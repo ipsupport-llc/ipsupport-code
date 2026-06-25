@@ -47,10 +47,7 @@ func (r *Registry) OpenAITools() []map[string]any {
 							"type": "string",
 							"enum": t.Actions(),
 						},
-						"params": map[string]any{
-							"type":        "object",
-							"description": "action-specific arguments; see the tool description",
-						},
+						"params": map[string]any{"type": "object"},
 					},
 					"required": []string{"action"},
 				},

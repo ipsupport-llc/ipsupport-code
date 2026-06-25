@@ -21,12 +21,12 @@ func (calcTool) Name() string      { return "calc" }
 func (calcTool) Actions() []string { return []string{"calculate"} }
 
 func (calcTool) Description() string {
-	return strings.TrimSpace(`Evaluate an arithmetic expression safely (AST-based, never eval). Use for ANY math — small models are unreliable on multi-digit and chained arithmetic.
+	return strings.TrimSpace(`Evaluate arithmetic safely (AST, not eval) — use for ANY math.
 Actions:
   - calculate: {"expression": str}
-Operators + - * / % and parentheses, unary -. Functions: sqrt cbrt pow abs floor ceil round log log2 log10 exp sin cos tan hypot min max. Constants: pi, e, tau.
-Examples: {"action":"calculate","params":{"expression":"3847*29"}} ; {"expression":"sqrt(2)+pi"} ; {"expression":"hypot(3,4)"}.
-NOT here — file ops → file; shell → run; web/search → web.`)
+Operators + - * / % and parens; functions sqrt cbrt pow abs floor ceil round log log2 log10 exp sin cos tan hypot min max; constants pi e tau.
+e.g. {"action":"calculate","params":{"expression":"sqrt(2)+pi"}}
+NOT here — files → file; shell → run.`)
 }
 
 func (calcTool) Call(_ context.Context, action string, params map[string]any) Result {

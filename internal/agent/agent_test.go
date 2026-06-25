@@ -195,6 +195,11 @@ func TestSplitSuggestion(t *testing.T) {
 	if c, s := splitSuggestion("just an answer"); c != "just an answer" || s != "" {
 		t.Errorf("no-NEXT case = %q,%q", c, s)
 	}
+	// A "NEXT:" in the MIDDLE must stay part of the answer, not be extracted.
+	mid := "Here is a script:\nNEXT: do X\nand it ends here"
+	if c, s := splitSuggestion(mid); c != mid || s != "" {
+		t.Errorf("mid-answer NEXT wrongly peeled: clean=%q sug=%q", c, s)
+	}
 }
 
 func TestParseArgsFoldsTopLevel(t *testing.T) {

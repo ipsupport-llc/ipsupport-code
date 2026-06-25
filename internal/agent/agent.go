@@ -163,18 +163,21 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 
 // splitSuggestion peels a trailing "NEXT: <step>" line off the final answer,
 // returning the answer without it plus the suggested next step ("" if none).
+// Only the LAST non-empty line is considered, so a "NEXT:" appearing mid-answer
+// (in a code block or a sentence) stays part of the answer and isn't mistaken
+// for the suggestion.
 func splitSuggestion(text string) (clean, suggestion string) {
-	lines := strings.Split(text, "\n")
-	kept := lines[:0:0]
-	for _, ln := range lines {
-		if suggestion == "" && strings.HasPrefix(strings.ToUpper(strings.TrimSpace(ln)), "NEXT:") {
-			s := strings.TrimSpace(ln)
-			suggestion = strings.TrimSpace(strings.Trim(s[len("NEXT:"):], " \"'`"))
-			continue
-		}
-		kept = append(kept, ln)
+	trimmed := strings.TrimRight(text, " \n")
+	nl := strings.LastIndexByte(trimmed, '\n') // -1 when single line
+	last := strings.TrimSpace(trimmed[nl+1:])
+	if !strings.HasPrefix(strings.ToUpper(last), "NEXT:") {
+		return text, ""
 	}
-	return strings.TrimRight(strings.Join(kept, "\n"), " \n"), suggestion
+	suggestion = strings.TrimSpace(strings.Trim(last[len("NEXT:"):], " \"'`"))
+	if nl < 0 {
+		return "", suggestion
+	}
+	return strings.TrimRight(trimmed[:nl], " \n"), suggestion
 }
 
 // runToolCalls executes every call from one assistant turn, concurrently when

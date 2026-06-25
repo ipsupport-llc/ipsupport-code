@@ -18,6 +18,39 @@
 - Action names are globally unique across tools (enables "action X belongs to tool Y" hints).
 - English only in repo content. TDD, frequent commits, DRY, YAGNI.
 
+## Cross-cutting refinements (override the per-task interfaces below)
+
+Applied from 2026-06-24 follow-ups. Where these differ from a task's original
+signature, THESE win.
+
+- **Context everywhere:** `Tool.Call(ctx context.Context, action string, params map[string]any) Result`;
+  `Registry.Dispatch(ctx, name, action, params) Result`; `llm.Chatter.Chat` and
+  `agent.Run` take `ctx`. file/run/web honor it (`exec.CommandContext`,
+  `http.NewRequestWithContext`); calc/help ignore it.
+- **Concurrent multi-call:** in the loop, >1 tool_call in a turn → a goroutine per
+  call, results kept in emitted order; 1 call runs inline.
+- **Result carries a typed cause:** `type Result struct { Content string; IsError bool; Err error }`.
+  `Err` is non-nil only for host failures (a `*ToolError`).
+- **Typed errors:** `tool.ToolError{Tool, Action string; Err error}`,
+  `knowledge.KnowledgeError{Op, Path string; Err error}`,
+  `reflect.ReflectionError{Err error}` — all implement `error` + `Unwrap`. Used in
+  T6/T7/T8 (ToolError on host failures), T3 (KnowledgeError on io/parse), T12
+  (ReflectionError on transport).
+- **LLM behind `llm.Chatter`:**
+  `type Chatter interface { Chat(context.Context, []Message, []map[string]any) (Message, error) }`
+  in package `llm`. Concrete LM Studio client is `llm.OpenAIClient`
+  (`func NewOpenAIClient(config.LLM) *OpenAIClient`). `agent.LLMClient` is replaced
+  by `llm.Chatter`. `reflect` exposes `type Reflector struct{ LLM llm.Chatter }`
+  with method `Reflect(ctx context.Context, t agent.Transcript) ([]knowledge.Pitfall, error)`.
+- **Trace & logging:** new `internal/trace` package writes the decision path as
+  JSONL (`goal`/`assistant`/`tool_call`/`observation`/`final`/`lesson`, each with
+  run id + RFC3339 time) to `~/.config/ipsupport-code/traces.jsonl` (configurable)
+  — the training dataset. Ops logs use `log/slog` to stderr (level via `IPS_LOG`).
+  `agent.Agent` and `reflect.Reflector` accept a nil-safe `trace.Tracer`
+  (`type Tracer interface { Emit(kind string, fields map[string]any) }`); CLI wires
+  the concrete `*trace.FileTracer`. Built as Task 11b (trace, no deps) and consumed
+  by the agent loop (T11) and CLI (T13).
+
 ## File Structure
 
 | File | Responsibility |

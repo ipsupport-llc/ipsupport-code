@@ -254,3 +254,61 @@ TDD throughout.
 - KB: global JSON file. Config: JSON (zero-dep, inspectable), not YAML.
 - `calc` included; `file.delete` excluded.
 - Build targets: `linux/amd64`, `darwin/amd64`, `darwin/arm64`.
+
+## 13. Refinements (2026-06-24)
+
+Three follow-up requests, adapted from Python idioms to right-sized Go.
+
+### 13.1 Async / non-blocking — goroutines + context, not asyncio
+
+Go has no asyncio; the equivalent is `context.Context` + goroutines.
+
+- `context.Context` is threaded through `llm.Chatter.Chat` and `tool.Tool.Call`,
+  giving per-step timeouts and Ctrl-C cancellation. A hung `web.fetch` or
+  `run.shell` is cancellable; the REPL never freezes.
+- When one assistant turn returns multiple `tool_calls`, they execute
+  concurrently (a goroutine per call; results reassembled in the model's emitted
+  order). The common case — one call per turn from a small model — runs inline.
+- We deliberately do NOT add a task runtime / event loop; context + goroutines
+  cover the requirement without the ceremony.
+
+### 13.2 Error model — typed errors at boundaries, Results for the model
+
+Two tiers, kept distinct on purpose:
+
+- **Model-recoverable** failures (bad path, denied, missing param, wrong action)
+  stay `tool.Result{IsError:true}` *text* so the loop continues and the model
+  self-corrects. These are NOT Go errors.
+- **Host/infra** failures are typed Go errors: `tool.ToolError{Tool,Action,Err}`,
+  `knowledge.KnowledgeError{Op,Path,Err}`, `reflect.ReflectionError{Err}` — each
+  implements `error` + `Unwrap` for `errors.As`. `tool.Result` gains an optional
+  `Err error` carrying a `*ToolError` on host failure, so the host logs the typed
+  cause while the model still sees `Content`. Reflection *parse* failures return
+  `[]` (no error); only transport failures yield `ReflectionError`.
+
+### 13.3 Provider swappability — one interface, no LangChain
+
+The model sits behind `llm.Chatter` (`Chat(ctx, msgs, tools) (Message, error)`).
+Both the agent's reasoning and the `reflect.Reflector` depend only on `Chatter`.
+
+- LM Studio, OpenAI, and an OpenAI-compatible **LiteLLM proxy** are the SAME
+  `llm.OpenAIClient` — swap via `base_url` + `api_key` in config, zero code.
+- Anthropic (or any non-OpenAI API) is a small adapter struct implementing
+  `Chatter`, added when needed.
+- We do NOT pull LangChain/LiteLLM into Go — a one-method interface is the whole
+  abstraction; a framework dependency would be over-engineering for a micro-agent.
+
+### 13.4 Logging & trace — the training dataset
+
+Two separate streams:
+
+- **Operational logging** via stdlib `log/slog` to stderr, level from config/env
+  (`IPS_LOG=debug|info|warn`). Replaces every `print`/`fmt.Println` debug line.
+- **Decision trace** via `internal/trace`: every step of a task — `goal`,
+  `assistant` (model text + tool calls), `tool_call`, `observation`, `final`,
+  `lesson` — is appended as a JSONL record tagged with a run id and RFC3339 time
+  to `~/.config/ipsupport-code/traces.jsonl` (path configurable). One run = one
+  trajectory; the file is the future training dataset (state → action →
+  observation → outcome shape). `agent.Agent` and `reflect.Reflector` take a
+  nil-safe tracer; the CLI wires the real one. Interactive approver prompts stay
+  on stdout (UI, not logging).

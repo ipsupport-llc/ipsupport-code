@@ -23,48 +23,25 @@ type fileTool struct {
 
 // NewFile returns the file tool, gated by the policy engine and (for "ask"
 // decisions) the approver.
-func NewFile(p *policy.Engine, a Approver) Tool { return &fileTool{pol: p, ap: a} }
-
-func (*fileTool) Name() string { return "file" }
-func (*fileTool) Actions() []string {
-	return []string{"read", "write", "append", "edit", "list", "mkdir"}
+func NewFile(p *policy.Engine, ap Approver) Tool {
+	f := &fileTool{pol: p, ap: ap}
+	return NewDomain(DomainSpec{
+		Name:    "file",
+		Summary: "Read, write, append, edit, list files/dirs in the workspace (paths relative, confined to it).",
+		NotHere: "NOT here — shell → run; web/fetch → web; math → calc.",
+		Actions: []Action{
+			{Name: "read", Params: []Param{Req("path", "str")}, Run: f.read},
+			{Name: "write", Params: []Param{Req("path", "str"), Req("content", "str")}, Note: "(overwrites the whole file)", Run: f.write},
+			{Name: "append", Params: []Param{Req("path", "str"), Req("content", "str")}, Run: f.appendFile},
+			{Name: "edit", Params: []Param{Req("path", "str"), Req("find", "str"), Req("replace", "str")}, Note: "(replaces first match; prefer this for partial changes)", Run: f.edit},
+			{Name: "list", Params: []Param{Opt("path", "str", ".")}, Run: f.list},
+			{Name: "mkdir", Params: []Param{Req("path", "str")}, Run: f.mkdir},
+		},
+	})
 }
 
-func (*fileTool) Description() string {
-	return strings.TrimSpace(`Read, write, append, edit, list files/dirs in the workspace (paths relative, confined to it).
-Actions:
-  - read:   {"path": str}
-  - write:  {"path": str, "content": str}   (overwrites the whole file)
-  - append: {"path": str, "content": str}
-  - edit:   {"path": str, "find": str, "replace": str}   (replaces first match; prefer this for partial changes)
-  - list:   {"path"?: str="."}
-  - mkdir:  {"path": str}
-NOT here — shell → run; web/fetch → web; math → calc.`)
-}
-
-func (f *fileTool) Call(_ context.Context, action string, params map[string]any) Result {
-	switch action {
-	case "read":
-		return f.read(params)
-	case "write":
-		return f.writeFile(action, params, false)
-	case "append":
-		return f.writeFile(action, params, true)
-	case "edit":
-		return f.edit(params)
-	case "list":
-		return f.list(params)
-	case "mkdir":
-		return f.mkdir(params)
-	}
-	return Err("file: unknown action " + action)
-}
-
-func (f *fileTool) read(params map[string]any) Result {
-	if err := Require(params, "path"); err != nil {
-		return Err(err.Error())
-	}
-	path := Str(params, "path")
+func (f *fileTool) read(_ context.Context, a Args) Result {
+	path := a.Str("path")
 	if err := f.pol.Read(path); err != nil {
 		return Err(err.Error())
 	}
@@ -83,12 +60,14 @@ func (f *fileTool) read(params map[string]any) Result {
 	return Ok(out)
 }
 
-func (f *fileTool) writeFile(action string, params map[string]any, appendMode bool) Result {
-	if err := Require(params, "path", "content"); err != nil {
-		return Err(err.Error())
-	}
-	path := Str(params, "path")
-	content := Str(params, "content")
+func (f *fileTool) write(_ context.Context, a Args) Result { return f.writeFile("write", a, false) }
+func (f *fileTool) appendFile(_ context.Context, a Args) Result {
+	return f.writeFile("append", a, true)
+}
+
+func (f *fileTool) writeFile(action string, a Args, appendMode bool) Result {
+	path := a.Str("path")
+	content := a.Str("content")
 
 	d, err := f.pol.Write(path)
 	if err != nil {
@@ -142,13 +121,10 @@ func (f *fileTool) writeFile(action string, params map[string]any, appendMode bo
 	return res
 }
 
-func (f *fileTool) edit(params map[string]any) Result {
-	if err := Require(params, "path", "find", "replace"); err != nil {
-		return Err(err.Error())
-	}
-	path := Str(params, "path")
-	find := Str(params, "find")
-	replace := Str(params, "replace")
+func (f *fileTool) edit(_ context.Context, a Args) Result {
+	path := a.Str("path")
+	find := a.Str("find")
+	replace := a.Str("replace")
 
 	d, err := f.pol.Write(path)
 	if err != nil {
@@ -197,11 +173,8 @@ func diffStat(diff string) (added, removed int) {
 	return added, removed
 }
 
-func (f *fileTool) mkdir(params map[string]any) Result {
-	if err := Require(params, "path"); err != nil {
-		return Err(err.Error())
-	}
-	path := Str(params, "path")
+func (f *fileTool) mkdir(_ context.Context, a Args) Result {
+	path := a.Str("path")
 	d, err := f.pol.Write(path)
 	if err != nil {
 		return Err(err.Error())
@@ -224,8 +197,8 @@ func (f *fileTool) mkdir(params map[string]any) Result {
 	return Ok("created directory " + path)
 }
 
-func (f *fileTool) list(params map[string]any) Result {
-	path := Str(params, "path")
+func (f *fileTool) list(_ context.Context, a Args) Result {
+	path := a.Str("path")
 	if path == "" {
 		path = "."
 	}

@@ -41,40 +41,23 @@ func NewWeb(hc *http.Client) Tool {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
-	return &webTool{hc: hc}
+	w := &webTool{hc: hc}
+	return NewDomain(DomainSpec{
+		Name:    "web",
+		Summary: "Reach the live web: search, read a page as Markdown, or query StackExchange Q&A.",
+		Details: "Use search to find pages, fetch to read one, stackexchange for programming Q&A.",
+		NotHere: "NOT here — local files → file; shell → run; arithmetic → calc.",
+		Actions: []Action{
+			{Name: "search", Params: []Param{Req("query", "str"), Opt("limit", "int", "8")}, Run: w.search},
+			{Name: "fetch", Params: []Param{Req("url", "str")}, Run: w.fetch},
+			{Name: "stackexchange", Params: []Param{Req("query", "str"), Opt("site", "str", "stackoverflow"), Opt("tag", "str", ""), Opt("limit", "int", "5")}, Run: w.stackexchange},
+		},
+	})
 }
 
-func (*webTool) Name() string      { return "web" }
-func (*webTool) Actions() []string { return []string{"search", "fetch", "stackexchange"} }
-
-func (*webTool) Description() string {
-	return strings.TrimSpace(`Reach the live web: search, read a page as Markdown, or query StackExchange Q&A.
-Actions:
-  - search:        {"query": str, "limit"?: int=8}   web search (DuckDuckGo)
-  - fetch:         {"url": str}                       fetch a page → clean Markdown
-  - stackexchange: {"query": str, "site"?: str="stackoverflow", "tag"?: str, "limit"?: int=5}
-Use search to find pages, fetch to read one, stackexchange for programming Q&A.
-NOT here — local files → file; shell → run; arithmetic → calc.`)
-}
-
-func (w *webTool) Call(ctx context.Context, action string, params map[string]any) Result {
-	switch action {
-	case "search":
-		return w.search(ctx, params)
-	case "fetch":
-		return w.fetch(ctx, params)
-	case "stackexchange":
-		return w.stackexchange(ctx, params)
-	}
-	return Err("web: unknown action " + action)
-}
-
-func (w *webTool) search(ctx context.Context, params map[string]any) Result {
-	if err := Require(params, "query"); err != nil {
-		return Err(err.Error())
-	}
-	q := Str(params, "query")
-	limit := Int(params, "limit", 8)
+func (w *webTool) search(ctx context.Context, a Args) Result {
+	q := a.Str("query")
+	limit := a.Int("limit", 8)
 	if limit < 1 {
 		limit = 8
 	}
@@ -112,11 +95,8 @@ func (w *webTool) search(ctx context.Context, params map[string]any) Result {
 	return Ok(strings.Join(lines, "\n"))
 }
 
-func (w *webTool) fetch(ctx context.Context, params map[string]any) Result {
-	if err := Require(params, "url"); err != nil {
-		return Err(err.Error())
-	}
-	raw := Str(params, "url")
+func (w *webTool) fetch(ctx context.Context, a Args) Result {
+	raw := a.Str("url")
 	pu, err := url.Parse(raw)
 	if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") {
 		return Err("invalid url (need http/https): " + raw)
@@ -145,16 +125,13 @@ func (w *webTool) fetch(ctx context.Context, params map[string]any) Result {
 	return Ok(markdown)
 }
 
-func (w *webTool) stackexchange(ctx context.Context, params map[string]any) Result {
-	if err := Require(params, "query"); err != nil {
-		return Err(err.Error())
-	}
-	q := Str(params, "query")
-	site := Str(params, "site")
+func (w *webTool) stackexchange(ctx context.Context, a Args) Result {
+	q := a.Str("query")
+	site := a.Str("site")
 	if site == "" {
 		site = "stackoverflow"
 	}
-	limit := Int(params, "limit", 5)
+	limit := a.Int("limit", 5)
 	if limit < 1 {
 		limit = 5
 	}
@@ -165,7 +142,7 @@ func (w *webTool) stackexchange(ctx context.Context, params map[string]any) Resu
 	qs.Set("sort", "relevance")
 	qs.Set("q", q)
 	qs.Set("site", site)
-	if tag := Str(params, "tag"); tag != "" {
+	if tag := a.Str("tag"); tag != "" {
 		qs.Set("tagged", tag)
 	}
 	qs.Set("pagesize", strconv.Itoa(limit))

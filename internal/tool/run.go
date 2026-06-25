@@ -25,27 +25,23 @@ type runTool struct {
 
 // NewRun returns the run tool: a single `shell` action gated by the policy
 // engine, executed with a timeout and a jail-confined working directory.
-func NewRun(p *policy.Engine, a Approver) Tool { return &runTool{pol: p, ap: a} }
-
-func (*runTool) Name() string      { return "run" }
-func (*runTool) Actions() []string { return []string{"shell"} }
-
-func (*runTool) Description() string {
-	return strings.TrimSpace(`Run a shell command (sh -c) in the workspace; returns combined stdout+stderr and the exit code. Gated by the workspace permission policy.
-Actions:
-  - shell: {"command": str, "cwd"?: str}
-Use for builds, tests, git, package managers — anything not covered by the other tools.
-NOT here — read/write files → file; web/search/fetch → web; arithmetic → calc.`)
+func NewRun(p *policy.Engine, ap Approver) Tool {
+	r := &runTool{pol: p, ap: ap}
+	return NewDomain(DomainSpec{
+		Name:    "run",
+		Summary: "Run a shell command (sh -c) in the workspace; returns combined stdout+stderr and the exit code. Gated by the workspace permission policy.",
+		Details: "Use for builds, tests, package managers — anything not covered by the other tools.",
+		NotHere: "NOT here — read/write files → file; web/search/fetch → web; arithmetic → calc.",
+		Actions: []Action{{
+			Name:   "shell",
+			Params: []Param{Req("command", "str"), Opt("cwd", "str", "")},
+			Run:    r.shell,
+		}},
+	})
 }
 
-func (r *runTool) Call(ctx context.Context, action string, params map[string]any) Result {
-	if action != "shell" {
-		return Err("run: unknown action " + action)
-	}
-	if err := Require(params, "command"); err != nil {
-		return Err(err.Error())
-	}
-	command := Str(params, "command")
+func (r *runTool) shell(ctx context.Context, a Args) Result {
+	command := a.Str("command")
 
 	switch r.pol.Run(command) {
 	case policy.Deny:
@@ -56,7 +52,7 @@ func (r *runTool) Call(ctx context.Context, action string, params map[string]any
 		}
 	}
 
-	cwd := Str(params, "cwd")
+	cwd := a.Str("cwd")
 	if cwd == "" {
 		cwd = "."
 	}

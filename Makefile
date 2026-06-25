@@ -7,12 +7,12 @@ PLATFORMS := linux/amd64 darwin/amd64 darwin/arm64
 build: ## host binary for local testing
 	go build -o dist/$(BIN) $(PKG)
 
-release: ## static binaries for every target into dist/
+release: ## stripped static binaries for every target into dist/
 	@mkdir -p dist
 	@for p in $(PLATFORMS); do \
 	  os=$${p%/*}; arch=$${p#*/}; \
 	  echo "→ $$os/$$arch"; \
-	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -o dist/$(BIN)-$$os-$$arch $(PKG); \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags="-s -w" -o dist/$(BIN)-$$os-$$arch $(PKG); \
 	done
 
 test: ## run all tests

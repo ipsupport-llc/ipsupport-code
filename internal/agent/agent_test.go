@@ -122,6 +122,33 @@ func TestSessionMemoryCarriesAcrossRuns(t *testing.T) {
 	}
 }
 
+type recTracer struct{ kinds []string }
+
+func (r *recTracer) Emit(kind string, _ map[string]any) { r.kinds = append(r.kinds, kind) }
+
+func TestNoDuplicateFinalEmit(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	rt := &recTracer{}
+	fake := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "hi there"}}}
+	a := New(fake, reg, nil, rt, "", 5)
+
+	if _, err := a.Run(context.Background(), "say hi"); err != nil {
+		t.Fatal(err)
+	}
+	var assistant, final int
+	for _, k := range rt.kinds {
+		switch k {
+		case "assistant":
+			assistant++
+		case "final":
+			final++
+		}
+	}
+	if final != 1 || assistant != 0 {
+		t.Errorf("emitted %v, want exactly 1 final and 0 assistant for a no-tool answer", rt.kinds)
+	}
+}
+
 func TestParseArgsFoldsTopLevel(t *testing.T) {
 	// Small models often omit the "params" wrapper.
 	action, params := parseArgs(`{"action":"calculate","expression":"2+2"}`)

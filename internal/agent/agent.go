@@ -95,8 +95,9 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 			return tr, fmt.Errorf("llm chat (step %d): %w", step+1, err)
 		}
 		msgs = append(msgs, assistant)
-		a.emit("assistant", map[string]any{"content": assistant.Content, "tool_calls": len(assistant.ToolCalls)})
 
+		// A reply with no tool calls IS the final answer — emit only "final"
+		// (emitting "assistant" too would render the same text twice).
 		if len(assistant.ToolCalls) == 0 {
 			tr.Final = assistant.Content
 			tr.Messages = msgs
@@ -105,6 +106,9 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 			return tr, nil
 		}
 
+		// Intermediate turn: show the model's reasoning text (if any) alongside
+		// the tool calls it's about to make.
+		a.emit("assistant", map[string]any{"content": assistant.Content, "tool_calls": len(assistant.ToolCalls)})
 		msgs = append(msgs, a.runToolCalls(ctx, assistant.ToolCalls)...)
 	}
 

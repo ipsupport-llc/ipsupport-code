@@ -111,7 +111,8 @@ func DefaultSystemPrompt() string {
 
 - DO the task with tools: write/edit files with file, run commands with run, use git/web/calc. NEVER just tell the user how to do it ("create a file", "chmod +x", "here's how…") — describing steps instead of doing them is a failure. (e.g. "make a hello script and run it" → file.write then run.shell, then report the output.)
 - Each call is {"action": <name>, "params": {...}}. On an error, read it — it names the fix or the right tool — and retry.
-- Small local model in a terminal: be brief. Finish with a one-line summary of what you did and no tool call.`)
+- Small local model in a terminal: be brief. Finish with a one-line summary of what you did and no tool call.
+- After that summary, add ONE last line exactly: "NEXT: <one short next step the user might want>" (≤6 words; skip the line if nothing fits).`)
 }
 
 // Run executes the loop until the model produces a final answer (a reply with no
@@ -138,10 +139,11 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		// A reply with no tool calls IS the final answer — emit only "final"
 		// (emitting "assistant" too would render the same text twice).
 		if len(assistant.ToolCalls) == 0 {
-			tr.Final = assistant.Content
+			clean, suggest := splitSuggestion(assistant.Content)
+			tr.Final = clean
 			tr.Messages = msgs
-			a.emit("final", map[string]any{"text": tr.Final})
-			a.remember(goal, tr.Final)
+			a.emit("final", map[string]any{"text": clean, "suggest": suggest})
+			a.remember(goal, clean)
 			return tr, nil
 		}
 
@@ -152,10 +154,27 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	}
 
 	tr.Messages = msgs
-	tr.Final = lastAssistantContent(msgs)
-	a.emit("final", map[string]any{"text": tr.Final, "exhausted": true})
-	a.remember(goal, tr.Final)
+	clean, suggest := splitSuggestion(lastAssistantContent(msgs))
+	tr.Final = clean
+	a.emit("final", map[string]any{"text": clean, "suggest": suggest, "exhausted": true})
+	a.remember(goal, clean)
 	return tr, nil
+}
+
+// splitSuggestion peels a trailing "NEXT: <step>" line off the final answer,
+// returning the answer without it plus the suggested next step ("" if none).
+func splitSuggestion(text string) (clean, suggestion string) {
+	lines := strings.Split(text, "\n")
+	kept := lines[:0:0]
+	for _, ln := range lines {
+		if suggestion == "" && strings.HasPrefix(strings.ToUpper(strings.TrimSpace(ln)), "NEXT:") {
+			s := strings.TrimSpace(ln)
+			suggestion = strings.TrimSpace(strings.Trim(s[len("NEXT:"):], " \"'`"))
+			continue
+		}
+		kept = append(kept, ln)
+	}
+	return strings.TrimRight(strings.Join(kept, "\n"), " \n"), suggestion
 }
 
 // runToolCalls executes every call from one assistant turn, concurrently when

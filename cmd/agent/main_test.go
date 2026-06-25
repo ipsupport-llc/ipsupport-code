@@ -46,28 +46,6 @@ func TestTabCompletesSingleMatch(t *testing.T) {
 	}
 }
 
-func TestSuggestFor(t *testing.T) {
-	cases := []struct {
-		tool, action string
-		errored      bool
-		want         string
-	}{
-		{"file", "write", false, "run it"},
-		{"file", "edit", false, "run it"},
-		{"run", "shell", true, "fix the error"},
-		{"run", "shell", false, "run the tests"},
-		{"git", "status", false, "commit the changes"},
-		{"git", "add", false, "commit with a message"},
-		{"calc", "calculate", false, ""},
-		{"file", "read", false, ""},
-	}
-	for _, c := range cases {
-		if got := suggestFor(c.tool, c.action, c.errored); got != c.want {
-			t.Errorf("suggestFor(%q,%q,%v) = %q, want %q", c.tool, c.action, c.errored, got, c.want)
-		}
-	}
-}
-
 func TestRenderDiff(t *testing.T) {
 	m := &tuiModel{width: 80, accent: lipgloss.Color("13")}
 	diff := "--- a.txt\n+++ a.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+LINE2\n line3\n"

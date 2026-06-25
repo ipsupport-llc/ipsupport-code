@@ -122,7 +122,7 @@ func TestTUI_E2E_StreamsAnswer(t *testing.T) {
 func TestTUI_E2E_SuggestsNextStep(t *testing.T) {
 	url := tuiFakeServer(t,
 		tuiToolCall("file", `{"action":"write","params":{"path":"hello.sh","content":"echo hi"}}`),
-		tuiContent("created hello.sh"),
+		tuiContent("created hello.sh\nNEXT: run it"),
 	)
 	a := tuiTestApp(t, url)
 	m, err := a.newTUIModel(context.Background())

@@ -184,6 +184,19 @@ func TestCompactSummarizesSession(t *testing.T) {
 	}
 }
 
+func TestSplitSuggestion(t *testing.T) {
+	clean, sug := splitSuggestion("Wrote hello.sh and ran it.\nNEXT: add a test")
+	if clean != "Wrote hello.sh and ran it." {
+		t.Errorf("clean = %q", clean)
+	}
+	if sug != "add a test" {
+		t.Errorf("suggestion = %q, want 'add a test'", sug)
+	}
+	if c, s := splitSuggestion("just an answer"); c != "just an answer" || s != "" {
+		t.Errorf("no-NEXT case = %q,%q", c, s)
+	}
+}
+
 func TestParseArgsFoldsTopLevel(t *testing.T) {
 	// Small models often omit the "params" wrapper.
 	action, params := parseArgs(`{"action":"calculate","expression":"2+2"}`)

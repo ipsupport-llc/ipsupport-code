@@ -57,10 +57,8 @@ type tuiModel struct {
 	width, height int
 	ready         bool
 
-	// last action of the finished task → a Tab-acceptable next-step suggestion
-	lastTool, lastAction string
-	lastErr              bool
-	suggestion           string
+	// model-proposed, Tab-acceptable next-step suggestion (parsed from NEXT:)
+	suggestion string
 }
 
 const defaultPlaceholder = "type a task, or /help"
@@ -159,16 +157,11 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.push(cErr.Render(fmt.Sprintf("  ⟳ server hiccup — retry %d, backing off %s", m.retry.attempt, wait)))
 		} else {
 			m.retry = nil // progress resumed
-			switch e.kind {
-			case "tool_call":
-				m.lastTool, _ = e.fields["tool"].(string)
-				m.lastAction, _ = e.fields["action"].(string)
-			case "observation":
-				m.lastErr, _ = e.fields["is_error"].(bool)
-			}
 			m.push(m.renderEvent(e)...)
-			if e.kind == "final" { // final is FIFO-last → lastTool is set by now
-				m.setSuggestion()
+			if e.kind == "final" {
+				if sug, _ := e.fields["suggest"].(string); strings.TrimSpace(sug) != "" {
+					m.setSuggestion(strings.TrimSpace(sug))
+				}
 			}
 		}
 		return m, m.waitEvent()
@@ -420,39 +413,12 @@ func (m *tuiModel) rename(name string) {
 	m.push(m.accentBold().Render("renamed → " + name))
 }
 
-// setSuggestion offers a next step (Tab-acceptable ghost text) from the task's
-// last tool action.
-func (m *tuiModel) setSuggestion() {
-	m.suggestion = suggestFor(m.lastTool, m.lastAction, m.lastErr)
-	if m.suggestion == "" {
-		m.input.Placeholder = defaultPlaceholder
-		return
-	}
-	m.input.Placeholder = m.suggestion + "   (Tab to accept)"
-	m.push(cDim.Render("  💡 next: ") + m.accentBold().Render(m.suggestion) + cDim.Render("   (Tab)"))
-}
-
-func suggestFor(tool, action string, errored bool) string {
-	switch tool {
-	case "file":
-		switch action {
-		case "write", "edit", "append":
-			return "run it"
-		}
-	case "run":
-		if errored {
-			return "fix the error"
-		}
-		return "run the tests"
-	case "git":
-		switch action {
-		case "status", "diff":
-			return "commit the changes"
-		case "add":
-			return "commit with a message"
-		}
-	}
-	return ""
+// setSuggestion shows a model-proposed next step (parsed from the final answer's
+// NEXT: line) as Tab-acceptable ghost text plus a visible hint line.
+func (m *tuiModel) setSuggestion(text string) {
+	m.suggestion = text
+	m.input.Placeholder = text + "   (Tab to accept)"
+	m.push(cDim.Render("  💡 next: ") + m.accentBold().Render(text) + cDim.Render("   (Tab)"))
 }
 
 // runGoals sets running state and returns a cmd that runs the goal n times in the
@@ -462,7 +428,7 @@ func (m *tuiModel) runGoals(n int, goal string) tea.Cmd {
 	m.taskStart = time.Now()
 	_, c := m.app.client.Usage()
 	m.startTok = c // count completion (generated) tokens for this task
-	m.lastTool, m.lastAction, m.lastErr, m.suggestion = "", "", false, ""
+	m.suggestion = ""
 	m.input.Placeholder = defaultPlaceholder
 	tctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel

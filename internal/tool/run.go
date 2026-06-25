@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
+	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
 const (
@@ -75,8 +76,8 @@ func (r *runTool) Call(ctx context.Context, action string, params map[string]any
 	runErr := cmd.Run()
 
 	body := strings.TrimRight(out.String(), "\n")
-	if len(body) > maxRunOutput {
-		body = body[:maxRunOutput] + "\n…[truncated]"
+	if clipped, truncated := textutil.Clip(body, maxRunOutput); truncated {
+		body = clipped + "\n…[truncated]"
 	}
 
 	exit := 0

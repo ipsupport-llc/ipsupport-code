@@ -34,6 +34,28 @@ func TestRunAllowAndDefault(t *testing.T) {
 	if got := e.Run("git push"); got != Ask {
 		t.Errorf("Run(git push) = %v, want Ask (default)", got)
 	}
+	// allow is anchored: a dangerous command that merely *contains* an allowed
+	// token must not be auto-allowed.
+	if got := e.Run("echo ls; rm x"); got != Ask {
+		t.Errorf("Run(echo ls; rm x) = %v, want Ask (allow must be anchored)", got)
+	}
+}
+
+func TestRunDenyMatchesAnywhereAndIgnoresExtraSpaces(t *testing.T) {
+	c := config.Default()
+	c.Run = config.RunPolicy{Default: "allow", Deny: []string{"rm -rf*", "sudo*"}}
+	e := eng(t, c)
+	cases := []string{
+		"rm -rf /",
+		"cd /tmp && rm -rf /home", // deny buried mid-command
+		"rm  -rf  /home",          // collapsed whitespace
+		"echo x && sudo tee /etc/x",
+	}
+	for _, cmd := range cases {
+		if got := e.Run(cmd); got != Deny {
+			t.Errorf("Run(%q) = %v, want Deny", cmd, got)
+		}
+	}
 }
 
 func TestWriteGlobsAndJail(t *testing.T) {

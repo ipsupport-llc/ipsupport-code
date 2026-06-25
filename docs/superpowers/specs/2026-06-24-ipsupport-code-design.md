@@ -312,3 +312,35 @@ Two separate streams:
   observation → outcome shape). `agent.Agent` and `reflect.Reflector` take a
   nil-safe tracer; the CLI wires the real one. Interactive approver prompts stay
   on stdout (UI, not logging).
+
+### 13.5 Two-tier config + first-run setup (2026-06-24)
+
+Configuration is two JSON files merged over `Default()`:
+
+- **User config** `~/.config/ipsupport-code/config.json` — machine-level `llm`
+  connection (server URL, model, key). Written by **first-run setup**: on the
+  first interactive start (no user config) or with `-init`, the CLI prompts for
+  the connection and saves it. A non-interactive first run (detected via
+  `golang.org/x/term.IsTerminal`, not a char-device heuristic — `/dev/null` is a
+  char device) skips the prompt and uses defaults.
+- **Workspace config** `<workspace>/.agent/config.json` — per-project policy;
+  wins over the user config.
+
+### 13.6 Safety hardening (from review, 2026-06-24)
+
+- **Non-overridable deny floor.** Because a JSON merge replaces slices wholesale,
+  a workspace `run.deny`/`file.deny_write` would otherwise drop the protective
+  defaults. `Load` unions a hardcoded floor (`rm -rf*`, `sudo*`, `mkfs*`,
+  `shutdown*`, `.git`, `.git/**`, `**/*secret*`, `**/.env*`, …) after merging, so
+  user config only ever *adds* guards.
+- **Deny matches anywhere; allow is anchored.** Command deny globs match any
+  substring (catching `cd x && rm -rf /`), allow globs match the whole command;
+  both ignore extra whitespace. Globs are precompiled at `New()`.
+- **Jail resolves to the nearest existing ancestor** before the prefix check, so a
+  symlinked directory several levels up can't smuggle a path out.
+- **Rune-safe truncation** (`internal/textutil.Clip`) everywhere output is capped
+  (file read, run output, web fetch, LLM error bodies), so multibyte runes aren't
+  split.
+- **Robust lesson extraction.** Reflection scans for the first substring that
+  decodes as a complete JSON array, tolerating prose that itself contains
+  brackets.

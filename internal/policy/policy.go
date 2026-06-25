@@ -35,18 +35,29 @@ func (d Decision) String() string {
 	}
 }
 
-// Engine resolves policy decisions for one workspace.
+// Engine resolves policy decisions for one workspace. Command globs are
+// precompiled at construction. Allow globs match the whole command (anchored);
+// deny globs match anywhere in the command, so a dangerous token is caught even
+// when it's buried in `cd x && rm -rf /`.
 type Engine struct {
-	run       config.RunPolicy
-	file      config.FilePolicy
-	workspace string // absolute
-	jailRoot  string // absolute, symlink-resolved; "" disables the jail
+	file       config.FilePolicy
+	runDefault string
+	allow      []*regexp.Regexp // anchored
+	deny       []*regexp.Regexp // unanchored
+	workspace  string           // absolute
+	jailRoot   string           // absolute, symlink-resolved; "" disables the jail
 }
 
 // New builds an Engine from a Config, resolving the jail root (relative to the
-// workspace) and following symlinks so jail-prefix checks are sound.
+// workspace, symlink-followed) and precompiling the command globs.
 func New(c config.Config) (*Engine, error) {
-	e := &Engine{run: c.Run, file: c.File, workspace: filepath.Clean(c.Workspace)}
+	e := &Engine{
+		file:       c.File,
+		runDefault: c.Run.Default,
+		allow:      compileGlobs(c.Run.Allow, true),
+		deny:       compileGlobs(c.Run.Deny, false),
+		workspace:  filepath.Clean(c.Workspace),
+	}
 	if c.File.Jail != "" {
 		jail := c.File.Jail
 		if !filepath.IsAbs(jail) {
@@ -61,21 +72,21 @@ func New(c config.Config) (*Engine, error) {
 	return e, nil
 }
 
-// Run decides whether a shell command may execute. Deny globs win over allow
-// globs; an unmatched command falls through to the configured default.
+// Run decides whether a shell command may execute. Deny (matched anywhere) wins
+// over allow (whole-command); an unmatched command falls through to the default.
 func (e *Engine) Run(command string) Decision {
-	if cmdMatch(e.run.Deny, command) {
+	cmd := normWS(command)
+	if anyMatch(e.deny, cmd) {
 		return Deny
 	}
-	if cmdMatch(e.run.Allow, command) {
+	if anyMatch(e.allow, cmd) {
 		return Allow
 	}
-	return parseDefault(e.run.Default)
+	return parseDefault(e.runDefault)
 }
 
-// Write decides whether a file may be written. It first enforces the jail (an
-// escape is an error, never a soft decision), then applies deny/allow write
-// globs, then the default.
+// Write decides whether a file may be written: jail first (escape is an error),
+// then deny/allow write globs, then the default.
 func (e *Engine) Write(path string) (Decision, error) {
 	abs, err := e.Resolve(path)
 	if err != nil {
@@ -91,8 +102,7 @@ func (e *Engine) Write(path string) (Decision, error) {
 	return parseDefault(e.file.Default), nil
 }
 
-// Read enforces the jail for a read; reads are not glob-gated. Returns nil when
-// the path is inside the jail (or the jail is disabled).
+// Read enforces the jail for a read; reads are not glob-gated.
 func (e *Engine) Read(path string) error {
 	_, err := e.Resolve(path)
 	return err
@@ -110,15 +120,7 @@ func (e *Engine) Resolve(path string) (string, error) {
 		}
 		abs = filepath.Join(base, path)
 	}
-	abs = filepath.Clean(abs)
-
-	// Resolve symlinks so a symlinked path can't smuggle us out of the jail.
-	// For a not-yet-existing file, resolve the nearest existing ancestor.
-	if real, err := filepath.EvalSymlinks(abs); err == nil {
-		abs = real
-	} else if parent, err := filepath.EvalSymlinks(filepath.Dir(abs)); err == nil {
-		abs = filepath.Join(parent, filepath.Base(abs))
-	}
+	abs = resolveSymlinks(filepath.Clean(abs))
 
 	if e.jailRoot == "" {
 		return abs, nil
@@ -129,9 +131,30 @@ func (e *Engine) Resolve(path string) (string, error) {
 	return abs, fmt.Errorf("path %q escapes the workspace jail %q", path, e.jailRoot)
 }
 
-// rel returns the slash-separated path of abs relative to the jail (or
-// workspace) for glob matching; falls back to the absolute path if it sits
-// outside that base.
+// resolveSymlinks follows symlinks in abs. For a not-yet-existing path it
+// resolves the nearest existing ancestor and re-appends the missing tail, so a
+// symlinked directory several levels up can't smuggle the path out of the jail.
+func resolveSymlinks(abs string) string {
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real
+	}
+	var missing []string
+	cur := abs
+	for {
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return abs // reached root without an existing ancestor
+		}
+		missing = append([]string{filepath.Base(cur)}, missing...)
+		if real, err := filepath.EvalSymlinks(parent); err == nil {
+			return filepath.Join(append([]string{real}, missing...)...)
+		}
+		cur = parent
+	}
+}
+
+// rel returns the slash path of abs relative to the jail (or workspace) for glob
+// matching; falls back to the absolute path if it sits outside that base.
 func (e *Engine) rel(abs string) string {
 	base := e.jailRoot
 	if base == "" {
@@ -166,35 +189,46 @@ func fileMatch(patterns []string, rel string) bool {
 	return false
 }
 
-// cmdMatch matches a shell command as a flat string where * spans any
-// characters (including / and spaces) — path-aware globbing is wrong for
-// commands, since "rm -rf*" must catch "rm -rf /".
-func cmdMatch(patterns []string, command string) bool {
+// compileGlobs turns command wildcard patterns into regexps. Path-aware globbing
+// is wrong for commands ("rm -rf*" must catch "rm -rf /"), so * spans any
+// characters. anchored=true wraps ^...$ (allow: whole command); anchored=false
+// leaves it unanchored (deny: match anywhere).
+func compileGlobs(patterns []string, anchored bool) []*regexp.Regexp {
+	out := make([]*regexp.Regexp, 0, len(patterns))
 	for _, p := range patterns {
-		if wildcardMatch(p, command) {
+		var b strings.Builder
+		if anchored {
+			b.WriteByte('^')
+		}
+		for _, r := range normWS(p) {
+			switch r {
+			case '*':
+				b.WriteString(".*")
+			case '?':
+				b.WriteByte('.')
+			default:
+				b.WriteString(regexp.QuoteMeta(string(r)))
+			}
+		}
+		if anchored {
+			b.WriteByte('$')
+		}
+		if re, err := regexp.Compile(b.String()); err == nil {
+			out = append(out, re)
+		}
+	}
+	return out
+}
+
+func anyMatch(res []*regexp.Regexp, s string) bool {
+	for _, re := range res {
+		if re.MatchString(s) {
 			return true
 		}
 	}
 	return false
 }
 
-func wildcardMatch(pattern, s string) bool {
-	var b strings.Builder
-	b.WriteByte('^')
-	for _, r := range pattern {
-		switch r {
-		case '*':
-			b.WriteString(".*")
-		case '?':
-			b.WriteByte('.')
-		default:
-			b.WriteString(regexp.QuoteMeta(string(r)))
-		}
-	}
-	b.WriteByte('$')
-	re, err := regexp.Compile(b.String())
-	if err != nil {
-		return false
-	}
-	return re.MatchString(s)
-}
+// normWS collapses runs of whitespace to single spaces so "rm  -rf" and
+// "rm -rf" compare equal.
+func normWS(s string) string { return strings.Join(strings.Fields(s), " ") }

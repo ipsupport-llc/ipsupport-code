@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
+	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
 const maxReadBytes = 200_000
@@ -69,9 +70,9 @@ func (f *fileTool) read(params map[string]any) Result {
 	if err != nil {
 		return Err("cannot read " + path + ": " + err.Error())
 	}
-	out := string(data)
-	if len(data) > maxReadBytes {
-		out = out[:maxReadBytes] + fmt.Sprintf("\n…[truncated; %d bytes total]", len(data))
+	out, truncated := textutil.Clip(string(data), maxReadBytes)
+	if truncated {
+		out += fmt.Sprintf("\n…[truncated; %d bytes total]", len(data))
 	}
 	return Ok(out)
 }

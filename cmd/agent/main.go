@@ -12,8 +12,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
@@ -26,12 +29,19 @@ import (
 )
 
 func main() {
-	var workspace string
+	var (
+		workspace string
+		doInit    bool
+	)
 	flag.StringVar(&workspace, "C", ".", "workspace directory")
+	flag.BoolVar(&doInit, "init", false, "re-run first-time setup (server URL, model)")
 	flag.Parse()
 	setupLogging()
 
-	app, cleanup, err := build(workspace)
+	reader := bufio.NewReader(os.Stdin)
+	maybeInit(reader, doInit)
+
+	app, cleanup, err := build(workspace, reader)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -48,6 +58,57 @@ func main() {
 	app.repl(ctx)
 }
 
+// maybeInit runs the interactive first-time setup, writing the LM Studio
+// connection to the user config. It triggers when forced (-init) or on a real
+// first run (no user config yet and an interactive terminal). Piped/non-TTY
+// first runs silently use defaults so scripts don't block.
+func maybeInit(reader *bufio.Reader, force bool) {
+	if !force && (config.GlobalExists() || !isTTY()) {
+		return
+	}
+	def := config.Default().LLM
+	fmt.Println("First-time setup — configure your model connection (press Enter for defaults).")
+	llm := config.LLM{
+		BaseURL:     ask(reader, "LM Studio server URL", def.BaseURL),
+		Model:       ask(reader, "Model name", def.Model),
+		Temperature: def.Temperature,
+		MaxSteps:    atoiOr(ask(reader, "Max steps per task", strconv.Itoa(def.MaxSteps)), def.MaxSteps),
+		APIKey:      ask(reader, "API key (blank for LM Studio)", ""),
+	}
+	if err := config.SaveGlobalLLM(llm); err != nil {
+		slog.Warn("could not save config", "err", err)
+		return
+	}
+	fmt.Printf("Saved to %s\n\n", config.GlobalPath())
+}
+
+func ask(r *bufio.Reader, label, def string) string {
+	if def != "" {
+		fmt.Printf("  %s [%s]: ", label, def)
+	} else {
+		fmt.Printf("  %s: ", label)
+	}
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return def
+	}
+	if v := strings.TrimSpace(line); v != "" {
+		return v
+	}
+	return def
+}
+
+func isTTY() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
+}
+
+func atoiOr(s string, def int) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+		return n
+	}
+	return def
+}
+
 // app bundles everything one process needs across tasks.
 type app struct {
 	ag     *agent.Agent
@@ -57,7 +118,7 @@ type app struct {
 	reader *bufio.Reader
 }
 
-func build(workspace string) (*app, func(), error) {
+func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 	cfg, err := config.Load(workspace)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load config: %w", err)
@@ -72,7 +133,6 @@ func build(workspace string) (*app, func(), error) {
 		return nil, nil, fmt.Errorf("policy: %w", err)
 	}
 
-	reader := bufio.NewReader(os.Stdin)
 	approver := &stdinApprover{r: reader}
 
 	reg := tool.NewRegistry(

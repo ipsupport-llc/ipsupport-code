@@ -52,14 +52,32 @@ make test      # all tests
 
 ## Configuration
 
-Drop a `.agent/config.json` in your workspace (see
-[`.agent/config.example.json`](.agent/config.example.json)). It's merged over safe
-defaults, so you only set what you want to change.
+**First run.** On its first interactive start (no user config yet) it asks for the
+server URL, model, and a couple of settings, then writes them to
+`~/.config/ipsupport-code/config.json`. Re-run setup any time with `-init`. A
+non-interactive first run (piped/CI) skips the prompt and uses defaults.
+
+Settings come from two JSON files merged over safe defaults:
+
+- **`~/.config/ipsupport-code/config.json`** — machine-level: the `llm` connection
+  (server URL, model, key). Written by first-run setup.
+- **`<workspace>/.agent/config.json`** — per-project: the permission policy (see
+  [`.agent/config.example.json`](.agent/config.example.json)). The workspace file
+  wins over the user file.
+
+Each file only needs the keys you want to change; everything else keeps its
+default.
 
 Permissions for `run` and `file` resolve per action: a **deny** glob blocks, an
 **allow** glob runs without asking, otherwise the **default** (`ask` / `allow` /
-`deny`) applies. File ops are confined to `jail` (set `""` to disable). Run-command
-globs are flat (`*` spans anything); file globs are path-aware (`**`, `*.go`).
+`deny`) applies. File ops are confined to `jail` (set `""` to disable).
+Run-command **deny** globs match *anywhere* in the command (so `rm -rf*` catches
+`cd x && rm -rf /`) and ignore extra whitespace; **allow** globs match the whole
+command. File globs are path-aware (`**`, `*.go`). A built-in protective deny
+floor (`rm -rf*`, `sudo*`, `mkfs*`, `.git/**`, `**/*secret*`, …) is always
+enforced — your config adds to it, it can't remove it. The `jail` confines the
+file tool; a shell command can still `cd` elsewhere, so lean on `run.deny`/`ask`
+for shell.
 
 Point it at OpenAI or a LiteLLM proxy instead of LM Studio by changing
 `llm.base_url` / `llm.api_key` — same client.

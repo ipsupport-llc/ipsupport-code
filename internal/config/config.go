@@ -1,8 +1,9 @@
-// Package config loads the agent's runtime configuration: the LM Studio
-// endpoint, the workspace permission policy, and the paths of the persisted
-// knowledge base and decision trace. Configuration lives in the workspace at
-// .agent/config.json and is merged over safe defaults; an absent file is not an
-// error — the defaults stand.
+// Package config loads the agent's runtime configuration. Settings come from
+// two JSON files merged over safe defaults: a machine-level user config
+// (~/.config/ipsupport-code/config.json — the LM Studio endpoint, written by
+// first-run setup) and a per-workspace config (<workspace>/.agent/config.json —
+// the permission policy). A protective deny floor is unioned in afterwards so a
+// workspace config can never drop the most dangerous-command guards.
 package config
 
 import (
@@ -23,8 +24,8 @@ type LLM struct {
 	APIKey      string  `json:"api_key,omitempty"`
 }
 
-// RunPolicy gates shell execution. Resolution per command: a Deny glob blocks,
-// an Allow glob auto-runs, otherwise Default applies (ask|allow|deny).
+// RunPolicy gates shell execution. Resolution per command: a Deny glob (matched
+// anywhere) blocks, an Allow glob (whole command) auto-runs, otherwise Default.
 type RunPolicy struct {
 	Default string   `json:"default"`
 	Allow   []string `json:"allow"`
@@ -51,9 +52,14 @@ type Config struct {
 	Workspace string     `json:"-"` // resolved absolute workspace root
 }
 
+// Non-overridable safety floor, always unioned into the resolved policy.
+var (
+	runDenyFloor  = []string{"rm -rf*", "sudo*", "mkfs*", "dd if=*", ":(){*", "shutdown*", "reboot*"}
+	fileDenyFloor = []string{".git", ".git/**", "**/*secret*", "**/.env*"}
+)
+
 // Default returns the baseline configuration: LM Studio on localhost, ask-by-
-// default policies, a jail at the workspace root, and a protective deny list so
-// the most destructive commands are blocked even before any config exists.
+// default policies, a jail at the workspace root, and the protective deny floor.
 func Default() Config {
 	return Config{
 		LLM: LLM{
@@ -65,16 +71,13 @@ func Default() Config {
 		Run: RunPolicy{
 			Default: "ask",
 			Allow:   []string{},
-			Deny: []string{
-				"rm -rf*", "sudo*", "mkfs*", "dd if=*",
-				"* > /dev/sd*", ":(){*", "shutdown*", "reboot*",
-			},
+			Deny:    append([]string{}, runDenyFloor...),
 		},
 		File: FilePolicy{
 			Default:    "ask",
 			Jail:       ".",
 			AllowWrite: []string{},
-			DenyWrite:  []string{".git/**", "**/*secret*", "**/.env*"},
+			DenyWrite:  append([]string{}, fileDenyFloor...),
 		},
 	}
 }
@@ -88,36 +91,54 @@ func configHome() string {
 	return ".agent"
 }
 
+// GlobalPath is the machine-level user config file.
+func GlobalPath() string { return filepath.Join(configHome(), "config.json") }
+
+// GlobalExists reports whether the user config file is present.
+func GlobalExists() bool {
+	_, err := os.Stat(GlobalPath())
+	return err == nil
+}
+
 // DefaultKBPath is the global knowledge-base location.
 func DefaultKBPath() string { return filepath.Join(configHome(), "knowledge.json") }
 
 // DefaultTracePath is the global decision-trace (training dataset) location.
 func DefaultTracePath() string { return filepath.Join(configHome(), "traces.jsonl") }
 
-// Load reads <workspace>/.agent/config.json and merges it over Default(). A
-// missing file yields the defaults. The merge is a JSON unmarshal over a
-// pre-populated Default value, so keys absent from the file keep their default
-// (including nested fields and the protective deny list).
+// SaveGlobalLLM writes the LLM connection settings to the user config file,
+// creating its directory.
+func SaveGlobalLLM(l LLM) error {
+	if err := os.MkdirAll(configHome(), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(map[string]any{"llm": l}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(GlobalPath(), data, 0o644)
+}
+
+// Load merges the user config then the workspace config over Default(), unions
+// the deny floor, and fills in default paths. Absent files are not errors.
 func Load(workspace string) (Config, error) {
 	cfg := Default()
+
+	if err := mergeFile(&cfg, GlobalPath()); err != nil {
+		return cfg, err
+	}
+
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
 		return cfg, err
 	}
-
-	data, err := os.ReadFile(filepath.Join(abs, ".agent", "config.json"))
-	switch {
-	case err == nil:
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return cfg, err
-		}
-	case errors.Is(err, fs.ErrNotExist):
-		// no workspace config — defaults stand
-	default:
+	if err := mergeFile(&cfg, filepath.Join(abs, ".agent", "config.json")); err != nil {
 		return cfg, err
 	}
 
-	cfg.Workspace = abs // json:"-", but set after unmarshal regardless
+	cfg.Workspace = abs
+	cfg.Run.Deny = union(cfg.Run.Deny, runDenyFloor)
+	cfg.File.DenyWrite = union(cfg.File.DenyWrite, fileDenyFloor)
 	if cfg.KBPath == "" {
 		cfg.KBPath = DefaultKBPath()
 	}
@@ -125,4 +146,33 @@ func Load(workspace string) (Config, error) {
 		cfg.TracePath = DefaultTracePath()
 	}
 	return cfg, nil
+}
+
+// mergeFile unmarshals a JSON config file over cfg (keys absent from the file
+// keep their current value). A missing file is a no-op.
+func mergeFile(cfg *Config, path string) error {
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		return json.Unmarshal(data, cfg)
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	default:
+		return err
+	}
+}
+
+// union appends floor entries not already present in base.
+func union(base, floor []string) []string {
+	seen := make(map[string]struct{}, len(base))
+	for _, b := range base {
+		seen[b] = struct{}{}
+	}
+	for _, f := range floor {
+		if _, ok := seen[f]; !ok {
+			base = append(base, f)
+			seen[f] = struct{}{}
+		}
+	}
+	return base
 }

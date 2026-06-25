@@ -84,6 +84,42 @@ func TestRunInjectsPitfall(t *testing.T) {
 	}
 }
 
+func TestParseArgsFoldsTopLevel(t *testing.T) {
+	// Small models often omit the "params" wrapper.
+	action, params := parseArgs(`{"action":"calculate","expression":"2+2"}`)
+	if action != "calculate" {
+		t.Errorf("action = %q, want calculate", action)
+	}
+	if params["expression"] != "2+2" {
+		t.Errorf("params = %v, want folded expression", params)
+	}
+	if _, leaked := params["action"]; leaked {
+		t.Error("action leaked into folded params")
+	}
+}
+
+func TestRunConcurrentToolCallsStayOrdered(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	twoCalls := llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{
+		{ID: "c1", Name: "calc", Arguments: `{"action":"calculate","params":{"expression":"2+2"}}`},
+		{ID: "c2", Name: "calc", Arguments: `{"action":"calculate","params":{"expression":"10*10"}}`},
+	}}
+	fake := &scriptLLM{replies: []llm.Message{twoCalls, {Role: "assistant", Content: "done"}}}
+	a := New(fake, reg, nil, nil, "", 5)
+
+	tr, _ := a.Run(context.Background(), "two sums")
+	obs := toolObservation(tr.Messages)
+	if len(obs) != 2 {
+		t.Fatalf("observations = %d, want 2", len(obs))
+	}
+	if obs[0].ToolCallID != "c1" || !strings.Contains(obs[0].Content, "4") {
+		t.Errorf("first observation = %+v, want c1=4", obs[0])
+	}
+	if obs[1].ToolCallID != "c2" || !strings.Contains(obs[1].Content, "100") {
+		t.Errorf("second observation = %+v, want c2=100", obs[1])
+	}
+}
+
 func TestRunWrongToolHint(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc(), tool.NewWeb(nil))
 	fake := &scriptLLM{replies: []llm.Message{

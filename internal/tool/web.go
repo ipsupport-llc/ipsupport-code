@@ -14,7 +14,12 @@ import (
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/PuerkitoBio/goquery"
+	// go-shiori/go-readability is unmaintained upstream; kept for v1 since fetch
+	// degrades gracefully (readability failure → raw HTML → stripTags). Future
+	// swap candidate: codeberg.org/readeck/go-readability/v2.
 	readability "github.com/go-shiori/go-readability"
+
+	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
 // Endpoints are package vars so tests can point them at an httptest server.
@@ -131,8 +136,8 @@ func (w *webTool) fetch(ctx context.Context, params map[string]any) Result {
 		markdown = stripTags(body)
 	}
 	markdown = strings.TrimSpace(markdown)
-	if len(markdown) > maxFetchBytes {
-		markdown = markdown[:maxFetchBytes] + "\n…[truncated]"
+	if clipped, truncated := textutil.Clip(markdown, maxFetchBytes); truncated {
+		markdown = clipped + "\n…[truncated]"
 	}
 	if title != "" {
 		return Ok("# " + title + "\n\n" + markdown)

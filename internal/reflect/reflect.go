@@ -87,41 +87,47 @@ func oneLine(s string) string {
 }
 
 func parseLessons(content string) []knowledge.Pitfall {
-	arr := extractJSONArray(content)
-	if arr == "" {
-		return nil
-	}
-	var raw []struct {
-		Domain       string `json:"domain"`
-		ErrorPattern string `json:"error_pattern"`
-		Context      string `json:"context"`
-		ProvenFix    string `json:"proven_fix"`
-	}
-	if err := json.Unmarshal([]byte(arr), &raw); err != nil {
-		return nil
-	}
-	var out []knowledge.Pitfall
-	for _, r := range raw {
-		if strings.TrimSpace(r.Domain) == "" || strings.TrimSpace(r.ProvenFix) == "" {
+	for _, candidate := range jsonArrayCandidates(content) {
+		var raw []struct {
+			Domain       string `json:"domain"`
+			ErrorPattern string `json:"error_pattern"`
+			Context      string `json:"context"`
+			ProvenFix    string `json:"proven_fix"`
+		}
+		if err := json.Unmarshal([]byte(candidate), &raw); err != nil {
 			continue
 		}
-		out = append(out, knowledge.Pitfall{
-			Domain:       r.Domain,
-			ErrorPattern: r.ErrorPattern,
-			Context:      r.Context,
-			ProvenFix:    r.ProvenFix,
-		})
+		var out []knowledge.Pitfall
+		for _, r := range raw {
+			if strings.TrimSpace(r.Domain) == "" || strings.TrimSpace(r.ProvenFix) == "" {
+				continue
+			}
+			out = append(out, knowledge.Pitfall{
+				Domain:       r.Domain,
+				ErrorPattern: r.ErrorPattern,
+				Context:      r.Context,
+				ProvenFix:    r.ProvenFix,
+			})
+		}
+		return out // first candidate that parses as an array wins
 	}
-	return out
+	return nil
 }
 
-// extractJSONArray returns the outermost [...] slice of s, tolerating prose
-// around it.
-func extractJSONArray(s string) string {
-	start := strings.IndexByte(s, '[')
-	end := strings.LastIndexByte(s, ']')
-	if start < 0 || end < start {
-		return ""
+// jsonArrayCandidates returns every substring of s that starts at a '[' and
+// decodes as a complete JSON array, in order. This tolerates prose around the
+// array — and prose that itself contains brackets — unlike a naive
+// first-'['-to-last-']' slice.
+func jsonArrayCandidates(s string) []string {
+	var out []string
+	for i := 0; i < len(s); i++ {
+		if s[i] != '[' {
+			continue
+		}
+		var raw json.RawMessage
+		if err := json.NewDecoder(strings.NewReader(s[i:])).Decode(&raw); err == nil && len(raw) > 0 && raw[0] == '[' {
+			out = append(out, string(raw))
+		}
 	}
-	return s[start : end+1]
+	return out
 }

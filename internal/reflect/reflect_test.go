@@ -43,6 +43,19 @@ func TestReflectParsesLessons(t *testing.T) {
 	}
 }
 
+func TestReflectParsesArrayAfterBracketProse(t *testing.T) {
+	// Prose contains a bracketed phrase before the real JSON array.
+	reply := "The lessons [for run] are below:\n" +
+		`[{"domain":"run","error_pattern":"permission denied","context":"writing /root","proven_fix":"use sudo"}]`
+	ps, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if len(ps) != 1 || ps[0].ProvenFix != "use sudo" {
+		t.Errorf("lessons = %+v, want the real array parsed past the prose brackets", ps)
+	}
+}
+
 func TestReflectNoJSONIsEmpty(t *testing.T) {
 	ps, err := New(fixedLLM{reply: "I see nothing durable to learn here."}).
 		Reflect(context.Background(), sampleTranscript())

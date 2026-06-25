@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
 // ToolCall is a function call the model wants to make. Arguments is the raw JSON
@@ -162,8 +163,6 @@ func fromWire(w wireMessage) Message {
 }
 
 func truncate(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
-	}
-	return s
+	out, _ := textutil.Clip(s, n)
+	return out
 }

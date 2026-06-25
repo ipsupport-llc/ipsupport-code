@@ -56,6 +56,39 @@ func (a *Agent) Reset() { a.history = nil }
 // SessionLen reports how many remembered messages are in the current session.
 func (a *Agent) SessionLen() int { return len(a.history) }
 
+// Compact summarizes the session so far into a short recap and replaces the
+// history with it, freeing context while keeping continuity. Returns how many
+// messages were compacted (0 if there was nothing worth compacting).
+func (a *Agent) Compact(ctx context.Context) (int, error) {
+	if len(a.history) < 2 {
+		return 0, nil
+	}
+	var b strings.Builder
+	for _, m := range a.history {
+		switch m.Role {
+		case "user":
+			b.WriteString("User: " + m.Content + "\n")
+		case "assistant":
+			if strings.TrimSpace(m.Content) != "" {
+				b.WriteString("Assistant: " + m.Content + "\n")
+			}
+		}
+	}
+	reply, err := a.llm.Chat(ctx, []llm.Message{
+		llm.System("Summarize the conversation so far into a compact recap that preserves the key facts, decisions, files touched, and context needed to keep going. A few sentences, no preamble."),
+		llm.User(b.String()),
+	}, nil)
+	if err != nil {
+		return 0, err
+	}
+	n := len(a.history)
+	a.history = []llm.Message{
+		{Role: "user", Content: "[Summary of earlier conversation]\n" + reply.Content},
+		{Role: "assistant", Content: "Got it — I have that context."},
+	}
+	return n, nil
+}
+
 // remember appends the goal and its final answer to the session, trimming to the
 // most recent maxHistory messages.
 func (a *Agent) remember(goal, final string) {
@@ -67,17 +100,18 @@ func (a *Agent) remember(goal, final string) {
 
 // DefaultSystemPrompt is the baseline instruction given to the model.
 func DefaultSystemPrompt() string {
-	return strings.TrimSpace(`You are ipsupport-code, a local command-line coding agent. You DO tasks yourself using tools — you never explain to the user how to do them.
+	return strings.TrimSpace(`You are the reasoning engine inside ipsupport-code, a local command-line coding agent. You run in a loop in the user's terminal and act ONLY through tools — the user sees a TUI with your tool calls and results, not your raw thoughts.
 
 Hard rules:
-- When asked to create a file or script, WRITE it with the file tool. When asked to run something, RUN it with the run tool. Do the work end to end.
-- NEVER reply with manual instructions like "create a file", "run nano", "chmod +x", "here's how you can…". The user has you so they don't have to. If you're describing steps instead of doing them, you're failing.
-- Example — "make a hello world shell script and run it": call file.write to create hello.sh, then run.shell to execute it (e.g. sh hello.sh), then report the output. Do NOT tell the user to save or run it themselves.
+- DO the task yourself with tools. Asked to create a file or script → WRITE it with the file tool. Asked to run something → RUN it with the run tool. Use git for git. Work end to end.
+- NEVER reply with manual instructions like "create a file", "run nano", "chmod +x", "here's how you can…". The user has you so they don't have to. Describing steps instead of doing them is a failure.
+- Example — "make a hello world shell script and run it": file.write hello.sh, then run.shell to execute it (e.g. sh hello.sh), then report the output. Do NOT tell the user to save or run it.
 - Prefer tools over talking: calc for ANY arithmetic, git for git, web to look things up, file/run for everything local.
+- You are a small local model in a terminal: be concise, no long essays.
 
 Mechanics:
-- Each tool takes {"action": <name>, "params": {...}} — put per-action fields inside params.
-- On a tool error, read it (it often names the fix or the right tool) and retry.
+- Each tool takes {"action": <name>, "params": {...}} — per-action fields go inside params.
+- On a tool error, read it (it often shows the correct schema or names the fix) and retry.
 - Finish with a SHORT report of what you actually did (files written, commands run, results) and make NO tool call.`)
 }
 

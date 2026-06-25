@@ -149,6 +149,41 @@ func TestNoDuplicateFinalEmit(t *testing.T) {
 	}
 }
 
+func TestCompactSummarizesSession(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "answer A"},
+		{Role: "assistant", Content: "answer B"},
+		{Role: "assistant", Content: "SUMMARY: we did A and B"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	a.Run(context.Background(), "task 1")
+	a.Run(context.Background(), "task 2")
+	if a.SessionLen() != 4 {
+		t.Fatalf("SessionLen before compact = %d, want 4", a.SessionLen())
+	}
+
+	n, err := a.Compact(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 4 {
+		t.Errorf("compacted %d messages, want 4", n)
+	}
+	if a.SessionLen() != 2 {
+		t.Errorf("SessionLen after compact = %d, want 2 (summary pair)", a.SessionLen())
+	}
+	var found bool
+	for _, m := range a.history {
+		if strings.Contains(m.Content, "SUMMARY: we did A and B") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("summary not stored in the compacted history")
+	}
+}
+
 func TestParseArgsFoldsTopLevel(t *testing.T) {
 	// Small models often omit the "params" wrapper.
 	action, params := parseArgs(`{"action":"calculate","expression":"2+2"}`)

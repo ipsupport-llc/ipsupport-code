@@ -71,6 +71,9 @@ In the REPL, anything not starting with `/` is run as a task. Slash commands:
 | `/usage` | session counters + token usage |
 | `/login` | (re)configure server URL / model / key, then reload |
 | `/new` | clear the session conversation memory |
+| `/clear` | fresh start — clear the screen and the session |
+| `/compact` | summarize the session so far to free up context |
+| `/color [name]` | change the TUI frame color (cycles if no name) |
 | `/goal <task>` | run a task explicitly |
 | `/loop [n] <task>` | run a task `n` times (default 3) so lessons compound |
 | `/help` | command list |

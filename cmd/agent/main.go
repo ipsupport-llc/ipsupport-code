@@ -1,6 +1,7 @@
 // Command ipsupport-code is a self-learning local agent for LM Studio. With a
-// goal argument it runs one task; with none it opens a REPL with slash commands.
-// After each task it reflects and persists what it learned.
+// goal argument it runs one task; with none on a terminal it opens a Bubble Tea
+// TUI (plain line REPL when piped). After each task it reflects and persists
+// what it learned.
 package main
 
 import (
@@ -14,6 +15,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/term"
@@ -51,11 +53,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	if goal := strings.TrimSpace(strings.Join(flag.Args(), " ")); goal != "" {
-		app.runOne(ctx, goal)
-		return
+	switch {
+	case strings.TrimSpace(strings.Join(flag.Args(), " ")) != "":
+		app.runOne(ctx, strings.TrimSpace(strings.Join(flag.Args(), " ")))
+	case isTTY():
+		if err := app.runTUI(ctx); err != nil {
+			fmt.Fprintln(os.Stderr, "tui:", err)
+		}
+	default:
+		app.repl(ctx)
 	}
-	app.repl(ctx)
 }
 
 // app bundles everything one process needs across tasks, plus session counters.
@@ -63,11 +70,16 @@ type app struct {
 	cfg       config.Config
 	workspace string
 	kb        *knowledge.KB
-	tracer    trace.Tracer
 	reader    *bufio.Reader
-	client    *llm.OpenAIClient
-	ag        *agent.Agent
-	refl      *reflect.Reflector
+
+	fileTracer trace.Tracer  // JSONL dataset
+	uiTracer   trace.Tracer  // live TUI (nil in plain mode)
+	tracer     trace.Tracer  // composite, set in wire()
+	approver   tool.Approver // stdin (plain) or the TUI bridge
+
+	client *llm.OpenAIClient
+	ag     *agent.Agent
+	refl   *reflect.Reflector
 
 	tasks, steps, toolCalls int
 }
@@ -83,16 +95,14 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 		kb, _ = knowledge.Open("")
 	}
 
-	var tracer trace.Tracer
 	cleanup := func() {}
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: reader, approver: &stdinApprover{r: reader}}
 	if ft, err := trace.NewFileTracer(cfg.TracePath, newRunID()); err != nil {
 		slog.Warn("trace disabled", "err", err)
 	} else {
-		tracer = ft
+		a.fileTracer = ft
 		cleanup = func() { _ = ft.Close() }
 	}
-
-	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, tracer: tracer, reader: reader}
 	if err := a.wire(); err != nil {
 		return nil, nil, err
 	}
@@ -100,20 +110,22 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 }
 
 // wire (re)builds the policy-gated tools, LLM client, agent, and reflector from
-// the current config. Called at startup and after /login.
+// the current config and the current approver/tracers. Called at startup, after
+// /login, and when the TUI installs its bridge.
 func (a *app) wire() error {
 	pol, err := policy.New(a.cfg)
 	if err != nil {
 		return fmt.Errorf("policy: %w", err)
 	}
-	approver := &stdinApprover{r: a.reader}
 	reg := tool.NewRegistry(
-		tool.NewFile(pol, approver),
-		tool.NewRun(pol, approver),
+		tool.NewFile(pol, a.approver),
+		tool.NewRun(pol, a.approver),
+		tool.NewGit(pol, a.approver),
 		tool.NewWeb(http.DefaultClient),
 		tool.NewHelp(a.kb),
 		tool.NewCalc(),
 	)
+	a.tracer = trace.Multi(a.fileTracer, a.uiTracer)
 	a.client = llm.NewOpenAIClient(a.cfg.LLM)
 	a.ag = agent.New(a.client, reg, a.kb, a.tracer, "", a.cfg.LLM.MaxSteps)
 	a.refl = reflect.New(a.client)
@@ -129,15 +141,13 @@ func (a *app) reconfigure() error {
 	return a.wire()
 }
 
-// runOne executes a single goal, updates session counters, then reflects and
-// persists new lessons.
-func (a *app) runOne(ctx context.Context, goal string) {
-	tr, err := a.ag.Run(ctx, goal)
-	if err != nil {
-		slog.Error("run failed", "err", err)
-		fmt.Fprintln(os.Stderr, "error:", err)
-		return
+func (a *app) emit(kind string, fields map[string]any) {
+	if a.tracer != nil {
+		a.tracer.Emit(kind, fields)
 	}
+}
+
+func (a *app) recordRun(tr agent.Transcript) {
 	a.tasks++
 	a.steps += tr.Steps
 	for _, m := range tr.Messages {
@@ -145,33 +155,60 @@ func (a *app) runOne(ctx context.Context, goal string) {
 			a.toolCalls++
 		}
 	}
+}
 
-	if strings.TrimSpace(tr.Final) != "" {
-		fmt.Println(tr.Final)
-	} else {
-		fmt.Println("(no final answer — step budget exhausted)")
-	}
-
+// reflectAndStore runs the post-task reflection and persists new lessons,
+// emitting a "lesson" event for each. Returns how many were new.
+func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 	lessons, err := a.refl.Reflect(ctx, tr)
 	if err != nil {
 		slog.Warn("reflection failed", "err", err)
-		return
+		return 0
 	}
 	learned := 0
 	for _, p := range lessons {
 		if a.kb.Add(p) {
 			learned++
-			if a.tracer != nil {
-				a.tracer.Emit("lesson", map[string]any{"domain": p.Domain, "proven_fix": p.ProvenFix})
-			}
+			a.emit("lesson", map[string]any{"domain": p.Domain, "proven_fix": p.ProvenFix})
 		}
 	}
 	if learned > 0 {
 		if err := a.kb.Save(); err != nil {
 			slog.Warn("knowledge save failed", "err", err)
 		}
+	}
+	return learned
+}
+
+// runOne is the plain (printing) path used in one-shot and piped modes.
+func (a *app) runOne(ctx context.Context, goal string) {
+	tr, err := a.ag.Run(ctx, goal)
+	if err != nil {
+		slog.Error("run failed", "err", err)
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return
+	}
+	a.recordRun(tr)
+	if strings.TrimSpace(tr.Final) != "" {
+		fmt.Println(tr.Final)
+	} else {
+		fmt.Println("(no final answer — step budget exhausted)")
+	}
+	if learned := a.reflectAndStore(ctx, tr); learned > 0 {
 		fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
 	}
+}
+
+// runTaskStreaming is the TUI path: no printing — progress reaches the screen via
+// the UI tracer. Errors surface as an "error" event.
+func (a *app) runTaskStreaming(ctx context.Context, goal string) {
+	tr, err := a.ag.Run(ctx, goal)
+	if err != nil {
+		a.emit("error", map[string]any{"text": err.Error()})
+		return
+	}
+	a.recordRun(tr)
+	a.reflectAndStore(ctx, tr)
 }
 
 func (a *app) repl(ctx context.Context) {
@@ -197,17 +234,17 @@ func (a *app) repl(ctx context.Context) {
 	}
 }
 
-// command handles a /slash line. Returns true when the REPL should exit.
+// command handles a /slash line in plain mode. Returns true when the REPL should
+// exit.
 func (a *app) command(ctx context.Context, line string) (quit bool) {
-	cmd := strings.Fields(line)[0]
-	rest := strings.TrimSpace(strings.TrimPrefix(line, cmd))
+	cmd, rest := splitCommand(line)
 	switch cmd {
 	case "/help", "/?":
-		printHelp()
+		fmt.Print(helpText())
 	case "/status":
-		a.printStatus()
+		fmt.Print(a.statusText())
 	case "/usage":
-		a.printUsage()
+		fmt.Print(a.usageText())
 	case "/login", "/init":
 		maybeInit(a.reader, true)
 		if err := a.reconfigure(); err != nil {
@@ -222,7 +259,18 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 			a.runOne(ctx, rest)
 		}
 	case "/loop":
-		a.loop(ctx, rest)
+		n, goal := parseLoop(rest)
+		if goal == "" {
+			fmt.Println("usage: /loop [count] <task>")
+			break
+		}
+		for i := 0; i < n; i++ {
+			if ctx.Err() != nil {
+				break
+			}
+			fmt.Printf("— loop %d/%d —\n", i+1, n)
+			a.runOne(ctx, goal)
+		}
 	case "/exit", "/quit":
 		return true
 	default:
@@ -231,53 +279,42 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	return false
 }
 
-// loop runs a goal several times so lessons compound. Form: /loop [count] <task>
-// (count defaults to 3).
-func (a *app) loop(ctx context.Context, rest string) {
-	n := 3
+func splitCommand(line string) (cmd, rest string) {
+	cmd = strings.Fields(line)[0]
+	return cmd, strings.TrimSpace(strings.TrimPrefix(line, cmd))
+}
+
+func parseLoop(rest string) (n int, goal string) {
+	n, goal = 3, rest
 	parts := strings.Fields(rest)
 	if len(parts) == 0 {
-		fmt.Println("usage: /loop [count] <task>")
-		return
+		return 0, ""
 	}
 	if v, err := strconv.Atoi(parts[0]); err == nil {
 		n = v
-		rest = strings.TrimSpace(strings.TrimPrefix(rest, parts[0]))
-	}
-	if strings.TrimSpace(rest) == "" {
-		fmt.Println("usage: /loop [count] <task>")
-		return
+		goal = strings.TrimSpace(strings.TrimPrefix(rest, parts[0]))
 	}
 	if n < 1 {
 		n = 1
 	}
-	for i := 0; i < n; i++ {
-		select {
-		case <-ctx.Done():
-			fmt.Println("\nloop cancelled")
-			return
-		default:
-		}
-		fmt.Printf("— loop %d/%d —\n", i+1, n)
-		a.runOne(ctx, rest)
-	}
+	return n, strings.TrimSpace(goal)
 }
 
-func printHelp() {
-	fmt.Print(`commands:
-  /status         show config, knowledge base, and trace paths
-  /usage          session counters + token usage
-  /login          (re)configure the server URL / model / key, then reload
-  /goal <task>    run a task explicitly
+func helpText() string {
+	return `commands:
+  /status          show config, knowledge base, and trace paths
+  /usage           session counters + token usage
+  /login           (re)configure the server URL / model / key, then reload
+  /goal <task>     run a task explicitly
   /loop [n] <task> run a task n times (default 3) so lessons compound
-  /help           this list
-  /exit, /quit    leave
+  /help            this list
+  /exit, /quit     leave
 Anything not starting with '/' is run as a task.
-`)
+`
 }
 
-func (a *app) printStatus() {
-	fmt.Printf(`status:
+func (a *app) statusText() string {
+	return fmt.Sprintf(`status:
   server      %s
   model       %s
   max_steps   %d
@@ -292,9 +329,9 @@ func (a *app) printStatus() {
 		a.cfg.KBPath, len(a.kb.All()), a.cfg.TracePath)
 }
 
-func (a *app) printUsage() {
+func (a *app) usageText() string {
 	p, c := a.client.Usage()
-	fmt.Printf(`usage (this session):
+	return fmt.Sprintf(`usage (this session):
   tasks       %d
   steps       %d
   tool calls  %d
@@ -304,15 +341,15 @@ func (a *app) printUsage() {
 }
 
 // maybeInit runs the interactive first-time setup, writing the LM Studio
-// connection to the user config. It triggers when forced (-init / /login) or on
-// a real first run (no user config yet and an interactive terminal).
+// connection to the user config. It triggers when forced (-init / /login) or on a
+// real first run (no user config yet and an interactive terminal).
 func maybeInit(reader *bufio.Reader, force bool) {
 	if !force && (config.GlobalExists() || !isTTY()) {
 		return
 	}
 	def := config.Default().LLM
 	if cur, err := config.Load("."); err == nil {
-		def = cur.LLM // pre-fill prompts with current values on /login
+		def = cur.LLM
 	}
 	fmt.Println("Setup — configure your model connection (press Enter to keep current).")
 	l := config.LLM{
@@ -354,10 +391,17 @@ func atoiOr(s string, def int) int {
 	return def
 }
 
-// stdinApprover prompts the operator for a policy "ask" decision.
-type stdinApprover struct{ r *bufio.Reader }
+// stdinApprover prompts the operator on stderr for a policy "ask" decision. The
+// mutex serializes prompts so concurrent tool-call approvals never read the
+// shared stdin reader at the same time.
+type stdinApprover struct {
+	mu sync.Mutex
+	r  *bufio.Reader
+}
 
 func (a *stdinApprover) Approve(kind, detail string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	fmt.Fprintf(os.Stderr, "\n[approve %s] %s\n  allow? [y/N] ", kind, detail)
 	line, err := a.r.ReadString('\n')
 	if err != nil {

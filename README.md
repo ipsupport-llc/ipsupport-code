@@ -2,9 +2,14 @@
 
 A small **self-learning local agent** for [LM Studio](https://lmstudio.ai). It
 drives a local model through a reason → act → observe loop over a handful of fat
-tools (`file`, `run`, `web`, `help`, `calc`), recovers from tool errors using
-lessons it learned on past runs, and — after each task — reflects and writes new
-lessons to disk so it actually gets better over time.
+tools (`file`, `run`, `git`, `web`, `help`, `calc`), recovers from tool errors
+using lessons it learned on past runs, and — after each task — reflects and writes
+new lessons to disk so it actually gets better over time.
+
+The interactive REPL is a Bubble Tea **TUI**: live-streamed tool calls and
+observations, a spinner while the model thinks, in-place `y/n` approval prompts,
+and a status bar (model · workspace · tokens). Piped/non-interactive runs fall
+back to a plain line REPL.
 
 It will not match a frontier model. It is built for **micro-tasks** on your own
 machine, with your own model, under a permission policy you control.
@@ -104,7 +109,7 @@ Logging level: `IPS_LOG=debug|info|warn|error` (default `warn`) to stderr.
 cmd/agent        CLI / REPL
 internal/llm      LM Studio client + Chatter interface
 internal/agent    the reason→act→observe loop
-internal/tool     fat tools: file, run, web, help, calc
+internal/tool     fat tools: file, run, git, web, help, calc
 internal/policy   workspace permission engine (+ jail)
 internal/knowledge persistent pitfall store
 internal/reflect  post-task lesson distillation

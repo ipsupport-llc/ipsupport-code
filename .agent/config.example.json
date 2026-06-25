@@ -1,0 +1,19 @@
+{
+  "llm": {
+    "base_url": "http://localhost:1234/v1",
+    "model": "qwen2.5-7b-instruct",
+    "temperature": 0.2,
+    "max_steps": 12
+  },
+  "run": {
+    "default": "ask",
+    "allow": ["ls*", "cat*", "git status", "go build*", "go test*"],
+    "deny": ["rm -rf*", "sudo*", "*| sh", "*curl*sh*"]
+  },
+  "file": {
+    "default": "ask",
+    "jail": ".",
+    "allow_write": ["**/*.go", "notes/**"],
+    "deny_write": [".git/**", "**/*secret*", "**/.env*"]
+  }
+}

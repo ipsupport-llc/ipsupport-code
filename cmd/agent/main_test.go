@@ -28,6 +28,24 @@ func TestParseLoop(t *testing.T) {
 	}
 }
 
+func TestLongestCommonPrefix(t *testing.T) {
+	if got := longestCommonPrefix([]string{"/color", "/compact"}); got != "/co" {
+		t.Errorf("lcp = %q, want /co", got)
+	}
+	if got := longestCommonPrefix([]string{"/help"}); got != "/help" {
+		t.Errorf("lcp single = %q", got)
+	}
+}
+
+func TestTabCompletesSingleMatch(t *testing.T) {
+	m := &tuiModel{input: textinput.New()}
+	m.input.SetValue("/comp")
+	m.completeCommand()
+	if m.input.Value() != "/compact " {
+		t.Errorf("completed to %q, want '/compact '", m.input.Value())
+	}
+}
+
 func TestRenderDiff(t *testing.T) {
 	m := &tuiModel{width: 80, accent: lipgloss.Color("13")}
 	diff := "--- a.txt\n+++ a.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+LINE2\n line3\n"

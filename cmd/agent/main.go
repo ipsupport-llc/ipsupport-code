@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -162,16 +163,18 @@ func loadInstructions(workspace string) (text, source string) {
 	return "", ""
 }
 
-// systemPrompt is the base prompt plus any project instructions; records the
-// source in instrSrc for /status.
+// systemPrompt is the base prompt plus the real environment (OS + workspace) and
+// any project instructions; records the instructions source in instrSrc.
 func (a *app) systemPrompt() string {
 	text, src := loadInstructions(a.workspace)
 	a.instrSrc = src
-	if text == "" {
-		return agent.DefaultSystemPrompt()
+	out := agent.DefaultSystemPrompt() + fmt.Sprintf(
+		"\n\nEnvironment: you are running on %s; the workspace is %s. Use commands that exist on this OS — on darwin prefer vm_stat/top/sw_vers over Linux-only tools like free.",
+		runtime.GOOS, a.workspace)
+	if text != "" {
+		out += "\n\n## Project instructions (from " + src + ") — follow these:\n" + text
 	}
-	return agent.DefaultSystemPrompt() +
-		"\n\n## Project instructions (from " + src + ") — follow these:\n" + text
+	return out
 }
 
 func (a *app) emit(kind string, fields map[string]any) {
@@ -285,9 +288,16 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		} else {
 			fmt.Println("config reloaded.")
 		}
-	case "/new", "/reset":
+	case "/new", "/reset", "/clear":
 		a.ag.Reset()
 		fmt.Println("session cleared.")
+	case "/compact":
+		n, err := a.ag.Compact(ctx)
+		if err != nil {
+			fmt.Println("compact failed:", err)
+		} else {
+			fmt.Printf("compacted %d messages → summary.\n", n)
+		}
 	case "/color":
 		fmt.Println("/color changes the TUI frame color — interactive mode only.")
 	case "/goal":
@@ -344,6 +354,8 @@ func helpText() string {
   /usage           session counters + token usage
   /login           (re)configure the server URL / model / key, then reload
   /new             clear the session conversation memory
+  /clear           fresh start — clear the screen and the session
+  /compact         summarize the session so far to free up context
   /color [name]    change the TUI frame color (cycles if no name)
   /goal <task>     run a task explicitly
   /loop [n] <task> run a task n times (default 3) so lessons compound

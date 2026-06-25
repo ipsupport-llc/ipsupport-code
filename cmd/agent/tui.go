@@ -61,6 +61,10 @@ type tuiModel struct {
 type eventMsg uiEvent
 type approvalMsg approvalReq
 type taskDoneMsg struct{}
+type compactDoneMsg struct {
+	n   int
+	err error
+}
 
 // newTUIModel installs the UI bridge as the agent's tracer + approver, wires the
 // stack, and builds the model. Split out from runTUI so tests can drive it.
@@ -151,6 +155,18 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.input.Focus()
 
+	case compactDoneMsg:
+		m.state = stIdle
+		switch {
+		case msg.err != nil:
+			m.push(cErr.Render("compact failed: " + msg.err.Error()))
+		case msg.n == 0:
+			m.push(cDim.Render("nothing to compact"))
+		default:
+			m.push(cDim.Render(fmt.Sprintf("compacted %d messages → summary", msg.n)))
+		}
+		return m, m.input.Focus()
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -215,6 +231,9 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m.submit(line)
+		case "tab":
+			m.completeCommand()
+			return m, nil
 		case "up", "down", "pgup", "pgdown", "home", "end":
 			var cmd tea.Cmd
 			m.vp, cmd = m.vp.Update(k)
@@ -252,11 +271,11 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	cmd, rest := splitCommand(line)
 	switch cmd {
 	case "/help", "/?":
-		m.pushBlock(helpText())
+		m.push(m.renderHelp()...)
 	case "/status":
-		m.pushBlock(m.app.statusText())
+		m.push(m.renderStatus()...)
 	case "/usage":
-		m.pushBlock(m.app.usageText())
+		m.push(m.renderUsage()...)
 	case "/login":
 		if err := m.app.reconfigure(); err != nil {
 			m.push(cErr.Render("reload failed: " + err.Error()))
@@ -266,6 +285,23 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/new", "/reset":
 		m.app.ag.Reset()
 		m.push(cDim.Render("session cleared"))
+	case "/clear":
+		m.app.ag.Reset()
+		m.history = m.history[:0]
+		if m.ready {
+			m.vp.SetContent("")
+		}
+		m.push(cDim.Render("cleared — fresh screen and session"))
+	case "/compact":
+		m.state = stRunning
+		m.taskStart = time.Now()
+		p, c := m.app.client.Usage()
+		m.startTok = p + c
+		ctx := m.ctx
+		return m, func() tea.Msg {
+			n, err := m.app.ag.Compact(ctx)
+			return compactDoneMsg{n: n, err: err}
+		}
 	case "/color":
 		m.setColor(rest)
 	case "/goal":
@@ -399,10 +435,116 @@ func (m *tuiModel) push(lines ...string) {
 	}
 }
 
-func (m *tuiModel) pushBlock(s string) {
-	for _, ln := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
-		m.push(cDim.Render(ln))
+// commandList is the single source for Tab completion and the /help display.
+type cmdInfo struct{ name, desc string }
+
+var commandList = []cmdInfo{
+	{"/help", "this list"},
+	{"/status", "config, knowledge base, trace paths"},
+	{"/usage", "session counters + live token usage"},
+	{"/login", "(re)configure server URL / model / key, then reload"},
+	{"/new", "clear the session conversation memory"},
+	{"/clear", "fresh start — clear the screen and the session"},
+	{"/compact", "summarize the session so far to free up context"},
+	{"/color", "change the frame color (cycles if no name)"},
+	{"/goal", "run a task explicitly"},
+	{"/loop", "run a task n times so lessons compound"},
+	{"/exit", "leave"},
+}
+
+// completeCommand completes a partial /command on Tab.
+func (m *tuiModel) completeCommand() {
+	val := m.input.Value()
+	if !strings.HasPrefix(val, "/") {
+		return
 	}
+	var matches []string
+	for _, c := range commandList {
+		if strings.HasPrefix(c.name, val) {
+			matches = append(matches, c.name)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return
+	case 1:
+		m.input.SetValue(matches[0] + " ")
+		m.input.CursorEnd()
+	default:
+		if lcp := longestCommonPrefix(matches); len(lcp) > len(val) {
+			m.input.SetValue(lcp)
+			m.input.CursorEnd()
+		} else {
+			m.push(cDim.Render("  " + strings.Join(matches, "   ")))
+		}
+	}
+}
+
+func longestCommonPrefix(ss []string) string {
+	if len(ss) == 0 {
+		return ""
+	}
+	p := ss[0]
+	for _, s := range ss[1:] {
+		for !strings.HasPrefix(s, p) {
+			if p = p[:len(p)-1]; p == "" {
+				return ""
+			}
+		}
+	}
+	return p
+}
+
+func (m *tuiModel) accentBold() lipgloss.Style {
+	return lipgloss.NewStyle().Foreground(m.accent).Bold(true)
+}
+
+func (m *tuiModel) renderHelp() []string {
+	cmd := m.accentBold()
+	out := []string{cmd.Render("  commands") + cDim.Render("   (Tab completes)")}
+	for _, c := range commandList {
+		out = append(out, "  "+cmd.Render(fmt.Sprintf("%-9s", c.name))+"  "+cDim.Render(c.desc))
+	}
+	out = append(out, cDim.Render("  anything else is run as a task"))
+	return out
+}
+
+func (m *tuiModel) renderKV(title string, rows [][2]string) []string {
+	out := []string{m.accentBold().Render("  " + title)}
+	for _, r := range rows {
+		out = append(out, "    "+cDim.Render(fmt.Sprintf("%-13s", r[0]))+"  "+cBot.Render(r[1]))
+	}
+	return out
+}
+
+func (m *tuiModel) renderStatus() []string {
+	c := m.app.cfg
+	instr := m.app.instrSrc
+	if instr == "" {
+		instr = "(none)"
+	}
+	return m.renderKV("status", [][2]string{
+		{"server", c.LLM.BaseURL},
+		{"model", c.LLM.Model},
+		{"workspace", c.Workspace},
+		{"jail", c.File.Jail},
+		{"defaults", fmt.Sprintf("run=%s  file=%s", c.Run.Default, c.File.Default)},
+		{"instructions", instr},
+		{"session", fmt.Sprintf("%d messages", m.app.ag.SessionLen())},
+		{"knowledge", fmt.Sprintf("%s (%d lessons)", c.KBPath, len(m.app.kb.All()))},
+		{"trace", c.TracePath},
+	})
+}
+
+func (m *tuiModel) renderUsage() []string {
+	p, c := m.app.client.Usage()
+	return m.renderKV("usage (this session)", [][2]string{
+		{"tasks", fmt.Sprintf("%d", m.app.tasks)},
+		{"steps", fmt.Sprintf("%d", m.app.steps)},
+		{"tool calls", fmt.Sprintf("%d", m.app.toolCalls)},
+		{"tokens", fmt.Sprintf("%d + %d = %d", p, c, p+c)},
+		{"lessons", fmt.Sprintf("%d", len(m.app.kb.All()))},
+	})
 }
 
 // renderEvent renders one streamed agent event into styled history lines.

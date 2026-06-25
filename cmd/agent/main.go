@@ -202,7 +202,11 @@ func loadInstructions(workspace string) (text, source string) {
 func (a *app) systemPrompt() string {
 	text, src := loadInstructions(a.workspace)
 	a.instrSrc = src
-	out := agent.DefaultSystemPrompt() + fmt.Sprintf(
+	base := agent.DefaultSystemPrompt()
+	if a.cfg.Name != "" && a.cfg.Name != "ipsupport-code" { // honor /rename
+		base = strings.ReplaceAll(base, "ipsupport-code", a.cfg.Name)
+	}
+	out := base + fmt.Sprintf(
 		"\n\nEnvironment: you are running on %s; the workspace is %s. Use commands that exist on this OS — on darwin prefer vm_stat/top/sw_vers over Linux-only tools like free.",
 		runtime.GOOS, a.workspace)
 	if text != "" {
@@ -338,6 +342,17 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		}
 	case "/color":
 		fmt.Println("/color changes the TUI frame color — interactive mode only.")
+	case "/rename":
+		if name := strings.TrimSpace(rest); name == "" {
+			fmt.Println("usage: /rename <new name>")
+		} else {
+			a.cfg.Name = name
+			if err := config.SaveGlobal(name, a.cfg.LLM); err != nil {
+				fmt.Println("rename failed:", err)
+			} else {
+				fmt.Println("renamed →", name)
+			}
+		}
 	case "/goal":
 		if rest == "" {
 			fmt.Println("usage: /goal <task>")
@@ -395,6 +410,7 @@ func helpText() string {
   /clear           fresh start — clear the screen and the session
   /compact         summarize the session so far to free up context
   /color [name]    change the TUI frame color (cycles if no name)
+  /rename <name>   rename the agent (saved in settings)
   /goal <task>     run a task explicitly
   /loop [n] <task> run a task n times (default 3) so lessons compound
   /help            this list
@@ -444,19 +460,19 @@ func maybeInit(reader *bufio.Reader, force bool) {
 	if !force && (config.GlobalExists() || !isTTY()) {
 		return
 	}
-	def := config.Default().LLM
+	def := config.Default()
 	if cur, err := config.Load("."); err == nil {
-		def = cur.LLM
+		def = cur
 	}
 	fmt.Println("Setup — configure your model connection (press Enter to keep current).")
 	l := config.LLM{
-		BaseURL:     ask(reader, "LM Studio server URL", def.BaseURL),
-		Model:       ask(reader, "Model name", def.Model),
-		Temperature: def.Temperature,
-		MaxSteps:    atoiOr(ask(reader, "Max steps per task", strconv.Itoa(def.MaxSteps)), def.MaxSteps),
-		APIKey:      ask(reader, "API key (blank for LM Studio)", def.APIKey),
+		BaseURL:     ask(reader, "LM Studio server URL", def.LLM.BaseURL),
+		Model:       ask(reader, "Model name", def.LLM.Model),
+		Temperature: def.LLM.Temperature,
+		MaxSteps:    atoiOr(ask(reader, "Max steps per task", strconv.Itoa(def.LLM.MaxSteps)), def.LLM.MaxSteps),
+		APIKey:      ask(reader, "API key (blank for LM Studio)", def.LLM.APIKey),
 	}
-	if err := config.SaveGlobalLLM(l); err != nil {
+	if err := config.SaveGlobal(def.Name, l); err != nil { // preserve any custom name
 		slog.Warn("could not save config", "err", err)
 		return
 	}

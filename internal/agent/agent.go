@@ -159,6 +159,9 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) llm.Message {
 	a.emit("observation", map[string]any{
 		"tool": c.Name, "action": action, "is_error": res.IsError, "content": content,
 	})
+	if res.Diff != "" {
+		a.emit("diff", map[string]any{"path": params["path"], "diff": res.Diff})
+	}
 	return llm.ToolResult(c.ID, c.Name, content)
 }
 

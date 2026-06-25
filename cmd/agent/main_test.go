@@ -1,10 +1,12 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestSplitCommand(t *testing.T) {
@@ -23,6 +25,22 @@ func TestParseLoop(t *testing.T) {
 	}
 	if n, g := parseLoop(""); n != 0 || g != "" {
 		t.Errorf("parseLoop empty = %d,%q", n, g)
+	}
+}
+
+func TestRenderDiff(t *testing.T) {
+	m := &tuiModel{width: 80, accent: lipgloss.Color("13")}
+	diff := "--- a.txt\n+++ a.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+LINE2\n line3\n"
+	out := strings.Join(m.renderDiff("a.txt", diff), "\n")
+
+	if !strings.Contains(out, "Update(a.txt)") {
+		t.Error("missing header Update(a.txt)")
+	}
+	if !strings.Contains(out, "Added 1 line, removed 1 line") {
+		t.Errorf("summary not as expected in:\n%s", out)
+	}
+	if !strings.Contains(out, bgGreen) || !strings.Contains(out, bgRed) {
+		t.Error("missing green/red row backgrounds")
 	}
 }
 

@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 
+	udiff "github.com/aymanbagabas/go-udiff"
+
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
@@ -23,17 +25,21 @@ type fileTool struct {
 // decisions) the approver.
 func NewFile(p *policy.Engine, a Approver) Tool { return &fileTool{pol: p, ap: a} }
 
-func (*fileTool) Name() string      { return "file" }
-func (*fileTool) Actions() []string { return []string{"read", "write", "append", "list", "mkdir"} }
+func (*fileTool) Name() string { return "file" }
+func (*fileTool) Actions() []string {
+	return []string{"read", "write", "append", "edit", "list", "mkdir"}
+}
 
 func (*fileTool) Description() string {
-	return strings.TrimSpace(`Read, write, append, list, and create files/dirs in the workspace.
+	return strings.TrimSpace(`Read, write, append, edit, list, and create files/dirs in the workspace.
 Actions:
   - read:   {"path": str}
-  - write:  {"path": str, "content": str}   (overwrites)
+  - write:  {"path": str, "content": str}              (overwrites whole file)
   - append: {"path": str, "content": str}
-  - list:   {"path"?: str}                  (defaults to ".")
+  - edit:   {"path": str, "find": str, "replace": str} (replace first match — best for small changes)
+  - list:   {"path"?: str}                             (defaults to ".")
   - mkdir:  {"path": str}
+Prefer edit over write when changing part of an existing file.
 Paths are relative to the workspace and confined to it.
 NOT here — shell commands → run; web/search/fetch → web; arithmetic → calc.`)
 }
@@ -46,6 +52,8 @@ func (f *fileTool) Call(_ context.Context, action string, params map[string]any)
 		return f.writeFile(action, params, false)
 	case "append":
 		return f.writeFile(action, params, true)
+	case "edit":
+		return f.edit(params)
 	case "list":
 		return f.list(params)
 	case "mkdir":
@@ -101,6 +109,12 @@ func (f *fileTool) writeFile(action string, params map[string]any, appendMode bo
 	if err != nil {
 		return Err(err.Error())
 	}
+	var old string
+	if !appendMode {
+		if data, e := os.ReadFile(abs); e == nil {
+			old = string(data)
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return Fail("file", action, "cannot create parent directory for "+path, err)
 	}
@@ -123,7 +137,66 @@ func (f *fileTool) writeFile(action string, params map[string]any, appendMode bo
 	if appendMode {
 		verb = "appended to"
 	}
-	return Ok(fmt.Sprintf("%s %s (%d bytes)", verb, path, len(content)))
+	res := Ok(fmt.Sprintf("%s %s (%d bytes)", verb, path, len(content)))
+	if old != "" && old != content { // overwrite of an existing file → show the diff
+		res.Diff = udiff.Unified(path, path, old, content)
+	}
+	return res
+}
+
+func (f *fileTool) edit(params map[string]any) Result {
+	if err := Require(params, "path", "find", "replace"); err != nil {
+		return Err(err.Error())
+	}
+	path := Str(params, "path")
+	find := Str(params, "find")
+	replace := Str(params, "replace")
+
+	d, err := f.pol.Write(path)
+	if err != nil {
+		return Err(err.Error())
+	}
+	switch d {
+	case policy.Deny:
+		return Err("edit " + path + " denied by workspace policy")
+	case policy.Ask:
+		if !f.ap.Approve("edit", path) {
+			return Err("edit " + path + " denied by user")
+		}
+	}
+	abs, err := f.pol.Resolve(path)
+	if err != nil {
+		return Err(err.Error())
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return Err("cannot read " + path + ": " + err.Error())
+	}
+	old := string(data)
+	if !strings.Contains(old, find) {
+		return Err("edit: the 'find' text is not present in " + path)
+	}
+	updated := strings.Replace(old, find, replace, 1)
+	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
+		return Fail("file", "edit", "write to "+path+" failed", err)
+	}
+	diff := udiff.Unified(path, path, old, updated)
+	add, del := diffStat(diff)
+	return Result{Content: fmt.Sprintf("edited %s (+%d -%d)", path, add, del), Diff: diff}
+}
+
+// diffStat counts added and removed lines in a unified diff.
+func diffStat(diff string) (added, removed int) {
+	for _, ln := range strings.Split(diff, "\n") {
+		switch {
+		case strings.HasPrefix(ln, "+++"), strings.HasPrefix(ln, "---"):
+		case strings.HasPrefix(ln, "+"):
+			added++
+		case strings.HasPrefix(ln, "-"):
+			removed++
+		}
+	}
+	return added, removed
 }
 
 func (f *fileTool) mkdir(params map[string]any) Result {

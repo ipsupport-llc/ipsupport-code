@@ -19,6 +19,7 @@ type Result struct {
 	Content string
 	IsError bool
 	Err     error
+	Diff    string // optional unified diff to display (set by file edits)
 }
 
 // Ok is a successful result.

@@ -2,6 +2,8 @@ package tool
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -56,6 +58,52 @@ func TestFileAskDeniedByUser(t *testing.T) {
 	r := tl.Call(context.Background(), "write", map[string]any{"path": "x.txt", "content": "x"})
 	if !r.IsError || !strings.Contains(r.Content, "denied by user") {
 		t.Errorf("ask+deny = %+v, want 'denied by user'", r)
+	}
+}
+
+func TestFileEditProducesDiff(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+	tl.Call(ctx, "write", map[string]any{"path": "a.txt", "content": "line1\nline2\nline3\n"})
+
+	r := tl.Call(ctx, "edit", map[string]any{"path": "a.txt", "find": "line2", "replace": "LINE-TWO"})
+	if r.IsError {
+		t.Fatalf("edit: %s", r.Content)
+	}
+	if r.Diff == "" {
+		t.Fatal("edit produced no diff")
+	}
+	if !strings.Contains(r.Diff, "-line2") || !strings.Contains(r.Diff, "+") || !strings.Contains(r.Diff, "LINE-TWO") {
+		t.Errorf("diff = %q", r.Diff)
+	}
+	data, _ := os.ReadFile(filepath.Join(dir, "a.txt"))
+	if !strings.Contains(string(data), "LINE-TWO") {
+		t.Errorf("file not actually edited: %q", data)
+	}
+}
+
+func TestFileEditFindMissing(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+	tl.Call(ctx, "write", map[string]any{"path": "a.txt", "content": "hello"})
+
+	r := tl.Call(ctx, "edit", map[string]any{"path": "a.txt", "find": "nope", "replace": "x"})
+	if !r.IsError || !strings.Contains(r.Content, "not present") {
+		t.Errorf("edit with missing find = %+v", r)
+	}
+}
+
+func TestFileOverwriteSetsDiff(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+	tl.Call(ctx, "write", map[string]any{"path": "a.txt", "content": "old\n"})
+
+	r := tl.Call(ctx, "write", map[string]any{"path": "a.txt", "content": "new\n"})
+	if r.IsError || r.Diff == "" {
+		t.Errorf("overwrite of existing file should carry a diff: %+v", r)
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
@@ -54,6 +55,10 @@ type OpenAIClient struct {
 	apiKey  string
 	temp    float64
 	hc      *http.Client
+
+	mu       sync.Mutex
+	promptTk int
+	complTk  int
 }
 
 // NewOpenAIClient builds a client from LLM config (LM Studio by default).
@@ -131,6 +136,10 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 		Choices []struct {
 			Message wireMessage `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &out); err != nil {
 		return Message{}, fmt.Errorf("decode llm response: %w", err)
@@ -138,7 +147,19 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	if len(out.Choices) == 0 {
 		return Message{}, fmt.Errorf("llm returned no choices")
 	}
+	c.mu.Lock()
+	c.promptTk += out.Usage.PromptTokens
+	c.complTk += out.Usage.CompletionTokens
+	c.mu.Unlock()
 	return fromWire(out.Choices[0].Message), nil
+}
+
+// Usage returns cumulative prompt/completion tokens reported by the server
+// across this client's lifetime (zero if the server omits usage).
+func (c *OpenAIClient) Usage() (prompt, completion int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.promptTk, c.complTk
 }
 
 func toWire(m Message) wireMessage {

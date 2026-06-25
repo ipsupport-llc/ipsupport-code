@@ -46,9 +46,23 @@ make test      # all tests
 3. Run a one-shot task, or a REPL:
    ```sh
    ./ipsupport-code-darwin-arm64 "use calc to compute (1234*9)+sqrt(2)"
-   ./ipsupport-code-darwin-arm64            # REPL; 'exit' to quit
+   ./ipsupport-code-darwin-arm64            # REPL
    ./ipsupport-code-darwin-arm64 -C ~/proj "summarize what main.go does"
    ```
+
+### REPL commands
+
+In the REPL, anything not starting with `/` is run as a task. Slash commands:
+
+| command | what |
+|---|---|
+| `/status` | config, knowledge base, and trace paths |
+| `/usage` | session counters + token usage |
+| `/login` | (re)configure server URL / model / key, then reload |
+| `/goal <task>` | run a task explicitly |
+| `/loop [n] <task>` | run a task `n` times (default 3) so lessons compound |
+| `/help` | command list |
+| `/exit`, `/quit` | leave |
 
 ## Configuration
 

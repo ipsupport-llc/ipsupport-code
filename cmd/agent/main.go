@@ -1,6 +1,6 @@
 // Command ipsupport-code is a self-learning local agent for LM Studio. With a
-// goal argument it runs one task; with none it opens a REPL. After each task it
-// reflects and persists what it learned.
+// goal argument it runs one task; with none it opens a REPL with slash commands.
+// After each task it reflects and persists what it learned.
 package main
 
 import (
@@ -58,64 +58,18 @@ func main() {
 	app.repl(ctx)
 }
 
-// maybeInit runs the interactive first-time setup, writing the LM Studio
-// connection to the user config. It triggers when forced (-init) or on a real
-// first run (no user config yet and an interactive terminal). Piped/non-TTY
-// first runs silently use defaults so scripts don't block.
-func maybeInit(reader *bufio.Reader, force bool) {
-	if !force && (config.GlobalExists() || !isTTY()) {
-		return
-	}
-	def := config.Default().LLM
-	fmt.Println("First-time setup — configure your model connection (press Enter for defaults).")
-	llm := config.LLM{
-		BaseURL:     ask(reader, "LM Studio server URL", def.BaseURL),
-		Model:       ask(reader, "Model name", def.Model),
-		Temperature: def.Temperature,
-		MaxSteps:    atoiOr(ask(reader, "Max steps per task", strconv.Itoa(def.MaxSteps)), def.MaxSteps),
-		APIKey:      ask(reader, "API key (blank for LM Studio)", ""),
-	}
-	if err := config.SaveGlobalLLM(llm); err != nil {
-		slog.Warn("could not save config", "err", err)
-		return
-	}
-	fmt.Printf("Saved to %s\n\n", config.GlobalPath())
-}
-
-func ask(r *bufio.Reader, label, def string) string {
-	if def != "" {
-		fmt.Printf("  %s [%s]: ", label, def)
-	} else {
-		fmt.Printf("  %s: ", label)
-	}
-	line, err := r.ReadString('\n')
-	if err != nil {
-		return def
-	}
-	if v := strings.TrimSpace(line); v != "" {
-		return v
-	}
-	return def
-}
-
-func isTTY() bool {
-	return term.IsTerminal(int(os.Stdin.Fd()))
-}
-
-func atoiOr(s string, def int) int {
-	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
-		return n
-	}
-	return def
-}
-
-// app bundles everything one process needs across tasks.
+// app bundles everything one process needs across tasks, plus session counters.
 type app struct {
-	ag     *agent.Agent
-	refl   *reflect.Reflector
-	kb     *knowledge.KB
-	tracer trace.Tracer
-	reader *bufio.Reader
+	cfg       config.Config
+	workspace string
+	kb        *knowledge.KB
+	tracer    trace.Tracer
+	reader    *bufio.Reader
+	client    *llm.OpenAIClient
+	ag        *agent.Agent
+	refl      *reflect.Reflector
+
+	tasks, steps, toolCalls int
 }
 
 func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
@@ -126,23 +80,8 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 	kb, err := knowledge.Open(cfg.KBPath)
 	if err != nil {
 		slog.Warn("knowledge base unreadable; starting empty", "err", err)
-		kb, _ = knowledge.Open("") // empty in-memory store
+		kb, _ = knowledge.Open("")
 	}
-	pol, err := policy.New(cfg)
-	if err != nil {
-		return nil, nil, fmt.Errorf("policy: %w", err)
-	}
-
-	approver := &stdinApprover{r: reader}
-
-	reg := tool.NewRegistry(
-		tool.NewFile(pol, approver),
-		tool.NewRun(pol, approver),
-		tool.NewWeb(http.DefaultClient),
-		tool.NewHelp(kb),
-		tool.NewCalc(),
-	)
-	client := llm.NewOpenAIClient(cfg.LLM)
 
 	var tracer trace.Tracer
 	cleanup := func() {}
@@ -153,16 +92,45 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 		cleanup = func() { _ = ft.Close() }
 	}
 
-	return &app{
-		ag:     agent.New(client, reg, kb, tracer, "", cfg.LLM.MaxSteps),
-		refl:   reflect.New(client),
-		kb:     kb,
-		tracer: tracer,
-		reader: reader,
-	}, cleanup, nil
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, tracer: tracer, reader: reader}
+	if err := a.wire(); err != nil {
+		return nil, nil, err
+	}
+	return a, cleanup, nil
 }
 
-// runOne executes a single goal, then reflects and persists new lessons.
+// wire (re)builds the policy-gated tools, LLM client, agent, and reflector from
+// the current config. Called at startup and after /login.
+func (a *app) wire() error {
+	pol, err := policy.New(a.cfg)
+	if err != nil {
+		return fmt.Errorf("policy: %w", err)
+	}
+	approver := &stdinApprover{r: a.reader}
+	reg := tool.NewRegistry(
+		tool.NewFile(pol, approver),
+		tool.NewRun(pol, approver),
+		tool.NewWeb(http.DefaultClient),
+		tool.NewHelp(a.kb),
+		tool.NewCalc(),
+	)
+	a.client = llm.NewOpenAIClient(a.cfg.LLM)
+	a.ag = agent.New(a.client, reg, a.kb, a.tracer, "", a.cfg.LLM.MaxSteps)
+	a.refl = reflect.New(a.client)
+	return nil
+}
+
+func (a *app) reconfigure() error {
+	cfg, err := config.Load(a.workspace)
+	if err != nil {
+		return err
+	}
+	a.cfg = cfg
+	return a.wire()
+}
+
+// runOne executes a single goal, updates session counters, then reflects and
+// persists new lessons.
 func (a *app) runOne(ctx context.Context, goal string) {
 	tr, err := a.ag.Run(ctx, goal)
 	if err != nil {
@@ -170,6 +138,14 @@ func (a *app) runOne(ctx context.Context, goal string) {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return
 	}
+	a.tasks++
+	a.steps += tr.Steps
+	for _, m := range tr.Messages {
+		if m.Role == "tool" {
+			a.toolCalls++
+		}
+	}
+
 	if strings.TrimSpace(tr.Final) != "" {
 		fmt.Println(tr.Final)
 	} else {
@@ -199,7 +175,7 @@ func (a *app) runOne(ctx context.Context, goal string) {
 }
 
 func (a *app) repl(ctx context.Context) {
-	fmt.Println("ipsupport-code — type a task, or 'exit' to quit.")
+	fmt.Println("ipsupport-code — type a task, or /help for commands.")
 	for {
 		fmt.Print("\n> ")
 		line, err := a.reader.ReadString('\n')
@@ -207,15 +183,175 @@ func (a *app) repl(ctx context.Context) {
 			fmt.Println()
 			return
 		}
-		goal := strings.TrimSpace(line)
-		switch goal {
-		case "":
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "":
 			continue
-		case "exit", "quit":
-			return
+		case strings.HasPrefix(line, "/"):
+			if a.command(ctx, line) {
+				return
+			}
+		default:
+			a.runOne(ctx, line)
 		}
-		a.runOne(ctx, goal)
 	}
+}
+
+// command handles a /slash line. Returns true when the REPL should exit.
+func (a *app) command(ctx context.Context, line string) (quit bool) {
+	cmd := strings.Fields(line)[0]
+	rest := strings.TrimSpace(strings.TrimPrefix(line, cmd))
+	switch cmd {
+	case "/help", "/?":
+		printHelp()
+	case "/status":
+		a.printStatus()
+	case "/usage":
+		a.printUsage()
+	case "/login", "/init":
+		maybeInit(a.reader, true)
+		if err := a.reconfigure(); err != nil {
+			fmt.Println("reconfigure failed:", err)
+		} else {
+			fmt.Println("config reloaded.")
+		}
+	case "/goal":
+		if rest == "" {
+			fmt.Println("usage: /goal <task>")
+		} else {
+			a.runOne(ctx, rest)
+		}
+	case "/loop":
+		a.loop(ctx, rest)
+	case "/exit", "/quit":
+		return true
+	default:
+		fmt.Printf("unknown command %q — try /help\n", cmd)
+	}
+	return false
+}
+
+// loop runs a goal several times so lessons compound. Form: /loop [count] <task>
+// (count defaults to 3).
+func (a *app) loop(ctx context.Context, rest string) {
+	n := 3
+	parts := strings.Fields(rest)
+	if len(parts) == 0 {
+		fmt.Println("usage: /loop [count] <task>")
+		return
+	}
+	if v, err := strconv.Atoi(parts[0]); err == nil {
+		n = v
+		rest = strings.TrimSpace(strings.TrimPrefix(rest, parts[0]))
+	}
+	if strings.TrimSpace(rest) == "" {
+		fmt.Println("usage: /loop [count] <task>")
+		return
+	}
+	if n < 1 {
+		n = 1
+	}
+	for i := 0; i < n; i++ {
+		select {
+		case <-ctx.Done():
+			fmt.Println("\nloop cancelled")
+			return
+		default:
+		}
+		fmt.Printf("— loop %d/%d —\n", i+1, n)
+		a.runOne(ctx, rest)
+	}
+}
+
+func printHelp() {
+	fmt.Print(`commands:
+  /status         show config, knowledge base, and trace paths
+  /usage          session counters + token usage
+  /login          (re)configure the server URL / model / key, then reload
+  /goal <task>    run a task explicitly
+  /loop [n] <task> run a task n times (default 3) so lessons compound
+  /help           this list
+  /exit, /quit    leave
+Anything not starting with '/' is run as a task.
+`)
+}
+
+func (a *app) printStatus() {
+	fmt.Printf(`status:
+  server      %s
+  model       %s
+  max_steps   %d
+  workspace   %s
+  jail        %q
+  defaults    run=%s  file=%s
+  knowledge   %s (%d lessons)
+  trace       %s
+`,
+		a.cfg.LLM.BaseURL, a.cfg.LLM.Model, a.cfg.LLM.MaxSteps,
+		a.cfg.Workspace, a.cfg.File.Jail, a.cfg.Run.Default, a.cfg.File.Default,
+		a.cfg.KBPath, len(a.kb.All()), a.cfg.TracePath)
+}
+
+func (a *app) printUsage() {
+	p, c := a.client.Usage()
+	fmt.Printf(`usage (this session):
+  tasks       %d
+  steps       %d
+  tool calls  %d
+  tokens      %d prompt + %d completion = %d
+  lessons     %d in knowledge base
+`, a.tasks, a.steps, a.toolCalls, p, c, p+c, len(a.kb.All()))
+}
+
+// maybeInit runs the interactive first-time setup, writing the LM Studio
+// connection to the user config. It triggers when forced (-init / /login) or on
+// a real first run (no user config yet and an interactive terminal).
+func maybeInit(reader *bufio.Reader, force bool) {
+	if !force && (config.GlobalExists() || !isTTY()) {
+		return
+	}
+	def := config.Default().LLM
+	if cur, err := config.Load("."); err == nil {
+		def = cur.LLM // pre-fill prompts with current values on /login
+	}
+	fmt.Println("Setup — configure your model connection (press Enter to keep current).")
+	l := config.LLM{
+		BaseURL:     ask(reader, "LM Studio server URL", def.BaseURL),
+		Model:       ask(reader, "Model name", def.Model),
+		Temperature: def.Temperature,
+		MaxSteps:    atoiOr(ask(reader, "Max steps per task", strconv.Itoa(def.MaxSteps)), def.MaxSteps),
+		APIKey:      ask(reader, "API key (blank for LM Studio)", def.APIKey),
+	}
+	if err := config.SaveGlobalLLM(l); err != nil {
+		slog.Warn("could not save config", "err", err)
+		return
+	}
+	fmt.Printf("Saved to %s\n\n", config.GlobalPath())
+}
+
+func ask(r *bufio.Reader, label, def string) string {
+	if def != "" {
+		fmt.Printf("  %s [%s]: ", label, def)
+	} else {
+		fmt.Printf("  %s: ", label)
+	}
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return def
+	}
+	if v := strings.TrimSpace(line); v != "" {
+		return v
+	}
+	return def
+}
+
+func isTTY() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
+
+func atoiOr(s string, def int) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+		return n
+	}
+	return def
 }
 
 // stdinApprover prompts the operator for a policy "ask" decision.

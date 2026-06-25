@@ -13,8 +13,8 @@ import (
 	"strings"
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
-	readability "github.com/go-shiori/go-readability"
 	"github.com/PuerkitoBio/goquery"
+	readability "github.com/go-shiori/go-readability"
 )
 
 // Endpoints are package vars so tests can point them at an httptest server.

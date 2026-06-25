@@ -13,8 +13,8 @@ type fakeTool struct {
 }
 
 func (f *fakeTool) Name() string        { return f.name }
-func (f *fakeTool) Description() string  { return f.name + " tool" }
-func (f *fakeTool) Actions() []string    { return f.actions }
+func (f *fakeTool) Description() string { return f.name + " tool" }
+func (f *fakeTool) Actions() []string   { return f.actions }
 func (f *fakeTool) Call(_ context.Context, action string, _ map[string]any) Result {
 	f.last = action
 	return Ok("did " + action)

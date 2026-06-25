@@ -22,7 +22,7 @@ type fileTool struct {
 // decisions) the approver.
 func NewFile(p *policy.Engine, a Approver) Tool { return &fileTool{pol: p, ap: a} }
 
-func (*fileTool) Name() string     { return "file" }
+func (*fileTool) Name() string      { return "file" }
 func (*fileTool) Actions() []string { return []string{"read", "write", "append", "list", "mkdir"} }
 
 func (*fileTool) Description() string {

@@ -17,7 +17,7 @@ type calcTool struct{}
 // don't have to do unreliable mental math.
 func NewCalc() Tool { return calcTool{} }
 
-func (calcTool) Name() string     { return "calc" }
+func (calcTool) Name() string      { return "calc" }
 func (calcTool) Actions() []string { return []string{"calculate"} }
 
 func (calcTool) Description() string {

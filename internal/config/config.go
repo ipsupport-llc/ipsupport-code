@@ -44,6 +44,7 @@ type FilePolicy struct {
 
 // Config is the merged runtime configuration.
 type Config struct {
+	Name      string     `json:"name,omitempty"` // display name (renameable)
 	LLM       LLM        `json:"llm"`
 	Run       RunPolicy  `json:"run"`
 	File      FilePolicy `json:"file"`
@@ -62,6 +63,7 @@ var (
 // default policies, a jail at the workspace root, and the protective deny floor.
 func Default() Config {
 	return Config{
+		Name: "ipsupport-code",
 		LLM: LLM{
 			BaseURL:     "http://localhost:1234/v1",
 			Model:       "qwen2.5-7b-instruct",
@@ -106,13 +108,16 @@ func DefaultKBPath() string { return filepath.Join(configHome(), "knowledge.json
 // DefaultTracePath is the global decision-trace (training dataset) location.
 func DefaultTracePath() string { return filepath.Join(configHome(), "traces.jsonl") }
 
-// SaveGlobalLLM writes the LLM connection settings to the user config file,
-// creating its directory.
-func SaveGlobalLLM(l LLM) error {
+// SaveGlobal writes the machine-level settings (display name + LLM connection)
+// to the user config file, creating its directory.
+func SaveGlobal(name string, l LLM) error {
+	if name == "" {
+		name = "ipsupport-code"
+	}
 	if err := os.MkdirAll(configHome(), 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(map[string]any{"llm": l}, "", "  ")
+	data, err := json.MarshalIndent(map[string]any{"name": name, "llm": l}, "", "  ")
 	if err != nil {
 		return err
 	}

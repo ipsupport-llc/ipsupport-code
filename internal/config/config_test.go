@@ -80,7 +80,7 @@ func TestLoadUnionsDenyFloor(t *testing.T) {
 
 func TestGlobalConfigMerged(t *testing.T) {
 	isolate(t)
-	if err := SaveGlobalLLM(LLM{BaseURL: "http://host:9999/v1", Model: "custom", MaxSteps: 7}); err != nil {
+	if err := SaveGlobal("renamed-bot", LLM{BaseURL: "http://host:9999/v1", Model: "custom", MaxSteps: 7}); err != nil {
 		t.Fatal(err)
 	}
 	if !GlobalExists() {
@@ -92,6 +92,9 @@ func TestGlobalConfigMerged(t *testing.T) {
 	}
 	if cfg.LLM.BaseURL != "http://host:9999/v1" || cfg.LLM.Model != "custom" || cfg.LLM.MaxSteps != 7 {
 		t.Errorf("global config not applied: %+v", cfg.LLM)
+	}
+	if cfg.Name != "renamed-bot" {
+		t.Errorf("name = %q, want renamed-bot", cfg.Name)
 	}
 }
 

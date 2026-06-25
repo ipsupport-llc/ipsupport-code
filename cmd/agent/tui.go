@@ -92,8 +92,12 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	sp.Spinner = spinner.Points
 	sp.Style = cToolCall
 
+	name := a.cfg.Name
+	if name == "" {
+		name = "ipsupport-code"
+	}
 	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: lipgloss.Color("13")}
-	m.history = []string{cDim.Render("ipsupport-code — type a task, or /help. ctrl-l clear · ↑↓ scroll · ctrl-c quit")}
+	m.history = []string{cDim.Render(name + " — type a task, or /help. ctrl-l clear · ↑↓ scroll · ctrl-c quit")}
 	return m, nil
 }
 
@@ -224,11 +228,16 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.push(cDim.Render("  …cancelling"))
 			return m, nil
 		case "enter":
-			if line := strings.TrimSpace(m.input.Value()); line != "" {
-				m.input.SetValue("")
-				m.queued = append(m.queued, line)
-				m.push(cDim.Render("queued ❯ ") + line)
+			line := strings.TrimSpace(m.input.Value())
+			if line == "" {
+				return m, nil
 			}
+			m.input.SetValue("")
+			if strings.HasPrefix(line, "/") {
+				return m.commandWhileBusy(line)
+			}
+			m.queued = append(m.queued, line) // type-ahead: run after the task
+			m.push(cDim.Render("queued ❯ ") + line)
 			return m, nil
 		case "up", "down", "pgup", "pgdown", "home", "end":
 			var cmd tea.Cmd
@@ -314,8 +323,8 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/compact":
 		m.state = stRunning
 		m.taskStart = time.Now()
-		p, c := m.app.client.Usage()
-		m.startTok = p + c
+		_, c := m.app.client.Usage()
+		m.startTok = c
 		ctx := m.ctx
 		return m, func() tea.Msg {
 			n, err := m.app.ag.Compact(ctx)
@@ -323,6 +332,8 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		}
 	case "/color":
 		m.setColor(rest)
+	case "/rename":
+		m.rename(rest)
 	case "/goal":
 		if rest == "" {
 			m.push(cDim.Render("usage: /goal <task>"))
@@ -346,13 +357,51 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// commandWhileBusy handles a /command typed while a task is running: exit quits
+// now, read-only commands run now, /goal queues the next task, everything else
+// waits — so you never have to sit through "thinking" just to leave or peek.
+func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
+	cmd, rest := splitCommand(line)
+	switch cmd {
+	case "/exit", "/quit":
+		return m, tea.Quit
+	case "/status", "/usage", "/help", "/?", "/color":
+		return m.runCommand(line) // read-only — doesn't touch the running task
+	case "/goal":
+		if rest == "" {
+			m.push(cDim.Render("usage: /goal <task>"))
+			return m, nil
+		}
+		m.queued = append(m.queued, rest)
+		m.push(cDim.Render("queued ❯ ") + rest)
+		return m, nil
+	default:
+		m.push(cDim.Render("busy — " + cmd + " will run once the current task finishes"))
+		return m, nil
+	}
+}
+
+// rename changes the display name and persists it to the user config.
+func (m *tuiModel) rename(name string) {
+	if name = strings.TrimSpace(name); name == "" {
+		m.push(cDim.Render("usage: /rename <new name>"))
+		return
+	}
+	m.app.cfg.Name = name
+	if err := config.SaveGlobal(name, m.app.cfg.LLM); err != nil {
+		m.push(cErr.Render("could not save name: " + err.Error()))
+		return
+	}
+	m.push(m.accentBold().Render("renamed → " + name))
+}
+
 // runGoals sets running state and returns a cmd that runs the goal n times in the
 // background, streaming via the bridge and ending with taskDoneMsg.
 func (m *tuiModel) runGoals(n int, goal string) tea.Cmd {
 	m.state = stRunning
 	m.taskStart = time.Now()
-	p, c := m.app.client.Usage()
-	m.startTok = p + c
+	_, c := m.app.client.Usage()
+	m.startTok = c // count completion (generated) tokens for this task
 	tctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel
 	return func() tea.Msg {
@@ -388,17 +437,24 @@ func (m *tuiModel) View() string {
 			status = cErr.Render(fmt.Sprintf("⟳ retrying (attempt %d) — backing off, %s left", m.retry.attempt, remain))
 		} else {
 			elapsed := time.Since(m.taskStart).Truncate(time.Second)
-			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" Thinking… (%s · ↓%s tok)", elapsed, humanK(total-m.startTok)))
+			gen := c - m.startTok // completion tokens generated this task
+			if gen < 0 {
+				gen = 0
+			}
+			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" Thinking… (%s · ↑%s tok)", elapsed, humanK(gen)))
 		}
 	case stApprove:
-		status = cToolCall.Render("⚠ approve? press y / n")
+		status = cToolCall.Render("⚠ approve?  y / n  ·  esc denies  ·  ctrl-c quits")
 	default:
 		status = cDim.Render(fmt.Sprintf("%s · %s · %d tok · ready", m.app.cfg.LLM.Model, filepath.Base(m.app.workspace), total))
 	}
 
 	hint := cDim.Render("/help · ctrl-l clear · ↑↓ scroll · ctrl-c quit")
-	if m.state == stRunning {
-		hint = cDim.Render("typing is live — Enter queues · esc cancels · ↑↓ scroll")
+	switch m.state {
+	case stRunning:
+		hint = cDim.Render("typing is live — Enter queues (or /exit, /status run now) · esc cancels")
+	case stApprove:
+		hint = cDim.Render("press y or n · esc denies · ctrl-c quits")
 	}
 
 	frame := lipgloss.NewStyle().Foreground(m.accent)
@@ -412,10 +468,13 @@ func (m *tuiModel) View() string {
 	}, "\n")
 }
 
-// topRule draws "────…──── ipsupport-code ──" with the label pinned right, in
-// the current accent color.
+// topRule draws "────…──── <name> ──" with the label pinned right, in the
+// current accent color.
 func (m *tuiModel) topRule(frame lipgloss.Style) string {
-	const label = "ipsupport-code"
+	label := m.app.cfg.Name
+	if label == "" {
+		label = "ipsupport-code"
+	}
 	right := " " + label + " ──"
 	n := m.width - lipgloss.Width(right)
 	if n < 0 {
@@ -474,6 +533,7 @@ var commandList = []cmdInfo{
 	{"/clear", "fresh start — clear the screen and the session"},
 	{"/compact", "summarize the session so far to free up context"},
 	{"/color", "change the frame color (cycles if no name)"},
+	{"/rename", "rename the agent (saved in settings)"},
 	{"/goal", "run a task explicitly"},
 	{"/loop", "run a task n times so lessons compound"},
 	{"/exit", "leave"},

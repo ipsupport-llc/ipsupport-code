@@ -152,8 +152,17 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) llm.Message {
 	res := a.reg.Dispatch(ctx, c.Name, action, params)
 	content := res.Content
 	if res.IsError {
+		var extra []string
+		if usageError(res.Content) { // lead the model back to the real schema
+			if u := strings.TrimSpace(a.reg.Usage(c.Name)); u != "" {
+				extra = append(extra, "Correct usage of "+c.Name+":\n"+u)
+			}
+		}
 		if hints := a.hints(c.Name, res.Content); hints != "" {
-			content = res.Content + "\n" + hints
+			extra = append(extra, hints)
+		}
+		if len(extra) > 0 {
+			content = res.Content + "\n" + strings.Join(extra, "\n")
 		}
 	}
 	a.emit("observation", map[string]any{
@@ -180,6 +189,17 @@ func (a *Agent) hints(domain, errText string) string {
 		fmt.Fprintf(&b, "\n- when you saw %q while %s, this worked: %s", p.ErrorPattern, p.Context, p.ProvenFix)
 	}
 	return b.String()
+}
+
+// usageError reports whether an error message indicates the model misused a
+// tool (wrong/missing params or action) — the cases where showing the real
+// schema helps it self-correct.
+func usageError(s string) bool {
+	l := strings.ToLower(s)
+	return strings.Contains(l, "missing required") ||
+		strings.Contains(l, "unknown action") ||
+		strings.Contains(l, "belongs to tool") ||
+		strings.Contains(l, "param")
 }
 
 func (a *Agent) emit(kind string, fields map[string]any) {

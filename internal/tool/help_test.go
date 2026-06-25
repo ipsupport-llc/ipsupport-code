@@ -14,7 +14,7 @@ func TestHelpLessons(t *testing.T) {
 	kb.Add(knowledge.Pitfall{Domain: "run", ErrorPattern: "permission denied", Context: "shell write to /root", ProvenFix: "use sudo"})
 	kb.Add(knowledge.Pitfall{Domain: "run", ErrorPattern: "command not found", Context: "missing binary", ProvenFix: "install it first"})
 
-	r := NewHelp(kb).Call(context.Background(), "lessons", map[string]any{"domain": "run"})
+	r := NewHelp(kb, nil).Call(context.Background(), "lessons", map[string]any{"domain": "run"})
 	if r.IsError {
 		t.Fatalf("error: %s", r.Content)
 	}
@@ -25,8 +25,8 @@ func TestHelpLessons(t *testing.T) {
 
 func TestHelpUnknownDomain(t *testing.T) {
 	kb, _ := knowledge.Open(filepath.Join(t.TempDir(), "k.json"))
-	r := NewHelp(kb).Call(context.Background(), "lessons", map[string]any{"domain": "file"})
-	if r.IsError || !strings.Contains(r.Content, "no lessons") {
+	r := NewHelp(kb, nil).Call(context.Background(), "lessons", map[string]any{"domain": "file"})
+	if r.IsError || !strings.Contains(r.Content, "No lessons") {
 		t.Errorf("unknown domain = %+v, want 'no lessons' message", r)
 	}
 }

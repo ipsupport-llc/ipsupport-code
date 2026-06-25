@@ -415,19 +415,25 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 	case "tool_call":
 		t, _ := e.fields["tool"].(string)
 		a, _ := e.fields["action"].(string)
-		return []string{cToolCall.Render("  ⚙ "+t+" "+a) + cDim.Render(" "+compactJSON(e.fields["params"]))}
+		detail := compactJSON(e.fields["params"])
+		if t == "file" { // the content shows below as a diff; just name the path here
+			if p := paramStr(e.fields["params"], "path"); p != "" {
+				detail = p
+			}
+		}
+		return []string{cToolCall.Render("  ⚙ "+t+" "+a) + cDim.Render(" "+detail)}
 	case "observation":
 		isErr, _ := e.fields["is_error"].(bool)
 		c, _ := e.fields["content"].(string)
-		if isErr {
-			return []string{cErr.Render("  ✖ " + firstLine(c))}
-		}
-		if tool, _ := e.fields["tool"].(string); tool == "file" {
+		if tool, _ := e.fields["tool"].(string); tool == "file" && !isErr {
 			if action, _ := e.fields["action"].(string); action == "read" {
 				return renderCode(c) // syntax-highlight file reads
 			}
 		}
-		return []string{cDim.Render("  → ") + cOk.Render(firstLine(c))}
+		if isErr {
+			return outputLines(c, "✖", cErr)
+		}
+		return outputLines(c, "→", cOk)
 	case "diff":
 		path, _ := e.fields["path"].(string)
 		d, _ := e.fields["diff"].(string)
@@ -481,9 +487,28 @@ func (m *tuiModel) renderDiff(path, diff string) []string {
 			newNo++
 		}
 	}
-	h1 := lipgloss.NewStyle().Foreground(m.accent).Render("● ") + lipgloss.NewStyle().Bold(true).Render("Update("+path+")")
+	const maxBody = 60
+	if len(body) > maxBody {
+		more := len(body) - maxBody
+		body = append(body[:maxBody:maxBody], cDim.Render(fmt.Sprintf("    … %d more %s", more, plural(more, "line"))))
+	}
+	verb := "Update"
+	if strings.Contains(diff, "@@ -0,0 ") { // new file → all additions
+		verb = "Create"
+	}
+	h1 := lipgloss.NewStyle().Foreground(m.accent).Render("● ") + lipgloss.NewStyle().Bold(true).Render(verb+"("+path+")")
 	h2 := cDim.Render(fmt.Sprintf("  ⎿  Added %d %s, removed %d %s", add, plural(add, "line"), del, plural(del, "line")))
 	return append([]string{h1, h2}, body...)
+}
+
+// paramStr extracts a string field from a tool-call's params map.
+func paramStr(v any, key string) string {
+	if m, ok := v.(map[string]any); ok {
+		if s, ok := m[key].(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // ANSI control sequences for building diff rows by hand (so a full-row
@@ -578,15 +603,27 @@ func compactJSON(v any) string {
 	return s
 }
 
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		s = s[:i]
+// outputLines renders a (possibly multi-line) tool result, capped, with a marker
+// on the first line — so command output and multi-line errors are actually
+// visible instead of truncated to one line.
+func outputLines(content, marker string, style lipgloss.Style) []string {
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	capped := false
+	if len(lines) > 25 {
+		lines, capped = lines[:25], true
 	}
-	if len(s) > 200 {
-		s = s[:200] + "…"
+	out := make([]string, 0, len(lines)+1)
+	for i, ln := range lines {
+		if i == 0 {
+			out = append(out, cDim.Render("  "+marker+" ")+style.Render(ln))
+		} else {
+			out = append(out, cDim.Render("    ")+style.Render(ln))
+		}
 	}
-	return s
+	if capped {
+		out = append(out, cDim.Render("    …"))
+	}
+	return out
 }
 
 func humanK(n int) string {

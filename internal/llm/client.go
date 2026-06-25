@@ -57,6 +57,11 @@ type OpenAIClient struct {
 	temp    float64
 	hc      *http.Client
 
+	// OnRetry, if set, is called before each backoff so the UI can show that
+	// we're retrying/backing off (e.g. while LM Studio reloads an unloaded
+	// model) rather than just "thinking".
+	OnRetry func(attempt int, wait time.Duration, reason string)
+
 	mu       sync.Mutex
 	promptTk int
 	complTk  int
@@ -113,25 +118,40 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 		return Message{}, err
 	}
 
-	// Local servers (LM Studio) hiccup with transient 5xx; retry those and
-	// network errors a couple of times instead of failing the whole task.
+	// Local servers (LM Studio) hiccup with transient 5xx and need time to
+	// reload a model unloaded by the idle timeout. Retry those (and network
+	// errors) with exponential backoff instead of failing the whole task.
+	const maxAttempts = 5
 	var lastErr error
-	for attempt := 1; attempt <= 3; attempt++ {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		msg, err, retriable := c.send(ctx, buf)
 		if err == nil {
 			return msg, nil
 		}
 		lastErr = err
-		if !retriable || ctx.Err() != nil {
+		if !retriable || ctx.Err() != nil || attempt == maxAttempts {
 			break
+		}
+		wait := backoff(attempt)
+		if c.OnRetry != nil {
+			c.OnRetry(attempt, wait, err.Error())
 		}
 		select {
 		case <-ctx.Done():
 			return Message{}, ctx.Err()
-		case <-time.After(time.Duration(attempt) * 400 * time.Millisecond):
+		case <-time.After(wait):
 		}
 	}
 	return Message{}, lastErr
+}
+
+// backoff grows exponentially (500ms, 1s, 2s, 4s…) capped at 8s.
+func backoff(attempt int) time.Duration {
+	d := 500 * time.Millisecond << (attempt - 1)
+	if d > 8*time.Second {
+		d = 8 * time.Second
+	}
+	return d
 }
 
 // send makes one attempt; the bool reports whether the failure is worth a retry.

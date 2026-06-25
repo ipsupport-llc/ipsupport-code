@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 )
@@ -129,12 +130,27 @@ func TestChatRetriesOnServerError(t *testing.T) {
 	defer srv.Close()
 
 	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+	var notified int
+	cl.OnRetry = func(_ int, _ time.Duration, _ string) { notified++ }
+
 	msg, err := cl.Chat(context.Background(), []Message{User("hi")}, nil)
 	if err != nil {
 		t.Fatalf("Chat should have retried past the 500: %v", err)
 	}
 	if msg.Content != "recovered" || n < 2 {
 		t.Errorf("content=%q attempts=%d, want recovered after a retry", msg.Content, n)
+	}
+	if notified == 0 {
+		t.Error("OnRetry was not called — the UI wouldn't show the backoff")
+	}
+}
+
+func TestBackoffGrows(t *testing.T) {
+	if backoff(1) != 500*time.Millisecond || backoff(2) != time.Second || backoff(3) != 2*time.Second {
+		t.Errorf("backoff = %s,%s,%s want 500ms,1s,2s", backoff(1), backoff(2), backoff(3))
+	}
+	if backoff(10) != 8*time.Second {
+		t.Errorf("backoff cap = %s, want 8s", backoff(10))
 	}
 }
 

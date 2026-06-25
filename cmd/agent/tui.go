@@ -51,10 +51,17 @@ type tuiModel struct {
 	cancel        context.CancelFunc
 	taskStart     time.Time
 	startTok      int
+	retry         *retryInfo
 	accent        lipgloss.Color
 	accentIdx     int
 	width, height int
 	ready         bool
+}
+
+// retryInfo tracks an in-progress LLM backoff so the UI can show it.
+type retryInfo struct {
+	attempt int
+	until   time.Time
 }
 
 // Bubble Tea messages.
@@ -134,7 +141,15 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case eventMsg:
-		m.push(m.renderEvent(uiEvent(msg))...)
+		e := uiEvent(msg)
+		if e.kind == "retry" {
+			wait := time.Duration(toInt(e.fields["wait_ms"])) * time.Millisecond
+			m.retry = &retryInfo{attempt: toInt(e.fields["attempt"]), until: time.Now().Add(wait)}
+			m.push(cErr.Render(fmt.Sprintf("  ⟳ server hiccup — retry %d, backing off %s", m.retry.attempt, wait)))
+		} else {
+			m.retry = nil // progress resumed
+			m.push(m.renderEvent(e)...)
+		}
 		return m, m.waitEvent()
 
 	case approvalMsg:
@@ -147,6 +162,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case taskDoneMsg:
 		m.state = stIdle
 		m.cancel = nil
+		m.retry = nil
 		if len(m.queued) > 0 { // run the next type-ahead
 			next := m.queued[0]
 			m.queued = m.queued[1:]
@@ -364,8 +380,16 @@ func (m *tuiModel) View() string {
 	var status string
 	switch m.state {
 	case stRunning:
-		elapsed := time.Since(m.taskStart).Truncate(time.Second)
-		status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" Thinking… (%s · ↓%s tok)", elapsed, humanK(total-m.startTok)))
+		if m.retry != nil {
+			remain := time.Until(m.retry.until).Truncate(100 * time.Millisecond)
+			if remain < 0 {
+				remain = 0
+			}
+			status = cErr.Render(fmt.Sprintf("⟳ retrying (attempt %d) — backing off, %s left", m.retry.attempt, remain))
+		} else {
+			elapsed := time.Since(m.taskStart).Truncate(time.Second)
+			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" Thinking… (%s · ↓%s tok)", elapsed, humanK(total-m.startTok)))
+		}
 	case stApprove:
 		status = cToolCall.Render("⚠ approve? press y / n")
 	default:

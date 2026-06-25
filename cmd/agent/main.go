@@ -287,6 +287,8 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	case "/new", "/reset":
 		a.ag.Reset()
 		fmt.Println("session cleared.")
+	case "/color":
+		fmt.Println("/color changes the TUI frame color — interactive mode only.")
 	case "/goal":
 		if rest == "" {
 			fmt.Println("usage: /goal <task>")
@@ -341,6 +343,7 @@ func helpText() string {
   /usage           session counters + token usage
   /login           (re)configure the server URL / model / key, then reload
   /new             clear the session conversation memory
+  /color [name]    change the TUI frame color (cycles if no name)
   /goal <task>     run a task explicitly
   /loop [n] <task> run a task n times (default 3) so lessons compound
   /help            this list

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
+	"github.com/alecthomas/chroma/v2/quick"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -49,6 +51,8 @@ type tuiModel struct {
 	cancel        context.CancelFunc
 	taskStart     time.Time
 	startTok      int
+	accent        lipgloss.Color
+	accentIdx     int
 	width, height int
 	ready         bool
 }
@@ -58,12 +62,14 @@ type eventMsg uiEvent
 type approvalMsg approvalReq
 type taskDoneMsg struct{}
 
-func (a *app) runTUI(ctx context.Context) error {
+// newTUIModel installs the UI bridge as the agent's tracer + approver, wires the
+// stack, and builds the model. Split out from runTUI so tests can drive it.
+func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	b := newBridge()
 	a.uiTracer = b
 	a.approver = b
 	if err := a.wire(); err != nil {
-		return err
+		return nil, err
 	}
 
 	in := textinput.New()
@@ -75,10 +81,17 @@ func (a *app) runTUI(ctx context.Context) error {
 	sp.Spinner = spinner.Points
 	sp.Style = cToolCall
 
-	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle}
+	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: lipgloss.Color("13")}
 	m.history = []string{cDim.Render("ipsupport-code — type a task, or /help. ctrl-l clear · ↑↓ scroll · ctrl-c quit")}
+	return m, nil
+}
 
-	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx)).Run()
+func (a *app) runTUI(ctx context.Context) error {
+	m, err := a.newTUIModel(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx)).Run()
 	return err
 }
 
@@ -117,7 +130,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case eventMsg:
-		m.push(eventLines(uiEvent(msg))...)
+		m.push(m.renderEvent(uiEvent(msg))...)
 		return m, m.waitEvent()
 
 	case approvalMsg:
@@ -253,6 +266,8 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/new", "/reset":
 		m.app.ag.Reset()
 		m.push(cDim.Render("session cleared"))
+	case "/color":
+		m.setColor(rest)
 	case "/goal":
 		if rest == "" {
 			m.push(cDim.Render("usage: /goal <task>"))
@@ -323,25 +338,42 @@ func (m *tuiModel) View() string {
 		hint = cDim.Render("typing is live — Enter queues · esc cancels · ↑↓ scroll")
 	}
 
+	frame := lipgloss.NewStyle().Foreground(m.accent)
 	return strings.Join([]string{
 		m.vp.View(),
 		status,
-		m.topRule(),
+		m.topRule(frame),
 		m.input.View(),
-		cDim.Render(strings.Repeat("─", m.width)),
+		frame.Render(strings.Repeat("─", m.width)),
 		hint,
 	}, "\n")
 }
 
-// topRule draws "────…──── ipsupport-code ──" with the label pinned right.
-func (m *tuiModel) topRule() string {
+// topRule draws "────…──── ipsupport-code ──" with the label pinned right, in
+// the current accent color.
+func (m *tuiModel) topRule(frame lipgloss.Style) string {
 	const label = "ipsupport-code"
 	right := " " + label + " ──"
 	n := m.width - lipgloss.Width(right)
 	if n < 0 {
 		n = 0
 	}
-	return cDim.Render(strings.Repeat("─", n)+" ") + cTitle.Render(label) + cDim.Render(" ──")
+	return frame.Render(strings.Repeat("─", n)+" ") + frame.Bold(true).Render(label) + frame.Render(" ──")
+}
+
+// setColor changes the frame accent: a name, a raw 0-255 code, or cycle on empty.
+func (m *tuiModel) setColor(arg string) {
+	arg = strings.ToLower(strings.TrimSpace(arg))
+	switch {
+	case arg == "":
+		m.accentIdx = (m.accentIdx + 1) % len(colorCycle)
+		m.accent = lipgloss.Color(colorCycle[m.accentIdx])
+	case colorNames[arg] != "":
+		m.accent = lipgloss.Color(colorNames[arg])
+	default:
+		m.accent = lipgloss.Color(arg) // raw ANSI 256 code
+	}
+	m.push(lipgloss.NewStyle().Foreground(m.accent).Render("frame color → " + string(m.accent)))
 }
 
 func (m *tuiModel) viewportHeight() int {
@@ -373,8 +405,8 @@ func (m *tuiModel) pushBlock(s string) {
 	}
 }
 
-// eventLines renders one streamed agent event into styled history lines.
-func eventLines(e uiEvent) []string {
+// renderEvent renders one streamed agent event into styled history lines.
+func (m *tuiModel) renderEvent(e uiEvent) []string {
 	switch e.kind {
 	case "assistant":
 		if c, _ := e.fields["content"].(string); strings.TrimSpace(c) != "" {
@@ -390,7 +422,16 @@ func eventLines(e uiEvent) []string {
 		if isErr {
 			return []string{cErr.Render("  ✖ " + firstLine(c))}
 		}
+		if tool, _ := e.fields["tool"].(string); tool == "file" {
+			if action, _ := e.fields["action"].(string); action == "read" {
+				return renderCode(c) // syntax-highlight file reads
+			}
+		}
 		return []string{cDim.Render("  → ") + cOk.Render(firstLine(c))}
+	case "diff":
+		path, _ := e.fields["path"].(string)
+		d, _ := e.fields["diff"].(string)
+		return m.renderDiff(path, d)
 	case "final":
 		if c, _ := e.fields["text"].(string); strings.TrimSpace(c) != "" {
 			return []string{"", cFinal.Render(c)}
@@ -406,6 +447,117 @@ func eventLines(e uiEvent) []string {
 		return []string{cErr.Render("error: " + c)}
 	}
 	return nil
+}
+
+// renderDiff renders a unified diff like a code host: `● Update(path)` + a
+// summary, then only the changed hunks (±3 context lines). Added rows get a
+// green background WITH chroma syntax colors; removed rows a red background with
+// plain white text; both fill the row width so the gutter is highlighted too.
+func (m *tuiModel) renderDiff(path, diff string) []string {
+	width := m.width
+	if width < 1 {
+		width = 80
+	}
+	add, del := 0, 0
+	oldNo, newNo := 0, 0
+	var body []string
+	for _, ln := range strings.Split(strings.TrimRight(diff, "\n"), "\n") {
+		switch {
+		case strings.HasPrefix(ln, "+++"), strings.HasPrefix(ln, "---"):
+			continue
+		case strings.HasPrefix(ln, "@@"):
+			oldNo, newNo = parseHunk(ln)
+		case strings.HasPrefix(ln, "+"):
+			add++
+			body = append(body, diffAddRow(newNo, ln[1:], width))
+			newNo++
+		case strings.HasPrefix(ln, "-"):
+			del++
+			body = append(body, diffDelRow(oldNo, ln[1:], width))
+			oldNo++
+		default:
+			body = append(body, diffCtx.Render(fmt.Sprintf(" %4d    %s", newNo, strings.TrimPrefix(ln, " "))))
+			oldNo++
+			newNo++
+		}
+	}
+	h1 := lipgloss.NewStyle().Foreground(m.accent).Render("● ") + lipgloss.NewStyle().Bold(true).Render("Update("+path+")")
+	h2 := cDim.Render(fmt.Sprintf("  ⎿  Added %d %s, removed %d %s", add, plural(add, "line"), del, plural(del, "line")))
+	return append([]string{h1, h2}, body...)
+}
+
+// ANSI control sequences for building diff rows by hand (so a full-row
+// background coexists with chroma's per-token foreground colors).
+const (
+	bgGreen = "\x1b[48;5;22m"
+	bgRed   = "\x1b[48;5;52m"
+	fgWhite = "\x1b[97m"
+	fgReset = "\x1b[39m" // reset foreground only — keeps our background
+	allOff  = "\x1b[0m"
+)
+
+// ansiBG matches background SGR sequences so chroma's own backgrounds can be
+// stripped, letting our green/red show through.
+var ansiBG = regexp.MustCompile("\x1b\\[(4[0-9]|48;5;[0-9]+|49)m")
+
+func diffAddRow(no int, code string, width int) string {
+	hl := ansiBG.ReplaceAllString(highlightCode(code), "")
+	hl = strings.ReplaceAll(strings.TrimRight(hl, "\r\n"), allOff, fgReset)
+	content := fmt.Sprintf(" %4d +  ", no) + hl
+	if pad := width - lipgloss.Width(content); pad > 0 {
+		content += strings.Repeat(" ", pad)
+	}
+	return bgGreen + content + allOff
+}
+
+func diffDelRow(no int, code string, width int) string {
+	content := fmt.Sprintf(" %4d -  %s", no, code)
+	if pad := width - lipgloss.Width(content); pad > 0 {
+		content += strings.Repeat(" ", pad)
+	}
+	return bgRed + fgWhite + content + allOff
+}
+
+func plural(n int, w string) string {
+	if n == 1 {
+		return w
+	}
+	return w + "s"
+}
+
+// renderCode syntax-highlights a file's content (capped) for a file.read result.
+func renderCode(content string) []string {
+	lines := strings.Split(content, "\n")
+	capped := false
+	if len(lines) > 40 {
+		lines, capped = lines[:40], true
+	}
+	out := []string{cDim.Render("  → read:")}
+	for _, ln := range strings.Split(highlightCode(strings.Join(lines, "\n")), "\n") {
+		out = append(out, "    "+ln)
+	}
+	if capped {
+		out = append(out, cDim.Render("    …"))
+	}
+	return out
+}
+
+func highlightCode(code string) string {
+	var b strings.Builder
+	if err := quick.Highlight(&b, code, "", "terminal256", "github-dark"); err != nil {
+		return code
+	}
+	return b.String()
+}
+
+func parseHunk(s string) (oldStart, newStart int) {
+	var a, bb, c, d int
+	if n, _ := fmt.Sscanf(s, "@@ -%d,%d +%d,%d @@", &a, &bb, &c, &d); n >= 3 {
+		return a, c
+	}
+	a, c = 0, 0
+	fmt.Sscanf(s, "@@ -%d +%d @@", &a, &c)
+	return a, c
 }
 
 func compactJSON(v any) string {

@@ -13,4 +13,10 @@ var (
 	cErr      = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	cLesson   = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
 	cDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+
+	// cBox frames the bottom input, separating the chat from the work area.
+	cBox = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("8")).
+		Padding(0, 1)
 )

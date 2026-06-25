@@ -24,6 +24,9 @@ type Transcript struct {
 }
 
 // Agent holds the wiring for a run. The knowledge base and tracer may be nil.
+// history carries the conversation across Run calls (the session memory); only
+// the user goals and final answers are kept, not the tool back-and-forth, so a
+// small model's context isn't swamped.
 type Agent struct {
 	llm      llm.Chatter
 	reg      *tool.Registry
@@ -31,6 +34,9 @@ type Agent struct {
 	tr       trace.Tracer
 	system   string
 	maxSteps int
+
+	history    []llm.Message
+	maxHistory int
 }
 
 // New builds an Agent. maxSteps <= 0 defaults to 12.
@@ -41,7 +47,22 @@ func New(l llm.Chatter, reg *tool.Registry, kb *knowledge.KB, tr trace.Tracer, s
 	if strings.TrimSpace(system) == "" {
 		system = DefaultSystemPrompt()
 	}
-	return &Agent{llm: l, reg: reg, kb: kb, tr: tr, system: system, maxSteps: maxSteps}
+	return &Agent{llm: l, reg: reg, kb: kb, tr: tr, system: system, maxSteps: maxSteps, maxHistory: 16}
+}
+
+// Reset clears the session conversation memory.
+func (a *Agent) Reset() { a.history = nil }
+
+// SessionLen reports how many remembered messages are in the current session.
+func (a *Agent) SessionLen() int { return len(a.history) }
+
+// remember appends the goal and its final answer to the session, trimming to the
+// most recent maxHistory messages.
+func (a *Agent) remember(goal, final string) {
+	a.history = append(a.history, llm.User(goal), llm.Message{Role: "assistant", Content: final})
+	if a.maxHistory > 0 && len(a.history) > a.maxHistory {
+		a.history = append([]llm.Message(nil), a.history[len(a.history)-a.maxHistory:]...)
+	}
 }
 
 // DefaultSystemPrompt is the baseline instruction given to the model.
@@ -58,7 +79,10 @@ Rules:
 // tool calls), maxSteps is reached, or the context is cancelled.
 func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	a.emit("goal", map[string]any{"text": goal})
-	msgs := []llm.Message{llm.System(a.system), llm.User(goal)}
+	msgs := make([]llm.Message, 0, len(a.history)+2)
+	msgs = append(msgs, llm.System(a.system))
+	msgs = append(msgs, a.history...) // session memory
+	msgs = append(msgs, llm.User(goal))
 	tools := a.reg.OpenAITools()
 
 	var tr Transcript
@@ -77,6 +101,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 			tr.Final = assistant.Content
 			tr.Messages = msgs
 			a.emit("final", map[string]any{"text": tr.Final})
+			a.remember(goal, tr.Final)
 			return tr, nil
 		}
 
@@ -86,6 +111,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	tr.Messages = msgs
 	tr.Final = lastAssistantContent(msgs)
 	a.emit("final", map[string]any{"text": tr.Final, "exhausted": true})
+	a.remember(goal, tr.Final)
 	return tr, nil
 }
 

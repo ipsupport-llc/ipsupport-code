@@ -11,13 +11,16 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 )
 
-// scriptLLM returns a fixed sequence of replies, ignoring input.
+// scriptLLM returns a fixed sequence of replies and records the last messages
+// it was given.
 type scriptLLM struct {
-	replies []llm.Message
-	i       int
+	replies  []llm.Message
+	i        int
+	lastMsgs []llm.Message
 }
 
-func (s *scriptLLM) Chat(_ context.Context, _ []llm.Message, _ []map[string]any) (llm.Message, error) {
+func (s *scriptLLM) Chat(_ context.Context, msgs []llm.Message, _ []map[string]any) (llm.Message, error) {
+	s.lastMsgs = msgs
 	if s.i >= len(s.replies) {
 		return llm.Message{Role: "assistant", Content: "(no more replies)"}, nil
 	}
@@ -81,6 +84,41 @@ func TestRunInjectsPitfall(t *testing.T) {
 	if got := toolObservation(tr.Messages); len(got) == 0 ||
 		!strings.Contains(got[0].Content, "only use whitelisted functions") {
 		t.Errorf("pitfall hint not injected: %+v", got)
+	}
+}
+
+func TestSessionMemoryCarriesAcrossRuns(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "the answer is 4"},   // run 1 final
+		{Role: "assistant", Content: "we computed 2+2=4"}, // run 2 final
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+
+	if _, err := a.Run(context.Background(), "what is 2+2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Run(context.Background(), "what did we just do?"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The second Run's prompt must contain the first goal AND its answer.
+	var sawGoal, sawAnswer bool
+	for _, m := range fake.lastMsgs {
+		if strings.Contains(m.Content, "what is 2+2") {
+			sawGoal = true
+		}
+		if strings.Contains(m.Content, "the answer is 4") {
+			sawAnswer = true
+		}
+	}
+	if !sawGoal || !sawAnswer {
+		t.Errorf("session memory missing in 2nd run: goal=%v answer=%v msgs=%+v", sawGoal, sawAnswer, fake.lastMsgs)
+	}
+
+	a.Reset()
+	if a.SessionLen() != 0 {
+		t.Errorf("after Reset SessionLen = %d, want 0", a.SessionLen())
 	}
 }
 

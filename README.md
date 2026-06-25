@@ -24,9 +24,15 @@ machine, with your own model, under a permission policy you control.
   are injected straight into the error the model sees — it doesn't have to ask.
 - **Reflection.** After a task, a second model pass distills durable lessons into
   `~/.config/ipsupport-code/knowledge.json`. They're available next run.
+- **Session memory.** Within a REPL session it remembers the conversation (your
+  goals and its answers carry across turns), so "what did we just do?" works.
+  `/new` clears it.
+- **Project instructions.** On startup it reads a `CLAUDE.md` (or `AGENTS.md`, or
+  `.agent/instructions.md`) from the workspace and folds it into the system prompt,
+  so the model follows your project's conventions.
 - **Trace = dataset.** Every step (goal, tool call, observation, final, lesson)
   is appended as JSONL to `~/.config/ipsupport-code/traces.jsonl` — your future
-  training dataset.
+  training dataset and session log.
 
 ## Build
 
@@ -64,6 +70,7 @@ In the REPL, anything not starting with `/` is run as a task. Slash commands:
 | `/status` | config, knowledge base, and trace paths |
 | `/usage` | session counters + token usage |
 | `/login` | (re)configure server URL / model / key, then reload |
+| `/new` | clear the session conversation memory |
 | `/goal <task>` | run a task explicitly |
 | `/loop [n] <task>` | run a task `n` times (default 3) so lessons compound |
 | `/help` | command list |

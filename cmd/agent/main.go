@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/reflect"
+	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 	"github.com/ipsupport-llc/ipsupport-code/internal/trace"
 )
@@ -77,9 +79,10 @@ type app struct {
 	tracer     trace.Tracer  // composite, set in wire()
 	approver   tool.Approver // stdin (plain) or the TUI bridge
 
-	client *llm.OpenAIClient
-	ag     *agent.Agent
-	refl   *reflect.Reflector
+	client   *llm.OpenAIClient
+	ag       *agent.Agent
+	refl     *reflect.Reflector
+	instrSrc string // project instructions file in effect, "" if none
 
 	tasks, steps, toolCalls int
 }
@@ -127,7 +130,7 @@ func (a *app) wire() error {
 	)
 	a.tracer = trace.Multi(a.fileTracer, a.uiTracer)
 	a.client = llm.NewOpenAIClient(a.cfg.LLM)
-	a.ag = agent.New(a.client, reg, a.kb, a.tracer, "", a.cfg.LLM.MaxSteps)
+	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.cfg.LLM.MaxSteps)
 	a.refl = reflect.New(a.client)
 	return nil
 }
@@ -139,6 +142,35 @@ func (a *app) reconfigure() error {
 	}
 	a.cfg = cfg
 	return a.wire()
+}
+
+const maxInstructions = 6000
+
+// loadInstructions reads a project instructions file from the workspace (the
+// agent's CLAUDE.md, à la Claude Code). Returns its content and the file it came
+// from, or empty when none exists.
+func loadInstructions(workspace string) (text, source string) {
+	for _, name := range []string{"CLAUDE.md", "AGENTS.md", ".agent/instructions.md"} {
+		data, err := os.ReadFile(filepath.Join(workspace, name))
+		if err != nil || strings.TrimSpace(string(data)) == "" {
+			continue
+		}
+		clipped, _ := textutil.Clip(string(data), maxInstructions)
+		return clipped, name
+	}
+	return "", ""
+}
+
+// systemPrompt is the base prompt plus any project instructions; records the
+// source in instrSrc for /status.
+func (a *app) systemPrompt() string {
+	text, src := loadInstructions(a.workspace)
+	a.instrSrc = src
+	if text == "" {
+		return agent.DefaultSystemPrompt()
+	}
+	return agent.DefaultSystemPrompt() +
+		"\n\n## Project instructions (from " + src + ") — follow these:\n" + text
 }
 
 func (a *app) emit(kind string, fields map[string]any) {
@@ -252,6 +284,9 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		} else {
 			fmt.Println("config reloaded.")
 		}
+	case "/new", "/reset":
+		a.ag.Reset()
+		fmt.Println("session cleared.")
 	case "/goal":
 		if rest == "" {
 			fmt.Println("usage: /goal <task>")
@@ -305,6 +340,7 @@ func helpText() string {
   /status          show config, knowledge base, and trace paths
   /usage           session counters + token usage
   /login           (re)configure the server URL / model / key, then reload
+  /new             clear the session conversation memory
   /goal <task>     run a task explicitly
   /loop [n] <task> run a task n times (default 3) so lessons compound
   /help            this list
@@ -314,18 +350,25 @@ Anything not starting with '/' is run as a task.
 }
 
 func (a *app) statusText() string {
+	instr := a.instrSrc
+	if instr == "" {
+		instr = "(none)"
+	}
 	return fmt.Sprintf(`status:
-  server      %s
-  model       %s
-  max_steps   %d
-  workspace   %s
-  jail        %q
-  defaults    run=%s  file=%s
-  knowledge   %s (%d lessons)
-  trace       %s
+  server       %s
+  model        %s
+  max_steps    %d
+  workspace    %s
+  jail         %q
+  defaults     run=%s  file=%s
+  instructions %s
+  session      %d messages
+  knowledge    %s (%d lessons)
+  trace        %s
 `,
 		a.cfg.LLM.BaseURL, a.cfg.LLM.Model, a.cfg.LLM.MaxSteps,
 		a.cfg.Workspace, a.cfg.File.Jail, a.cfg.Run.Default, a.cfg.File.Default,
+		instr, a.ag.SessionLen(),
 		a.cfg.KBPath, len(a.kb.All()), a.cfg.TracePath)
 }
 

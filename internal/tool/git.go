@@ -19,74 +19,73 @@ type gitTool struct {
 
 // NewGit returns the git tool. It runs git directly (argv, no shell) in the
 // workspace; read-only actions run freely, mutating ones ask for approval.
-func NewGit(p *policy.Engine, a Approver) Tool { return &gitTool{pol: p, ap: a} }
-
-func (*gitTool) Name() string { return "git" }
-func (*gitTool) Actions() []string {
-	return []string{"status", "diff", "log", "show", "add", "commit", "branch", "checkout"}
+func NewGit(p *policy.Engine, ap Approver) Tool {
+	g := &gitTool{pol: p, ap: ap}
+	return NewDomain(DomainSpec{
+		Name:    "git",
+		Summary: "Git in the workspace. Mutating actions (add/commit/branch/checkout) ask approval.",
+		NotHere: "NOT here — non-git shell → run; files → file.",
+		Actions: []Action{
+			{Name: "status", Run: g.status},
+			{Name: "diff", Params: []Param{Opt("path", "str", ""), Opt("staged", "bool", "")}, Run: g.diff},
+			{Name: "log", Params: []Param{Opt("n", "int", "15")}, Run: g.log},
+			{Name: "show", Params: []Param{Opt("ref", "str", "HEAD")}, Run: g.show},
+			{Name: "add", Params: []Param{Req("paths", "str")}, Note: "(space-separated)", Run: g.add},
+			{Name: "commit", Params: []Param{Req("message", "str")}, Run: g.commit},
+			{Name: "branch", Params: []Param{Opt("name", "str", "")}, Note: "(none=list, name=create)", Run: g.branch},
+			{Name: "checkout", Params: []Param{Req("ref", "str")}, Run: g.checkout},
+		},
+	})
 }
 
-func (*gitTool) Description() string {
-	return strings.TrimSpace(`Git in the workspace. Mutating actions (add/commit/branch/checkout) ask approval.
-Actions:
-  - status:   {}
-  - diff:     {"path"?: str, "staged"?: bool}
-  - log:      {"n"?: int=15}
-  - show:     {"ref"?: str="HEAD"}
-  - add:      {"paths": str}   (space-separated)
-  - commit:   {"message": str}
-  - branch:   {"name"?: str}   (none=list, name=create)
-  - checkout: {"ref": str}
-NOT here — non-git shell → run; files → file.`)
+func (g *gitTool) status(ctx context.Context, _ Args) Result {
+	return g.run(ctx, "status", false, "status", "--short", "--branch")
 }
 
-func (g *gitTool) Call(ctx context.Context, action string, params map[string]any) Result {
-	switch action {
-	case "status":
-		return g.run(ctx, action, false, "status", "--short", "--branch")
-	case "diff":
-		args := []string{"diff"}
-		if b, _ := params["staged"].(bool); b {
-			args = append(args, "--staged")
-		}
-		if p := Str(params, "path"); p != "" {
-			args = append(args, "--", p)
-		}
-		return g.run(ctx, action, false, args...)
-	case "log":
-		n := Int(params, "n", 15)
-		if n < 1 {
-			n = 15
-		}
-		return g.run(ctx, action, false, "log", "--oneline", "-n", strconv.Itoa(n))
-	case "show":
-		ref := Str(params, "ref")
-		if ref == "" {
-			ref = "HEAD"
-		}
-		return g.run(ctx, action, false, "show", "--stat", ref)
-	case "add":
-		if err := Require(params, "paths"); err != nil {
-			return Err(err.Error())
-		}
-		return g.run(ctx, action, true, append([]string{"add", "--"}, strings.Fields(Str(params, "paths"))...)...)
-	case "commit":
-		if err := Require(params, "message"); err != nil {
-			return Err(err.Error())
-		}
-		return g.run(ctx, action, true, "commit", "-m", Str(params, "message"))
-	case "branch":
-		if name := Str(params, "name"); name != "" {
-			return g.run(ctx, action, true, "branch", name)
-		}
-		return g.run(ctx, action, false, "branch")
-	case "checkout":
-		if err := Require(params, "ref"); err != nil {
-			return Err(err.Error())
-		}
-		return g.run(ctx, action, true, "checkout", Str(params, "ref"))
+func (g *gitTool) diff(ctx context.Context, a Args) Result {
+	args := []string{"diff"}
+	if a.Bool("staged") {
+		args = append(args, "--staged")
 	}
-	return Err("git: unknown action " + action)
+	if p := a.Str("path"); p != "" {
+		args = append(args, "--", p)
+	}
+	return g.run(ctx, "diff", false, args...)
+}
+
+func (g *gitTool) log(ctx context.Context, a Args) Result {
+	n := a.Int("n", 15)
+	if n < 1 {
+		n = 15
+	}
+	return g.run(ctx, "log", false, "log", "--oneline", "-n", strconv.Itoa(n))
+}
+
+func (g *gitTool) show(ctx context.Context, a Args) Result {
+	ref := a.Str("ref")
+	if ref == "" {
+		ref = "HEAD"
+	}
+	return g.run(ctx, "show", false, "show", "--stat", ref)
+}
+
+func (g *gitTool) add(ctx context.Context, a Args) Result {
+	return g.run(ctx, "add", true, append([]string{"add", "--"}, strings.Fields(a.Str("paths"))...)...)
+}
+
+func (g *gitTool) commit(ctx context.Context, a Args) Result {
+	return g.run(ctx, "commit", true, "commit", "-m", a.Str("message"))
+}
+
+func (g *gitTool) branch(ctx context.Context, a Args) Result {
+	if name := a.Str("name"); name != "" {
+		return g.run(ctx, "branch", true, "branch", name)
+	}
+	return g.run(ctx, "branch", false, "branch")
+}
+
+func (g *gitTool) checkout(ctx context.Context, a Args) Result {
+	return g.run(ctx, "checkout", true, "checkout", a.Str("ref"))
 }
 
 func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ...string) Result {

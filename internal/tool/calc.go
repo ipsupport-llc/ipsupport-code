@@ -11,36 +11,26 @@ import (
 	"strings"
 )
 
-type calcTool struct{}
-
 // NewCalc returns the calc tool: safe arithmetic evaluation, so small models
 // don't have to do unreliable mental math.
-func NewCalc() Tool { return calcTool{} }
-
-func (calcTool) Name() string      { return "calc" }
-func (calcTool) Actions() []string { return []string{"calculate"} }
-
-func (calcTool) Description() string {
-	return strings.TrimSpace(`Evaluate arithmetic safely (AST, not eval) — use for ANY math.
-Actions:
-  - calculate: {"expression": str}
-Operators + - * / % and parens; functions sqrt cbrt pow abs floor ceil round log log2 log10 exp sin cos tan hypot min max; constants pi e tau.
-e.g. {"action":"calculate","params":{"expression":"sqrt(2)+pi"}}
-NOT here — files → file; shell → run.`)
-}
-
-func (calcTool) Call(_ context.Context, action string, params map[string]any) Result {
-	if action != "calculate" {
-		return Err("calc: unknown action " + action)
-	}
-	if err := Require(params, "expression"); err != nil {
-		return Err(err.Error())
-	}
-	v, err := evalArith(Str(params, "expression"))
-	if err != nil {
-		return Err("calc error: " + err.Error())
-	}
-	return Ok(formatNum(v))
+func NewCalc() Tool {
+	return NewDomain(DomainSpec{
+		Name:    "calc",
+		Summary: "Evaluate arithmetic safely (AST, not eval) — use for ANY math.",
+		Details: "Operators + - * / % and parens; functions sqrt cbrt pow abs floor ceil round log log2 log10 exp sin cos tan hypot min max; constants pi e tau.\ne.g. {\"action\":\"calculate\",\"params\":{\"expression\":\"sqrt(2)+pi\"}}",
+		NotHere: "NOT here — files → file; shell → run.",
+		Actions: []Action{{
+			Name:   "calculate",
+			Params: []Param{Req("expression", "str")},
+			Run: func(_ context.Context, a Args) Result {
+				v, err := evalArith(a.Str("expression"))
+				if err != nil {
+					return Err("calc error: " + err.Error())
+				}
+				return Ok(formatNum(v))
+			},
+		}},
+	})
 }
 
 func formatNum(f float64) string {

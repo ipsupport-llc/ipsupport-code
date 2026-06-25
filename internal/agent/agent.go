@@ -104,21 +104,14 @@ func (a *Agent) remember(goal, final string) {
 	}
 }
 
-// DefaultSystemPrompt is the baseline instruction given to the model.
+// DefaultSystemPrompt is the baseline instruction given to the model. Kept tight
+// on purpose — it ships in every request to a small local model.
 func DefaultSystemPrompt() string {
-	return strings.TrimSpace(`You are the reasoning engine inside ipsupport-code, a local command-line coding agent. You run in a loop in the user's terminal and act ONLY through tools — the user sees a TUI with your tool calls and results, not your raw thoughts.
+	return strings.TrimSpace(`You are the engine inside ipsupport-code, a local terminal coding agent. You run in a loop and act ONLY through tools; the user sees your tool calls and results.
 
-Hard rules:
-- DO the task yourself with tools. Asked to create a file or script → WRITE it with the file tool. Asked to run something → RUN it with the run tool. Use git for git. Work end to end.
-- NEVER reply with manual instructions like "create a file", "run nano", "chmod +x", "here's how you can…". The user has you so they don't have to. Describing steps instead of doing them is a failure.
-- Example — "make a hello world shell script and run it": file.write hello.sh, then run.shell to execute it (e.g. sh hello.sh), then report the output. Do NOT tell the user to save or run it.
-- Prefer tools over talking: calc for ANY arithmetic, git for git, web to look things up, file/run for everything local.
-- You are a small local model in a terminal: be concise, no long essays.
-
-Mechanics:
-- Each tool takes {"action": <name>, "params": {...}} — per-action fields go inside params.
-- On a tool error, read it (it often shows the correct schema or names the fix) and retry.
-- Finish with a SHORT report of what you actually did (files written, commands run, results) and make NO tool call.`)
+- DO the task with tools: write/edit files with file, run commands with run, use git/web/calc. NEVER just tell the user how to do it ("create a file", "chmod +x", "here's how…") — describing steps instead of doing them is a failure. (e.g. "make a hello script and run it" → file.write then run.shell, then report the output.)
+- Each call is {"action": <name>, "params": {...}}. On an error, read it — it names the fix or the right tool — and retry.
+- Small local model in a terminal: be brief. Finish with a one-line summary of what you did and no tool call.`)
 }
 
 // Run executes the loop until the model produces a final answer (a reply with no
@@ -193,9 +186,13 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) llm.Message {
 	content := res.Content
 	if res.IsError {
 		var extra []string
-		if usageError(res.Content) { // lead the model back to the real schema
+		// On a misuse error, put the tool's schema right at the error — a weak
+		// model corrects far more reliably from that than from a pointer it has
+		// to chase. The descriptions are kept lean, so this is cheap and only
+		// fires on errors.
+		if usageError(res.Content) {
 			if u := strings.TrimSpace(a.reg.Usage(c.Name)); u != "" {
-				extra = append(extra, "Correct usage of "+c.Name+":\n"+u)
+				extra = append(extra, c.Name+" usage:\n"+u)
 			}
 		}
 		if hints := a.hints(c.Name, res.Content); hints != "" {

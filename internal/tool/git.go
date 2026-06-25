@@ -27,17 +27,17 @@ func (*gitTool) Actions() []string {
 }
 
 func (*gitTool) Description() string {
-	return strings.TrimSpace(`Run common git operations in the workspace. Read-only actions run freely; mutating ones (add/commit/branch/checkout) ask for approval.
+	return strings.TrimSpace(`Git in the workspace. Mutating actions (add/commit/branch/checkout) ask approval.
 Actions:
-  - status:   {}                              short status + branch
+  - status:   {}
   - diff:     {"path"?: str, "staged"?: bool}
-  - log:      {"n"?: int=15}                  oneline history
-  - show:     {"ref"?: str="HEAD"}            commit details (--stat)
-  - add:      {"paths": str}                  stage paths (space-separated)
+  - log:      {"n"?: int=15}
+  - show:     {"ref"?: str="HEAD"}
+  - add:      {"paths": str}   (space-separated)
   - commit:   {"message": str}
-  - branch:   {"name"?: str}                  no name = list; name = create
-  - checkout: {"ref": str}                    switch branch/commit
-NOT here — non-git shell → run; read/write files → file.`)
+  - branch:   {"name"?: str}   (none=list, name=create)
+  - checkout: {"ref": str}
+NOT here — non-git shell → run; files → file.`)
 }
 
 func (g *gitTool) Call(ctx context.Context, action string, params map[string]any) Result {

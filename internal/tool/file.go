@@ -31,17 +31,15 @@ func (*fileTool) Actions() []string {
 }
 
 func (*fileTool) Description() string {
-	return strings.TrimSpace(`Read, write, append, edit, list, and create files/dirs in the workspace.
+	return strings.TrimSpace(`Read, write, append, edit, list files/dirs in the workspace (paths relative, confined to it).
 Actions:
   - read:   {"path": str}
-  - write:  {"path": str, "content": str}              (overwrites whole file)
+  - write:  {"path": str, "content": str}   (overwrites the whole file)
   - append: {"path": str, "content": str}
-  - edit:   {"path": str, "find": str, "replace": str} (replace first match — best for small changes)
-  - list:   {"path"?: str}                             (defaults to ".")
+  - edit:   {"path": str, "find": str, "replace": str}   (replaces first match; prefer this for partial changes)
+  - list:   {"path"?: str="."}
   - mkdir:  {"path": str}
-Prefer edit over write when changing part of an existing file.
-Paths are relative to the workspace and confined to it.
-NOT here — shell commands → run; web/search/fetch → web; arithmetic → calc.`)
+NOT here — shell → run; web/fetch → web; math → calc.`)
 }
 
 func (f *fileTool) Call(_ context.Context, action string, params map[string]any) Result {

@@ -362,11 +362,11 @@ func TestE2E_UsageGuidanceOnError(t *testing.T) {
 	if _, err := ag.Run(context.Background(), "write a file"); err != nil {
 		t.Fatal(err)
 	}
-	if !tr.observationContains("Correct usage of file") {
-		t.Error("usage guidance not injected on a missing-param error")
+	if !tr.observationContains("missing required param(s): path") {
+		t.Error("the precise missing-param error was not surfaced")
 	}
-	if !tr.observationContains("edit:") { // the real file-tool schema is shown
-		t.Error("real tool schema not surfaced in the error")
+	if !tr.observationContains("file usage") || !tr.observationContains("edit:") {
+		t.Error("the tool schema was not injected to guide the model on a misuse error")
 	}
 }
 

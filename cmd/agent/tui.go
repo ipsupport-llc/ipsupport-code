@@ -56,7 +56,14 @@ type tuiModel struct {
 	accentIdx     int
 	width, height int
 	ready         bool
+
+	// last action of the finished task → a Tab-acceptable next-step suggestion
+	lastTool, lastAction string
+	lastErr              bool
+	suggestion           string
 }
+
+const defaultPlaceholder = "type a task, or /help"
 
 // retryInfo tracks an in-progress LLM backoff so the UI can show it.
 type retryInfo struct {
@@ -84,7 +91,7 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	}
 
 	in := textinput.New()
-	in.Placeholder = "type a task, or /help"
+	in.Placeholder = defaultPlaceholder
 	in.Prompt = "❯ "
 	in.Focus()
 
@@ -152,6 +159,13 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.push(cErr.Render(fmt.Sprintf("  ⟳ server hiccup — retry %d, backing off %s", m.retry.attempt, wait)))
 		} else {
 			m.retry = nil // progress resumed
+			switch e.kind {
+			case "tool_call":
+				m.lastTool, _ = e.fields["tool"].(string)
+				m.lastAction, _ = e.fields["action"].(string)
+			case "observation":
+				m.lastErr, _ = e.fields["is_error"].(bool)
+			}
 			m.push(m.renderEvent(e)...)
 		}
 		return m, m.waitEvent()
@@ -173,6 +187,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.push(cYou.Render("❯ ") + next)
 			return m, m.runGoals(1, next)
 		}
+		m.setSuggestion() // offer a next step as Tab-acceptable ghost text
 		return m, m.input.Focus()
 
 	case compactDoneMsg:
@@ -258,7 +273,15 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m.submit(line)
 		case "tab":
-			m.completeCommand()
+			switch {
+			case strings.HasPrefix(m.input.Value(), "/"):
+				m.completeCommand()
+			case m.input.Value() == "" && m.suggestion != "":
+				m.input.SetValue(m.suggestion)
+				m.input.CursorEnd()
+				m.suggestion = ""
+				m.input.Placeholder = defaultPlaceholder
+			}
 			return m, nil
 		case "up", "down", "pgup", "pgdown", "home", "end":
 			var cmd tea.Cmd
@@ -395,6 +418,40 @@ func (m *tuiModel) rename(name string) {
 	m.push(m.accentBold().Render("renamed → " + name))
 }
 
+// setSuggestion offers a next step (Tab-acceptable ghost text) from the task's
+// last tool action.
+func (m *tuiModel) setSuggestion() {
+	m.suggestion = suggestFor(m.lastTool, m.lastAction, m.lastErr)
+	if m.suggestion != "" {
+		m.input.Placeholder = m.suggestion + "   (Tab to accept)"
+	} else {
+		m.input.Placeholder = defaultPlaceholder
+	}
+}
+
+func suggestFor(tool, action string, errored bool) string {
+	switch tool {
+	case "file":
+		switch action {
+		case "write", "edit", "append":
+			return "run it"
+		}
+	case "run":
+		if errored {
+			return "fix the error"
+		}
+		return "run the tests"
+	case "git":
+		switch action {
+		case "status", "diff":
+			return "commit the changes"
+		case "add":
+			return "commit with a message"
+		}
+	}
+	return ""
+}
+
 // runGoals sets running state and returns a cmd that runs the goal n times in the
 // background, streaming via the bridge and ending with taskDoneMsg.
 func (m *tuiModel) runGoals(n int, goal string) tea.Cmd {
@@ -402,6 +459,8 @@ func (m *tuiModel) runGoals(n int, goal string) tea.Cmd {
 	m.taskStart = time.Now()
 	_, c := m.app.client.Usage()
 	m.startTok = c // count completion (generated) tokens for this task
+	m.lastTool, m.lastAction, m.lastErr, m.suggestion = "", "", false, ""
+	m.input.Placeholder = defaultPlaceholder
 	tctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel
 	return func() tea.Msg {

@@ -67,6 +67,31 @@ func TestReflectNoJSONIsEmpty(t *testing.T) {
 	}
 }
 
+type recordingLLM struct{ called bool }
+
+func (r *recordingLLM) Chat(_ context.Context, _ []llm.Message, _ []map[string]any) (llm.Message, error) {
+	r.called = true
+	return llm.Message{Role: "assistant", Content: "[]"}, nil
+}
+
+func TestReflectSkipsWithoutToolUse(t *testing.T) {
+	r := &recordingLLM{}
+	transcript := agent.Transcript{Messages: []llm.Message{
+		llm.User("привет"),
+		{Role: "assistant", Content: "Привет!"},
+	}}
+	lessons, err := New(r).Reflect(context.Background(), transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.called {
+		t.Error("reflection called the model for a chat turn with no tool use")
+	}
+	if len(lessons) != 0 {
+		t.Errorf("lessons = %v, want none", lessons)
+	}
+}
+
 func TestReflectTransportError(t *testing.T) {
 	_, err := New(fixedLLM{err: errors.New("boom")}).
 		Reflect(context.Background(), sampleTranscript())

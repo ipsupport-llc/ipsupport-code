@@ -138,7 +138,7 @@ func (f *fileTool) writeFile(action string, params map[string]any, appendMode bo
 		verb = "appended to"
 	}
 	res := Ok(fmt.Sprintf("%s %s (%d bytes)", verb, path, len(content)))
-	if old != "" && old != content { // overwrite of an existing file → show the diff
+	if !appendMode && old != content { // show the change — for a new file, all additions
 		res.Diff = udiff.Unified(path, path, old, content)
 	}
 	return res

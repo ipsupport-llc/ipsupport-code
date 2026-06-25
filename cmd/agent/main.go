@@ -120,12 +120,13 @@ func (a *app) wire() error {
 	if err != nil {
 		return fmt.Errorf("policy: %w", err)
 	}
-	reg := tool.NewRegistry(
+	var reg *tool.Registry
+	reg = tool.NewRegistry(
 		tool.NewFile(pol, a.approver),
 		tool.NewRun(pol, a.approver),
 		tool.NewGit(pol, a.approver),
 		tool.NewWeb(http.DefaultClient),
-		tool.NewHelp(a.kb),
+		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),
 		tool.NewCalc(),
 	)
 	a.tracer = trace.Multi(a.fileTracer, a.uiTracer)

@@ -76,6 +76,15 @@ func (r *Registry) Dispatch(ctx context.Context, name, action string, params map
 	return t.Call(ctx, action, params)
 }
 
+// Usage returns a tool's self-describing contract (its Description), or "" if no
+// such tool — used to lead the model back to correct usage after an error.
+func (r *Registry) Usage(name string) string {
+	if t, ok := r.tools[name]; ok {
+		return t.Description()
+	}
+	return ""
+}
+
 func contains(ss []string, s string) bool {
 	for _, x := range ss {
 		if x == s {

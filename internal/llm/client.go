@@ -5,6 +5,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -97,9 +98,11 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	}
 
 	body := map[string]any{
-		"model":       c.model,
-		"temperature": c.temp,
-		"messages":    wm,
+		"model":          c.model,
+		"temperature":    c.temp,
+		"messages":       wm,
+		"stream":         true,
+		"stream_options": map[string]any{"include_usage": true},
 	}
 	if len(tools) > 0 {
 		body["tools"] = tools
@@ -115,6 +118,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 		return Message{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
@@ -124,14 +128,89 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 		return Message{}, err
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		data, _ := io.ReadAll(resp.Body)
+		return Message{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, truncate(string(data), 500))
+	}
+	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
+		return c.parseStream(resp.Body)
+	}
+	return c.parseJSON(resp.Body) // server ignored stream (e.g. a test fake)
+}
+
+// parseStream reads an SSE stream, accumulating content and tool calls, and ticks
+// the live completion-token counter as deltas arrive so the UI updates in real
+// time (LM Studio sends roughly one token per chunk). The final usage chunk
+// reconciles the estimate with the real count.
+func (c *OpenAIClient) parseStream(r io.Reader) (Message, error) {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	var content strings.Builder
+	calls := map[int]*ToolCall{}
+	var order []int
+	reqCompl := 0
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(line[len("data:"):])
+		if payload == "[DONE]" {
+			break
+		}
+		var ch streamChunk
+		if json.Unmarshal([]byte(payload), &ch) != nil {
+			continue
+		}
+		if len(ch.Choices) > 0 {
+			d := ch.Choices[0].Delta
+			if d.Content != "" {
+				content.WriteString(d.Content)
+				reqCompl++
+				c.bumpToken()
+			}
+			for _, tc := range d.ToolCalls {
+				cur, ok := calls[tc.Index]
+				if !ok {
+					cur = &ToolCall{}
+					calls[tc.Index] = cur
+					order = append(order, tc.Index)
+				}
+				if tc.ID != "" {
+					cur.ID = tc.ID
+				}
+				if tc.Function.Name != "" {
+					cur.Name = tc.Function.Name
+				}
+				if tc.Function.Arguments != "" {
+					cur.Arguments += tc.Function.Arguments
+					reqCompl++
+					c.bumpToken()
+				}
+			}
+		}
+		if ch.Usage != nil {
+			c.mu.Lock()
+			c.promptTk += ch.Usage.PromptTokens
+			c.complTk += ch.Usage.CompletionTokens - reqCompl
+			c.mu.Unlock()
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return Message{}, err
+	}
+	msg := Message{Role: "assistant", Content: content.String()}
+	for _, idx := range order {
+		msg.ToolCalls = append(msg.ToolCalls, *calls[idx])
+	}
+	return msg, nil
+}
+
+func (c *OpenAIClient) parseJSON(r io.Reader) (Message, error) {
+	data, err := io.ReadAll(r)
 	if err != nil {
 		return Message{}, err
 	}
-	if resp.StatusCode >= 400 {
-		return Message{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, truncate(string(data), 500))
-	}
-
 	var out struct {
 		Choices []struct {
 			Message wireMessage `json:"message"`
@@ -152,6 +231,32 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	c.complTk += out.Usage.CompletionTokens
 	c.mu.Unlock()
 	return fromWire(out.Choices[0].Message), nil
+}
+
+func (c *OpenAIClient) bumpToken() {
+	c.mu.Lock()
+	c.complTk++
+	c.mu.Unlock()
+}
+
+type streamChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content   string `json:"content"`
+			ToolCalls []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"delta"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+	} `json:"usage"`
 }
 
 // Usage returns cumulative prompt/completion tokens reported by the server

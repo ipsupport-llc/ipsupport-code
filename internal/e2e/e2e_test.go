@@ -138,12 +138,13 @@ func buildStack(t *testing.T, url, ws string, kb *knowledge.KB) (*agent.Agent, *
 		t.Fatal(err)
 	}
 	ap := allowApprover{}
-	reg := tool.NewRegistry(
+	var reg *tool.Registry
+	reg = tool.NewRegistry(
 		tool.NewFile(pol, ap),
 		tool.NewRun(pol, ap),
 		tool.NewGit(pol, ap),
 		tool.NewWeb(http.DefaultClient),
-		tool.NewHelp(kb),
+		tool.NewHelp(kb, func(d string) string { return reg.Usage(d) }),
 		tool.NewCalc(),
 	)
 	tr := &recTracer{}
@@ -348,6 +349,24 @@ func mustWrite(t *testing.T, path, content string) {
 	}
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestE2E_UsageGuidanceOnError(t *testing.T) {
+	f := &fakeLM{queue: []string{
+		toolResp("file", call("write", map[string]any{"content": "hi"})), // missing required "path"
+		contentResp("ok, I see"),
+	}}
+	ag, tr, _ := buildStack(t, serve(t, f), t.TempDir(), nil)
+
+	if _, err := ag.Run(context.Background(), "write a file"); err != nil {
+		t.Fatal(err)
+	}
+	if !tr.observationContains("Correct usage of file") {
+		t.Error("usage guidance not injected on a missing-param error")
+	}
+	if !tr.observationContains("edit:") { // the real file-tool schema is shown
+		t.Error("real tool schema not surfaced in the error")
 	}
 }
 

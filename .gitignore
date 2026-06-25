@@ -1,0 +1,4 @@
+/dist/
+*.out
+.agent/knowledge.json
+.DS_Store

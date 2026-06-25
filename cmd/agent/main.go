@@ -7,6 +7,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -110,6 +111,7 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 	if err := a.wire(); err != nil {
 		return nil, nil, err
 	}
+	a.loadSession() // restore the prior conversation for this workspace
 	return a, cleanup, nil
 }
 
@@ -143,7 +145,35 @@ func (a *app) reconfigure() error {
 		return err
 	}
 	a.cfg = cfg
-	return a.wire()
+	if err := a.wire(); err != nil {
+		return err
+	}
+	a.loadSession() // a fresh agent — restore the persisted session
+	return nil
+}
+
+// Session memory persists per workspace so "the prior context" survives a
+// restart. /new and /clear wipe it.
+func (a *app) sessionPath() string { return filepath.Join(a.workspace, ".agent", "session.json") }
+
+func (a *app) loadSession() {
+	data, err := os.ReadFile(a.sessionPath())
+	if err != nil {
+		return
+	}
+	var h []llm.Message
+	if json.Unmarshal(data, &h) == nil {
+		a.ag.SetHistory(h)
+	}
+}
+
+func (a *app) saveSession() {
+	if err := os.MkdirAll(filepath.Dir(a.sessionPath()), 0o755); err != nil {
+		return
+	}
+	if data, err := json.Marshal(a.ag.History()); err == nil {
+		_ = os.WriteFile(a.sessionPath(), data, 0o644)
+	}
 }
 
 const maxInstructions = 6000
@@ -233,6 +263,7 @@ func (a *app) runOne(ctx context.Context, goal string) {
 	if learned := a.reflectAndStore(ctx, tr); learned > 0 {
 		fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
 	}
+	a.saveSession()
 }
 
 // runTaskStreaming is the TUI path: no printing — progress reaches the screen via
@@ -245,6 +276,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string) {
 	}
 	a.recordRun(tr)
 	a.reflectAndStore(ctx, tr)
+	a.saveSession()
 }
 
 func (a *app) repl(ctx context.Context) {
@@ -290,12 +322,14 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		}
 	case "/new", "/reset", "/clear":
 		a.ag.Reset()
+		a.saveSession()
 		fmt.Println("session cleared.")
 	case "/compact":
 		n, err := a.ag.Compact(ctx)
 		if err != nil {
 			fmt.Println("compact failed:", err)
 		} else {
+			a.saveSession()
 			fmt.Printf("compacted %d messages → summary.\n", n)
 		}
 	case "/color":

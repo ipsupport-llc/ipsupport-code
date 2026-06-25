@@ -2,3 +2,4 @@
 *.out
 .agent/knowledge.json
 .DS_Store
+.agent/session.json

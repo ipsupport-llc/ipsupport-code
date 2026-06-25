@@ -122,7 +122,5 @@ internal/knowledge persistent pitfall store
 internal/reflect  post-task lesson distillation
 internal/trace    JSONL decision trace (the dataset)
 internal/config   config load/merge
+cmd/agent         CLI, plain REPL, and the Bubble Tea TUI
 ```
-
-See [`docs/superpowers/specs`](docs/superpowers/specs) for the design and
-[`docs/superpowers/plans`](docs/superpowers/plans) for the implementation plan.

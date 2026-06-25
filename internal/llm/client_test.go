@@ -114,5 +114,29 @@ func TestChatStreamingToolCall(t *testing.T) {
 	}
 }
 
+func TestChatRetriesOnServerError(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n++
+		if n < 2 { // first attempt 500s, like a transient LM Studio hiccup
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, "<html>Internal Server Error</html>")
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"recovered"}}]}`)
+	}))
+	defer srv.Close()
+
+	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+	msg, err := cl.Chat(context.Background(), []Message{User("hi")}, nil)
+	if err != nil {
+		t.Fatalf("Chat should have retried past the 500: %v", err)
+	}
+	if msg.Content != "recovered" || n < 2 {
+		t.Errorf("content=%q attempts=%d, want recovered after a retry", msg.Content, n)
+	}
+}
+
 // compile-time guarantee the client satisfies the interface.
 var _ Chatter = (*OpenAIClient)(nil)

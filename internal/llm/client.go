@@ -113,9 +113,32 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 		return Message{}, err
 	}
 
+	// Local servers (LM Studio) hiccup with transient 5xx; retry those and
+	// network errors a couple of times instead of failing the whole task.
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		msg, err, retriable := c.send(ctx, buf)
+		if err == nil {
+			return msg, nil
+		}
+		lastErr = err
+		if !retriable || ctx.Err() != nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return Message{}, ctx.Err()
+		case <-time.After(time.Duration(attempt) * 400 * time.Millisecond):
+		}
+	}
+	return Message{}, lastErr
+}
+
+// send makes one attempt; the bool reports whether the failure is worth a retry.
+func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bool) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(buf))
 	if err != nil {
-		return Message{}, err
+		return Message{}, err, false
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
@@ -125,17 +148,29 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		return Message{}, err
+		return Message{}, err, true // network hiccup — retry
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		data, _ := io.ReadAll(resp.Body)
-		return Message{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, truncate(string(data), 500))
+
+	switch {
+	case resp.StatusCode >= 500:
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return Message{}, fmt.Errorf("llm server error (http %d)", resp.StatusCode), true
+	case resp.StatusCode >= 400:
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return Message{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, oneLine(string(data))), false
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		return c.parseStream(resp.Body)
+		m, err := c.parseStream(resp.Body)
+		return m, err, false
 	}
-	return c.parseJSON(resp.Body) // server ignored stream (e.g. a test fake)
+	m, err := c.parseJSON(resp.Body) // server ignored stream (e.g. a test fake)
+	return m, err, false
+}
+
+// oneLine collapses a (possibly HTML) error body to a short single line.
+func oneLine(s string) string {
+	return truncate(strings.Join(strings.Fields(s), " "), 150)
 }
 
 // parseStream reads an SSE stream, accumulating content and tool calls, and ticks

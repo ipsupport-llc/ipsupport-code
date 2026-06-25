@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 )
@@ -22,22 +25,32 @@ const (
 	stApprove
 )
 
-// tuiModel runs in INLINE mode (no alt-screen): the transcript is printed into
-// the terminal's normal scrollback via tea.Println — so native scrolling and
-// Ctrl-L keep working — and only the bottom region (divider, status, input box,
-// status bar) is the live, redrawn View.
+// chromeRows: status line + top rule + input + bottom rule + hint line.
+const chromeRows = 5
+
+// tuiModel is a full-screen coding-agent UI: a scrollable log fills the screen,
+// and a bottom region (a titled top rule, the input line, a bottom rule, and a
+// hint) holds the chat. The input stays live while a task runs — Enter queues
+// type-ahead. Scrolling is in-app (↑↓ / PgUp/PgDn; iTerm maps the wheel to
+// arrows in alt-screen); Ctrl-L clears the log.
 type tuiModel struct {
 	app    *app
 	ctx    context.Context
 	bridge *uiBridge
 
+	vp    viewport.Model
 	input textinput.Model
 	spin  spinner.Model
 
 	state         uiState
+	history       []string
+	queued        []string // type-ahead while a task runs
 	pending       *approvalReq
 	cancel        context.CancelFunc
+	taskStart     time.Time
+	startTok      int
 	width, height int
+	ready         bool
 }
 
 // Bubble Tea messages.
@@ -45,8 +58,6 @@ type eventMsg uiEvent
 type approvalMsg approvalReq
 type taskDoneMsg struct{}
 
-// runTUI installs the UI bridge as the agent's tracer + approver, then runs the
-// Bubble Tea program in inline mode.
 func (a *app) runTUI(ctx context.Context) error {
 	b := newBridge()
 	a.uiTracer = b
@@ -57,21 +68,22 @@ func (a *app) runTUI(ctx context.Context) error {
 
 	in := textinput.New()
 	in.Placeholder = "type a task, or /help"
-	in.Prompt = "› "
+	in.Prompt = "❯ "
 	in.Focus()
 
 	sp := spinner.New()
-	sp.Spinner = spinner.Dot
+	sp.Spinner = spinner.Points
 	sp.Style = cToolCall
 
 	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle}
-	_, err := tea.NewProgram(m, tea.WithContext(ctx)).Run()
+	m.history = []string{cDim.Render("ipsupport-code — type a task, or /help. ctrl-l clear · ↑↓ scroll · ctrl-c quit")}
+
+	_, err := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx)).Run()
 	return err
 }
 
 func (m *tuiModel) Init() tea.Cmd {
-	banner := cTitle.Render("ipsupport-code") + cDim.Render("  — task or /help · ctrl-c quit · ctrl-l clear")
-	return tea.Batch(m.spin.Tick, textinput.Blink, m.waitEvent(), m.waitApproval(), tea.Println(banner))
+	return tea.Batch(m.spin.Tick, textinput.Blink, m.waitEvent(), m.waitApproval())
 }
 
 func (m *tuiModel) waitEvent() tea.Cmd {
@@ -86,7 +98,17 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
-		m.input.Width = msg.Width - 6
+		h := m.viewportHeight()
+		if !m.ready {
+			m.vp = viewport.New(msg.Width, h)
+			m.ready = true
+		} else {
+			m.vp.Width = msg.Width
+			m.vp.Height = h
+		}
+		m.input.Width = msg.Width - 4
+		m.vp.SetContent(strings.Join(m.history, "\n"))
+		m.vp.GotoBottom()
 		return m, nil
 
 	case spinner.TickMsg:
@@ -95,53 +117,84 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case eventMsg:
-		return m, tea.Batch(m.print(eventLines(uiEvent(msg))...), m.waitEvent())
+		m.push(eventLines(uiEvent(msg))...)
+		return m, m.waitEvent()
 
 	case approvalMsg:
 		req := approvalReq(msg)
 		m.pending = &req
 		m.state = stApprove
-		line := cToolCall.Render("  ⚠ approve "+req.kind+": ") + req.detail + cDim.Render("  [y/N]")
-		return m, tea.Batch(m.print(line), m.waitApproval())
+		m.push(cToolCall.Render("  ⚠ approve "+req.kind+": ") + req.detail + cDim.Render("  [y/N]"))
+		return m, m.waitApproval()
 
 	case taskDoneMsg:
 		m.state = stIdle
 		m.cancel = nil
+		if len(m.queued) > 0 { // run the next type-ahead
+			next := m.queued[0]
+			m.queued = m.queued[1:]
+			m.push(cYou.Render("❯ ") + next)
+			return m, m.runGoals(1, next)
+		}
 		return m, m.input.Focus()
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
-	return m, nil
+
+	var cmd tea.Cmd
+	m.vp, cmd = m.vp.Update(msg)
+	return m, cmd
 }
 
 func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if k.String() == "ctrl+l" {
-		return m, tea.ClearScreen
+	switch k.String() {
+	case "ctrl+c":
+		return m, tea.Quit
+	case "ctrl+l":
+		m.history = m.history[:0]
+		if m.ready {
+			m.vp.SetContent("")
+		}
+		return m, nil
 	}
+
 	switch m.state {
 	case stApprove:
 		switch k.String() {
 		case "y", "Y":
-			return m, m.resolveApproval(true)
+			m.resolveApproval(true)
 		case "n", "N", "esc", "enter":
-			return m, m.resolveApproval(false)
+			m.resolveApproval(false)
 		}
 		return m, nil
 
 	case stRunning:
-		if s := k.String(); s == "ctrl+c" || s == "esc" {
+		switch k.String() {
+		case "esc":
 			if m.cancel != nil {
 				m.cancel()
 			}
-			return m, m.print(cDim.Render("  …cancelling"))
+			m.push(cDim.Render("  …cancelling"))
+			return m, nil
+		case "enter":
+			if line := strings.TrimSpace(m.input.Value()); line != "" {
+				m.input.SetValue("")
+				m.queued = append(m.queued, line)
+				m.push(cDim.Render("queued ❯ ") + line)
+			}
+			return m, nil
+		case "up", "down", "pgup", "pgdown", "home", "end":
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(k)
+			return m, cmd
 		}
-		return m, nil
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(k) // live typing while it thinks
+		return m, cmd
 
 	default: // idle
 		switch k.String() {
-		case "ctrl+c":
-			return m, tea.Quit
 		case "enter":
 			line := strings.TrimSpace(m.input.Value())
 			m.input.SetValue("")
@@ -149,6 +202,10 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			return m.submit(line)
+		case "up", "down", "pgup", "pgdown", "home", "end":
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(k)
+			return m, cmd
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(k)
@@ -156,10 +213,10 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-func (m *tuiModel) resolveApproval(ok bool) tea.Cmd {
+func (m *tuiModel) resolveApproval(ok bool) {
 	m.state = stRunning
 	if m.pending == nil {
-		return nil
+		return
 	}
 	m.pending.reply <- ok
 	m.pending = nil
@@ -167,56 +224,65 @@ func (m *tuiModel) resolveApproval(ok bool) tea.Cmd {
 	if ok {
 		verdict = cOk.Render("allowed")
 	}
-	return m.print(cDim.Render("  → ") + verdict)
+	m.push(cDim.Render("  → ") + verdict)
 }
 
 func (m *tuiModel) submit(line string) (tea.Model, tea.Cmd) {
 	if strings.HasPrefix(line, "/") {
 		return m.runCommand(line)
 	}
-	return m, tea.Batch(m.print(cYou.Render("you › ")+line), m.runGoals(1, line))
+	m.push(cYou.Render("❯ ") + line)
+	return m, m.runGoals(1, line)
 }
 
 func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	cmd, rest := splitCommand(line)
 	switch cmd {
 	case "/help", "/?":
-		return m, m.printBlock(helpText())
+		m.pushBlock(helpText())
 	case "/status":
-		return m, m.printBlock(m.app.statusText())
+		m.pushBlock(m.app.statusText())
 	case "/usage":
-		return m, m.printBlock(m.app.usageText())
+		m.pushBlock(m.app.usageText())
 	case "/login":
 		if err := m.app.reconfigure(); err != nil {
-			return m, m.print(cErr.Render("reload failed: " + err.Error()))
+			m.push(cErr.Render("reload failed: " + err.Error()))
+		} else {
+			m.push(cDim.Render("config reloaded from " + config.GlobalPath() + " — edit it or run `ipsupport-code -init` to change the connection"))
 		}
-		return m, m.print(cDim.Render("config reloaded from " + config.GlobalPath() + " — edit it or run `ipsupport-code -init` to change the connection"))
 	case "/new", "/reset":
 		m.app.ag.Reset()
-		return m, m.print(cDim.Render("session cleared"))
+		m.push(cDim.Render("session cleared"))
 	case "/goal":
 		if rest == "" {
-			return m, m.print(cDim.Render("usage: /goal <task>"))
+			m.push(cDim.Render("usage: /goal <task>"))
+			return m, nil
 		}
-		return m, tea.Batch(m.print(cYou.Render("you › ")+rest), m.runGoals(1, rest))
+		m.push(cYou.Render("❯ ") + rest)
+		return m, m.runGoals(1, rest)
 	case "/loop":
 		n, goal := parseLoop(rest)
 		if goal == "" {
-			return m, m.print(cDim.Render("usage: /loop [count] <task>"))
+			m.push(cDim.Render("usage: /loop [count] <task>"))
+			return m, nil
 		}
-		return m, tea.Batch(m.print(cYou.Render(fmt.Sprintf("you › /loop %d ", n))+goal), m.runGoals(n, goal))
+		m.push(cYou.Render(fmt.Sprintf("❯ /loop %d ", n)) + goal)
+		return m, m.runGoals(n, goal)
 	case "/exit", "/quit":
 		return m, tea.Quit
 	default:
-		return m, m.print(cDim.Render("unknown command " + cmd + " — /help"))
+		m.push(cDim.Render("unknown command " + cmd + " — /help"))
 	}
+	return m, nil
 }
 
 // runGoals sets running state and returns a cmd that runs the goal n times in the
 // background, streaming via the bridge and ending with taskDoneMsg.
 func (m *tuiModel) runGoals(n int, goal string) tea.Cmd {
 	m.state = stRunning
-	m.input.Blur()
+	m.taskStart = time.Now()
+	p, c := m.app.client.Usage()
+	m.startTok = p + c
 	tctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel
 	return func() tea.Msg {
@@ -235,48 +301,76 @@ func (m *tuiModel) runGoals(n int, goal string) tea.Cmd {
 }
 
 func (m *tuiModel) View() string {
-	width := m.width
-	if width < 1 {
-		width = 60
+	if !m.ready {
+		return "loading…"
 	}
+	p, c := m.app.client.Usage()
+	total := p + c
+
 	var status string
 	switch m.state {
 	case stRunning:
-		status = m.spin.View() + cDim.Render(" working… (esc to cancel)")
+		elapsed := time.Since(m.taskStart).Truncate(time.Second)
+		status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" Thinking… (%s · ↓%s tok)", elapsed, humanK(total-m.startTok)))
 	case stApprove:
-		status = cToolCall.Render("approve? press y / n")
+		status = cToolCall.Render("⚠ approve? press y / n")
 	default:
-		status = cDim.Render("ready · /help for commands")
+		status = cDim.Render(fmt.Sprintf("%s · %s · %d tok · ready", m.app.cfg.LLM.Model, filepath.Base(m.app.workspace), total))
 	}
 
-	field := m.input.View()
-	if m.state != stIdle {
-		field = cDim.Render("(input disabled while a task runs)")
+	hint := cDim.Render("/help · ctrl-l clear · ↑↓ scroll · ctrl-c quit")
+	if m.state == stRunning {
+		hint = cDim.Render("typing is live — Enter queues · esc cancels · ↑↓ scroll")
 	}
-	box := cBox.Width(width - 4).Render(field)
 
-	p, c := m.app.client.Usage()
-	bar := cDim.Render(fmt.Sprintf("%s · %s · %d tok", m.app.cfg.LLM.Model, filepath.Base(m.app.workspace), p+c))
-	divider := cDim.Render(strings.Repeat("─", width))
-
-	return strings.Join([]string{divider, status, box, bar}, "\n")
+	return strings.Join([]string{
+		m.vp.View(),
+		status,
+		m.topRule(),
+		m.input.View(),
+		cDim.Render(strings.Repeat("─", m.width)),
+		hint,
+	}, "\n")
 }
 
-// print emits transcript lines into the terminal's scrollback (above the live
-// region). Multiple lines are joined so they print atomically and in order.
-func (m *tuiModel) print(lines ...string) tea.Cmd {
+// topRule draws "────…──── ipsupport-code ──" with the label pinned right.
+func (m *tuiModel) topRule() string {
+	const label = "ipsupport-code"
+	right := " " + label + " ──"
+	n := m.width - lipgloss.Width(right)
+	if n < 0 {
+		n = 0
+	}
+	return cDim.Render(strings.Repeat("─", n)+" ") + cTitle.Render(label) + cDim.Render(" ──")
+}
+
+func (m *tuiModel) viewportHeight() int {
+	if h := m.height - chromeRows - 1; h > 0 { // -1: status row sits above the rule
+		return h
+	}
+	return 1
+}
+
+// push appends styled lines to the log, auto-scrolling to the bottom only if the
+// user was already there (so scrolling up to read isn't interrupted).
+func (m *tuiModel) push(lines ...string) {
 	if len(lines) == 0 {
-		return nil
+		return
 	}
-	return tea.Println(strings.Join(lines, "\n"))
+	atBottom := !m.ready || m.vp.AtBottom()
+	m.history = append(m.history, lines...)
+	if m.ready {
+		m.vp.SetContent(strings.Join(m.history, "\n"))
+		if atBottom {
+			m.vp.GotoBottom()
+		}
+	}
 }
 
-func (m *tuiModel) printBlock(s string) tea.Cmd {
-	var lines []string
+func (m *tuiModel) pushBlock(s string) {
 	for _, ln := range strings.Split(strings.TrimRight(s, "\n"), "\n") {
-		lines = append(lines, cDim.Render(ln))
+		m.push(cDim.Render(ln))
 	}
-	return m.print(lines...)
 }
 
 // eventLines renders one streamed agent event into styled history lines.
@@ -341,6 +435,13 @@ func firstLine(s string) string {
 		s = s[:200] + "…"
 	}
 	return s
+}
+
+func humanK(n int) string {
+	if n >= 1000 {
+		return fmt.Sprintf("%.1fk", float64(n)/1000)
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 func toInt(v any) int {

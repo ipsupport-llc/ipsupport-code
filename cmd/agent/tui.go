@@ -163,6 +163,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.n == 0:
 			m.push(cDim.Render("nothing to compact"))
 		default:
+			m.app.saveSession()
 			m.push(cDim.Render(fmt.Sprintf("compacted %d messages → summary", msg.n)))
 		}
 		return m, m.input.Focus()
@@ -284,9 +285,11 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		}
 	case "/new", "/reset":
 		m.app.ag.Reset()
+		m.app.saveSession()
 		m.push(cDim.Render("session cleared"))
 	case "/clear":
 		m.app.ag.Reset()
+		m.app.saveSession()
 		m.history = m.history[:0]
 		if m.ready {
 			m.vp.SetContent("")

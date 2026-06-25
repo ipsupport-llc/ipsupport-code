@@ -24,9 +24,10 @@ machine, with your own model, under a permission policy you control.
   are injected straight into the error the model sees — it doesn't have to ask.
 - **Reflection.** After a task, a second model pass distills durable lessons into
   `~/.config/ipsupport-code/knowledge.json`. They're available next run.
-- **Session memory.** Within a REPL session it remembers the conversation (your
-  goals and its answers carry across turns), so "what did we just do?" works.
-  `/new` clears it.
+- **Session memory.** It remembers the conversation (your goals and its answers)
+  across turns — and **across restarts**: the session is persisted per workspace
+  (`.agent/session.json`), so reopening in the same directory recalls the prior
+  context. `/new` or `/clear` wipes it; `/compact` summarizes it to free context.
 - **Project instructions.** On startup it reads a `CLAUDE.md` (or `AGENTS.md`, or
   `.agent/instructions.md`) from the workspace and folds it into the system prompt,
   so the model follows your project's conventions.

@@ -56,6 +56,12 @@ func (a *Agent) Reset() { a.history = nil }
 // SessionLen reports how many remembered messages are in the current session.
 func (a *Agent) SessionLen() int { return len(a.history) }
 
+// History returns a copy of the session conversation (for persistence).
+func (a *Agent) History() []llm.Message { return append([]llm.Message(nil), a.history...) }
+
+// SetHistory restores a session conversation (e.g. loaded from disk).
+func (a *Agent) SetHistory(h []llm.Message) { a.history = append([]llm.Message(nil), h...) }
+
 // Compact summarizes the session so far into a short recap and replaces the
 // history with it, freeing context while keeping continuity. Returns how many
 // messages were compacted (0 if there was nothing worth compacting).

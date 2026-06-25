@@ -55,6 +55,38 @@ func tuiTestApp(t *testing.T, url string) *app {
 	return &app{cfg: c, workspace: c.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
 }
 
+func TestSessionPersistsAcrossRestarts(t *testing.T) {
+	url := tuiFakeServer(t, tuiContent("first answer"))
+	ws := t.TempDir()
+
+	mk := func() *app {
+		kb, _ := knowledge.Open(filepath.Join(t.TempDir(), "kb.json"))
+		c := config.Default()
+		c.Workspace, c.LLM.BaseURL, c.LLM.Model = ws, url, "fake"
+		c.Run.Default, c.File.Default, c.File.Jail = "allow", "allow", "."
+		a := &app{cfg: c, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+		a.approver = &stdinApprover{r: a.reader}
+		if err := a.wire(); err != nil {
+			t.Fatal(err)
+		}
+		a.loadSession()
+		return a
+	}
+
+	first := mk()
+	first.runOne(context.Background(), "remember this")
+	if first.ag.SessionLen() == 0 {
+		t.Fatal("no session memory after a run")
+	}
+
+	// A brand-new process for the same workspace must recover the conversation.
+	second := mk()
+	if second.ag.SessionLen() != first.ag.SessionLen() {
+		t.Errorf("session not persisted: reloaded %d messages, want %d",
+			second.ag.SessionLen(), first.ag.SessionLen())
+	}
+}
+
 // Drive the real TUI model end to end: type a task, press Enter, and confirm the
 // streamed final answer reaches the screen.
 func TestTUI_E2E_StreamsAnswer(t *testing.T) {

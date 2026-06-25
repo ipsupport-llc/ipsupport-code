@@ -134,6 +134,10 @@ func (a *app) wire() error {
 	)
 	a.tracer = trace.Multi(a.fileTracer, a.uiTracer)
 	a.client = llm.NewOpenAIClient(a.cfg.LLM)
+	a.client.OnRetry = func(attempt int, wait time.Duration, reason string) {
+		slog.Warn("llm retry", "attempt", attempt, "wait", wait, "reason", reason)
+		a.emit("retry", map[string]any{"attempt": attempt, "wait_ms": wait.Milliseconds(), "reason": reason})
+	}
 	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.cfg.LLM.MaxSteps)
 	a.refl = reflect.New(a.client)
 	return nil

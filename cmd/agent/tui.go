@@ -167,6 +167,9 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.lastErr, _ = e.fields["is_error"].(bool)
 			}
 			m.push(m.renderEvent(e)...)
+			if e.kind == "final" { // final is FIFO-last → lastTool is set by now
+				m.setSuggestion()
+			}
 		}
 		return m, m.waitEvent()
 
@@ -187,7 +190,6 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.push(cYou.Render("❯ ") + next)
 			return m, m.runGoals(1, next)
 		}
-		m.setSuggestion() // offer a next step as Tab-acceptable ghost text
 		return m, m.input.Focus()
 
 	case compactDoneMsg:
@@ -422,11 +424,12 @@ func (m *tuiModel) rename(name string) {
 // last tool action.
 func (m *tuiModel) setSuggestion() {
 	m.suggestion = suggestFor(m.lastTool, m.lastAction, m.lastErr)
-	if m.suggestion != "" {
-		m.input.Placeholder = m.suggestion + "   (Tab to accept)"
-	} else {
+	if m.suggestion == "" {
 		m.input.Placeholder = defaultPlaceholder
+		return
 	}
+	m.input.Placeholder = m.suggestion + "   (Tab to accept)"
+	m.push(cDim.Render("  💡 next: ") + m.accentBold().Render(m.suggestion) + cDim.Render("   (Tab)"))
 }
 
 func suggestFor(tool, action string, errored bool) string {

@@ -35,6 +35,15 @@ func tuiFakeServer(t *testing.T, responses ...string) string {
 	return srv.URL
 }
 
+func tuiToolCall(name, argsJSON string) string {
+	b, _ := json.Marshal(map[string]any{"choices": []map[string]any{{"message": map[string]any{
+		"role": "assistant", "content": "",
+		"tool_calls": []map[string]any{{"id": "c1", "type": "function",
+			"function": map[string]any{"name": name, "arguments": argsJSON}}},
+	}}}})
+	return string(b)
+}
+
 func tuiContent(text string) string {
 	b, _ := json.Marshal(map[string]any{
 		"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": text}}},
@@ -103,6 +112,30 @@ func TestTUI_E2E_StreamsAnswer(t *testing.T) {
 
 	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
 		return strings.Contains(string(b), "hello from the model")
+	}, teatest.WithDuration(5*time.Second))
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+}
+
+// After a file-write task, the TUI offers "run it" as a next-step suggestion.
+func TestTUI_E2E_SuggestsNextStep(t *testing.T) {
+	url := tuiFakeServer(t,
+		tuiToolCall("file", `{"action":"write","params":{"path":"hello.sh","content":"echo hi"}}`),
+		tuiContent("created hello.sh"),
+	)
+	a := tuiTestApp(t, url)
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 40))
+	tm.Type("make a script")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return strings.Contains(string(b), "run it")
 	}, teatest.WithDuration(5*time.Second))
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})

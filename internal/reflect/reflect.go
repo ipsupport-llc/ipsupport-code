@@ -36,8 +36,13 @@ Return ONLY a JSON array of objects with keys: "domain", "error_pattern", "conte
 - Keep lessons environment-general (tool/OS behaviour). EXCLUDE anything specific to this project, path, or task.
 - If there is nothing durable to learn, return exactly [].`
 
-// Reflect returns the durable pitfalls learned from t.
+// Reflect returns the durable pitfalls learned from t. A turn with no tool use
+// (a plain chat exchange) has nothing to learn, so it skips the model call
+// entirely — no point making a small model reason over an empty run.
 func (r *Reflector) Reflect(ctx context.Context, t agent.Transcript) ([]knowledge.Pitfall, error) {
+	if !usedTools(t) {
+		return nil, nil
+	}
 	summary := summarize(t)
 	if strings.TrimSpace(summary) == "" {
 		return nil, nil
@@ -76,6 +81,16 @@ func summarize(t agent.Transcript) string {
 		fmt.Fprintf(&b, "FINAL: %s\n", oneLine(t.Final))
 	}
 	return b.String()
+}
+
+// usedTools reports whether the run actually called any tool.
+func usedTools(t agent.Transcript) bool {
+	for _, m := range t.Messages {
+		if m.Role == "tool" {
+			return true
+		}
+	}
+	return false
 }
 
 func oneLine(s string) string {

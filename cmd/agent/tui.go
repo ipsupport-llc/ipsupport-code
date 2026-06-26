@@ -565,10 +565,13 @@ func (m *tuiModel) View() string {
 		} else {
 			elapsed := time.Since(m.taskStart).Truncate(time.Second)
 			gen := c - m.startTok // completion tokens generated this task
-			if gen < 0 {
-				gen = 0
+			// Until the first token streams (the model is still reading the
+			// prompt) show just the clock — a stuck "↑0 tok" reads as broken.
+			detail := elapsed.String()
+			if gen > 0 {
+				detail = fmt.Sprintf("%s · ↑%s tok", elapsed, humanK(gen))
 			}
-			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" Thinking… (%s · ↑%s tok)", elapsed, humanK(gen)))
+			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" Thinking… (%s)", detail))
 		}
 	case stApprove:
 		status = cToolCall.Render("⚠ approve?  y / n  ·  esc denies  ·  ctrl-c quits")

@@ -721,7 +721,7 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 	switch e.kind {
 	case "assistant":
 		if c, _ := e.fields["content"].(string); strings.TrimSpace(c) != "" {
-			return []string{cBot.Render(c)}
+			return strings.Split(renderMarkdown(c, m.width), "\n")
 		}
 	case "tool_call":
 		t, _ := e.fields["tool"].(string)

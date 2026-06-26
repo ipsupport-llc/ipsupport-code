@@ -105,6 +105,29 @@ func TestSessionSurvivesTUILaunch(t *testing.T) {
 	}
 }
 
+// Changed-your-mind: while a task runs, Up with an empty input pulls the most
+// recent queued (type-ahead) message back into the input to edit or drop.
+func TestUpRecallsQueuedMessage(t *testing.T) {
+	m := &tuiModel{input: textinput.New(), state: stRunning, queued: []string{"first", "second"}}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyUp})
+	if m.input.Value() != "second" {
+		t.Errorf("recalled %q, want 'second'", m.input.Value())
+	}
+	if len(m.queued) != 1 || m.queued[0] != "first" {
+		t.Errorf("queue after recall = %v, want [first]", m.queued)
+	}
+}
+
+func TestRenderMarkdownKeepsContent(t *testing.T) {
+	out := renderMarkdown("Wrote **hello.sh** and ran it.", 80)
+	if !strings.Contains(out, "hello.sh") {
+		t.Errorf("markdown render dropped content: %q", out)
+	}
+	if renderMarkdown("", 80) != "" {
+		t.Error("empty input must stay empty")
+	}
+}
+
 // The pipe-through-script smoke test can't reliably confirm quit semantics, so
 // verify the exit path directly: /exit must yield tea.Quit.
 func TestExitCommandQuits(t *testing.T) {

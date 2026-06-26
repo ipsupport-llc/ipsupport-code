@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -103,8 +104,29 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 		name = "ipsupport-code"
 	}
 	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: lipgloss.Color("13")}
-	m.history = []string{cDim.Render(name + " — type a task, or /help. ctrl-l clear · ↑↓ scroll · ctrl-c quit")}
+	m.history = bannerLines(name, a.cfg.LLM.Model, a.workspace, m.accent)
 	return m, nil
+}
+
+// bannerLines builds the Claude-Code-style startup card: a rounded box with the
+// agent name, model, and working directory, then a one-line key hint.
+func bannerLines(name, model, cwd string, accent lipgloss.Color) []string {
+	if h, err := os.UserHomeDir(); err == nil && h != "" && strings.HasPrefix(cwd, h) {
+		cwd = "~" + cwd[len(h):]
+	}
+	label := lipgloss.NewStyle().Bold(true).Foreground(accent)
+	body := strings.Join([]string{
+		label.Render("✦ " + name),
+		cDim.Render("model  ") + cBot.Render(model),
+		cDim.Render("cwd    ") + cBot.Render(cwd),
+	}, "\n")
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(accent).
+		Padding(0, 2).
+		Render(body)
+	hint := cDim.Render("type a task, or /help · ctrl-l clear · ↑↓ scroll · ctrl-c quit")
+	return append(strings.Split(box, "\n"), "", hint)
 }
 
 func (a *app) runTUI(ctx context.Context) error {
@@ -250,7 +272,19 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.queued = append(m.queued, line) // type-ahead: run after the task
 			m.push(cDim.Render("queued ❯ ") + line)
 			return m, nil
-		case "up", "down", "pgup", "pgdown", "home", "end":
+		case "up":
+			// Changed your mind about a queued message? With an empty input, Up
+			// pulls the last one back to edit (Enter re-queues it; clear to drop).
+			if strings.TrimSpace(m.input.Value()) == "" && len(m.queued) > 0 {
+				last := m.queued[len(m.queued)-1]
+				m.queued = m.queued[:len(m.queued)-1]
+				m.input.SetValue(last)
+				m.input.CursorEnd()
+				m.push(cDim.Render("  ↑ editing queued — Enter re-queues, clear to drop"))
+				return m, nil
+			}
+			fallthrough
+		case "down", "pgup", "pgdown", "home", "end":
 			var cmd tea.Cmd
 			m.vp, cmd = m.vp.Update(k)
 			return m, cmd
@@ -717,7 +751,7 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		return m.renderDiff(path, d)
 	case "final":
 		if c, _ := e.fields["text"].(string); strings.TrimSpace(c) != "" {
-			return []string{"", cFinal.Render(c)}
+			return append([]string{""}, strings.Split(renderMarkdown(c, m.width), "\n")...)
 		}
 	case "lesson":
 		d, _ := e.fields["domain"].(string)

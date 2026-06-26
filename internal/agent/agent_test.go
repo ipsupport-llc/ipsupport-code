@@ -87,6 +87,24 @@ func TestRunInjectsPitfall(t *testing.T) {
 	}
 }
 
+func TestHintsRequireErrorPatternMatch(t *testing.T) {
+	kb, _ := knowledge.Open(filepath.Join(t.TempDir(), "k.json"))
+	kb.Add(knowledge.Pitfall{
+		Domain: "file", ErrorPattern: "missing required param(s): path",
+		Context: "file: edit", ProvenFix: "include the path param",
+	})
+	a := New(&scriptLLM{}, tool.NewRegistry(tool.NewCalc()), kb, nil, "", 5)
+
+	// An unrelated error (e.g. "no action") must NOT surface the path pitfall.
+	if h := a.hints("file", `file: no action given — set "action" to one of: read, write`); h != "" {
+		t.Errorf("irrelevant hint injected: %q", h)
+	}
+	// The same error recurring does.
+	if h := a.hints("file", "edit failed: missing required param(s): path"); !strings.Contains(h, "include the path param") {
+		t.Errorf("relevant hint not injected: %q", h)
+	}
+}
+
 func TestSessionMemoryCarriesAcrossRuns(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
 	fake := &scriptLLM{replies: []llm.Message{

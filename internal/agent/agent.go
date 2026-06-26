@@ -292,18 +292,23 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool)
 	return llm.ToolResult(c.ID, c.Name, content), res.IsError
 }
 
-// hints pulls matching learned pitfalls for a failed tool call.
+// hints pulls matching learned pitfalls for a failed tool call. A pitfall is only
+// surfaced when its error pattern actually occurs in THIS error — otherwise a
+// loosely keyword-matched lesson (e.g. a "missing path" fix shown on a "no
+// action" error) just misleads a weak model.
 func (a *Agent) hints(domain, errText string) string {
 	if a.kb == nil {
 		return ""
 	}
-	ps := a.kb.Query(domain, errText, 3)
-	if len(ps) == 0 {
-		return ""
-	}
+	low := strings.ToLower(errText)
 	var b strings.Builder
-	b.WriteString("Hints from past runs:")
-	for _, p := range ps {
+	for _, p := range a.kb.Query(domain, errText, 3) {
+		if p.ErrorPattern == "" || !strings.Contains(low, strings.ToLower(p.ErrorPattern)) {
+			continue
+		}
+		if b.Len() == 0 {
+			b.WriteString("Hints from past runs:")
+		}
 		fmt.Fprintf(&b, "\n- when you saw %q while %s, this worked: %s", p.ErrorPattern, p.Context, p.ProvenFix)
 	}
 	return b.String()

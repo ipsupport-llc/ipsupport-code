@@ -256,7 +256,9 @@ func (c *OpenAIClient) parseStream(r io.Reader) (Message, error) {
 	}
 	msg := Message{Role: "assistant", Content: content.String()}
 	for _, idx := range order {
-		msg.ToolCalls = append(msg.ToolCalls, *calls[idx])
+		c := *calls[idx]
+		c.Arguments = validArgs(c.Arguments)
+		msg.ToolCalls = append(msg.ToolCalls, c)
 	}
 	return msg, nil
 }
@@ -338,9 +340,20 @@ func toWire(m Message) wireMessage {
 func fromWire(w wireMessage) Message {
 	m := Message{Role: w.Role, Content: w.Content, ToolCallID: w.ToolCallID, Name: w.Name}
 	for _, tc := range w.ToolCalls {
-		m.ToolCalls = append(m.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: tc.Function.Arguments})
+		m.ToolCalls = append(m.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: validArgs(tc.Function.Arguments)})
 	}
 	return m
+}
+
+// validArgs normalizes a tool call's arguments to valid JSON. Small models
+// sometimes emit empty or malformed arguments; echoing those back in the
+// conversation can break a server's chat template (LM Studio 500s), so coerce
+// them to "{}" — the dispatcher then reports the missing action/params normally.
+func validArgs(s string) string {
+	if json.Valid([]byte(s)) {
+		return s
+	}
+	return "{}"
 }
 
 func truncate(s string, n int) string {

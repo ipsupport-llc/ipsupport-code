@@ -140,7 +140,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.vp.Height = h
 		}
 		m.input.Width = msg.Width - 4
-		m.vp.SetContent(strings.Join(m.history, "\n"))
+		m.vp.SetContent(m.renderContent())
 		m.vp.GotoBottom()
 		return m, nil
 
@@ -542,11 +542,30 @@ func (m *tuiModel) push(lines ...string) {
 	atBottom := !m.ready || m.vp.AtBottom()
 	m.history = append(m.history, lines...)
 	if m.ready {
-		m.vp.SetContent(strings.Join(m.history, "\n"))
+		m.vp.SetContent(m.renderContent())
 		if atBottom {
 			m.vp.GotoBottom()
 		}
 	}
+}
+
+// renderContent joins the log, soft-wrapping any line wider than the viewport so
+// a long single-line input/answer doesn't run off the edge. Lines that already
+// fit (including the width-padded diff rows) pass through untouched.
+func (m *tuiModel) renderContent() string {
+	if m.width < 1 {
+		return strings.Join(m.history, "\n")
+	}
+	wrap := lipgloss.NewStyle().Width(m.width)
+	out := make([]string, len(m.history))
+	for i, ln := range m.history {
+		if lipgloss.Width(ln) > m.width {
+			out[i] = wrap.Render(ln)
+		} else {
+			out[i] = ln
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 // commandList is the single source for Tab completion and the /help display.
@@ -894,6 +913,8 @@ func toInt(v any) int {
 	switch n := v.(type) {
 	case int:
 		return n
+	case int64:
+		return int(n)
 	case float64:
 		return int(n)
 	}

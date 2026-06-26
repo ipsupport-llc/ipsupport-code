@@ -3,7 +3,9 @@ package reflect
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
@@ -89,6 +91,15 @@ func TestReflectSkipsWithoutToolUse(t *testing.T) {
 	}
 	if len(lessons) != 0 {
 		t.Errorf("lessons = %v, want none", lessons)
+	}
+}
+
+// oneLine must clip on a rune boundary so a long Cyrillic transcript line never
+// writes a broken trailing rune into the knowledge base or the trace dataset.
+func TestOneLineRuneSafe(t *testing.T) {
+	got := oneLine(strings.Repeat("я", 600)) // 2 bytes each → 500-byte cap lands mid-rune
+	if !utf8.ValidString(got) {
+		t.Errorf("oneLine produced invalid UTF-8: %q", got)
 	}
 }
 

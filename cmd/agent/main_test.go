@@ -1,12 +1,21 @@
 package main
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
+	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 )
 
 func TestSplitCommand(t *testing.T) {
@@ -59,6 +68,40 @@ func TestRenderDiff(t *testing.T) {
 	}
 	if !strings.Contains(out, bgGreen) || !strings.Contains(out, bgRed) {
 		t.Error("missing green/red row backgrounds")
+	}
+}
+
+// A restored session must survive opening the TUI. newTUIModel re-wires the
+// stack to install its bridge, which rebuilds the agent; if that rebuild drops
+// the loaded history, every launch starts from a clean slate (the reported bug).
+func TestSessionSurvivesTUILaunch(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hist := []llm.Message{llm.User("build a thing"), {Role: "assistant", Content: "built it"}}
+	data, _ := json.Marshal(hist)
+	if err := os.WriteFile(filepath.Join(ws, ".agent", "session.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.loadSession()
+	if a.ag.SessionLen() != 2 {
+		t.Fatalf("after loadSession SessionLen=%d, want 2", a.ag.SessionLen())
+	}
+
+	if _, err := a.newTUIModel(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.ag.SessionLen(); got != 2 {
+		t.Errorf("session dropped when TUI launched: SessionLen=%d, want 2", got)
 	}
 }
 

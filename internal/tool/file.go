@@ -31,11 +31,11 @@ func NewFile(p *policy.Engine, ap Approver) Tool {
 		NotHere: "NOT here — shell → run; web/fetch → web; math → calc.",
 		Actions: []Action{
 			{Name: "read", Params: []Param{Req("path", "str")}, Run: f.read},
-			{Name: "write", Params: []Param{Req("path", "str"), Req("content", "str")}, Note: "(overwrites the whole file)", Run: f.write},
-			{Name: "append", Params: []Param{Req("path", "str"), Req("content", "str")}, Run: f.appendFile},
-			{Name: "edit", Params: []Param{Req("path", "str"), Req("find", "str"), Req("replace", "str")}, Note: "(replaces first match; prefer this for partial changes)", Run: f.edit},
+			{Name: "write", Mutates: true, Params: []Param{Req("path", "str"), Req("content", "str")}, Note: "(overwrites the whole file)", Run: f.write},
+			{Name: "append", Mutates: true, Params: []Param{Req("path", "str"), Req("content", "str")}, Run: f.appendFile},
+			{Name: "edit", Mutates: true, Params: []Param{Req("path", "str"), Req("find", "str"), Req("replace", "str")}, Note: "(replaces first match; prefer this for partial changes)", Run: f.edit},
 			{Name: "list", Params: []Param{Opt("path", "str", ".")}, Run: f.list},
-			{Name: "mkdir", Params: []Param{Req("path", "str")}, Run: f.mkdir},
+			{Name: "mkdir", Mutates: true, Params: []Param{Req("path", "str")}, Run: f.mkdir},
 		},
 	})
 }

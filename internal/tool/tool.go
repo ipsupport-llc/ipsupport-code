@@ -61,6 +61,9 @@ type Tool interface {
 	Description() string
 	Actions() []string
 	Call(ctx context.Context, action string, params map[string]any) Result
+	// Mutates reports whether an action changes state (writes a file, runs a
+	// command, alters git). Plan mode blocks these; read-only actions stay open.
+	Mutates(action string) bool
 }
 
 // Require returns an error naming every missing/empty required param at once, so

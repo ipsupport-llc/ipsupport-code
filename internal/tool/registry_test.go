@@ -9,12 +9,14 @@ import (
 type fakeTool struct {
 	name    string
 	actions []string
+	mutates []string
 	last    string
 }
 
 func (f *fakeTool) Name() string        { return f.name }
-func (f *fakeTool) Description() string { return f.name + " tool" }
-func (f *fakeTool) Actions() []string   { return f.actions }
+func (f *fakeTool) Description() string  { return f.name + " tool" }
+func (f *fakeTool) Actions() []string    { return f.actions }
+func (f *fakeTool) Mutates(a string) bool { return contains(f.mutates, a) }
 func (f *fakeTool) Call(_ context.Context, action string, _ map[string]any) Result {
 	f.last = action
 	return Ok("did " + action)
@@ -59,6 +61,20 @@ func TestOpenAIToolsSchema(t *testing.T) {
 	enum := props["action"].(map[string]any)["enum"].([]string)
 	if len(enum) != 1 || enum[0] != "calculate" {
 		t.Errorf("action enum = %v, want [calculate]", enum)
+	}
+}
+
+func TestRegistryMutates(t *testing.T) {
+	ft := &fakeTool{name: "file", actions: []string{"read", "write"}, mutates: []string{"write"}}
+	r := NewRegistry(ft)
+	if r.Mutates("file", "read") {
+		t.Error("read should be read-only")
+	}
+	if !r.Mutates("file", "write") {
+		t.Error("write should report as mutating")
+	}
+	if r.Mutates("nope", "x") {
+		t.Error("unknown tool should be non-mutating")
 	}
 }
 

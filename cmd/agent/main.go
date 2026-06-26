@@ -87,6 +87,7 @@ type app struct {
 	ag       *agent.Agent
 	refl     *reflect.Reflector
 	instrSrc string // project instructions file in effect, "" if none
+	planMode bool   // plan (propose) vs auto (execute); survives re-wire
 
 	tasks, steps, toolCalls int
 }
@@ -159,8 +160,22 @@ func (a *app) wire() error {
 	}
 	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.cfg.LLM.MaxSteps)
 	a.ag.SetHistory(prior)
+	a.ag.SetPlanMode(a.planMode) // carry the mode into the rebuilt agent
 	a.refl = reflect.New(a.client)
 	return nil
+}
+
+// setMode switches between plan (investigate + propose) and auto (execute) and
+// returns a one-line confirmation.
+func (a *app) setMode(plan bool) string {
+	a.planMode = plan
+	if a.ag != nil {
+		a.ag.SetPlanMode(plan)
+	}
+	if plan {
+		return "plan mode on — investigates and proposes a plan; changes nothing"
+	}
+	return "auto mode on — executes the task"
 }
 
 func (a *app) reconfigure() error {
@@ -365,6 +380,10 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 			a.saveSession()
 			fmt.Printf("compacted %d messages → summary.\n", n)
 		}
+	case "/plan":
+		fmt.Println(a.setMode(true))
+	case "/auto":
+		fmt.Println(a.setMode(false))
 	case "/skills":
 		for _, l := range a.skillsCommand(ctx, rest) {
 			fmt.Println(l)
@@ -565,6 +584,7 @@ func helpText() string {
   /new             clear the session conversation memory
   /clear           fresh start — clear the screen and the session
   /compact         summarize the session so far to free up context
+  /plan, /auto     plan mode (propose only) vs auto mode (execute)
   /skills          list/toggle/install on-demand instruction packs
   /permissions     relax approval for non-destructive file/shell actions
   /color [name]    change the TUI frame color (cycles if no name)

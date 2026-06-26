@@ -48,9 +48,10 @@ type Config struct {
 	LLM       LLM        `json:"llm"`
 	Run       RunPolicy  `json:"run"`
 	File      FilePolicy `json:"file"`
-	KBPath    string     `json:"kb_path,omitempty"`
-	TracePath string     `json:"trace_path,omitempty"`
-	Workspace string     `json:"-"` // resolved absolute workspace root
+	KBPath     string     `json:"kb_path,omitempty"`
+	TracePath  string     `json:"trace_path,omitempty"`
+	SkillsPath string     `json:"skills_path,omitempty"`
+	Workspace  string     `json:"-"` // resolved absolute workspace root
 }
 
 // Non-overridable safety floor, always unioned into the resolved policy.
@@ -108,6 +109,9 @@ func DefaultKBPath() string { return filepath.Join(configHome(), "knowledge.json
 // DefaultTracePath is the global decision-trace (training dataset) location.
 func DefaultTracePath() string { return filepath.Join(configHome(), "traces.jsonl") }
 
+// DefaultSkillsPath is the global skills directory.
+func DefaultSkillsPath() string { return filepath.Join(configHome(), "skills") }
+
 // SaveGlobal writes the machine-level settings (display name + LLM connection)
 // to the user config file, creating its directory.
 func SaveGlobal(name string, l LLM) error {
@@ -122,6 +126,32 @@ func SaveGlobal(name string, l LLM) error {
 		return err
 	}
 	return os.WriteFile(GlobalPath(), data, 0o644)
+}
+
+// SaveWorkspacePolicy persists the run/file permission policy to the workspace
+// config (<workspace>/.agent/config.json) so /permissions changes survive a
+// restart. Any other keys already in that file are preserved.
+func SaveWorkspacePolicy(workspace string, run RunPolicy, file FilePolicy) error {
+	path := filepath.Join(workspace, ".agent", "config.json")
+	raw := map[string]json.RawMessage{}
+	if data, err := os.ReadFile(path); err == nil {
+		_ = json.Unmarshal(data, &raw)
+	}
+	for key, val := range map[string]any{"run": run, "file": file} {
+		b, err := json.Marshal(val)
+		if err != nil {
+			return err
+		}
+		raw[key] = b
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o644)
 }
 
 // Load merges the user config then the workspace config over Default(), unions
@@ -149,6 +179,9 @@ func Load(workspace string) (Config, error) {
 	}
 	if cfg.TracePath == "" {
 		cfg.TracePath = DefaultTracePath()
+	}
+	if cfg.SkillsPath == "" {
+		cfg.SkillsPath = DefaultSkillsPath()
 	}
 	return cfg, nil
 }

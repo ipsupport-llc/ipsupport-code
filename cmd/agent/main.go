@@ -29,6 +29,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/reflect"
+	"github.com/ipsupport-llc/ipsupport-code/internal/skill"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 	"github.com/ipsupport-llc/ipsupport-code/internal/trace"
@@ -74,6 +75,7 @@ type app struct {
 	cfg       config.Config
 	workspace string
 	kb        *knowledge.KB
+	skills    *skill.Store
 	reader    *bufio.Reader
 
 	fileTracer trace.Tracer  // JSONL dataset
@@ -99,9 +101,13 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 		slog.Warn("knowledge base unreadable; starting empty", "err", err)
 		kb, _ = knowledge.Open("")
 	}
+	skills, err := skill.Open(cfg.SkillsPath, http.DefaultClient)
+	if err != nil {
+		slog.Warn("skills unavailable", "err", err)
+	}
 
 	cleanup := func() {}
-	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: reader, approver: &stdinApprover{r: reader}}
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, skills: skills, reader: reader, approver: &stdinApprover{r: reader}}
 	if ft, err := trace.NewFileTracer(cfg.TracePath, newRunID()); err != nil {
 		slog.Warn("trace disabled", "err", err)
 	} else {
@@ -124,14 +130,20 @@ func (a *app) wire() error {
 		return fmt.Errorf("policy: %w", err)
 	}
 	var reg *tool.Registry
-	reg = tool.NewRegistry(
+	tools := []tool.Tool{
 		tool.NewFile(pol, a.approver),
 		tool.NewRun(pol, a.approver),
 		tool.NewGit(pol, a.approver),
 		tool.NewWeb(http.DefaultClient),
 		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),
 		tool.NewCalc(),
-	)
+	}
+	// The skill tool only exists when a skill is enabled, so it costs nothing in
+	// the catalog until the user opts in.
+	if a.skills != nil && a.skills.HasEnabled() {
+		tools = append(tools, tool.NewSkill(a.skills))
+	}
+	reg = tool.NewRegistry(tools...)
 	a.tracer = trace.Multi(a.fileTracer, a.uiTracer)
 	a.client = llm.NewOpenAIClient(a.cfg.LLM)
 	a.client.OnRetry = func(attempt int, wait time.Duration, reason string) {
@@ -219,6 +231,11 @@ func (a *app) systemPrompt() string {
 		runtime.GOOS, a.workspace)
 	if text != "" {
 		out += "\n\n## Project instructions (from " + src + ") — follow these:\n" + text
+	}
+	if a.skills != nil {
+		if idx := a.skills.Index(); idx != "" {
+			out += "\n\n## Skills (load full instructions with the skill tool when the topic fits):\n" + idx
+		}
 	}
 	return out
 }
@@ -348,6 +365,14 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 			a.saveSession()
 			fmt.Printf("compacted %d messages → summary.\n", n)
 		}
+	case "/skills":
+		for _, l := range a.skillsCommand(ctx, rest) {
+			fmt.Println(l)
+		}
+	case "/permissions", "/perms":
+		for _, l := range a.permissionsCommand(rest) {
+			fmt.Println(l)
+		}
 	case "/color":
 		fmt.Println("/color changes the TUI frame color — interactive mode only.")
 	case "/rename":
@@ -388,6 +413,129 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	return false
 }
 
+// --- skills: surface-agnostic handlers, returning plain lines the REPL prints
+// and the TUI styles. Install touches the network, so callers run it off the UI
+// thread; the rest are local filesystem ops. ---
+
+func (a *app) skillsCommand(ctx context.Context, rest string) []string {
+	if a.skills == nil {
+		return []string{"skills unavailable"}
+	}
+	if strings.TrimSpace(rest) == "" {
+		return a.skillsStatus()
+	}
+	sub, arg := splitCommand(rest)
+	switch sub {
+	case "on", "enable":
+		return a.skillsToggle(arg, true)
+	case "off", "disable":
+		return a.skillsToggle(arg, false)
+	case "install", "add":
+		return a.skillsInstall(ctx, arg)
+	case "remove", "rm":
+		return a.skillsRemove(arg)
+	case "list":
+		return a.skillsStatus()
+	default:
+		return []string{"usage: /skills [on|off|remove <name>] [install <url|git>]"}
+	}
+}
+
+func (a *app) skillsStatus() []string {
+	list := a.skills.List()
+	if len(list) == 0 {
+		return []string{"no skills — add one with /skills install <url|git>"}
+	}
+	out := []string{"skills:"}
+	for _, sk := range list {
+		mark := "off"
+		if sk.Enabled {
+			mark = "on "
+		}
+		out = append(out, fmt.Sprintf("  [%s] %-20s %s", mark, sk.Name, sk.Description))
+	}
+	return append(out, "  /skills on|off <name> · install <url|git> · remove <name>")
+}
+
+func (a *app) skillsToggle(name string, on bool) []string {
+	if err := a.skills.SetEnabled(name, on); err != nil {
+		return []string{"error: " + err.Error()}
+	}
+	_ = a.wire() // (de)register the skill tool + refresh the prompt index; session preserved
+	if on {
+		return []string{"enabled " + name}
+	}
+	return []string{"disabled " + name}
+}
+
+func (a *app) skillsRemove(name string) []string {
+	if err := a.skills.Remove(name); err != nil {
+		return []string{"error: " + err.Error()}
+	}
+	_ = a.wire()
+	return []string{"removed " + name}
+}
+
+func (a *app) skillsInstall(ctx context.Context, src string) []string {
+	if strings.TrimSpace(src) == "" {
+		return []string{"usage: /skills install <url|git>"}
+	}
+	names, err := a.skills.Install(ctx, src)
+	if err != nil {
+		return []string{"install failed: " + err.Error()}
+	}
+	_ = a.wire() // installed skills are enabled, so register the tool + index
+	return []string{"installed & enabled: " + strings.Join(names, ", ")}
+}
+
+// --- permissions: relax the policy so non-destructive actions stop prompting.
+// The deny floor (secrets, .git, .env, rm -rf, …) is never affected. ---
+
+func (a *app) permissionsCommand(rest string) []string {
+	if strings.TrimSpace(rest) == "" {
+		return a.permissionsStatus()
+	}
+	sub, arg := splitCommand(rest)
+	switch sub {
+	case "files", "file":
+		return a.permissionsSet(&a.cfg.File.Default, arg, "file writes")
+	case "run", "shell":
+		return a.permissionsSet(&a.cfg.Run.Default, arg, "shell commands")
+	default:
+		return []string{"usage: /permissions [files on|off] [run on|off]"}
+	}
+}
+
+func (a *app) permissionsStatus() []string {
+	return []string{
+		"permissions:",
+		fmt.Sprintf("  files  %s   (jail %q)", a.cfg.File.Default, a.cfg.File.Jail),
+		fmt.Sprintf("  run    %s", a.cfg.Run.Default),
+		"  deny floor (always on): secrets, .git, .env, rm -rf, sudo, …",
+		"  /permissions files on  → stop asking before file writes in the workspace",
+		"  /permissions files off → ask again",
+	}
+}
+
+func (a *app) permissionsSet(field *string, arg, label string) []string {
+	switch strings.TrimSpace(arg) {
+	case "on", "allow", "yes":
+		*field = "allow"
+	case "off", "ask", "no", "":
+		*field = "ask"
+	default:
+		return []string{"usage: on (auto-allow) | off (ask)"}
+	}
+	if err := a.wire(); err != nil {
+		return []string{"error: " + err.Error()}
+	}
+	msg := fmt.Sprintf("%s → %s (deny floor still enforced)", label, *field)
+	if err := config.SaveWorkspacePolicy(a.workspace, a.cfg.Run, a.cfg.File); err != nil {
+		return []string{msg, "warning: not persisted: " + err.Error()}
+	}
+	return []string{msg + " — saved to .agent/config.json"}
+}
+
 func splitCommand(line string) (cmd, rest string) {
 	cmd = strings.Fields(line)[0]
 	return cmd, strings.TrimSpace(strings.TrimPrefix(line, cmd))
@@ -417,6 +565,8 @@ func helpText() string {
   /new             clear the session conversation memory
   /clear           fresh start — clear the screen and the session
   /compact         summarize the session so far to free up context
+  /skills          list/toggle/install on-demand instruction packs
+  /permissions     relax approval for non-destructive file/shell actions
   /color [name]    change the TUI frame color (cycles if no name)
   /rename <name>   rename the agent (saved in settings)
   /goal <task>     run a task explicitly

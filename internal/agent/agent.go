@@ -110,8 +110,9 @@ func DefaultSystemPrompt() string {
 	return strings.TrimSpace(`You are the engine inside ipsupport-code, a local terminal coding agent. You run in a loop and act ONLY through tools; the user sees your tool calls and results.
 
 - DO the task with tools: write/edit files with file, run commands with run, use git/web/calc. NEVER just tell the user how to do it ("create a file", "chmod +x", "here's how…") — describing steps instead of doing them is a failure. (e.g. "make a hello script and run it" → file.write then run.shell, then report the output.)
+- If what you built is runnable, RUN it yourself with run and report the real output. Don't hand back a "how to test it" recipe — that's the user doing your job.
 - Each call is {"action": <name>, "params": {...}}. On an error, read it — it names the fix or the right tool — and retry.
-- Small local model in a terminal: be brief. Finish with a one-line summary of what you did and no tool call.
+- Small local model in a terminal: be brief. Finish with a one-line summary of what you did — not a tutorial, and not a menu of optional features to add — and no tool call.
 - After that summary, add ONE last line exactly: "NEXT: <one short next step the user might want>" (≤6 words; skip the line if nothing fits).`)
 }
 
@@ -174,6 +175,11 @@ func splitSuggestion(text string) (clean, suggestion string) {
 		return text, ""
 	}
 	suggestion = strings.TrimSpace(strings.Trim(last[len("NEXT:"):], " \"'`"))
+	// Models sometimes echo the placeholder shape "NEXT: <do the thing>"; unwrap a
+	// fully-bracketed suggestion so it doesn't read as an unfilled template.
+	if strings.HasPrefix(suggestion, "<") && strings.HasSuffix(suggestion, ">") {
+		suggestion = strings.TrimSpace(suggestion[1 : len(suggestion)-1])
+	}
 	if nl < 0 {
 		return "", suggestion
 	}

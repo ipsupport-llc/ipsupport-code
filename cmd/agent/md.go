@@ -6,6 +6,23 @@ import (
 	"github.com/charmbracelet/glamour"
 )
 
+// latexToUnicode replaces the LaTeX math forms small models like to emit (often
+// wrapped in $…$) with plain unicode, since glamour renders no math — otherwise
+// "$\rightarrow$" shows up verbatim. Pairs are listed wrapped-first so the $
+// delimiters go too.
+var latexToUnicode = strings.NewReplacer(
+	`$\rightarrow$`, "→", `\rightarrow`, "→",
+	`$\Rightarrow$`, "⇒", `\Rightarrow`, "⇒",
+	`$\leftarrow$`, "←", `\leftarrow`, "←",
+	`$\to$`, "→", `\to`, "→",
+	`$\times$`, "×", `\times`, "×",
+	`$\cdot$`, "·", `\cdot`, "·",
+	`$\leq$`, "≤", `\leq`, "≤",
+	`$\geq$`, "≥", `\geq`, "≥",
+	`$\neq$`, "≠", `\neq`, "≠", `\ne`, "≠",
+	`$\approx$`, "≈", `\approx`, "≈",
+)
+
 // renderMarkdown turns the model's final answer into terminal markdown — bold,
 // inline code, lists, headings, and fenced code blocks with syntax colors — the
 // way Claude Code (or a code host) shows it, instead of a flat string. It is
@@ -23,6 +40,7 @@ func renderMarkdown(s string, width int) string {
 	if strings.TrimSpace(s) == "" {
 		return s
 	}
+	s = latexToUnicode.Replace(s)
 	if width < 20 {
 		width = 80
 	}

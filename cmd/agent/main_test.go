@@ -128,6 +128,13 @@ func TestRenderMarkdownKeepsContent(t *testing.T) {
 	}
 }
 
+func TestRenderMarkdownConvertsLatex(t *testing.T) {
+	out := renderMarkdown(`.jpg $\rightarrow$ Images`, 80)
+	if !strings.Contains(out, "→") || strings.Contains(out, "rightarrow") {
+		t.Errorf("LaTeX not converted to unicode arrow: %q", out)
+	}
+}
+
 // The pipe-through-script smoke test can't reliably confirm quit semantics, so
 // verify the exit path directly: /exit must yield tea.Quit.
 func TestExitCommandQuits(t *testing.T) {

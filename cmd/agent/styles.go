@@ -7,7 +7,6 @@ var (
 	cTitle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
 	cYou      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14"))
 	cBot      = lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
-	cFinal    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 	cToolCall = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
 	cOk       = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	cErr      = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))

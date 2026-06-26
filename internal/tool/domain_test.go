@@ -36,3 +36,19 @@ func TestDomainGeneratesSchemaAndValidates(t *testing.T) {
 		t.Errorf("handler result = %+v", r)
 	}
 }
+
+// Weak models emit booleans as strings/numbers; Args.Bool must read them as the
+// model meant, not silently fall back to false (which e.g. dropped `git diff
+// --staged`).
+func TestArgsBoolCoercesWeakModelForms(t *testing.T) {
+	for _, v := range []any{true, "true", "True", "yes", "1", float64(1)} {
+		if !(Args{m: map[string]any{"k": v}}).Bool("k") {
+			t.Errorf("Bool(%#v) = false, want true", v)
+		}
+	}
+	for _, v := range []any{false, "false", "no", "0", float64(0), "", nil} {
+		if (Args{m: map[string]any{"k": v}}).Bool("k") {
+			t.Errorf("Bool(%#v) = true, want false", v)
+		}
+	}
+}

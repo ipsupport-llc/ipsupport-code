@@ -25,7 +25,7 @@ type Args struct{ m map[string]any }
 
 func (a Args) Str(k string) string       { return Str(a.m, k) }
 func (a Args) Int(k string, def int) int { return Int(a.m, k, def) }
-func (a Args) Bool(k string) bool        { b, _ := a.m[k].(bool); return b }
+func (a Args) Bool(k string) bool        { return Bool(a.m, k) }
 func (a Args) Has(k string) bool         { _, ok := a.m[k]; return ok }
 
 // Action is one operation: its declared params and its handler. The handler runs

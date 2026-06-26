@@ -117,3 +117,21 @@ func Int(p map[string]any, key string, def int) int {
 	}
 	return def
 }
+
+// Bool reads a boolean param, tolerating the string and numeric forms weak
+// models emit ("true"/"yes"/"1", or a non-zero number) instead of a real JSON
+// bool. Missing or unrecognized → false.
+func Bool(p map[string]any, key string) bool {
+	switch v := p[key].(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "true", "yes", "y", "1":
+			return true
+		}
+	case float64:
+		return v != 0
+	}
+	return false
+}

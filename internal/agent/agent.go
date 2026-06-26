@@ -143,6 +143,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	tools := a.reg.OpenAITools()
 
 	var tr Transcript
+	stuck := 0
 	for step := 0; step < a.maxSteps; step++ {
 		tr.Steps = step + 1
 
@@ -167,7 +168,24 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		// Intermediate turn: show the model's reasoning text (if any) alongside
 		// the tool calls it's about to make.
 		a.emit("assistant", map[string]any{"content": assistant.Content, "tool_calls": len(assistant.ToolCalls)})
-		msgs = append(msgs, a.runToolCalls(ctx, assistant.ToolCalls)...)
+		results, nErr := a.runToolCalls(ctx, assistant.ToolCalls)
+		msgs = append(msgs, results...)
+
+		// Stop a model that's stuck emitting invalid calls (e.g. empty action)
+		// from burning every step and the user's time. If a whole turn's calls
+		// all error, several times running, bail with a clear message.
+		if nErr == len(assistant.ToolCalls) {
+			if stuck++; stuck >= maxStuckTurns {
+				const msg = "Stopped — the model made several invalid tool calls in a row (it isn't making progress). Try rephrasing the task, or use a stronger model."
+				tr.Final = msg
+				tr.Messages = msgs
+				a.emit("final", map[string]any{"text": msg, "suggest": "", "exhausted": true})
+				a.remember(goal, msg)
+				return tr, nil
+			}
+		} else {
+			stuck = 0
+		}
 	}
 
 	tr.Messages = msgs
@@ -202,27 +220,38 @@ func splitSuggestion(text string) (clean, suggestion string) {
 	return strings.TrimRight(trimmed[:nl], " \n"), suggestion
 }
 
+// maxStuckTurns is how many consecutive all-error tool turns end the run early.
+const maxStuckTurns = 3
+
 // runToolCalls executes every call from one assistant turn, concurrently when
-// the model batched more than one, keeping results in the emitted order.
-func (a *Agent) runToolCalls(ctx context.Context, calls []llm.ToolCall) []llm.Message {
+// the model batched more than one, keeping results in the emitted order. It also
+// reports how many of the calls errored (for stuck-loop detection).
+func (a *Agent) runToolCalls(ctx context.Context, calls []llm.ToolCall) ([]llm.Message, int) {
 	out := make([]llm.Message, len(calls))
+	errs := make([]bool, len(calls))
 	if len(calls) == 1 {
-		out[0] = a.execOne(ctx, calls[0])
-		return out
+		out[0], errs[0] = a.execOne(ctx, calls[0])
+	} else {
+		var wg sync.WaitGroup
+		for i, c := range calls {
+			wg.Add(1)
+			go func(i int, c llm.ToolCall) {
+				defer wg.Done()
+				out[i], errs[i] = a.execOne(ctx, c)
+			}(i, c)
+		}
+		wg.Wait()
 	}
-	var wg sync.WaitGroup
-	for i, c := range calls {
-		wg.Add(1)
-		go func(i int, c llm.ToolCall) {
-			defer wg.Done()
-			out[i] = a.execOne(ctx, c)
-		}(i, c)
+	n := 0
+	for _, e := range errs {
+		if e {
+			n++
+		}
 	}
-	wg.Wait()
-	return out
+	return out, n
 }
 
-func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) llm.Message {
+func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool) {
 	action, params := parseArgs(c.Arguments)
 	a.emit("tool_call", map[string]any{"tool": c.Name, "action": action, "params": params})
 
@@ -231,7 +260,7 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) llm.Message {
 	if a.planMode && a.reg.Mutates(c.Name, action) {
 		msg := fmt.Sprintf("plan mode is ON — %s.%s was NOT run. Don't retry it; list it as a step in your plan, then finish.", c.Name, action)
 		a.emit("observation", map[string]any{"tool": c.Name, "action": action, "is_error": true, "content": msg})
-		return llm.ToolResult(c.ID, c.Name, msg)
+		return llm.ToolResult(c.ID, c.Name, msg), true
 	}
 
 	res := a.reg.Dispatch(ctx, c.Name, action, params)
@@ -260,7 +289,7 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) llm.Message {
 	if res.Diff != "" {
 		a.emit("diff", map[string]any{"path": params["path"], "diff": res.Diff})
 	}
-	return llm.ToolResult(c.ID, c.Name, content)
+	return llm.ToolResult(c.ID, c.Name, content), res.IsError
 }
 
 // hints pulls matching learned pitfalls for a failed tool call.

@@ -154,5 +154,24 @@ func TestBackoffGrows(t *testing.T) {
 	}
 }
 
+func TestToolCallArgsSanitized(t *testing.T) {
+	const resp = `{"choices":[{"message":{"role":"assistant","content":"",
+		"tool_calls":[{"id":"c1","type":"function","function":{"name":"file","arguments":""}}]}}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, resp)
+	}))
+	defer srv.Close()
+
+	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+	msg, err := cl.Chat(context.Background(), []Message{User("hi")}, []map[string]any{{"type": "function"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Arguments != "{}" {
+		t.Errorf("empty args = %q, want {} after sanitizing", msg.ToolCalls[0].Arguments)
+	}
+}
+
 // compile-time guarantee the client satisfies the interface.
 var _ Chatter = (*OpenAIClient)(nil)

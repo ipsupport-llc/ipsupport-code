@@ -82,6 +82,14 @@ func (r *Registry) Usage(name string) string {
 	return ""
 }
 
+// Mutates reports whether (name, action) changes state — the gate plan mode uses.
+func (r *Registry) Mutates(name, action string) bool {
+	if t, ok := r.tools[name]; ok {
+		return t.Mutates(action)
+	}
+	return false
+}
+
 func contains(ss []string, s string) bool {
 	for _, x := range ss {
 		if x == s {

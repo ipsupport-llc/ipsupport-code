@@ -31,10 +31,11 @@ func (a Args) Has(k string) bool         { _, ok := a.m[k]; return ok }
 // Action is one operation: its declared params and its handler. The handler runs
 // only after the required params have been validated.
 type Action struct {
-	Name   string
-	Note   string // optional one-line note appended to the generated help
-	Params []Param
-	Run    func(ctx context.Context, a Args) Result
+	Name    string
+	Note    string // optional one-line note appended to the generated help
+	Mutates bool   // changes state (write/run/git) — blocked in plan mode
+	Params  []Param
+	Run     func(ctx context.Context, a Args) Result
 }
 
 // DomainSpec declares a fat tool: a name, a one-line summary, optional extra
@@ -66,6 +67,14 @@ func NewDomain(spec DomainSpec) *Domain {
 }
 
 func (d *Domain) Name() string { return d.spec.Name }
+
+// Mutates reports whether the named action is declared as state-changing.
+func (d *Domain) Mutates(action string) bool {
+	if a, ok := d.index[action]; ok {
+		return a.Mutates
+	}
+	return false
+}
 
 func (d *Domain) Actions() []string {
 	out := make([]string, len(d.spec.Actions))

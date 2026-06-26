@@ -242,6 +242,58 @@ func TestRunConcurrentToolCallsStayOrdered(t *testing.T) {
 	}
 }
 
+// planFileTool is a minimal file-like tool with one read-only and one mutating
+// action, for exercising the plan-mode gate.
+func planFileTool() tool.Tool {
+	return tool.NewDomain(tool.DomainSpec{
+		Name: "file", Summary: "files",
+		Actions: []tool.Action{
+			{Name: "read", Run: func(context.Context, tool.Args) tool.Result { return tool.Ok("content-of-x") }},
+			{Name: "write", Mutates: true, Run: func(context.Context, tool.Args) tool.Result { return tool.Ok("wrote") }},
+		},
+	})
+}
+
+func TestPlanModeBlocksMutationAndInjectsDirective(t *testing.T) {
+	reg := tool.NewRegistry(planFileTool())
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "file", `{"action":"write","params":{"path":"x","content":"y"}}`),
+		{Role: "assistant", Content: "plan: 1. write x"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	a.SetPlanMode(true)
+
+	tr, _ := a.Run(context.Background(), "make x")
+	obs := toolObservation(tr.Messages)
+	if len(obs) == 0 || !strings.Contains(obs[0].Content, "plan mode is ON") {
+		t.Fatalf("write was not blocked in plan mode: %+v", obs)
+	}
+	var sawDirective bool
+	for _, m := range fake.lastMsgs {
+		if m.Role == "system" && strings.Contains(m.Content, "PLAN MODE is ON") {
+			sawDirective = true
+		}
+	}
+	if !sawDirective {
+		t.Error("plan directive not injected into the prompt")
+	}
+}
+
+func TestPlanModeAllowsReadOnly(t *testing.T) {
+	reg := tool.NewRegistry(planFileTool())
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "file", `{"action":"read","params":{"path":"x"}}`),
+		{Role: "assistant", Content: "the file says X"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	a.SetPlanMode(true)
+
+	tr, _ := a.Run(context.Background(), "read x")
+	if obs := toolObservation(tr.Messages); len(obs) == 0 || !strings.Contains(obs[0].Content, "content-of-x") {
+		t.Errorf("read-only call should run in plan mode: %+v", obs)
+	}
+}
+
 func TestRunWrongToolHint(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc(), tool.NewWeb(nil))
 	fake := &scriptLLM{replies: []llm.Message{

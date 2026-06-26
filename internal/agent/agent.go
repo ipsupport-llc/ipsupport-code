@@ -37,6 +37,7 @@ type Agent struct {
 
 	history    []llm.Message
 	maxHistory int
+	planMode   bool
 }
 
 // New builds an Agent. maxSteps <= 0 defaults to 12.
@@ -52,6 +53,14 @@ func New(l llm.Chatter, reg *tool.Registry, kb *knowledge.KB, tr trace.Tracer, s
 
 // Reset clears the session conversation memory.
 func (a *Agent) Reset() { a.history = nil }
+
+// SetPlanMode toggles plan mode. In plan mode the agent investigates with
+// read-only tools and proposes a plan; mutating tool calls are refused, so it
+// can't change anything until switched back to auto.
+func (a *Agent) SetPlanMode(on bool) { a.planMode = on }
+
+// PlanMode reports whether plan mode is on.
+func (a *Agent) PlanMode() bool { return a.planMode }
 
 // SessionLen reports how many remembered messages are in the current session.
 func (a *Agent) SessionLen() int { return len(a.history) }
@@ -116,12 +125,19 @@ func DefaultSystemPrompt() string {
 - After that summary, add ONE last line exactly: "NEXT: <one short next step the user might want>" (≤6 words; skip the line if nothing fits).`)
 }
 
+// planDirective is added (only in plan mode) on top of the system prompt. Kept
+// short — it ships in every plan-mode request to a small local model.
+const planDirective = `PLAN MODE is ON. Do NOT change anything. You may investigate with read-only tools (file.read, file.list, web, calc), then present a concise, numbered plan of what you WOULD do, and stop with no tool call. Any tool that writes files, runs commands, or changes git is blocked right now.`
+
 // Run executes the loop until the model produces a final answer (a reply with no
 // tool calls), maxSteps is reached, or the context is cancelled.
 func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	a.emit("goal", map[string]any{"text": goal})
-	msgs := make([]llm.Message, 0, len(a.history)+2)
+	msgs := make([]llm.Message, 0, len(a.history)+3)
 	msgs = append(msgs, llm.System(a.system))
+	if a.planMode {
+		msgs = append(msgs, llm.System(planDirective))
+	}
 	msgs = append(msgs, a.history...) // session memory
 	msgs = append(msgs, llm.User(goal))
 	tools := a.reg.OpenAITools()
@@ -209,6 +225,14 @@ func (a *Agent) runToolCalls(ctx context.Context, calls []llm.ToolCall) []llm.Me
 func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) llm.Message {
 	action, params := parseArgs(c.Arguments)
 	a.emit("tool_call", map[string]any{"tool": c.Name, "action": action, "params": params})
+
+	// Plan mode backstop: refuse mutating calls even if the model ignores the
+	// directive, so a weak model can't change anything while planning.
+	if a.planMode && a.reg.Mutates(c.Name, action) {
+		msg := fmt.Sprintf("plan mode is ON — %s.%s was NOT run. Don't retry it; list it as a step in your plan, then finish.", c.Name, action)
+		a.emit("observation", map[string]any{"tool": c.Name, "action": action, "is_error": true, "content": msg})
+		return llm.ToolResult(c.ID, c.Name, msg)
+	}
 
 	res := a.reg.Dispatch(ctx, c.Name, action, params)
 	content := res.Content

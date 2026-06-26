@@ -30,10 +30,10 @@ func NewGit(p *policy.Engine, ap Approver) Tool {
 			{Name: "diff", Params: []Param{Opt("path", "str", ""), Opt("staged", "bool", "")}, Run: g.diff},
 			{Name: "log", Params: []Param{Opt("n", "int", "15")}, Run: g.log},
 			{Name: "show", Params: []Param{Opt("ref", "str", "HEAD")}, Run: g.show},
-			{Name: "add", Params: []Param{Req("paths", "str")}, Note: "(space-separated)", Run: g.add},
-			{Name: "commit", Params: []Param{Req("message", "str")}, Run: g.commit},
-			{Name: "branch", Params: []Param{Opt("name", "str", "")}, Note: "(none=list, name=create)", Run: g.branch},
-			{Name: "checkout", Params: []Param{Req("ref", "str")}, Run: g.checkout},
+			{Name: "add", Mutates: true, Params: []Param{Req("paths", "str")}, Note: "(space-separated)", Run: g.add},
+			{Name: "commit", Mutates: true, Params: []Param{Req("message", "str")}, Run: g.commit},
+			{Name: "branch", Mutates: true, Params: []Param{Opt("name", "str", "")}, Note: "(none=list, name=create)", Run: g.branch},
+			{Name: "checkout", Mutates: true, Params: []Param{Req("ref", "str")}, Run: g.checkout},
 		},
 	})
 }

@@ -128,6 +128,17 @@ func TestRenderMarkdownKeepsContent(t *testing.T) {
 	}
 }
 
+func TestModeLine(t *testing.T) {
+	m := &tuiModel{app: &app{}, accent: lipgloss.Color("13")}
+	if !strings.Contains(m.modeLine(), "auto mode on") {
+		t.Errorf("auto: %q", m.modeLine())
+	}
+	m.app.planMode = true
+	if !strings.Contains(m.modeLine(), "plan mode on") {
+		t.Errorf("plan: %q", m.modeLine())
+	}
+}
+
 func TestRenderMarkdownConvertsLatex(t *testing.T) {
 	out := renderMarkdown(`.jpg $\rightarrow$ Images`, 80)
 	if !strings.Contains(out, "→") || strings.Contains(out, "rightarrow") {

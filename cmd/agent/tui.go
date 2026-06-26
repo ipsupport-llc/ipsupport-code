@@ -138,7 +138,9 @@ func (a *app) runTUI(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx)).Run()
+	// WithMouseCellMotion lets the wheel scroll the log in the alt-screen (without
+	// it the terminal swallows the wheel and nothing moves).
+	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx)).Run()
 	return err
 }
 
@@ -161,6 +163,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		h := m.viewportHeight()
 		if !m.ready {
 			m.vp = viewport.New(msg.Width, h)
+			m.vp.MouseWheelEnabled = true
 			m.ready = true
 		} else {
 			m.vp.Width = msg.Width
@@ -253,6 +256,9 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.ready {
 			m.vp.SetContent("")
 		}
+		return m, nil
+	case "shift+tab":
+		m.app.setMode(!m.app.planMode) // cycle plan/auto; the bottom indicator updates
 		return m, nil
 	}
 
@@ -397,6 +403,10 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 			n, err := m.app.ag.Compact(ctx)
 			return compactDoneMsg{n: n, err: err}
 		}
+	case "/plan":
+		m.push(cDim.Render(m.app.setMode(true)))
+	case "/auto":
+		m.push(cDim.Render(m.app.setMode(false)))
 	case "/skills":
 		return m.skillsCmd(rest)
 	case "/permissions", "/perms":
@@ -566,12 +576,12 @@ func (m *tuiModel) View() string {
 		status = cDim.Render(fmt.Sprintf("%s · %s · %d tok · ready", m.app.cfg.LLM.Model, filepath.Base(m.app.workspace), total))
 	}
 
-	hint := cDim.Render("/help · ctrl-l clear · ↑↓ scroll · ctrl-c quit")
+	bottom := m.modeLine()
 	switch m.state {
 	case stRunning:
-		hint = cDim.Render("typing is live — Enter queues (or /exit, /status run now) · esc cancels")
+		bottom += cDim.Render("  · esc cancels")
 	case stApprove:
-		hint = cDim.Render("press y or n · esc denies · ctrl-c quits")
+		bottom = cDim.Render("  press y or n · esc denies · ctrl-c quits")
 	}
 
 	frame := lipgloss.NewStyle().Foreground(m.accent)
@@ -581,8 +591,17 @@ func (m *tuiModel) View() string {
 		m.topRule(frame),
 		m.input.View(),
 		frame.Render(strings.Repeat("─", m.width)),
-		hint,
+		bottom,
 	}, "\n")
+}
+
+// modeLine is the bottom indicator: auto (executes) or plan (proposes only),
+// cycled with shift+tab — the same affordance as Claude Code.
+func (m *tuiModel) modeLine() string {
+	if m.app.planMode {
+		return "  " + m.accentBold().Render("⏸ plan mode on") + cDim.Render("  (shift+tab to cycle · read-only, it proposes)")
+	}
+	return "  " + cOk.Render("⏵⏵ auto mode on") + cDim.Render("  (shift+tab to cycle)")
 }
 
 // topRule draws "────…──── <name> ──" with the label pinned right, in the
@@ -668,6 +687,8 @@ var commandList = []cmdInfo{
 	{"/new", "clear the session conversation memory"},
 	{"/clear", "fresh start — clear the screen and the session"},
 	{"/compact", "summarize the session so far to free up context"},
+	{"/plan", "plan mode — propose a plan, change nothing"},
+	{"/auto", "auto mode — execute the task (default)"},
 	{"/skills", "list/toggle/install on-demand instruction packs"},
 	{"/permissions", "relax approval for non-destructive file/shell actions"},
 	{"/color", "change the frame color (cycles if no name)"},

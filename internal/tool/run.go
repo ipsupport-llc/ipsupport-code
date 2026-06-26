@@ -33,9 +33,10 @@ func NewRun(p *policy.Engine, ap Approver) Tool {
 		Details: "Use for builds, tests, package managers — anything not covered by the other tools.",
 		NotHere: "NOT here — read/write files → file; web/search/fetch → web; arithmetic → calc.",
 		Actions: []Action{{
-			Name:   "shell",
-			Params: []Param{Req("command", "str"), Opt("cwd", "str", "")},
-			Run:    r.shell,
+			Name:    "shell",
+			Mutates: true,
+			Params:  []Param{Req("command", "str"), Opt("cwd", "str", "")},
+			Run:     r.shell,
 		}},
 	})
 }

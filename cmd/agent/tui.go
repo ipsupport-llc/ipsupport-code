@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
 type uiState int
@@ -873,8 +874,8 @@ func compactJSON(v any) string {
 	if s == "{}" || s == "null" {
 		return ""
 	}
-	if len(s) > 80 {
-		s = s[:80] + "…"
+	if clipped, truncated := textutil.Clip(s, 80); truncated {
+		s = clipped + "…"
 	}
 	return s
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
 // ReflectionError wraps a host-level failure of the reflection pass (the model
@@ -95,8 +96,8 @@ func usedTools(t agent.Transcript) bool {
 
 func oneLine(s string) string {
 	s = strings.ReplaceAll(s, "\n", " ⏎ ")
-	if len(s) > 500 {
-		s = s[:500] + "…"
+	if clipped, truncated := textutil.Clip(s, 500); truncated {
+		s = clipped + "…"
 	}
 	return s
 }

@@ -138,7 +138,15 @@ func (a *app) wire() error {
 		slog.Warn("llm retry", "attempt", attempt, "wait", wait, "reason", reason)
 		a.emit("retry", map[string]any{"attempt": attempt, "wait_ms": wait.Milliseconds(), "reason": reason})
 	}
+	// Carry the live session into the new agent. wire() is called again to install
+	// the TUI bridge and on /login to reload config; without this hand-off the
+	// restored conversation would be dropped and every launch would start blank.
+	var prior []llm.Message
+	if a.ag != nil {
+		prior = a.ag.History()
+	}
 	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.cfg.LLM.MaxSteps)
+	a.ag.SetHistory(prior)
 	a.refl = reflect.New(a.client)
 	return nil
 }

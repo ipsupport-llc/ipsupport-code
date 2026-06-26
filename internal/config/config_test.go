@@ -98,6 +98,30 @@ func TestGlobalConfigMerged(t *testing.T) {
 	}
 }
 
+// /permissions writes the relaxed policy here; it must survive a reload, and the
+// deny floor must still be re-unioned on top of it.
+func TestSaveWorkspacePolicyRoundTrips(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+
+	cfg, _ := Load(dir)
+	cfg.File.Default = "allow" // as /permissions files on would set
+	if err := SaveWorkspacePolicy(dir, cfg.Run, cfg.File); err != nil {
+		t.Fatalf("SaveWorkspacePolicy: %v", err)
+	}
+
+	reloaded, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.File.Default != "allow" {
+		t.Errorf("File.Default = %q, want allow (persisted)", reloaded.File.Default)
+	}
+	if !contains(reloaded.File.DenyWrite, "**/.env*") {
+		t.Errorf("deny floor lost after save/reload: %v", reloaded.File.DenyWrite)
+	}
+}
+
 func writeWorkspaceConfig(t *testing.T, js string) string {
 	t.Helper()
 	dir := t.TempDir()

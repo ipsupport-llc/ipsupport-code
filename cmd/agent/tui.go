@@ -79,6 +79,10 @@ type compactDoneMsg struct {
 	n   int
 	err error
 }
+type skillsMsg struct {
+	names []string
+	err   error
+}
 
 // newTUIModel installs the UI bridge as the agent's tracer + approver, wires the
 // stack, and builds the model. Split out from runTUI so tests can drive it.
@@ -218,6 +222,16 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		default:
 			m.app.saveSession()
 			m.push(cDim.Render(fmt.Sprintf("compacted %d messages → summary", msg.n)))
+		}
+		return m, m.input.Focus()
+
+	case skillsMsg:
+		m.state = stIdle
+		if msg.err != nil {
+			m.push(cErr.Render("install failed: " + msg.err.Error()))
+		} else {
+			_ = m.app.wire() // register the skill tool + index on the UI thread (no race)
+			m.push(cDim.Render("installed & enabled: " + strings.Join(msg.names, ", ")))
 		}
 		return m, m.input.Focus()
 
@@ -383,6 +397,11 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 			n, err := m.app.ag.Compact(ctx)
 			return compactDoneMsg{n: n, err: err}
 		}
+	case "/skills":
+		return m.skillsCmd(rest)
+	case "/permissions", "/perms":
+		m.pushLines(m.app.permissionsCommand(rest))
+		return m, nil
 	case "/color":
 		m.setColor(rest)
 	case "/rename":
@@ -408,6 +427,41 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.push(cDim.Render("unknown command " + cmd + " — /help"))
 	}
 	return m, nil
+}
+
+// skillsCmd runs a /skills subcommand. install hits the network, so it runs off
+// the UI thread (like /compact) and re-wires on the result; the rest are instant
+// local filesystem ops.
+func (m *tuiModel) skillsCmd(rest string) (tea.Model, tea.Cmd) {
+	if m.app.skills == nil {
+		m.push(cDim.Render("skills unavailable"))
+		return m, nil
+	}
+	if sub, arg := splitCommand(rest); sub == "install" || sub == "add" {
+		if strings.TrimSpace(arg) == "" {
+			m.push(cDim.Render("usage: /skills install <url|git>"))
+			return m, nil
+		}
+		m.state = stRunning
+		m.taskStart = time.Now()
+		ctx, src := m.ctx, arg
+		m.push(cDim.Render("installing " + src + " …"))
+		return m, func() tea.Msg {
+			names, err := m.app.skills.Install(ctx, src)
+			return skillsMsg{names: names, err: err}
+		}
+	}
+	m.pushLines(m.app.skillsCommand(m.ctx, rest))
+	return m, nil
+}
+
+// pushLines appends plain command-output lines to the log, dimmed.
+func (m *tuiModel) pushLines(lines []string) {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = cDim.Render(l)
+	}
+	m.push(out...)
 }
 
 // commandWhileBusy handles a /command typed while a task is running: exit quits
@@ -614,6 +668,8 @@ var commandList = []cmdInfo{
 	{"/new", "clear the session conversation memory"},
 	{"/clear", "fresh start — clear the screen and the session"},
 	{"/compact", "summarize the session so far to free up context"},
+	{"/skills", "list/toggle/install on-demand instruction packs"},
+	{"/permissions", "relax approval for non-destructive file/shell actions"},
 	{"/color", "change the frame color (cycles if no name)"},
 	{"/rename", "rename the agent (saved in settings)"},
 	{"/goal", "run a task explicitly"},

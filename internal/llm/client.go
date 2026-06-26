@@ -62,19 +62,64 @@ type OpenAIClient struct {
 	// model) rather than just "thinking".
 	OnRetry func(attempt int, wait time.Duration, reason string)
 
+	// idle bounds how long we wait with NO response or stream data before giving
+	// up on a request and retrying. It's an idle (not total) deadline, so a slow-
+	// but-progressing generation isn't killed, while a server that went silent
+	// (LM Studio idle, connection still open) fails fast instead of hanging
+	// forever. Set once at construction; tests shorten it before use.
+	idle time.Duration
+
 	mu       sync.Mutex
 	promptTk int
 	complTk  int
 }
 
-// NewOpenAIClient builds a client from LLM config (LM Studio by default).
+// NewOpenAIClient builds a client from LLM config (LM Studio by default). The
+// http client has no total timeout on purpose — a long generation can run for
+// minutes; the idle watchdog in send() is what guards against a true hang.
 func NewOpenAIClient(c config.LLM) *OpenAIClient {
 	return &OpenAIClient{
 		baseURL: strings.TrimRight(c.BaseURL, "/"),
 		model:   c.Model,
 		apiKey:  c.APIKey,
 		temp:    c.Temperature,
-		hc:      &http.Client{Timeout: 120 * time.Second},
+		hc:      &http.Client{},
+		idle:    90 * time.Second,
+	}
+}
+
+// startIdleWatchdog cancels the request if neither the response nor any stream
+// chunk arrives within c.idle. It returns a tick func the reader calls on each
+// chunk to push the deadline back; the goroutine exits when ctx is done.
+func (c *OpenAIClient) startIdleWatchdog(ctx context.Context, cancel context.CancelFunc) func() {
+	d := c.idle
+	reset := make(chan struct{}, 1)
+	go func() {
+		t := time.NewTimer(d)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-reset:
+				if !t.Stop() {
+					select {
+					case <-t.C:
+					default:
+					}
+				}
+				t.Reset(d)
+			case <-t.C:
+				cancel() // gone silent — abort so the caller can retry
+				return
+			}
+		}
+	}()
+	return func() {
+		select {
+		case reset <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -156,7 +201,15 @@ func backoff(attempt int) time.Duration {
 
 // send makes one attempt; the bool reports whether the failure is worth a retry.
 func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bool) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(buf))
+	reqCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	tick := c.startIdleWatchdog(reqCtx, cancel)
+
+	// stalled reports a watchdog-induced cancel (vs. the user cancelling ctx), so
+	// the caller knows to retry rather than abort.
+	stalled := func() bool { return reqCtx.Err() != nil && ctx.Err() == nil }
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(buf))
 	if err != nil {
 		return Message{}, err, false
 	}
@@ -168,6 +221,9 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bo
 
 	resp, err := c.hc.Do(req)
 	if err != nil {
+		if stalled() {
+			return Message{}, fmt.Errorf("llm timed out (no response for %s)", c.idle), true
+		}
 		return Message{}, err, true // network hiccup — retry
 	}
 	defer resp.Body.Close()
@@ -181,7 +237,10 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bo
 		return Message{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, oneLine(string(data))), false
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		m, err := c.parseStream(resp.Body)
+		m, err := c.parseStream(resp.Body, tick)
+		if err != nil && stalled() {
+			return Message{}, fmt.Errorf("llm stream stalled (no data for %s)", c.idle), true
+		}
 		return m, err, false
 	}
 	m, err := c.parseJSON(resp.Body) // server ignored stream (e.g. a test fake)
@@ -197,7 +256,7 @@ func oneLine(s string) string {
 // the live completion-token counter as deltas arrive so the UI updates in real
 // time (LM Studio sends roughly one token per chunk). The final usage chunk
 // reconciles the estimate with the real count.
-func (c *OpenAIClient) parseStream(r io.Reader) (Message, error) {
+func (c *OpenAIClient) parseStream(r io.Reader, tick func()) (Message, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	var content strings.Builder
@@ -205,6 +264,7 @@ func (c *OpenAIClient) parseStream(r io.Reader) (Message, error) {
 	var order []int
 	reqCompl := 0
 	for sc.Scan() {
+		tick() // data arrived — push the idle deadline back
 		line := strings.TrimSpace(sc.Text())
 		if !strings.HasPrefix(line, "data:") {
 			continue

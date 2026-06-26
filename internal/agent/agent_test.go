@@ -294,6 +294,21 @@ func TestPlanModeAllowsReadOnly(t *testing.T) {
 	}
 }
 
+func TestRunStopsAfterRepeatedToolErrors(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	bad := toolCallReply("c", "calc", `{"action":"","params":{}}`) // empty action → always errors
+	fake := &scriptLLM{replies: []llm.Message{bad, bad, bad, bad, bad, bad}}
+	a := New(fake, reg, nil, nil, "", 12)
+
+	tr, _ := a.Run(context.Background(), "do something")
+	if tr.Steps > maxStuckTurns {
+		t.Errorf("ran %d steps, want it to bail at ~%d stuck turns", tr.Steps, maxStuckTurns)
+	}
+	if !strings.Contains(tr.Final, "invalid tool calls") {
+		t.Errorf("final = %q, want the stuck-loop message", tr.Final)
+	}
+}
+
 func TestRunWrongToolHint(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc(), tool.NewWeb(nil))
 	fake := &scriptLLM{replies: []llm.Message{

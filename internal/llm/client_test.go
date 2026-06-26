@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -170,6 +171,76 @@ func TestToolCallArgsSanitized(t *testing.T) {
 	}
 	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Arguments != "{}" {
 		t.Errorf("empty args = %q, want {} after sanitizing", msg.ToolCalls[0].Arguments)
+	}
+}
+
+func TestIdleWatchdogCancelsOnStall(t *testing.T) {
+	c := NewOpenAIClient(config.LLM{})
+	c.idle = 30 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c.startIdleWatchdog(ctx, cancel) // no ticks → should cancel ctx
+
+	select {
+	case <-ctx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("watchdog did not cancel on a silent stream")
+	}
+}
+
+func TestIdleWatchdogStaysAliveWithTicks(t *testing.T) {
+	c := NewOpenAIClient(config.LLM{})
+	c.idle = 60 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tick := c.startIdleWatchdog(ctx, cancel)
+	for i := 0; i < 5; i++ {
+		time.Sleep(20 * time.Millisecond)
+		tick()
+	}
+	if ctx.Err() != nil {
+		t.Error("watchdog cancelled despite regular ticks")
+	}
+}
+
+// A stalled stream (headers, then silence) must fail fast and be retriable, not
+// hang — the "no ping, waits forever" bug.
+func TestChatStalledStreamRetriable(t *testing.T) {
+	var mu sync.Mutex
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		hits++
+		first := hits == 1
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		if fl, ok := w.(http.Flusher); ok {
+			fl.Flush()
+		}
+		if first {
+			time.Sleep(300 * time.Millisecond) // go silent → watchdog should fire
+			return
+		}
+		io.WriteString(w, `data: {"choices":[{"delta":{"content":"ok"}}]}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+	cl.idle = 40 * time.Millisecond
+	var retried bool
+	cl.OnRetry = func(_ int, _ time.Duration, reason string) {
+		retried = true
+		if !strings.Contains(reason, "stall") {
+			t.Errorf("retry reason = %q, want a stall", reason)
+		}
+	}
+	msg, err := cl.Chat(context.Background(), []Message{User("hi")}, nil)
+	if err != nil {
+		t.Fatalf("Chat should recover after the stall: %v", err)
+	}
+	if !retried || msg.Content != "ok" {
+		t.Errorf("retried=%v content=%q, want recovery after a stall", retried, msg.Content)
 	}
 }
 

@@ -146,6 +146,34 @@ func TestRenderMarkdownConvertsLatex(t *testing.T) {
 	}
 }
 
+// Batched tool calls each request approval concurrently. Showing one approval
+// must NOT immediately wait for the next (that pre-fetch overwrote m.pending and
+// orphaned the first reply channel — a forever "Thinking" hang). The next is
+// fetched only after the current one is answered.
+func TestApprovalSerializedNoPrefetch(t *testing.T) {
+	m := &tuiModel{bridge: newBridge(), input: textinput.New(), state: stIdle}
+
+	req := approvalReq{kind: "write", detail: "a.txt", reply: make(chan bool, 1)}
+	_, cmd := m.Update(approvalMsg(req))
+	if cmd != nil {
+		t.Error("showing an approval must not issue a follow-up command (no pre-fetch)")
+	}
+	if m.pending == nil || m.state != stApprove {
+		t.Fatalf("approval not shown: pending=%v state=%v", m.pending, m.state)
+	}
+
+	_, cmd = m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if !<-req.reply {
+		t.Error("approval not granted on 'y'")
+	}
+	if m.pending != nil {
+		t.Error("pending should be cleared after answering")
+	}
+	if cmd == nil {
+		t.Error("answering should fetch the next queued approval")
+	}
+}
+
 // The pipe-through-script smoke test can't reliably confirm quit semantics, so
 // verify the exit path directly: /exit must yield tea.Quit.
 func TestExitCommandQuits(t *testing.T) {

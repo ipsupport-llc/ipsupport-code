@@ -47,7 +47,8 @@ type FilePolicy struct {
 
 // Config is the merged runtime configuration.
 type Config struct {
-	Name       string     `json:"name,omitempty"` // display name (renameable)
+	Name       string     `json:"name,omitempty"`    // display name (renameable)
+	Channel    string     `json:"channel,omitempty"` // update channel: stable | nightly
 	LLM        LLM        `json:"llm"`
 	Run        RunPolicy  `json:"run"`
 	File       FilePolicy `json:"file"`
@@ -67,7 +68,8 @@ var (
 // default policies, a jail at the workspace root, and the protective deny floor.
 func Default() Config {
 	return Config{
-		Name: "ipsupport-code",
+		Name:    "ipsupport-code",
+		Channel: "stable",
 		LLM: LLM{
 			BaseURL:       "http://localhost:1234/v1",
 			Model:         "qwen2.5-7b-instruct",
@@ -156,6 +158,28 @@ func SaveWorkspacePolicy(workspace string, run RunPolicy, file FilePolicy) error
 		return err
 	}
 	return os.WriteFile(path, data, 0o644)
+}
+
+// SaveChannel persists the update channel (stable|nightly) into the user config,
+// preserving the other keys already there.
+func SaveChannel(channel string) error {
+	raw := map[string]json.RawMessage{}
+	if data, err := os.ReadFile(GlobalPath()); err == nil {
+		_ = json.Unmarshal(data, &raw)
+	}
+	b, err := json.Marshal(channel)
+	if err != nil {
+		return err
+	}
+	raw["channel"] = b
+	if err := os.MkdirAll(configHome(), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(raw, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(GlobalPath(), data, 0o644)
 }
 
 // Load merges the user config then the workspace config over Default(), unions

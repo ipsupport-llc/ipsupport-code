@@ -57,6 +57,22 @@ make release   # every target into dist/
 go install github.com/ipsupport-llc/ipsupport-code/cmd/agent@latest  # installs as `agent`
 ```
 
+## Updating
+
+The binary updates itself in place from GitHub Releases:
+
+```sh
+ipsupport-code update            # update on the current channel
+ipsupport-code update nightly    # switch to the nightly channel (saved) and update
+ipsupport-code update stable     # switch back to stable
+```
+
+`/update` does the same from inside the REPL. On startup it does a quick,
+best-effort check and prints a one-line notice if a newer build is out on your
+channel (`stable` by default — set `"channel": "nightly"` in
+`~/.config/ipsupport-code/config.json`, or switch with `update nightly`). Local
+dev builds are never nagged.
+
 ## Quick start
 
 1. In LM Studio, load a **tool-calling** model (e.g. `qwen2.5-7b-instruct`) and

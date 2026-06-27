@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -20,6 +21,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/selfupdate"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
@@ -86,6 +88,8 @@ type skillsMsg struct {
 	names []string
 	err   error
 }
+type updateMsg struct{ notice string }   // startup freshness check result
+type updateDoneMsg struct{ text string } // /update result
 
 // newTUIModel installs the UI bridge as the agent's tracer + approver, wires the
 // stack, and builds the model. Split out from runTUI so tests can drive it.
@@ -153,7 +157,16 @@ func (a *app) runTUI(ctx context.Context) error {
 }
 
 func (m *tuiModel) Init() tea.Cmd {
-	return tea.Batch(m.spin.Tick, textinput.Blink, m.waitEvent(), m.waitApproval())
+	return tea.Batch(m.spin.Tick, textinput.Blink, m.waitEvent(), m.waitApproval(), m.checkUpdate())
+}
+
+// checkUpdate runs the startup freshness check off the UI thread.
+func (m *tuiModel) checkUpdate() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(m.ctx, 3*time.Second)
+		defer cancel()
+		return updateMsg{notice: m.app.freshnessNotice(ctx)}
+	}
 }
 
 func (m *tuiModel) waitEvent() tea.Cmd {
@@ -251,6 +264,17 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = m.app.wire() // register the skill tool + index on the UI thread (no race)
 			m.push(cDim.Render("installed & enabled: " + strings.Join(msg.names, ", ")))
 		}
+		return m, m.input.Focus()
+
+	case updateMsg:
+		if strings.TrimSpace(msg.notice) != "" {
+			m.push(m.accentBold().Render("  ⬆ " + msg.notice)) // a newer build is out
+		}
+		return m, nil
+
+	case updateDoneMsg:
+		m.state = stIdle
+		m.push(cDim.Render("  " + msg.text))
 		return m, m.input.Focus()
 
 	case tea.KeyMsg:
@@ -442,6 +466,8 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.push(cDim.Render(m.app.setMode(true)))
 	case "/auto":
 		m.push(cDim.Render(m.app.setMode(false)))
+	case "/update":
+		return m, m.startUpdate(strings.TrimSpace(rest))
 	case "/skills":
 		return m.skillsCmd(rest)
 	case "/permissions", "/perms":
@@ -553,6 +579,44 @@ func (m *tuiModel) setSuggestion(text string) {
 	m.suggestion = text
 	m.input.Placeholder = text + "   (Tab to accept)"
 	m.push(cDim.Render("  💡 next: ") + m.accentBold().Render(text) + cDim.Render("   (Tab)"))
+}
+
+// startUpdate self-updates from GitHub in the background. An optional
+// "stable"/"nightly" arg switches and saves the channel. The binary is replaced
+// in place; a restart picks it up.
+func (m *tuiModel) startUpdate(arg string) tea.Cmd {
+	channel := m.app.cfg.Channel
+	if channel == "" {
+		channel = selfupdate.Stable
+	}
+	if arg == selfupdate.Stable || arg == selfupdate.Nightly {
+		channel = arg
+		_ = config.SaveChannel(channel)
+		m.app.cfg.Channel = channel
+	} else if arg != "" {
+		m.push(cDim.Render("usage: /update [stable|nightly]"))
+		return nil
+	}
+	m.state = stRunning
+	m.taskStart = time.Now()
+	m.push(cDim.Render("  ⬆ checking the " + channel + " channel…"))
+	ctx, cur := m.ctx, version
+	return func() tea.Msg {
+		c, cancel := context.WithTimeout(ctx, 90*time.Second)
+		defer cancel()
+		rel, err := selfupdate.Latest(c, selfupdate.Repo, channel, http.DefaultClient)
+		switch {
+		case err != nil:
+			return updateDoneMsg{"update failed: " + err.Error()}
+		case rel.Version == cur:
+			return updateDoneMsg{"already up to date — " + cur + " (" + channel + ")"}
+		}
+		path, err := selfupdate.Apply(c, rel, http.DefaultClient)
+		if err != nil {
+			return updateDoneMsg{"update failed: " + err.Error()}
+		}
+		return updateDoneMsg{"updated to " + rel.Version + " — restart to use it (" + path + ")"}
+	}
 }
 
 // startCompact folds the session into a summary in the background (manual via
@@ -803,6 +867,7 @@ var commandList = []cmdInfo{
 	{"/compact", "summarize the session so far to free up context"},
 	{"/plan", "plan mode — propose a plan, change nothing"},
 	{"/auto", "auto mode — execute the task (default)"},
+	{"/update", "self-update from GitHub (stable|nightly)"},
 	{"/skills", "list/toggle/install on-demand instruction packs"},
 	{"/permissions", "relax approval for non-destructive file/shell actions"},
 	{"/color", "change the frame color (cycles if no name)"},
@@ -884,6 +949,7 @@ func (m *tuiModel) renderStatus() []string {
 		instr = "(none)"
 	}
 	return m.renderKV("status", [][2]string{
+		{"version", fmt.Sprintf("%s (%s channel)", version, channelOf(c))},
 		{"server", c.LLM.BaseURL},
 		{"model", c.LLM.Model},
 		{"workspace", c.Workspace},

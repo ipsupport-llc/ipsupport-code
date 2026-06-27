@@ -29,6 +29,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/reflect"
+	"github.com/ipsupport-llc/ipsupport-code/internal/selfupdate"
 	"github.com/ipsupport-llc/ipsupport-code/internal/skill"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
@@ -51,6 +52,10 @@ func main() {
 	flag.Parse()
 	if showVersion {
 		fmt.Println("ipsupport-code", version)
+		return
+	}
+	if args := flag.Args(); len(args) >= 1 && args[0] == "update" {
+		runUpdate(args[1:])
 		return
 	}
 	setupLogging()
@@ -78,6 +83,74 @@ func main() {
 	default:
 		app.repl(ctx)
 	}
+}
+
+// runUpdate downloads and installs a newer binary from GitHub Releases for the
+// configured channel (an optional "stable"/"nightly" arg switches and saves it).
+func runUpdate(args []string) {
+	cfg, _ := config.Load(".")
+	channel := cfg.Channel
+	if channel == "" {
+		channel = selfupdate.Stable
+	}
+	if len(args) >= 1 {
+		switch args[0] {
+		case selfupdate.Stable, selfupdate.Nightly:
+			channel = args[0]
+			if err := config.SaveChannel(channel); err != nil {
+				fmt.Fprintln(os.Stderr, "warning: channel not saved:", err)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "unknown channel %q — use 'stable' or 'nightly'\n", args[0])
+			os.Exit(1)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	rel, err := selfupdate.Latest(ctx, selfupdate.Repo, channel, http.DefaultClient)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "update:", err)
+		os.Exit(1)
+	}
+	if rel.Version == version {
+		fmt.Printf("already up to date — %s (%s channel)\n", version, channel)
+		return
+	}
+	fmt.Printf("updating %s → %s (%s channel)…\n", version, rel.Version, channel)
+	path, err := selfupdate.Apply(ctx, rel, http.DefaultClient)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "update:", err)
+		os.Exit(1)
+	}
+	fmt.Printf("done — %s is now %s\n", path, rel.Version)
+}
+
+// startupNotice runs freshnessNotice under a short timeout (best-effort).
+func (a *app) startupNotice(ctx context.Context) string {
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	return a.freshnessNotice(cctx)
+}
+
+// freshnessNotice returns a one-line "newer build available" message, or "" when
+// up to date, on a local (dev) build, or if the check fails. Best-effort.
+func (a *app) freshnessNotice(ctx context.Context) string {
+	// Only released binaries have a clean version ("v0.1.0" / "nightly-…"); a local
+	// build is "dev" or a git-describe ("v0.1.0-20-g<sha>", "-dirty") — skip those
+	// so a developer build doesn't nag about being "outdated".
+	if version == "dev" || strings.Contains(version, "dirty") || strings.Contains(version, "-g") {
+		return ""
+	}
+	channel := a.cfg.Channel
+	if channel == "" {
+		channel = selfupdate.Stable
+	}
+	rel, err := selfupdate.Latest(ctx, selfupdate.Repo, channel, http.DefaultClient)
+	if err != nil || rel.Version == "" || rel.Version == version {
+		return ""
+	}
+	return fmt.Sprintf("a newer %s build is available: %s (you're on %s) — run `update`", channel, rel.Version, version)
 }
 
 // app bundles everything one process needs across tasks, plus session counters.
@@ -384,6 +457,9 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string) {
 
 func (a *app) repl(ctx context.Context) {
 	fmt.Println("ipsupport-code — type a task, or /help for commands.")
+	if n := a.startupNotice(ctx); n != "" {
+		fmt.Fprintln(os.Stderr, n)
+	}
 	for {
 		fmt.Print("\n> ")
 		line, err := a.reader.ReadString('\n')
@@ -439,6 +515,8 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		fmt.Println(a.setMode(true))
 	case "/auto":
 		fmt.Println(a.setMode(false))
+	case "/update":
+		runUpdate(strings.Fields(rest))
 	case "/skills":
 		for _, l := range a.skillsCommand(ctx, rest) {
 			fmt.Println(l)
@@ -640,6 +718,7 @@ func helpText() string {
   /clear           fresh start — clear the screen and the session
   /compact         summarize the session so far to free up context
   /plan, /auto     plan mode (propose only) vs auto mode (execute)
+  /update [chan]   self-update from GitHub (chan = stable|nightly, saved)
   /skills          list/toggle/install on-demand instruction packs
   /permissions     relax approval for non-destructive file/shell actions
   /color [name]    change the TUI frame color (cycles if no name)
@@ -658,6 +737,7 @@ func (a *app) statusText() string {
 		instr = "(none)"
 	}
 	return fmt.Sprintf(`status:
+  version      %s (%s channel)
   server       %s
   model        %s
   max_steps    %d
@@ -669,10 +749,19 @@ func (a *app) statusText() string {
   knowledge    %s (%d lessons)
   trace        %s
 `,
+		version, channelOf(a.cfg),
 		a.cfg.LLM.BaseURL, a.cfg.LLM.Model, a.cfg.LLM.MaxSteps,
 		a.cfg.Workspace, a.cfg.File.Jail, a.cfg.Run.Default, a.cfg.File.Default,
 		instr, a.ag.SessionLen(),
 		a.cfg.KBPath, len(a.kb.All()), a.cfg.TracePath)
+}
+
+// channelOf returns the configured update channel, defaulting to stable.
+func channelOf(cfg config.Config) string {
+	if cfg.Channel == "" {
+		return selfupdate.Stable
+	}
+	return cfg.Channel
 }
 
 func (a *app) usageText() string {

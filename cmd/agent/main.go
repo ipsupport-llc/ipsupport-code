@@ -173,12 +173,13 @@ type app struct {
 	tracer     trace.Tracer  // composite, set in wire()
 	approver   tool.Approver // stdin (plain) or the TUI bridge
 
-	client    *llm.OpenAIClient
-	ag        *agent.Agent
-	refl      *reflect.Reflector
-	instrSrc  string // project instructions file in effect, "" if none
-	promptSrc string // "built-in" or the system.md override path
-	planMode  bool   // plan (propose) vs auto (execute); survives re-wire
+	client         *llm.OpenAIClient
+	ag             *agent.Agent
+	refl           *reflect.Reflector
+	instrSrc       string // project instructions file in effect, "" if none
+	promptSrc      string // "built-in" or the system.md override path
+	planMode       bool   // plan (propose) vs auto (execute); survives re-wire
+	windowDetected bool   // got the real loaded context window (vs a default/guess)
 
 	tasks, steps, toolCalls int
 }
@@ -215,13 +216,19 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 }
 
 // detectContextWindow asks LM Studio for the loaded model's context length and,
-// if it answers, uses that real value instead of the configured default. Best-
-// effort with a short timeout so startup never blocks on it.
+// once it answers (the model must be loaded), uses that real value instead of
+// the configured default. No-op after it has succeeded once. Best-effort with a
+// short timeout so it never blocks. The model is usually unloaded at startup, so
+// this also runs after the first task (see the re-detect call sites).
 func (a *app) detectContextWindow() {
+	if a.windowDetected {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if w := llm.DetectContextWindow(ctx, a.cfg.LLM.BaseURL, a.cfg.LLM.Model, http.DefaultClient); w > 0 {
 		a.cfg.LLM.ContextWindow = w
+		a.windowDetected = true
 		slog.Info("detected context window", "tokens", w, "model", a.cfg.LLM.Model)
 	}
 }
@@ -298,8 +305,9 @@ func (a *app) reconfigure() error {
 	if err := a.wire(); err != nil {
 		return err
 	}
-	a.loadSession()         // a fresh agent — restore the persisted session
-	a.detectContextWindow() // model may have changed — re-detect the window
+	a.loadSession()          // a fresh agent — restore the persisted session
+	a.windowDetected = false // model may have changed (/login) — re-detect
+	a.detectContextWindow()
 	return nil
 }
 
@@ -461,6 +469,7 @@ func (a *app) runOne(ctx context.Context, goal string) {
 		fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
 	}
 	a.saveSession()
+	a.detectContextWindow() // the model is loaded now — confirm the real window
 	if a.shouldAutoCompact() {
 		if n, err := a.ag.Compact(ctx); err == nil && n > 0 {
 			a.saveSession()

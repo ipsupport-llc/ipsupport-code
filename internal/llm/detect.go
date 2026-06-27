@@ -41,26 +41,22 @@ func DetectContextWindow(ctx context.Context, baseURL, model string, hc *http.Cl
 		return 0
 	}
 
-	// Prefer the entry for our model; otherwise the first loaded one.
+	// Only trust loaded_context_length — the window the model is actually running
+	// with. max_context_length is the model's theoretical max (often huge), which
+	// is all an UNLOADED model reports; using it would size auto-compact against,
+	// say, 260k instead of the real 8k. When nothing is loaded we return 0 so the
+	// caller keeps its default and re-detects once the model is up.
 	for _, m := range out.Data {
-		if m.ID == model {
-			return ctxLen(m.LoadedContextLength, m.MaxContextLength)
+		if m.ID == model && m.LoadedContextLength > 0 {
+			return m.LoadedContextLength
 		}
 	}
 	for _, m := range out.Data {
-		if m.State == "loaded" {
-			return ctxLen(m.LoadedContextLength, m.MaxContextLength)
+		if m.State == "loaded" && m.LoadedContextLength > 0 {
+			return m.LoadedContextLength
 		}
 	}
 	return 0
-}
-
-// ctxLen prefers the loaded window (what's actually in use) over the model max.
-func ctxLen(loaded, max int) int {
-	if loaded > 0 {
-		return loaded
-	}
-	return max
 }
 
 // lmStudioModelsURL turns an OpenAI base URL (…/v1) into LM Studio's native

@@ -22,6 +22,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/selfupdate"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
@@ -93,6 +94,7 @@ type updateMsg struct{ notice string }   // startup freshness check result
 type updateDoneMsg struct{ text string } // /update result
 type shellDoneMsg struct{}               // returned from a drop-to-shell
 type shellCmdMsg struct{ out string }    // output of a one-off !cmd
+type windowMsg struct{ tokens int }      // re-detected context window
 
 // newTUIModel installs the UI bridge as the agent's tracer + approver, wires the
 // stack, and builds the model. Split out from runTUI so tests can drive it.
@@ -161,6 +163,22 @@ func (a *app) runTUI(ctx context.Context) error {
 
 func (m *tuiModel) Init() tea.Cmd {
 	return tea.Batch(m.spin.Tick, textinput.Blink, m.waitEvent(), m.waitApproval(), m.checkUpdate())
+}
+
+// detectWindowCmd re-detects the context window off the UI thread once the model
+// is loaded (it's usually unloaded at startup, so the detector returned 0 then).
+// Returns nil once we have the real value. It only reads config and returns the
+// number via windowMsg — the write happens on the UI thread, so no race.
+func (m *tuiModel) detectWindowCmd() tea.Cmd {
+	if m.app.windowDetected {
+		return nil
+	}
+	base, model := m.app.cfg.LLM.BaseURL, m.app.cfg.LLM.Model
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		return windowMsg{tokens: llm.DetectContextWindow(ctx, base, model, http.DefaultClient)}
+	}
 }
 
 // checkUpdate runs the startup freshness check off the UI thread.
@@ -234,17 +252,18 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stIdle
 		m.cancel = nil
 		m.retry = nil
-		if len(m.queued) > 0 { // run the next type-ahead
+		detect := m.detectWindowCmd() // model is loaded now — confirm the real window
+		if len(m.queued) > 0 {        // run the next type-ahead
 			next := m.queued[0]
 			m.queued = m.queued[1:]
 			m.syncViewport() // it left the pinned queue
 			m.push(cYou.Render("❯ ") + next)
-			return m, m.runGoals(1, next)
+			return m, tea.Batch(detect, m.runGoals(1, next))
 		}
 		if m.app.shouldAutoCompact() { // context near the limit — fold it down
-			return m, m.startCompact(true)
+			return m, tea.Batch(detect, m.startCompact(true))
 		}
-		return m, m.input.Focus()
+		return m, tea.Batch(detect, m.input.Focus())
 
 	case compactDoneMsg:
 		m.state = stIdle
@@ -287,6 +306,14 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case shellCmdMsg:
 		if msg.out != "" {
 			m.push(outputLines(msg.out, "→", cOk)...)
+		}
+		return m, nil
+
+	case windowMsg:
+		// applied on the UI thread, so View/auto-compact never race the write
+		if msg.tokens > 0 && !m.app.windowDetected {
+			m.app.cfg.LLM.ContextWindow = msg.tokens
+			m.app.windowDetected = true
 		}
 		return m, nil
 

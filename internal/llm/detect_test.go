@@ -45,14 +45,17 @@ func TestDetectContextWindow(t *testing.T) {
 	}
 }
 
-func TestDetectContextWindowFallsToMax(t *testing.T) {
-	const body = `{"data":[{"id":"m","state":"loaded","max_context_length":8192}]}`
+// An unloaded model reports only max_context_length — we must NOT adopt it
+// (that's the 260k bug); return 0 so the caller keeps its default and re-detects
+// once the model is loaded.
+func TestDetectContextWindowUnloadedReturnsZero(t *testing.T) {
+	const body = `{"data":[{"id":"m","state":"not-loaded","max_context_length":262144}]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		io.WriteString(w, body)
 	}))
 	defer srv.Close()
-	if got := DetectContextWindow(context.Background(), srv.URL+"/v1", "m", srv.Client()); got != 8192 {
-		t.Errorf("got %d, want 8192 (max when no loaded length)", got)
+	if got := DetectContextWindow(context.Background(), srv.URL+"/v1", "m", srv.Client()); got != 0 {
+		t.Errorf("got %d, want 0 (don't trust max for an unloaded model)", got)
 	}
 }
 

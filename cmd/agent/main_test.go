@@ -221,6 +221,34 @@ func TestApprovalKeepsInputEditable(t *testing.T) {
 	}
 }
 
+// A system.md override replaces the built-in base prompt; without one the base
+// is used.
+func TestSystemPromptOverride(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+
+	if p := a.systemPrompt(); !strings.Contains(p, "You are the engine inside") || a.promptSrc != "built-in" {
+		t.Fatalf("default should be the built-in base; promptSrc=%q", a.promptSrc)
+	}
+
+	if err := os.MkdirAll(filepath.Join(ws, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".agent", "system.md"), []byte("MY CUSTOM ENGINE PROMPT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := a.systemPrompt()
+	if !strings.Contains(p, "MY CUSTOM ENGINE PROMPT") || strings.Contains(p, "You are the engine inside") {
+		t.Errorf("override not applied:\n%s", p)
+	}
+	if !strings.HasSuffix(a.promptSrc, "system.md") {
+		t.Errorf("promptSrc = %q, want the override path", a.promptSrc)
+	}
+}
+
 // A /skills or /permissions toggle re-wires the stack (new client); the running
 // token total must carry over, not reset to zero.
 func TestTokenTotalSurvivesRewire(t *testing.T) {

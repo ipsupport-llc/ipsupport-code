@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -90,6 +91,8 @@ type skillsMsg struct {
 }
 type updateMsg struct{ notice string }   // startup freshness check result
 type updateDoneMsg struct{ text string } // /update result
+type shellDoneMsg struct{}               // returned from a drop-to-shell
+type shellCmdMsg struct{ out string }    // output of a one-off !cmd
 
 // newTUIModel installs the UI bridge as the agent's tracer + approver, wires the
 // stack, and builds the model. Split out from runTUI so tests can drive it.
@@ -277,6 +280,16 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.push(cDim.Render("  " + msg.text))
 		return m, m.input.Focus()
 
+	case shellDoneMsg:
+		m.push(cDim.Render("  ⇱ back in ipsupport-code"))
+		return m, m.input.Focus()
+
+	case shellCmdMsg:
+		if msg.out != "" {
+			m.push(outputLines(msg.out, "→", cOk)...)
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -386,7 +399,7 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			line := strings.TrimSpace(m.input.Value())
 			m.input.SetValue("")
 			if line == "" {
-				return m, nil
+				return m.runCommand("/shell") // empty Enter → drop to a shell
 			}
 			return m.submit(line)
 		case "tab":
@@ -426,11 +439,33 @@ func (m *tuiModel) resolveApproval(ok bool) {
 }
 
 func (m *tuiModel) submit(line string) (tea.Model, tea.Cmd) {
-	if strings.HasPrefix(line, "/") {
+	switch {
+	case line == "!": // bang alias for /shell
+		return m.runCommand("/shell")
+	case strings.HasPrefix(line, "!"): // !cmd — run one shell command
+		return m, m.runShellCmd(strings.TrimPrefix(line, "!"))
+	case strings.HasPrefix(line, "/"):
 		return m.runCommand(line)
 	}
 	m.push(cYou.Render("❯ ") + line)
 	return m, m.runGoals(1, line)
+}
+
+// runShellCmd runs a single shell command (the !cmd shortcut) in the workspace
+// and shows its output — the user's own command, ungated by the agent policy.
+func (m *tuiModel) runShellCmd(cmdline string) tea.Cmd {
+	cmdline = strings.TrimSpace(cmdline)
+	if cmdline == "" {
+		return nil
+	}
+	m.push(cYou.Render("! ") + cmdline)
+	dir := m.app.workspace
+	return func() tea.Msg {
+		c := exec.Command(shellPath(), "-c", cmdline)
+		c.Dir = dir
+		out, _ := c.CombinedOutput()
+		return shellCmdMsg{out: strings.TrimRight(string(out), "\n")}
+	}
 }
 
 func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
@@ -468,6 +503,12 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.push(cDim.Render(m.app.setMode(false)))
 	case "/update":
 		return m, m.startUpdate(strings.TrimSpace(rest))
+	case "/shell", "/sh":
+		sh := shellPath()
+		c := exec.Command(sh)
+		c.Dir = m.app.workspace
+		m.push(cDim.Render("  ⇲ dropping to " + sh + " — exit to return"))
+		return m, tea.ExecProcess(c, func(error) tea.Msg { return shellDoneMsg{} })
 	case "/skills":
 		return m.skillsCmd(rest)
 	case "/permissions", "/perms":
@@ -868,6 +909,7 @@ var commandList = []cmdInfo{
 	{"/plan", "plan mode — propose a plan, change nothing"},
 	{"/auto", "auto mode — execute the task (default)"},
 	{"/update", "self-update from GitHub (stable|nightly)"},
+	{"/shell", "drop to a shell in the workspace (exit to return)"},
 	{"/skills", "list/toggle/install on-demand instruction packs"},
 	{"/permissions", "relax approval for non-destructive file/shell actions"},
 	{"/color", "change the frame color (cycles if no name)"},
@@ -955,6 +997,7 @@ func (m *tuiModel) renderStatus() []string {
 		{"workspace", c.Workspace},
 		{"jail", c.File.Jail},
 		{"defaults", fmt.Sprintf("run=%s  file=%s", c.Run.Default, c.File.Default)},
+		{"prompt", promptOrDefault(m.app.promptSrc)},
 		{"instructions", instr},
 		{"session", fmt.Sprintf("%d messages", m.app.ag.SessionLen())},
 		{"knowledge", fmt.Sprintf("%s (%d lessons)", c.KBPath, len(m.app.kb.All()))},

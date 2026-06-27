@@ -159,6 +159,19 @@ While a task runs the input stays live: Enter **queues** a follow-up (pinned
 above the input until it runs), **↑** pulls the last queued message back to edit
 or drop, and **esc** cancels.
 
+**Shell.** `/shell` (or `!`, or Enter on an empty prompt) drops you into an
+interactive shell in the workspace — do things by hand, exit to return. `!cmd`
+runs a single command and shows its output. These are your commands, not the
+agent's, so they aren't gated by the permission policy.
+
+**Custom system prompt.** The built-in engine prompt is deliberately tiny; you
+can replace it with `.agent/system.md` (per project) or
+`~/.config/ipsupport-code/system.md` (global). `ipsupport-code -dump-prompt`
+prints the default to start from (`> .agent/system.md`). Your `CLAUDE.md`,
+environment, and skills are still appended after it. `/status` shows which
+prompt is in effect. (A bloated prompt makes a small model call tools worse —
+edit at your own risk.)
+
 ## How it works
 
 - **Native tool calling.** Talks to LM Studio's OpenAI-compatible server and lets

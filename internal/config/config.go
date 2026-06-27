@@ -118,6 +118,10 @@ func DefaultTracePath() string { return filepath.Join(configHome(), "traces.json
 // DefaultSkillsPath is the global skills directory.
 func DefaultSkillsPath() string { return filepath.Join(configHome(), "skills") }
 
+// SystemPromptPath is the optional global system-prompt override file; if it (or
+// a workspace .agent/system.md) exists, it replaces the built-in base prompt.
+func SystemPromptPath() string { return filepath.Join(configHome(), "system.md") }
+
 // SaveGlobal writes the machine-level settings (display name + LLM connection)
 // to the user config file, creating its directory.
 func SaveGlobal(name string, l LLM) error {

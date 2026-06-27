@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
@@ -45,13 +46,19 @@ func main() {
 		workspace   string
 		doInit      bool
 		showVersion bool
+		dumpPrompt  bool
 	)
 	flag.StringVar(&workspace, "C", ".", "workspace directory")
 	flag.BoolVar(&doInit, "init", false, "re-run first-time setup (server URL, model)")
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
+	flag.BoolVar(&dumpPrompt, "dump-prompt", false, "print the built-in system prompt and exit (e.g. > .agent/system.md to start editing)")
 	flag.Parse()
 	if showVersion {
 		fmt.Println("ipsupport-code", version)
+		return
+	}
+	if dumpPrompt {
+		fmt.Println(agent.DefaultSystemPrompt())
 		return
 	}
 	if args := flag.Args(); len(args) >= 1 && args[0] == "update" {
@@ -166,11 +173,12 @@ type app struct {
 	tracer     trace.Tracer  // composite, set in wire()
 	approver   tool.Approver // stdin (plain) or the TUI bridge
 
-	client   *llm.OpenAIClient
-	ag       *agent.Agent
-	refl     *reflect.Reflector
-	instrSrc string // project instructions file in effect, "" if none
-	planMode bool   // plan (propose) vs auto (execute); survives re-wire
+	client    *llm.OpenAIClient
+	ag        *agent.Agent
+	refl      *reflect.Reflector
+	instrSrc  string // project instructions file in effect, "" if none
+	promptSrc string // "built-in" or the system.md override path
+	planMode  bool   // plan (propose) vs auto (execute); survives re-wire
 
 	tasks, steps, toolCalls int
 }
@@ -354,15 +362,34 @@ func loadInstructions(workspace string) (text, source string) {
 	return "", ""
 }
 
+// loadSystemOverride reads a system-prompt override that REPLACES the built-in
+// base — workspace .agent/system.md wins, then the global one. Empty when none.
+func loadSystemOverride(workspace string) (text, source string) {
+	for _, p := range []string{filepath.Join(workspace, ".agent", "system.md"), config.SystemPromptPath()} {
+		data, err := os.ReadFile(p)
+		if err != nil || strings.TrimSpace(string(data)) == "" {
+			continue
+		}
+		clipped, _ := textutil.Clip(string(data), maxInstructions)
+		return clipped, p
+	}
+	return "", ""
+}
+
 // systemPrompt is the base prompt plus the real environment (OS + workspace) and
-// any project instructions; records the instructions source in instrSrc.
+// any project instructions. The base is the built-in default unless a system.md
+// override replaces it. Records the instructions and prompt sources for /status.
 func (a *app) systemPrompt() string {
 	text, src := loadInstructions(a.workspace)
 	a.instrSrc = src
-	base := agent.DefaultSystemPrompt()
-	if a.cfg.Name != "" && a.cfg.Name != "ipsupport-code" { // honor /rename
+
+	base, psrc := agent.DefaultSystemPrompt(), "built-in"
+	if override, osrc := loadSystemOverride(a.workspace); override != "" {
+		base, psrc = override, osrc
+	} else if a.cfg.Name != "" && a.cfg.Name != "ipsupport-code" { // honor /rename (default only)
 		base = strings.ReplaceAll(base, "ipsupport-code", a.cfg.Name)
 	}
+	a.promptSrc = psrc
 	out := base + fmt.Sprintf(
 		"\n\nEnvironment: you are running on %s; the workspace is %s. Use commands that exist on this OS — on darwin prefer vm_stat/top/sw_vers over Linux-only tools like free.",
 		runtime.GOOS, a.workspace)
@@ -471,6 +498,10 @@ func (a *app) repl(ctx context.Context) {
 		switch {
 		case line == "":
 			continue
+		case line == "!":
+			a.runShell(ctx)
+		case strings.HasPrefix(line, "!"):
+			a.runShellLine(ctx, strings.TrimPrefix(line, "!"))
 		case strings.HasPrefix(line, "/"):
 			if a.command(ctx, line) {
 				return
@@ -517,6 +548,8 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		fmt.Println(a.setMode(false))
 	case "/update":
 		runUpdate(strings.Fields(rest))
+	case "/shell", "/sh":
+		a.runShell(ctx)
 	case "/skills":
 		for _, l := range a.skillsCommand(ctx, rest) {
 			fmt.Println(l)
@@ -688,6 +721,37 @@ func (a *app) permissionsSet(field *string, arg, label string) []string {
 	return []string{msg + " — saved to .agent/config.json"}
 }
 
+// shellPath is the user's interactive shell, falling back to /bin/sh.
+func shellPath() string {
+	if s := os.Getenv("SHELL"); s != "" {
+		return s
+	}
+	return "/bin/sh"
+}
+
+// runShell drops to an interactive shell in the workspace so the user can do
+// things by hand; control returns when they exit it.
+func (a *app) runShell(ctx context.Context) {
+	sh := shellPath()
+	fmt.Printf("— %s (exit to return to ipsupport-code) —\n", sh)
+	cmd := exec.CommandContext(ctx, sh)
+	cmd.Dir = a.workspace
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	_ = cmd.Run() // a non-zero shell exit is normal; nothing to report
+	fmt.Println("— back in ipsupport-code —")
+}
+
+// runShellLine runs a single shell command (the !cmd shortcut) in the workspace.
+func (a *app) runShellLine(ctx context.Context, cmdline string) {
+	if strings.TrimSpace(cmdline) == "" {
+		return
+	}
+	cmd := exec.CommandContext(ctx, shellPath(), "-c", cmdline)
+	cmd.Dir = a.workspace
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	_ = cmd.Run()
+}
+
 func splitCommand(line string) (cmd, rest string) {
 	cmd = strings.Fields(line)[0]
 	return cmd, strings.TrimSpace(strings.TrimPrefix(line, cmd))
@@ -719,6 +783,7 @@ func helpText() string {
   /compact         summarize the session so far to free up context
   /plan, /auto     plan mode (propose only) vs auto mode (execute)
   /update [chan]   self-update from GitHub (chan = stable|nightly, saved)
+  /shell, /sh      drop to a shell in the workspace (exit to return)
   /skills          list/toggle/install on-demand instruction packs
   /permissions     relax approval for non-destructive file/shell actions
   /color [name]    change the TUI frame color (cycles if no name)
@@ -744,6 +809,7 @@ func (a *app) statusText() string {
   workspace    %s
   jail         %q
   defaults     run=%s  file=%s
+  prompt       %s
   instructions %s
   session      %d messages
   knowledge    %s (%d lessons)
@@ -752,8 +818,16 @@ func (a *app) statusText() string {
 		version, channelOf(a.cfg),
 		a.cfg.LLM.BaseURL, a.cfg.LLM.Model, a.cfg.LLM.MaxSteps,
 		a.cfg.Workspace, a.cfg.File.Jail, a.cfg.Run.Default, a.cfg.File.Default,
-		instr, a.ag.SessionLen(),
+		promptOrDefault(a.promptSrc), instr, a.ag.SessionLen(),
 		a.cfg.KBPath, len(a.kb.All()), a.cfg.TracePath)
+}
+
+// promptOrDefault labels the system-prompt source for /status.
+func promptOrDefault(src string) string {
+	if src == "" {
+		return "built-in"
+	}
+	return src
 }
 
 // channelOf returns the configured update channel, defaulting to stable.

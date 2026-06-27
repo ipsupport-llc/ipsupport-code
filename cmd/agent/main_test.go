@@ -174,6 +174,25 @@ func TestApprovalSerializedNoPrefetch(t *testing.T) {
 	}
 }
 
+// A /skills or /permissions toggle re-wires the stack (new client); the running
+// token total must carry over, not reset to zero.
+func TestTokenTotalSurvivesRewire(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.client.SeedUsage(120, 45) // pretend some calls happened
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if p, c := a.client.Usage(); p != 120 || c != 45 {
+		t.Errorf("token total reset on re-wire: %d/%d, want 120/45", p, c)
+	}
+}
+
 // The pipe-through-script smoke test can't reliably confirm quit semantics, so
 // verify the exit path directly: /exit must yield tea.Quit.
 func TestExitCommandQuits(t *testing.T) {

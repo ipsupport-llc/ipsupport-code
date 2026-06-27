@@ -384,6 +384,15 @@ func (c *OpenAIClient) Usage() (prompt, completion int) {
 	return c.promptTk, c.complTk
 }
 
+// SeedUsage carries the running token totals from a previous client, so
+// rebuilding the stack (a /skills or /permissions toggle, /login) doesn't zero
+// the session's cumulative count.
+func (c *OpenAIClient) SeedUsage(prompt, completion int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.promptTk, c.complTk = prompt, completion
+}
+
 func toWire(m Message) wireMessage {
 	w := wireMessage{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID, Name: m.Name}
 	for _, tc := range m.ToolCalls {

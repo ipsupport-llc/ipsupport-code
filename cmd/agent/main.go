@@ -146,7 +146,14 @@ func (a *app) wire() error {
 	}
 	reg = tool.NewRegistry(tools...)
 	a.tracer = trace.Multi(a.fileTracer, a.uiTracer)
+	// Carry the session's running token total into the rebuilt client so a
+	// /skills, /permissions or /login re-wire doesn't zero the counter.
+	var seedP, seedC int
+	if a.client != nil {
+		seedP, seedC = a.client.Usage()
+	}
 	a.client = llm.NewOpenAIClient(a.cfg.LLM)
+	a.client.SeedUsage(seedP, seedC)
 	a.client.OnRetry = func(attempt int, wait time.Duration, reason string) {
 		slog.Warn("llm retry", "attempt", attempt, "wait", wait, "reason", reason)
 		a.emit("retry", map[string]any{"attempt": attempt, "wait_ms": wait.Milliseconds(), "reason": reason})

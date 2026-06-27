@@ -456,7 +456,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string) {
 }
 
 func (a *app) repl(ctx context.Context) {
-	fmt.Println("ipsupport-code — type a task, or /help for commands.")
+	fmt.Printf("ipsupport-code %s — type a task, or /help for commands.\n", version)
 	if n := a.startupNotice(ctx); n != "" {
 		fmt.Fprintln(os.Stderr, n)
 	}

@@ -12,7 +12,17 @@ set -eu
 
 REPO="ipsupport-llc/ipsupport-code"
 TAG="${1:-nightly}"
-DEST="${2:-./ipsupport-code}"
+
+# Where to install: an explicit 2nd arg wins; otherwise a personal bin dir that
+# already exists (so it's likely on PATH); otherwise the current directory.
+if [ "${2:-}" ]; then
+  DEST="$2"
+else
+  DEST="./ipsupport-code"
+  for d in "$HOME/.local/bin" "$HOME/bin"; do
+    [ -d "$d" ] && { DEST="$d/ipsupport-code"; break; }
+  done
+fi
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 arch=$(uname -m)
@@ -65,3 +75,31 @@ chmod +x "$DEST"
 
 echo "→ installed: $DEST"
 "$DEST" -version
+
+# How to run it: on PATH → by name; otherwise the full path + per-shell hint.
+dir=$(cd "$(dirname "$DEST")" 2>/dev/null && pwd)
+echo
+case ":$PATH:" in
+  *":$dir:"*)
+    echo "✓ $dir is on your PATH — run it with:  ipsupport-code"
+    ;;
+  *)
+    echo "ⓘ $dir is not on your PATH."
+    echo "  run it now:    $DEST"
+    case "$(basename "${SHELL:-sh}")" in
+      fish)
+        echo "  add to PATH:   fish_add_path $dir"
+        ;;
+      zsh)
+        echo "  add to PATH:   echo 'export PATH=\"$dir:\$PATH\"' >> ~/.zshrc && exec zsh"
+        ;;
+      bash)
+        rc="~/.bashrc"; [ "$os" = darwin ] && rc="~/.bash_profile"
+        echo "  add to PATH:   echo 'export PATH=\"$dir:\$PATH\"' >> $rc && exec bash"
+        ;;
+      *)
+        echo "  add to PATH:   put  export PATH=\"$dir:\$PATH\"  in your shell's startup file"
+        ;;
+    esac
+    ;;
+esac

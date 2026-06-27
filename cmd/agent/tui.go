@@ -115,20 +115,20 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 		name = "ipsupport-code"
 	}
 	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: lipgloss.Color("13")}
-	m.history = bannerLines(name, a.cfg.LLM.Model, a.workspace, a.cfg.LLM.ContextWindow, m.accent)
+	m.history = bannerLines(name, version, a.cfg.LLM.Model, a.workspace, a.cfg.LLM.ContextWindow, m.accent)
 	return m, nil
 }
 
 // bannerLines builds the Claude-Code-style startup card: a rounded box with the
-// agent name, model, working directory, and detected context window, then a
-// one-line key hint.
-func bannerLines(name, model, cwd string, window int, accent lipgloss.Color) []string {
+// agent name + version, model, working directory, and detected context window,
+// then a one-line key hint.
+func bannerLines(name, ver, model, cwd string, window int, accent lipgloss.Color) []string {
 	if h, err := os.UserHomeDir(); err == nil && h != "" && strings.HasPrefix(cwd, h) {
 		cwd = "~" + cwd[len(h):]
 	}
 	label := lipgloss.NewStyle().Bold(true).Foreground(accent)
 	rows := []string{
-		label.Render("✦ " + name),
+		label.Render("✦ "+name) + cDim.Render("  "+ver),
 		cDim.Render("model  ") + cBot.Render(model),
 		cDim.Render("cwd    ") + cBot.Render(cwd),
 	}

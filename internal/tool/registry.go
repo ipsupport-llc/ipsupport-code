@@ -64,10 +64,13 @@ func (r *Registry) Dispatch(ctx context.Context, name, action string, params map
 	if !ok {
 		return Err(fmt.Sprintf("unknown tool %q; available tools: %s", name, strings.Join(r.order, ", ")))
 	}
-	// Empty action is a common small-model slip; answer tersely (no full schema
-	// dump) so a retry loop doesn't bloat the context with the whole usage block.
+	// Empty action is a common small-model slip — it often means the model didn't
+	// format the call. Show the exact JSON shape with a concrete action (a weak
+	// model copies the example), not the whole schema dump.
 	if action == "" {
-		return Err(fmt.Sprintf("%s: no action given — set \"action\" to one of: %s", name, strings.Join(t.Actions(), ", ")))
+		acts := t.Actions()
+		return Err(fmt.Sprintf(`%s: no action given. Call it like {"action":%q,"params":{...}} — actions: %s`,
+			name, acts[0], strings.Join(acts, ", ")))
 	}
 	if !contains(t.Actions(), action) {
 		if owner, ok := r.actionToTool[action]; ok && owner != name {

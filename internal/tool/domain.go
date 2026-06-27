@@ -2,6 +2,8 @@ package tool
 
 import (
 	"context"
+	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -112,16 +114,26 @@ func (d *Domain) Call(ctx context.Context, action string, params map[string]any)
 	if !ok {
 		return Err(d.spec.Name + ": unknown action " + action)
 	}
-	var missing []string
+	var missing, required []string
 	for _, p := range a.Params {
 		if p.Required {
+			required = append(required, p.Name)
 			if v, ok := params[p.Name]; !ok || isEmpty(v) {
 				missing = append(missing, p.Name)
 			}
 		}
 	}
 	if len(missing) > 0 {
-		return Err("missing required param(s): " + strings.Join(missing, ", "))
+		given := make([]string, 0, len(params))
+		for k := range params {
+			given = append(given, k)
+		}
+		sort.Strings(given)
+		// Point at exactly what's wrong: which are missing, what the action needs,
+		// and what was actually passed — a weak model self-corrects from this fast.
+		return Err(fmt.Sprintf("missing required param(s): %s — %s.%s needs {%s}; you gave {%s}",
+			strings.Join(missing, ", "), d.spec.Name, a.Name,
+			strings.Join(required, ", "), strings.Join(given, ", ")))
 	}
 	return a.Run(ctx, Args{m: params})
 }

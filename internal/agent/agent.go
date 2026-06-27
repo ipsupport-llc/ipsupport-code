@@ -152,6 +152,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 
 	var tr Transcript
 	stuck, nudged := 0, false
+	lastSig := ""          // signature of the previous turn's tool calls (loop detection)
 	acted := false         // did the model call any tool this run?
 	refusalNudged := false // already pushed back on a "can't edit / here are the files" dodge?
 	for step := 0; step < a.maxSteps; step++ {
@@ -208,19 +209,23 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		results, nErr := a.runToolCalls(ctx, assistant.ToolCalls)
 		msgs = append(msgs, results...)
 
-		// A model stuck repeating failing calls (e.g. empty action) burns steps and
-		// the user's time. After several all-error turns, give it ONE forceful
-		// "this isn't working — rethink" nudge with an escape hatch to answer in
-		// words. Only if it's STILL stuck after that do we stop, handing the user a
-		// steering suggestion they can send in one tap.
-		if nErr == len(assistant.ToolCalls) {
+		// A model burns steps either by repeating calls that all fail (e.g. empty
+		// action) OR by repeating the exact same call(s) that already succeeded,
+		// making no progress (a reasoning model can spin here). Count both as
+		// unproductive: after several such turns give ONE forceful "rethink" nudge
+		// with an escape hatch to answer in words; if it's STILL stuck after that,
+		// stop and hand the user a one-tap steering suggestion.
+		sig := callSig(assistant.ToolCalls)
+		repeating := sig != "" && sig == lastSig
+		lastSig = sig
+		if nErr == len(assistant.ToolCalls) || repeating {
 			if stuck++; stuck >= maxStuckTurns {
 				if !nudged {
 					msgs = append(msgs, llm.User(stuckNudge))
 					a.emit("nudge", map[string]any{})
 					stuck, nudged = 0, true
 				} else {
-					const msg = "Stopped — it kept making invalid tool calls even after a nudge to rethink. Steer it (a different approach), or use a stronger model."
+					const msg = "Stopped — it kept repeating the same tool calls without progress (or they kept failing) even after a nudge to rethink. Steer it (a different approach), or use a stronger model."
 					tr.Final = msg
 					tr.Messages = msgs
 					a.emit("final", map[string]any{"text": msg, "suggest": stuckSuggest, "exhausted": true})
@@ -255,6 +260,23 @@ func toolNames(tools []map[string]any) []string {
 		}
 	}
 	return names
+}
+
+// callSig is a stable signature of a turn's tool calls (name + raw args), so two
+// turns making the exact same calls compare equal — the tell for a no-progress
+// loop. Empty for a turn with no calls.
+func callSig(calls []llm.ToolCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range calls {
+		b.WriteString(c.Name)
+		b.WriteByte('|')
+		b.WriteString(c.Arguments)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // toolCallNames lists the action names the model called this turn (debug). nil
@@ -300,7 +322,7 @@ const maxStuckTurns = 3
 
 // stuckNudge is the one self-correction injected before giving up — with an
 // escape hatch so the model answers in words instead of looping.
-const stuckNudge = `Those tool calls keep failing the same way — stop repeating them. Re-read the last error: it says exactly what is wrong (the call format, or a missing param). Either fix the call, or take a completely different approach to the goal. If you genuinely cannot proceed, reply in ONE sentence explaining what is blocking you, and do NOT call a tool.`
+const stuckNudge = `You're repeating the same tool call(s) without making progress. Stop and re-read the last result: if it errored, it says exactly what's wrong (the call format, or a missing param) — fix that; if it succeeded, you already have what you need, so act on it or finish. Take a different approach. If you genuinely cannot proceed, reply in ONE sentence explaining what's blocking you, and do NOT call a tool.`
 
 // stuckSuggest is offered to the user (one tap) when even the nudge didn't help.
 const stuckSuggest = "take a different approach — outline the steps first"

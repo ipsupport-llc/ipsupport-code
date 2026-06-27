@@ -334,6 +334,28 @@ func TestRunAcceptsRefusalAfterOneNudge(t *testing.T) {
 	}
 }
 
+// A model that keeps making the exact same (succeeding) tool call makes no
+// progress; the loop guard nudges once, then stops instead of running forever.
+func TestRunStopsOnRepeatedIdenticalCalls(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	call := toolCallReply("c", "calc", `{"action":"calculate","params":{"expression":"2+2"}}`)
+	replies := make([]llm.Message, 12)
+	for i := range replies {
+		replies[i] = call
+	}
+	a := New(&scriptLLM{replies: replies}, reg, nil, nil, "", 20)
+	tr, err := a.Run(context.Background(), "spin on the same call")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(tr.Final, "Stopped") {
+		t.Errorf("final = %q, want the loop guard to stop it", tr.Final)
+	}
+	if tr.Steps >= 20 {
+		t.Errorf("steps = %d, want the guard to stop well before maxSteps", tr.Steps)
+	}
+}
+
 func TestParseArgsNestedObject(t *testing.T) {
 	action, params := parseArgs(`{"action":"edit","params":{"path":"a","find":"x","replace":"y"}}`)
 	if action != "edit" || params["find"] != "x" || params["replace"] != "y" {
@@ -428,7 +450,7 @@ func TestRunNudgesThenStops(t *testing.T) {
 	if tr.Steps > 2*maxStuckTurns+1 {
 		t.Errorf("ran %d steps, want it bounded (~2x stuck, after one nudge)", tr.Steps)
 	}
-	if !strings.Contains(tr.Final, "invalid tool calls") {
+	if !strings.Contains(tr.Final, "Stopped") {
 		t.Errorf("final = %q, want the stuck stop", tr.Final)
 	}
 	if !rt.has("nudge") {
@@ -460,7 +482,7 @@ func TestStuckNudgeRecovers(t *testing.T) {
 	}
 	var injected bool
 	for _, m := range fake.lastMsgs {
-		if m.Role == "user" && strings.Contains(m.Content, "keep failing") {
+		if m.Role == "user" && strings.Contains(m.Content, "repeating the same tool") {
 			injected = true
 		}
 	}

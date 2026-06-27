@@ -152,16 +152,18 @@ dev builds are never nagged.
 
 **Which session?** Memory is saved per **workspace** (the `-C` dir, default the
 current one) and per **agent name** (default `ipsupport-code`). A one-shot or
-piped run silently **continues** that saved thread; the interactive TUI **asks**
-([R]estore / [N]ew / [D]elete) when one exists. To start clean or pick a
-different thread:
+piped run silently **continues** the saved thread; the interactive TUI opens a
+**navigable chooser** (↑↓ to pick a saved session, **enter** to open, **d** to
+delete, **esc** for the newest) when any exist. To start clean or pick a thread
+from the CLI:
 
 ```sh
 ./ipsupport-code -new "fresh task"              # ignore the saved session
 ./ipsupport-code -session review "look at X"    # a separate named thread (review.json)
 ```
 
-In the TUI, `/sessions` lists/switches/deletes threads, and `/new` clears the
+In the TUI, `/sessions` lists/switches/deletes threads, `/new <name>` starts a
+fresh named thread (the old one stays in `/sessions`), and `/new` clears the
 active one.
 
 ## Modes: auto vs plan
@@ -272,9 +274,9 @@ edit at your own risk.)
   (`file:line: match`), skipping VCS/dep/build dirs and binaries — no external `grep`.
 - **Session memory.** Remembers your goals and its answers across turns and across
   restarts, kept per workspace **and per agent name** (`.agent/sessions/<name>.json`).
-  On startup, if a session is saved for that name, it offers **restore / new /
-  delete** — and on restore it replays the recent exchanges so you pick up where
-  you left off. `/new` wipes the active one.
+  On startup the TUI shows a **navigable chooser** of saved sessions (↑↓ / enter /
+  d) — and on restore it replays the recent exchanges so you pick up where you
+  left off. `/new <name>` starts a fresh named thread; `/new` wipes the active one.
 - **Resilience.** Exponential-backoff retry on transient 5xx/network errors, an
   idle watchdog that aborts a silently-stalled stream, and a stuck-loop guard.
 - **Project instructions.** Reads a `CLAUDE.md` / `AGENTS.md` / `.agent/instructions.md`

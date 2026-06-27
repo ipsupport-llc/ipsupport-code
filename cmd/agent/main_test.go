@@ -241,8 +241,8 @@ func TestSlugName(t *testing.T) {
 func TestSessionsKeyedByName(t *testing.T) {
 	ws := t.TempDir()
 	a := &app{workspace: ws, cfg: config.Config{Name: "bob"}}
-	if c, _ := a.savedSession(); c != 0 {
-		t.Fatalf("savedSession count = %d, want 0 (none yet)", c)
+	if got := len(a.listSessions()); got != 0 {
+		t.Fatalf("listSessions = %d, want 0 (none yet)", got)
 	}
 	// write a session for "bob"
 	if err := os.MkdirAll(filepath.Dir(a.sessionPath()), 0o755); err != nil {
@@ -255,17 +255,12 @@ func TestSessionsKeyedByName(t *testing.T) {
 	if !strings.HasSuffix(a.sessionPath(), filepath.Join(".agent", "sessions", "bob.json")) {
 		t.Errorf("sessionPath = %q, want …/sessions/bob.json", a.sessionPath())
 	}
-	if c, _ := a.savedSession(); c != 2 {
-		t.Errorf("savedSession count = %d, want 2", c)
+	if got := a.listSessions(); len(got) != 1 || got[0].name != "bob" || got[0].count != 2 {
+		t.Errorf("listSessions = %+v, want one 'bob' with 2 messages", got)
 	}
-	// a differently-named agent in the same workspace sees no session
-	other := &app{workspace: ws, cfg: config.Config{Name: "alice"}}
-	if c, _ := other.savedSession(); c != 0 {
-		t.Errorf("alice should not see bob's session, got count %d", c)
-	}
-	a.deleteSession()
-	if c, _ := a.savedSession(); c != 0 {
-		t.Errorf("after deleteSession count = %d, want 0", c)
+	a.deleteSessionNamed("bob")
+	if got := len(a.listSessions()); got != 0 {
+		t.Errorf("after delete = %d, want 0", got)
 	}
 }
 

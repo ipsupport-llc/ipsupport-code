@@ -100,8 +100,10 @@ func main() {
 		}
 		app.runOne(ctx, strings.TrimSpace(strings.Join(flag.Args(), " ")))
 	case isTTY():
-		if !newSession {
-			app.chooseSession() // restore / new / delete the saved session for this name
+		app.startNew = newSession             // the TUI shows an in-screen session chooser (unless -new)
+		if sessionName != "" && !newSession { // -session: go straight to that named thread
+			app.loadSession()
+			app.sessionRestored = app.ag.SessionLen() > 0
 		}
 		if err := app.runTUI(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "tui:", err)
@@ -207,6 +209,7 @@ type app struct {
 	windowDetected  bool     // got the real loaded context window (vs a default/guess)
 	sessionRestored bool     // a saved session was restored at startup (TUI renders a recap)
 	tui             bool     // running the TUI (detect the context window off-thread, not inline)
+	startNew        bool     // -new: skip the startup chooser, begin a fresh session
 
 	tasks, steps, toolCalls int
 	lastPrompt, lastCompl   int // client usage snapshot for per-task ledger deltas
@@ -634,65 +637,19 @@ func (a *app) loadSession() {
 	}
 }
 
-// savedSession reports the message count and last-modified time of the saved
-// session for the current name (count 0 = none worth restoring).
-func (a *app) savedSession() (count int, mod time.Time) {
-	path := a.existingSessionPath()
-	if path == "" {
-		return 0, time.Time{}
+// newNamedSession saves the current thread (so it stays returnable via /sessions),
+// adopts name as the agent's identity, re-wires, and starts a FRESH empty thread.
+func (a *app) newNamedSession(name string) error {
+	a.saveSession()
+	a.cfg.Name = name
+	if err := config.SaveGlobal(name, a.cfg.LLM); err != nil {
+		return err
 	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		return 0, time.Time{}
+	if err := a.wire(); err != nil {
+		return err
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return 0, time.Time{}
-	}
-	var h []llm.Message
-	if json.Unmarshal(data, &h) != nil {
-		return 0, time.Time{}
-	}
-	return len(h), fi.ModTime()
-}
-
-// deleteSession removes the saved session for the current name and clears memory.
-func (a *app) deleteSession() {
-	if p := a.existingSessionPath(); p != "" {
-		_ = os.Remove(p)
-	}
-	if a.ag != nil {
-		a.ag.Reset()
-	}
-}
-
-// chooseSession is the interactive startup prompt: if a session is saved for this
-// agent name, offer to restore it, start fresh, or delete it. Restoring sets the
-// flag the TUI uses to replay a recap. Default (Enter) restores.
-func (a *app) chooseSession() {
-	count, mod := a.savedSession()
-	if count == 0 {
-		return
-	}
-	name := a.cfg.Name
-	if name == "" {
-		name = "ipsupport-code"
-	}
-	fmt.Fprintf(os.Stderr, "Saved session for %q — %d exchange(s), last active %s.\n",
-		name, count/2, humanizeAgo(mod))
-	fmt.Fprint(os.Stderr, "  [R]estore · [N]ew · [D]elete  (R): ")
-	line, _ := a.reader.ReadString('\n')
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "d", "delete":
-		a.deleteSession()
-		fmt.Fprintln(os.Stderr, "  → deleted — starting fresh")
-	case "n", "new":
-		fmt.Fprintln(os.Stderr, "  → new session (the old one is kept until overwritten)")
-	default:
-		a.loadSession()
-		a.sessionRestored = true
-		fmt.Fprintln(os.Stderr, "  → restored")
-	}
+	a.ag.Reset() // fresh — don't load name's prior thread
+	return nil
 }
 
 // humanizeAgo renders how long ago t was, compactly.
@@ -1131,6 +1088,14 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 			fmt.Println("config reloaded.")
 		}
 	case "/new", "/reset", "/clear":
+		if name := strings.TrimSpace(rest); name != "" && cmd != "/clear" {
+			if err := a.newNamedSession(name); err != nil {
+				fmt.Println("could not start session:", err)
+			} else {
+				fmt.Printf("started a new session %q — the previous one is in /sessions\n", a.cfg.Name)
+			}
+			break
+		}
 		a.ag.Reset()
 		a.saveSession()
 		fmt.Println("session cleared.")

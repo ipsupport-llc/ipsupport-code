@@ -35,7 +35,8 @@ const (
 	stIdle uiState = iota
 	stRunning
 	stApprove
-	stConfig // interactive /config settings panel
+	stConfig        // interactive /config settings panel
+	stChooseSession // startup: pick a saved session to restore / start new / delete
 )
 
 // chromeFixed: status line + top rule + bottom rule + hint line + 1 margin. The
@@ -64,8 +65,10 @@ type tuiModel struct {
 	history       []string
 	queued        []string // type-ahead while a task runs
 	pending       *approvalReq
-	approveChoice bool // selected Yes(true)/No(false) while answering an approval
-	cfgCursor     int  // selected row in the /config panel (stConfig)
+	approveChoice bool          // selected Yes(true)/No(false) while answering an approval
+	cfgCursor     int           // selected row in the /config panel (stConfig)
+	chooseRows    []sessionMeta // saved sessions offered by the startup chooser (stChooseSession)
+	chooseCursor  int           // selected row (0..len = the "new session" row)
 	cancel        context.CancelFunc
 	taskStart     time.Time
 	startTok      int
@@ -153,8 +156,14 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: lipgloss.Color("13"), inputLines: 1}
 	act := a.activeLLM()
 	m.history = bannerLines(name, version, act.Model, a.workspace, act.ContextWindow, m.accent)
-	if a.sessionRestored {
+	switch {
+	case a.sessionRestored: // -session restored it already
 		m.history = append(m.history, m.sessionRecap()...)
+	case !a.startNew: // offer the saved sessions to restore / start fresh / delete
+		if rows := a.listSessions(); len(rows) > 0 {
+			m.chooseRows = rows
+			m.state = stChooseSession
+		}
 	}
 	return m, nil
 }
@@ -188,6 +197,55 @@ func (m *tuiModel) sessionRecap() []string {
 		}
 	}
 	return append(out, cDim.Render("  ── end of recap · continuing where you left off ──"), "")
+}
+
+// chooseActivate handles Enter/esc on the startup session chooser: open the
+// highlighted session (restore its thread), or start a fresh one.
+func (m *tuiModel) chooseActivate() (tea.Model, tea.Cmd) {
+	m.state = stIdle
+	if m.chooseCursor >= len(m.chooseRows) { // the "start new" row
+		m.app.ag.Reset()
+		m.push(cDim.Render("  — new session —"))
+		return m, nil
+	}
+	name := m.chooseRows[m.chooseCursor].name
+	if name == slugName(m.app.cfg.Name) {
+		m.app.loadSession() // the current name — restore, keep its display name
+	} else if err := m.app.switchSession(name); err != nil {
+		m.push(cErr.Render("couldn't open session: " + err.Error()))
+		return m, nil
+	}
+	m.push(m.sessionRecap()...)
+	return m, nil
+}
+
+// renderChooser draws the startup "resume a session?" picker.
+func (m *tuiModel) renderChooser() string {
+	accent := lipgloss.NewStyle().Foreground(m.accent)
+	cur := slugName(m.app.cfg.Name)
+	lines := []string{
+		accent.Bold(true).Render("resume a session?") + cDim.Render("   ↑↓ move · enter open · d delete · esc = newest"),
+		"",
+	}
+	for i, s := range m.chooseRows {
+		label := fmt.Sprintf("%-22s %d exchange(s) · %s", s.name, s.count/2, humanizeAgo(s.mod))
+		if s.name == cur {
+			label += "  (current)"
+		}
+		if i == m.chooseCursor {
+			lines = append(lines, accent.Render(" ▸ "+label))
+		} else {
+			lines = append(lines, "   "+cDim.Render(label))
+		}
+	}
+	newRow := "＋ start a new session"
+	if m.chooseCursor == len(m.chooseRows) {
+		lines = append(lines, accent.Render(" ▸ "+newRow))
+	} else {
+		lines = append(lines, "   "+cDim.Render(newRow))
+	}
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(m.accent).Padding(0, 1)
+	return box.Render(strings.Join(lines, "\n"))
 }
 
 // bannerLines builds the Claude-Code-style startup card: a rounded box with the
@@ -441,6 +499,30 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch m.state {
+	case stChooseSession:
+		n := len(m.chooseRows) + 1 // +1 for the "start new" row
+		switch k.String() {
+		case "up", "k":
+			m.chooseCursor = (m.chooseCursor - 1 + n) % n
+		case "down", "j":
+			m.chooseCursor = (m.chooseCursor + 1) % n
+		case "d": // delete the highlighted saved session
+			if m.chooseCursor < len(m.chooseRows) {
+				m.app.deleteSessionNamed(m.chooseRows[m.chooseCursor].name)
+				m.chooseRows = m.app.listSessions()
+				if len(m.chooseRows) == 0 {
+					m.state = stIdle // nothing left — start fresh
+				} else if m.chooseCursor >= len(m.chooseRows) {
+					m.chooseCursor = len(m.chooseRows) // clamp onto "start new"
+				}
+			}
+		case "enter", "right", "l", " ":
+			return m.chooseActivate()
+		case "esc", "q": // default = the most recent session (first row)
+			m.chooseCursor = 0
+			return m.chooseActivate()
+		}
+		return m, nil
 	case stConfig:
 		switch k.String() {
 		case "up", "k":
@@ -631,6 +713,14 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.push(cDim.Render("config reloaded from " + config.GlobalPath() + " — edit it or run `ipsupport-code -init` to change the connection"))
 		return m, m.detectWindowCmd()
 	case "/new", "/reset":
+		if name := strings.TrimSpace(rest); name != "" { // /new <name> — fresh named session, old stays in /sessions
+			if err := m.app.newNamedSession(name); err != nil {
+				m.push(cErr.Render("could not start session: " + err.Error()))
+				return m, nil
+			}
+			m.push(cDim.Render("started a new session “" + m.app.cfg.Name + "” — the previous one is in /sessions"))
+			return m, nil
+		}
 		m.app.ag.Reset()
 		m.app.saveSession()
 		m.push(cDim.Render("session cleared"))
@@ -900,6 +990,8 @@ func (m *tuiModel) View() string {
 
 	var status string
 	switch {
+	case m.state == stChooseSession:
+		status = cDim.Render("welcome back — pick up a session, or start fresh")
 	case m.state == stConfig:
 		status = cDim.Render("settings — changes apply and save as you make them")
 	case m.state == stApprove:
@@ -953,8 +1045,11 @@ func (m *tuiModel) View() string {
 	}
 
 	content := m.vp.View()
-	if m.state == stConfig {
+	switch m.state {
+	case stConfig:
 		content = m.renderConfigPanel()
+	case stChooseSession:
+		content = m.renderChooser()
 	}
 	frame := lipgloss.NewStyle().Foreground(m.accent)
 	parts := []string{content, status}

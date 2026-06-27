@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -58,7 +58,7 @@ func TestLongestCommonPrefix(t *testing.T) {
 }
 
 func TestTabCompletesSingleMatch(t *testing.T) {
-	m := &tuiModel{input: textinput.New()}
+	m := &tuiModel{input: textarea.New()}
 	m.input.SetValue("/comp")
 	m.completeCommand()
 	if m.input.Value() != "/compact " {
@@ -73,7 +73,7 @@ func TestTabCompletesArgument(t *testing.T) {
 	for _, env := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"} {
 		t.Setenv(env, "")
 	}
-	m := &tuiModel{input: textinput.New(), app: &app{
+	m := &tuiModel{input: textarea.New(), app: &app{
 		cfg: config.Config{Providers: map[string]config.LLM{"grok": {APIKey: "x"}}},
 	}}
 
@@ -218,7 +218,7 @@ func TestSessionSurvivesTUILaunch(t *testing.T) {
 // Changed-your-mind: while a task runs, Up with an empty input pulls the most
 // recent queued (type-ahead) message back into the input to edit or drop.
 func TestUpRecallsQueuedMessage(t *testing.T) {
-	m := &tuiModel{input: textinput.New(), state: stRunning, queued: []string{"first", "second"}}
+	m := &tuiModel{input: textarea.New(), state: stRunning, queued: []string{"first", "second"}}
 	m.handleKey(tea.KeyMsg{Type: tea.KeyUp})
 	if m.input.Value() != "second" {
 		t.Errorf("recalled %q, want 'second'", m.input.Value())
@@ -272,7 +272,7 @@ func TestRenderMarkdownConvertsLatex(t *testing.T) {
 // orphaned the first reply channel — a forever "Thinking" hang). The next is
 // fetched only after the current one is answered.
 func TestApprovalSerializedNoPrefetch(t *testing.T) {
-	m := &tuiModel{bridge: newBridge(), input: textinput.New(), state: stRunning}
+	m := &tuiModel{bridge: newBridge(), input: textarea.New(), state: stRunning}
 
 	req := approvalReq{kind: "write", detail: "a.txt", reply: make(chan bool, 1)}
 	_, cmd := m.Update(approvalMsg(req))
@@ -305,7 +305,7 @@ func TestApprovalSerializedNoPrefetch(t *testing.T) {
 // The pending approval must not capture keystrokes — typing keeps editing the
 // input until the user deliberately presses ↑ to answer.
 func TestApprovalKeepsInputEditable(t *testing.T) {
-	m := &tuiModel{bridge: newBridge(), input: textinput.New(), state: stRunning}
+	m := &tuiModel{bridge: newBridge(), input: textarea.New(), state: stRunning}
 	m.input.Focus()
 	req := approvalReq{kind: "write", detail: "a.txt", reply: make(chan bool, 1)}
 	m.Update(approvalMsg(req))
@@ -425,7 +425,7 @@ func TestAutoCompactNeeded(t *testing.T) {
 // The pipe-through-script smoke test can't reliably confirm quit semantics, so
 // verify the exit path directly: /exit must yield tea.Quit.
 func TestExitCommandQuits(t *testing.T) {
-	m := &tuiModel{input: textinput.New()}
+	m := &tuiModel{input: textarea.New()}
 	_, cmd := m.runCommand("/exit")
 	if cmd == nil {
 		t.Fatal("/exit returned a nil command")

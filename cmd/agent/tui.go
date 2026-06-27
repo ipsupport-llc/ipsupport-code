@@ -16,8 +16,9 @@ import (
 	"github.com/alecthomas/chroma/v2/formatters"
 	"github.com/alecthomas/chroma/v2/lexers"
 	"github.com/alecthomas/chroma/v2/styles"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -37,8 +38,13 @@ const (
 	stConfig // interactive /config settings panel
 )
 
-// chromeRows: status line + top rule + input + bottom rule + hint line.
-const chromeRows = 5
+// chromeFixed: status line + top rule + bottom rule + hint line + 1 margin. The
+// input's own height (1..maxInputLines) is added separately, since it grows with
+// multi-line content (pastes, alt+enter).
+const chromeFixed = 5
+
+// maxInputLines caps how tall the input box grows before it scrolls internally.
+const maxInputLines = 10
 
 // tuiModel is a full-screen coding-agent UI: a scrollable log fills the screen,
 // and a bottom region (a titled top rule, the input line, a bottom rule, and a
@@ -51,7 +57,7 @@ type tuiModel struct {
 	bridge *uiBridge
 
 	vp    viewport.Model
-	input textinput.Model
+	input textarea.Model
 	spin  spinner.Model
 
 	state         uiState
@@ -68,6 +74,7 @@ type tuiModel struct {
 	accentIdx     int
 	width, height int
 	ready         bool
+	inputLines    int // current input box height in rows (grows with content)
 
 	// model-proposed, Tab-acceptable next-step suggestion (parsed from NEXT:)
 	suggestion string
@@ -113,9 +120,21 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 		return nil, err
 	}
 
-	in := textinput.New()
+	in := textarea.New()
 	in.Placeholder = defaultPlaceholder
-	in.Prompt = "❯ "
+	in.ShowLineNumbers = false
+	in.CharLimit = 0 // no limit — allow large multi-line pastes (e.g. a YAML block)
+	// "❯ " on the first row, aligned spaces on wrapped/continuation rows.
+	in.SetPromptFunc(2, func(i int) string {
+		if i == 0 {
+			return "❯ "
+		}
+		return "  "
+	})
+	// Enter submits (handled in handleKey); alt+enter / ctrl+j insert a newline.
+	in.KeyMap.InsertNewline = key.NewBinding(key.WithKeys("alt+enter", "ctrl+j"))
+	in.FocusedStyle.CursorLine = lipgloss.NewStyle() // no full-width highlight bar
+	in.SetHeight(1)
 	in.Focus()
 
 	sp := spinner.New()
@@ -126,7 +145,7 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	if name == "" {
 		name = "ipsupport-code"
 	}
-	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: lipgloss.Color("13")}
+	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: lipgloss.Color("13"), inputLines: 1}
 	act := a.activeLLM()
 	m.history = bannerLines(name, version, act.Model, a.workspace, act.ContextWindow, m.accent)
 	return m, nil
@@ -154,7 +173,7 @@ func bannerLines(name, ver, model, cwd string, window int, accent lipgloss.Color
 		BorderForeground(accent).
 		Padding(0, 2).
 		Render(body)
-	hint := cDim.Render("type a task, or /help · ctrl-l clear · ↑↓ scroll · ctrl-c quit")
+	hint := cDim.Render("type a task, or /help · alt+enter newline · ctrl-l clear · ctrl-c quit")
 	return append(strings.Split(box, "\n"), "", hint)
 }
 
@@ -170,7 +189,7 @@ func (a *app) runTUI(ctx context.Context) error {
 }
 
 func (m *tuiModel) Init() tea.Cmd {
-	return tea.Batch(m.spin.Tick, textinput.Blink, m.waitEvent(), m.waitApproval(), m.checkUpdate())
+	return tea.Batch(m.spin.Tick, textarea.Blink, m.waitEvent(), m.waitApproval(), m.checkUpdate())
 }
 
 // detectWindowCmd re-detects the context window off the UI thread once the model
@@ -219,7 +238,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.vp.Width = msg.Width
 			m.vp.Height = h
 		}
-		m.input.Width = msg.Width - 4
+		m.input.SetWidth(msg.Width - 4)
 		m.vp.SetContent(m.renderContent())
 		m.vp.GotoBottom()
 		return m, nil
@@ -801,6 +820,7 @@ func (m *tuiModel) View() string {
 	if !m.ready {
 		return "loading…"
 	}
+	m.syncInputHeight()          // grow/shrink the input box to its content before layout
 	_, c := m.app.client.Usage() // c = cumulative completion (generated) tokens
 
 	var status string
@@ -918,12 +938,37 @@ func (m *tuiModel) setColor(arg string) {
 }
 
 func (m *tuiModel) viewportHeight() int {
-	// The pinned queue region (if any) eats into the log height so nothing
-	// overflows the screen.
-	if h := m.height - chromeRows - 1 - len(m.queuedView()); h > 0 {
+	// The pinned queue region and the (variable-height) input both eat into the
+	// log height so nothing overflows the screen.
+	if h := m.height - chromeFixed - m.inputLines - len(m.queuedView()); h > 0 {
 		return h
 	}
 	return 1
+}
+
+// syncInputHeight sizes the input box to its content (wrapped rows across all
+// lines), capped at maxInputLines — so a multi-line paste or a long wrapped line
+// grows the box instead of scrolling on one line.
+func (m *tuiModel) syncInputHeight() {
+	w := m.width - 4 - 2 // input width minus the 2-col prompt
+	if w < 1 {
+		w = 1
+	}
+	rows := 0
+	for _, ln := range strings.Split(m.input.Value(), "\n") {
+		rows += max(1, (lipgloss.Width(ln)+w-1)/w)
+	}
+	if rows < 1 {
+		rows = 1
+	}
+	if rows > maxInputLines {
+		rows = maxInputLines
+	}
+	if rows != m.inputLines {
+		m.inputLines = rows
+		m.input.SetHeight(rows)
+		m.syncViewport() // input height changed → re-fit the log
+	}
 }
 
 // queuedView renders the type-ahead queue pinned just above the input, so

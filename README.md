@@ -177,6 +177,10 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | `/help` | command list |
 | `/exit`, `/quit` | leave |
 
+The input is multi-line: paste a whole block (e.g. a YAML snippet) and it keeps
+its line breaks, the box grows and word-wraps instead of scrolling on one line,
+and **alt+enter** (or **ctrl+j**) inserts a newline by hand. **Enter** submits.
+
 While a task runs the input stays live: Enter **queues** a follow-up (pinned
 above the input until it runs), **↑** pulls the last queued message back to edit
 or drop, and **esc** cancels.

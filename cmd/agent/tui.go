@@ -1081,6 +1081,8 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		if c, _ := e.fields["text"].(string); strings.TrimSpace(c) != "" {
 			return append([]string{""}, strings.Split(renderMarkdown(c, m.width), "\n")...)
 		}
+	case "nudge":
+		return []string{cToolCall.Render("  ↻ that's not working — asking it to rethink")}
 	case "lesson":
 		d, _ := e.fields["domain"].(string)
 		f, _ := e.fields["proven_fix"].(string)

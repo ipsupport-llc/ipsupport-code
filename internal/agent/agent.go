@@ -143,7 +143,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	tools := a.reg.OpenAITools()
 
 	var tr Transcript
-	stuck := 0
+	stuck, nudged := 0, false
 	for step := 0; step < a.maxSteps; step++ {
 		tr.Steps = step + 1
 
@@ -171,17 +171,25 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		results, nErr := a.runToolCalls(ctx, assistant.ToolCalls)
 		msgs = append(msgs, results...)
 
-		// Stop a model that's stuck emitting invalid calls (e.g. empty action)
-		// from burning every step and the user's time. If a whole turn's calls
-		// all error, several times running, bail with a clear message.
+		// A model stuck repeating failing calls (e.g. empty action) burns steps and
+		// the user's time. After several all-error turns, give it ONE forceful
+		// "this isn't working — rethink" nudge with an escape hatch to answer in
+		// words. Only if it's STILL stuck after that do we stop, handing the user a
+		// steering suggestion they can send in one tap.
 		if nErr == len(assistant.ToolCalls) {
 			if stuck++; stuck >= maxStuckTurns {
-				const msg = "Stopped — the model made several invalid tool calls in a row (it isn't making progress). Try rephrasing the task, or use a stronger model."
-				tr.Final = msg
-				tr.Messages = msgs
-				a.emit("final", map[string]any{"text": msg, "suggest": "", "exhausted": true})
-				a.remember(goal, msg)
-				return tr, nil
+				if !nudged {
+					msgs = append(msgs, llm.User(stuckNudge))
+					a.emit("nudge", map[string]any{})
+					stuck, nudged = 0, true
+				} else {
+					const msg = "Stopped — it kept making invalid tool calls even after a nudge to rethink. Steer it (a different approach), or use a stronger model."
+					tr.Final = msg
+					tr.Messages = msgs
+					a.emit("final", map[string]any{"text": msg, "suggest": stuckSuggest, "exhausted": true})
+					a.remember(goal, msg)
+					return tr, nil
+				}
 			}
 		} else {
 			stuck = 0
@@ -220,8 +228,16 @@ func splitSuggestion(text string) (clean, suggestion string) {
 	return strings.TrimRight(trimmed[:nl], " \n"), suggestion
 }
 
-// maxStuckTurns is how many consecutive all-error tool turns end the run early.
+// maxStuckTurns is how many consecutive all-error tool turns trigger the rethink
+// nudge (and, if it doesn't help, the stop).
 const maxStuckTurns = 3
+
+// stuckNudge is the one self-correction injected before giving up — with an
+// escape hatch so the model answers in words instead of looping.
+const stuckNudge = `Those tool calls keep failing the same way — stop repeating them. Re-read the last error: it says exactly what is wrong (the call format, or a missing param). Either fix the call, or take a completely different approach to the goal. If you genuinely cannot proceed, reply in ONE sentence explaining what is blocking you, and do NOT call a tool.`
+
+// stuckSuggest is offered to the user (one tap) when even the nudge didn't help.
+const stuckSuggest = "take a different approach — outline the steps first"
 
 // runToolCalls executes every call from one assistant turn, concurrently when
 // the model batched more than one, keeping results in the emitted order. It also

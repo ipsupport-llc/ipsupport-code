@@ -140,9 +140,26 @@ func TestSessionMemoryCarriesAcrossRuns(t *testing.T) {
 	}
 }
 
-type recTracer struct{ kinds []string }
+type recTracer struct {
+	kinds        []string
+	finalSuggest string
+}
 
-func (r *recTracer) Emit(kind string, _ map[string]any) { r.kinds = append(r.kinds, kind) }
+func (r *recTracer) Emit(kind string, f map[string]any) {
+	r.kinds = append(r.kinds, kind)
+	if kind == "final" {
+		r.finalSuggest, _ = f["suggest"].(string)
+	}
+}
+
+func (r *recTracer) has(kind string) bool {
+	for _, k := range r.kinds {
+		if k == kind {
+			return true
+		}
+	}
+	return false
+}
 
 func TestNoDuplicateFinalEmit(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
@@ -312,18 +329,57 @@ func TestPlanModeAllowsReadOnly(t *testing.T) {
 	}
 }
 
-func TestRunStopsAfterRepeatedToolErrors(t *testing.T) {
+// A model that keeps failing gets ONE rethink nudge; if it still fails, the run
+// stops (bounded) and offers the user a steering suggestion.
+func TestRunNudgesThenStops(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
 	bad := toolCallReply("c", "calc", `{"action":"","params":{}}`) // empty action → always errors
-	fake := &scriptLLM{replies: []llm.Message{bad, bad, bad, bad, bad, bad}}
-	a := New(fake, reg, nil, nil, "", 12)
+	fake := &scriptLLM{replies: []llm.Message{bad, bad, bad, bad, bad, bad, bad, bad}}
+	rt := &recTracer{}
+	a := New(fake, reg, nil, rt, "", 20)
 
 	tr, _ := a.Run(context.Background(), "do something")
-	if tr.Steps > maxStuckTurns {
-		t.Errorf("ran %d steps, want it to bail at ~%d stuck turns", tr.Steps, maxStuckTurns)
+	if tr.Steps > 2*maxStuckTurns+1 {
+		t.Errorf("ran %d steps, want it bounded (~2x stuck, after one nudge)", tr.Steps)
 	}
 	if !strings.Contains(tr.Final, "invalid tool calls") {
-		t.Errorf("final = %q, want the stuck-loop message", tr.Final)
+		t.Errorf("final = %q, want the stuck stop", tr.Final)
+	}
+	if !rt.has("nudge") {
+		t.Error("expected one rethink nudge before stopping")
+	}
+	if rt.finalSuggest == "" {
+		t.Error("the stop should offer the user a steering suggestion")
+	}
+}
+
+// If the nudge unsticks the model (it answers), the run recovers instead of
+// stopping.
+func TestStuckNudgeRecovers(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	bad := toolCallReply("c", "calc", `{"action":"","params":{}}`)
+	fake := &scriptLLM{replies: []llm.Message{
+		bad, bad, bad, // 3 fails → nudge
+		{Role: "assistant", Content: "I can't do that with calc — here's the answer in words."},
+	}}
+	rt := &recTracer{}
+	a := New(fake, reg, nil, rt, "", 12)
+
+	tr, _ := a.Run(context.Background(), "do x")
+	if strings.Contains(tr.Final, "Stopped") {
+		t.Errorf("should have recovered after the nudge, got: %q", tr.Final)
+	}
+	if !rt.has("nudge") {
+		t.Error("expected a nudge before the recovery")
+	}
+	var injected bool
+	for _, m := range fake.lastMsgs {
+		if m.Role == "user" && strings.Contains(m.Content, "keep failing") {
+			injected = true
+		}
+	}
+	if !injected {
+		t.Error("the nudge message should be in the conversation sent to the model")
 	}
 }
 

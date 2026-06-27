@@ -1,73 +1,120 @@
 # ipsupport-code
 
-A small **self-learning local agent** for [LM Studio](https://lmstudio.ai). It
-drives a local model through a reason → act → observe loop over a handful of fat
-tools (`file`, `run`, `git`, `web`, `help`, `calc`), recovers from tool errors
-using lessons it learned on past runs, and — after each task — reflects and writes
-new lessons to disk so it actually gets better over time.
+[![ci](https://github.com/ipsupport-llc/ipsupport-code/actions/workflows/ci.yml/badge.svg)](https://github.com/ipsupport-llc/ipsupport-code/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/ipsupport-llc/ipsupport-code?sort=semver)](https://github.com/ipsupport-llc/ipsupport-code/releases)
+[![license](https://img.shields.io/github/license/ipsupport-llc/ipsupport-code)](LICENSE)
+[![go](https://img.shields.io/github/go-mod/go-version/ipsupport-llc/ipsupport-code)](go.mod)
 
-The interactive REPL is a Bubble Tea **TUI**: live-streamed tool calls and
-observations, a spinner while the model thinks, in-place `y/n` approval prompts,
-and a status bar (model · workspace · tokens). Piped/non-interactive runs fall
+A small **self-learning local coding agent** for [LM Studio](https://lmstudio.ai),
+in a single static binary. It drives a local model through a reason → act →
+observe loop over a handful of fat tools (`file`, `run`, `git`, `web`, `calc`),
+recovers from tool errors using lessons it learned on past runs, and — after each
+task — reflects and writes new lessons to disk so it actually gets better over
+time.
+
+The interactive UI is a Claude-Code-style **TUI** (Bubble Tea): live-streamed
+tool calls and observations, markdown answers, syntax-highlighted diffs, a
+**plan / auto** mode toggle, non-stealing approval prompts, and a status bar
+showing the model, context usage, and tokens. Piped/non-interactive runs fall
 back to a plain line REPL.
 
-It will not match a frontier model. It is built for **micro-tasks** on your own
+It will not match a frontier model. It's built for **micro-tasks** on your own
 machine, with your own model, under a permission policy you control.
 
-## How it works
+> Not affiliated with Anthropic's Claude Code; the name reflects a similar
+> terminal-agent UX.
 
-- **Native tool calling.** Talks to LM Studio's OpenAI-compatible server
-  (`http://localhost:1234/v1`) and lets the model call tools natively.
-- **Fat tools.** One tool per domain, each taking `{"action": ..., "params": {...}}`.
-  The catalog stays tiny (~1k tokens) so small models prefill fast and route well.
-- **Proactive help.** When a tool fails, matching lessons from the knowledge base
-  are injected straight into the error the model sees — it doesn't have to ask.
-- **Reflection.** After a task, a second model pass distills durable lessons into
-  `~/.config/ipsupport-code/knowledge.json`. They're available next run.
-- **Session memory.** It remembers the conversation (your goals and its answers)
-  across turns — and **across restarts**: the session is persisted per workspace
-  (`.agent/session.json`), so reopening in the same directory recalls the prior
-  context. `/new` or `/clear` wipes it; `/compact` summarizes it to free context.
-- **Project instructions.** On startup it reads a `CLAUDE.md` (or `AGENTS.md`, or
-  `.agent/instructions.md`) from the workspace and folds it into the system prompt,
-  so the model follows your project's conventions.
-- **Trace = dataset.** Every step (goal, tool call, observation, final, lesson)
-  is appended as JSONL to `~/.config/ipsupport-code/traces.jsonl` — your future
-  training dataset and session log.
+## Install
 
-## Build
-
-Everything is pure Go, so any target cross-compiles from any host with
-`CGO_ENABLED=0`.
+**Download a binary** from the [latest release](https://github.com/ipsupport-llc/ipsupport-code/releases/latest)
+(or the rolling [`nightly`](https://github.com/ipsupport-llc/ipsupport-code/releases/tag/nightly)).
+Pick your platform — `darwin-arm64` (Apple Silicon), `darwin-amd64` (Intel Mac),
+`linux-amd64`, `linux-arm64`, `windows-amd64`.
 
 ```sh
-make release   # → dist/ipsupport-code-{linux-amd64,darwin-amd64,darwin-arm64}
-make build     # host binary at dist/ipsupport-code
-make test      # all tests
+chmod +x ipsupport-code-darwin-arm64
+# macOS may quarantine a downloaded binary:
+xattr -d com.apple.quarantine ./ipsupport-code-darwin-arm64
+./ipsupport-code-darwin-arm64 -version
 ```
 
-## Run on your Mac
+**Or build from source** (pure Go, `CGO_ENABLED=0`, cross-compiles from any host):
 
-1. In LM Studio, load a tool-calling model (e.g. `qwen2.5-7b-instruct`) and start
-   the local server on port `1234`.
-2. Copy the matching binary over (`darwin-arm64` for Apple Silicon, `darwin-amd64`
-   for Intel). If macOS quarantines it:
+```sh
+make build     # host binary at dist/ipsupport-code
+make release   # every target into dist/
+go install github.com/ipsupport-llc/ipsupport-code/cmd/agent@latest  # installs as `agent`
+```
+
+## Quick start
+
+1. In LM Studio, load a **tool-calling** model (e.g. `qwen2.5-7b-instruct`) and
+   start the local server on port `1234`.
+2. First interactive run walks you through the server URL, model, and context
+   window; settings are saved to `~/.config/ipsupport-code/config.json` (re-run
+   with `-init`).
+3. Run a one-shot task, or open the REPL:
+
    ```sh
-   xattr -d com.apple.quarantine ./ipsupport-code-darwin-arm64
-   ```
-3. Run a one-shot task, or a REPL:
-   ```sh
-   ./ipsupport-code-darwin-arm64 "use calc to compute (1234*9)+sqrt(2)"
-   ./ipsupport-code-darwin-arm64            # REPL
-   ./ipsupport-code-darwin-arm64 -C ~/proj "summarize what main.go does"
+   ./ipsupport-code "use calc to compute (1234*9)+sqrt(2)"
+   ./ipsupport-code                      # interactive TUI
+   ./ipsupport-code -C ~/proj "summarize what main.go does"
    ```
 
-### REPL commands
+## Modes: auto vs plan
 
-In the REPL, anything not starting with `/` is run as a task. Slash commands:
+Toggle with **shift+tab** (or `/plan` / `/auto`); the current mode shows at the
+bottom of the screen.
+
+- **auto** (default) — the agent executes the task with tools.
+- **plan** — read-only: it investigates and proposes a numbered plan, and every
+  state-changing tool call is **blocked at the engine**, so it can't touch
+  anything until you switch back to auto.
+
+## Permissions
+
+Mutating actions ask for approval by default. The prompt **doesn't steal your
+input** — keep typing, then press **↑** to answer (←→ / `y`/`n`, Enter confirms).
+A non-overridable deny floor (`rm -rf`, `sudo`, secrets, `.git`, `.env`, …) is
+always enforced.
+
+Tired of approving every write? `/permissions files on` auto-allows
+non-destructive file ops in the workspace (the deny floor still applies); same
+for `/permissions run on`. The choice is saved to the workspace config.
+
+## Skills
+
+On-demand instruction packs — the user-extensible version of guides-on-demand.
+Only an **enabled** skill adds a single line to the system prompt; the model
+loads a skill's full instructions on demand, so the base prompt stays lean no
+matter how many you install. Five curated skills ship in the binary
+(`test-first`, `debug-systematically`, `git-flow`, `research-first`,
+`minimal-code`), seeded **disabled** so you opt in.
+
+```
+/skills                       list installed skills (on/off)
+/skills on git-flow           enable one
+/skills install <url|git>     add a .md by URL, or every skill in a git repo
+/skills remove <name>
+```
+
+## Context & auto-compact
+
+The status bar shows `ctx 4.1k/8k` — the size of the last prompt vs. the model's
+context window. The window is **auto-detected** from LM Studio's
+`/api/v0/models`; set `llm.context_window` to override (0 disables auto-compact).
+When the prompt passes ~75% of the window the session is **auto-compacted** into
+a short summary to free room (run it any time with `/compact`).
+
+## REPL commands
+
+Anything not starting with `/` is run as a task. Tab completes commands.
 
 | command | what |
 |---|---|
+| `/plan`, `/auto` | plan mode (propose only) vs auto mode (execute) — also shift+tab |
+| `/skills` | list / toggle / install on-demand instruction packs |
+| `/permissions` | relax approval for non-destructive file/shell actions |
 | `/status` | config, knowledge base, and trace paths |
 | `/usage` | session counters + token usage |
 | `/login` | (re)configure server URL / model / key, then reload |
@@ -75,56 +122,76 @@ In the REPL, anything not starting with `/` is run as a task. Slash commands:
 | `/clear` | fresh start — clear the screen and the session |
 | `/compact` | summarize the session so far to free up context |
 | `/color [name]` | change the TUI frame color (cycles if no name) |
+| `/rename <name>` | rename the agent (saved in settings) |
 | `/goal <task>` | run a task explicitly |
 | `/loop [n] <task>` | run a task `n` times (default 3) so lessons compound |
 | `/help` | command list |
 | `/exit`, `/quit` | leave |
 
+While a task runs the input stays live: Enter **queues** a follow-up (pinned
+above the input until it runs), **↑** pulls the last queued message back to edit
+or drop, and **esc** cancels.
+
+## How it works
+
+- **Native tool calling.** Talks to LM Studio's OpenAI-compatible server and lets
+  the model call tools natively. Point `llm.base_url` / `llm.api_key` at OpenAI or
+  a LiteLLM proxy instead — same client.
+- **Fat tools.** One tool per domain, each `{"action": ..., "params": {...}}`. The
+  catalog stays tiny (~1k tokens) so small models prefill fast and route well; a
+  declarative `Domain` generates each tool's schema, help, and validation.
+- **Proactive help.** When a tool fails, a matching lesson from past runs is
+  injected straight into the error the model sees — it doesn't have to ask.
+- **Reflection.** After a task, a second model pass distills durable lessons into
+  `~/.config/ipsupport-code/knowledge.json`, available next run.
+- **Session memory.** Remembers your goals and its answers across turns and across
+  restarts (`.agent/session.json`, per workspace). `/new` wipes it.
+- **Resilience.** Exponential-backoff retry on transient 5xx/network errors, an
+  idle watchdog that aborts a silently-stalled stream, and a stuck-loop guard.
+- **Project instructions.** Reads a `CLAUDE.md` / `AGENTS.md` / `.agent/instructions.md`
+  from the workspace into the system prompt.
+- **Trace = dataset.** Every step (goal, tool call, observation, final, lesson) is
+  appended as JSONL to `~/.config/ipsupport-code/traces.jsonl`.
+
 ## Configuration
 
-**First run.** On its first interactive start (no user config yet) it asks for the
-server URL, model, and a couple of settings, then writes them to
-`~/.config/ipsupport-code/config.json`. Re-run setup any time with `-init`. A
-non-interactive first run (piped/CI) skips the prompt and uses defaults.
-
-Settings come from two JSON files merged over safe defaults:
+Settings merge over safe defaults from two JSON files:
 
 - **`~/.config/ipsupport-code/config.json`** — machine-level: the `llm` connection
-  (server URL, model, key). Written by first-run setup.
+  (server URL, model, key, `context_window`). Written by first-run setup.
 - **`<workspace>/.agent/config.json`** — per-project: the permission policy (see
-  [`.agent/config.example.json`](.agent/config.example.json)). The workspace file
-  wins over the user file.
-
-Each file only needs the keys you want to change; everything else keeps its
-default.
+  [`.agent/config.example.json`](.agent/config.example.json)). Wins over the user
+  file.
 
 Permissions for `run` and `file` resolve per action: a **deny** glob blocks, an
-**allow** glob runs without asking, otherwise the **default** (`ask` / `allow` /
-`deny`) applies. File ops are confined to `jail` (set `""` to disable).
-Run-command **deny** globs match *anywhere* in the command (so `rm -rf*` catches
-`cd x && rm -rf /`) and ignore extra whitespace; **allow** globs match the whole
-command. File globs are path-aware (`**`, `*.go`). A built-in protective deny
-floor (`rm -rf*`, `sudo*`, `mkfs*`, `.git/**`, `**/*secret*`, …) is always
-enforced — your config adds to it, it can't remove it. The `jail` confines the
-file tool; a shell command can still `cd` elsewhere, so lean on `run.deny`/`ask`
-for shell.
+**allow** glob runs without asking, otherwise the **default** (`ask`/`allow`/`deny`)
+applies. Run-command deny globs match *anywhere* in the command (so `rm -rf*`
+catches `cd x && rm -rf /`); file globs are path-aware (`**`, `*.go`) and confined
+to `jail`. The protective deny floor is always unioned in — your config adds to
+it, it can't remove it.
 
-Point it at OpenAI or a LiteLLM proxy instead of LM Studio by changing
-`llm.base_url` / `llm.api_key` — same client.
-
-Logging level: `IPS_LOG=debug|info|warn|error` (default `warn`) to stderr.
+Logging: `IPS_LOG=debug|info|warn|error` (default `warn`) to stderr.
 
 ## Layout
 
 ```
-cmd/agent        CLI / REPL
-internal/llm      LM Studio client + Chatter interface
-internal/agent    the reason→act→observe loop
-internal/tool     fat tools: file, run, git, web, help, calc
-internal/policy   workspace permission engine (+ jail)
-internal/knowledge persistent pitfall store
-internal/reflect  post-task lesson distillation
-internal/trace    JSONL decision trace (the dataset)
-internal/config   config load/merge
-cmd/agent         CLI, plain REPL, and the Bubble Tea TUI
+cmd/agent          CLI, plain REPL, and the Bubble Tea TUI
+internal/llm        LM Studio client (streaming, retry, context detection)
+internal/agent      the reason → act → observe loop (+ plan mode)
+internal/tool       fat tools: file, run, git, web, calc, skill, help
+internal/skill      downloadable, toggleable instruction packs
+internal/policy     workspace permission engine (+ jail, deny floor)
+internal/knowledge  persistent pitfall store
+internal/reflect    post-task lesson distillation
+internal/trace      JSONL decision trace (the dataset)
+internal/config     config load/merge
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). CI runs gofmt, `go vet`, the race suite,
+and a cross-compile of every target on each push and PR.
+
+## License
+
+[MIT](LICENSE) © ipsupport-llc

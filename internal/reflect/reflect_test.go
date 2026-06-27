@@ -79,8 +79,8 @@ func (r *recordingLLM) Chat(_ context.Context, _ []llm.Message, _ []map[string]a
 func TestReflectSkipsWithoutToolUse(t *testing.T) {
 	r := &recordingLLM{}
 	transcript := agent.Transcript{Messages: []llm.Message{
-		llm.User("привет"),
-		{Role: "assistant", Content: "Привет!"},
+		llm.User("hi"),
+		{Role: "assistant", Content: "Hi there!"},
 	}}
 	lessons, err := New(r).Reflect(context.Background(), transcript)
 	if err != nil {
@@ -94,10 +94,10 @@ func TestReflectSkipsWithoutToolUse(t *testing.T) {
 	}
 }
 
-// oneLine must clip on a rune boundary so a long Cyrillic transcript line never
+// oneLine must clip on a rune boundary so a long line of multi-byte runes never
 // writes a broken trailing rune into the knowledge base or the trace dataset.
 func TestOneLineRuneSafe(t *testing.T) {
-	got := oneLine(strings.Repeat("я", 600)) // 2 bytes each → 500-byte cap lands mid-rune
+	got := oneLine(strings.Repeat("é", 600)) // 2 bytes each → 500-byte cap lands mid-rune
 	if !utf8.ValidString(got) {
 		t.Errorf("oneLine produced invalid UTF-8: %q", got)
 	}

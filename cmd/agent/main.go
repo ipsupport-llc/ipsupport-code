@@ -35,14 +35,24 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/trace"
 )
 
+// version is stamped at build time via -ldflags "-X main.version=…" (GoReleaser
+// and `make release`); "dev" for a plain `go build`.
+var version = "dev"
+
 func main() {
 	var (
-		workspace string
-		doInit    bool
+		workspace   string
+		doInit      bool
+		showVersion bool
 	)
 	flag.StringVar(&workspace, "C", ".", "workspace directory")
 	flag.BoolVar(&doInit, "init", false, "re-run first-time setup (server URL, model)")
+	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.Parse()
+	if showVersion {
+		fmt.Println("ipsupport-code", version)
+		return
+	}
 	setupLogging()
 
 	reader := bufio.NewReader(os.Stdin)

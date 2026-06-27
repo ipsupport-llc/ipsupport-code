@@ -83,12 +83,15 @@ func main() {
 
 	switch {
 	case strings.TrimSpace(strings.Join(flag.Args(), " ")) != "":
+		app.loadSession() // one-shot: silently continue the saved session
 		app.runOne(ctx, strings.TrimSpace(strings.Join(flag.Args(), " ")))
 	case isTTY():
+		app.chooseSession() // restore / new / delete the saved session for this name
 		if err := app.runTUI(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "tui:", err)
 		}
 	default:
+		app.loadSession() // piped: silently continue
 		app.repl(ctx)
 	}
 }
@@ -175,14 +178,15 @@ type app struct {
 	tracer     trace.Tracer  // composite, set in wire()
 	approver   tool.Approver // stdin (plain) or the TUI bridge
 
-	client         *llm.OpenAIClient
-	ag             *agent.Agent
-	refl           *reflect.Reflector
-	instrSrc       string   // project instructions file in effect, "" if none
-	promptSrc      string   // "built-in" or the system.md override path
-	facts          []string // durable project facts learned over time (per workspace)
-	planMode       bool     // plan (propose) vs auto (execute); survives re-wire
-	windowDetected bool     // got the real loaded context window (vs a default/guess)
+	client          *llm.OpenAIClient
+	ag              *agent.Agent
+	refl            *reflect.Reflector
+	instrSrc        string   // project instructions file in effect, "" if none
+	promptSrc       string   // "built-in" or the system.md override path
+	facts           []string // durable project facts learned over time (per workspace)
+	planMode        bool     // plan (propose) vs auto (execute); survives re-wire
+	windowDetected  bool     // got the real loaded context window (vs a default/guess)
+	sessionRestored bool     // a saved session was restored at startup (TUI renders a recap)
 
 	tasks, steps, toolCalls int
 	lastPrompt, lastCompl   int // client usage snapshot for per-task ledger deltas
@@ -221,7 +225,8 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 	if err := a.wire(); err != nil {
 		return nil, nil, err
 	}
-	a.loadSession()         // restore the prior conversation for this workspace
+	// The prior session is restored by the caller: interactively via chooseSession
+	// (restore/new/delete), or auto-loaded in non-interactive modes.
 	a.detectContextWindow() // ask LM Studio for the real window (auto-compact sizing)
 	return a, cleanup, nil
 }
@@ -375,18 +380,147 @@ func (a *app) shouldAutoCompact() bool {
 	return autoCompactNeeded(a.client.Context(), a.activeLLM().ContextWindow, a.ag.SessionLen())
 }
 
-// Session memory persists per workspace so "the prior context" survives a
-// restart. /new and /clear wipe it.
-func (a *app) sessionPath() string { return filepath.Join(a.workspace, ".agent", "session.json") }
+// Session memory persists per workspace AND per agent name, so each named agent
+// (see /rename) keeps its own thread of context across restarts. /new and /clear
+// wipe the active one.
+func (a *app) sessionPath() string {
+	return filepath.Join(a.workspace, ".agent", "sessions", slugName(a.cfg.Name)+".json")
+}
+
+// legacySessionPath is the pre-naming location, read as a fallback for the
+// default name so existing sessions still restore after upgrading.
+func (a *app) legacySessionPath() string {
+	return filepath.Join(a.workspace, ".agent", "session.json")
+}
+
+// slugName turns a display name into a safe filename stem.
+func slugName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" {
+		return "ipsupport-code"
+	}
+	var b strings.Builder
+	lastDash := false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+			lastDash = false
+		default: // anything else becomes a single dash (no runs)
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	if out := strings.Trim(b.String(), "-"); out != "" {
+		return out
+	}
+	return "agent"
+}
+
+// existingSessionPath returns the path of the saved session for the current name
+// (or the legacy path for the default name), or "" if none exists.
+func (a *app) existingSessionPath() string {
+	if _, err := os.Stat(a.sessionPath()); err == nil {
+		return a.sessionPath()
+	}
+	if slugName(a.cfg.Name) == "ipsupport-code" {
+		if _, err := os.Stat(a.legacySessionPath()); err == nil {
+			return a.legacySessionPath()
+		}
+	}
+	return ""
+}
 
 func (a *app) loadSession() {
-	data, err := os.ReadFile(a.sessionPath())
+	path := a.existingSessionPath()
+	if path == "" {
+		return
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return
 	}
 	var h []llm.Message
 	if json.Unmarshal(data, &h) == nil {
 		a.ag.SetHistory(h)
+	}
+}
+
+// savedSession reports the message count and last-modified time of the saved
+// session for the current name (count 0 = none worth restoring).
+func (a *app) savedSession() (count int, mod time.Time) {
+	path := a.existingSessionPath()
+	if path == "" {
+		return 0, time.Time{}
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0, time.Time{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, time.Time{}
+	}
+	var h []llm.Message
+	if json.Unmarshal(data, &h) != nil {
+		return 0, time.Time{}
+	}
+	return len(h), fi.ModTime()
+}
+
+// deleteSession removes the saved session for the current name and clears memory.
+func (a *app) deleteSession() {
+	if p := a.existingSessionPath(); p != "" {
+		_ = os.Remove(p)
+	}
+	if a.ag != nil {
+		a.ag.Reset()
+	}
+}
+
+// chooseSession is the interactive startup prompt: if a session is saved for this
+// agent name, offer to restore it, start fresh, or delete it. Restoring sets the
+// flag the TUI uses to replay a recap. Default (Enter) restores.
+func (a *app) chooseSession() {
+	count, mod := a.savedSession()
+	if count == 0 {
+		return
+	}
+	name := a.cfg.Name
+	if name == "" {
+		name = "ipsupport-code"
+	}
+	fmt.Fprintf(os.Stderr, "Saved session for %q — %d exchange(s), last active %s.\n",
+		name, count/2, humanizeAgo(mod))
+	fmt.Fprint(os.Stderr, "  [R]estore · [N]ew · [D]elete  (R): ")
+	line, _ := a.reader.ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "d", "delete":
+		a.deleteSession()
+		fmt.Fprintln(os.Stderr, "  → deleted — starting fresh")
+	case "n", "new":
+		fmt.Fprintln(os.Stderr, "  → new session (the old one is kept until overwritten)")
+	default:
+		a.loadSession()
+		a.sessionRestored = true
+		fmt.Fprintln(os.Stderr, "  → restored")
+	}
+}
+
+// humanizeAgo renders how long ago t was, compactly.
+func humanizeAgo(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }
 

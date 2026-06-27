@@ -215,6 +215,69 @@ func TestSessionSurvivesTUILaunch(t *testing.T) {
 	}
 }
 
+func TestSlugName(t *testing.T) {
+	cases := map[string]string{"Alice Bot": "alice-bot", "  ": "ipsupport-code", "C++/Helper!": "c-helper", "": "ipsupport-code"}
+	for in, want := range cases {
+		if got := slugName(in); got != want {
+			t.Errorf("slugName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSessionsKeyedByName(t *testing.T) {
+	ws := t.TempDir()
+	a := &app{workspace: ws, cfg: config.Config{Name: "bob"}}
+	if c, _ := a.savedSession(); c != 0 {
+		t.Fatalf("savedSession count = %d, want 0 (none yet)", c)
+	}
+	// write a session for "bob"
+	if err := os.MkdirAll(filepath.Dir(a.sessionPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal([]llm.Message{llm.User("g1"), {Role: "assistant", Content: "a1"}})
+	if err := os.WriteFile(a.sessionPath(), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(a.sessionPath(), filepath.Join(".agent", "sessions", "bob.json")) {
+		t.Errorf("sessionPath = %q, want …/sessions/bob.json", a.sessionPath())
+	}
+	if c, _ := a.savedSession(); c != 2 {
+		t.Errorf("savedSession count = %d, want 2", c)
+	}
+	// a differently-named agent in the same workspace sees no session
+	other := &app{workspace: ws, cfg: config.Config{Name: "alice"}}
+	if c, _ := other.savedSession(); c != 0 {
+		t.Errorf("alice should not see bob's session, got count %d", c)
+	}
+	a.deleteSession()
+	if c, _ := a.savedSession(); c != 0 {
+		t.Errorf("after deleteSession count = %d, want 0", c)
+	}
+}
+
+func TestRestoredSessionRendersRecap(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag.SetHistory([]llm.Message{llm.User("build a thing"), {Role: "assistant", Content: "built it"}})
+	a.sessionRestored = true
+
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(m.history, "\n")
+	for _, want := range []string{"restored session", "build a thing", "built it"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("recap missing %q in:\n%s", want, joined)
+		}
+	}
+}
+
 // Changed-your-mind: while a task runs, Up with an empty input pulls the most
 // recent queued (type-ahead) message back into the input to edit or drop.
 func TestUpRecallsQueuedMessage(t *testing.T) {

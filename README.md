@@ -217,7 +217,10 @@ edit at your own risk.)
 - **Code search.** The `file` tool's `search` action greps the workspace by regex
   (`file:line: match`), skipping VCS/dep/build dirs and binaries — no external `grep`.
 - **Session memory.** Remembers your goals and its answers across turns and across
-  restarts (`.agent/session.json`, per workspace). `/new` wipes it.
+  restarts, kept per workspace **and per agent name** (`.agent/sessions/<name>.json`).
+  On startup, if a session is saved for that name, it offers **restore / new /
+  delete** — and on restore it replays the recent exchanges so you pick up where
+  you left off. `/new` wipes the active one.
 - **Resilience.** Exponential-backoff retry on transient 5xx/network errors, an
   idle watchdog that aborts a silently-stalled stream, and a stuck-loop guard.
 - **Project instructions.** Reads a `CLAUDE.md` / `AGENTS.md` / `.agent/instructions.md`

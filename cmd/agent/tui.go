@@ -148,7 +148,41 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: lipgloss.Color("13"), inputLines: 1}
 	act := a.activeLLM()
 	m.history = bannerLines(name, version, act.Model, a.workspace, act.ContextWindow, m.accent)
+	if a.sessionRestored {
+		m.history = append(m.history, m.sessionRecap()...)
+	}
 	return m, nil
+}
+
+// sessionRecap renders the tail of a restored session as log lines, so the screen
+// shows the recent conversation "as if you never left".
+func (m *tuiModel) sessionRecap() []string {
+	const maxExchanges, maxFinalLines = 5, 10
+	h := m.app.ag.History()
+	if len(h) == 0 {
+		return nil
+	}
+	if len(h) > maxExchanges*2 {
+		h = h[len(h)-maxExchanges*2:]
+	}
+	out := []string{"", cDim.Render("  ── restored session ──")}
+	for _, msg := range h {
+		switch msg.Role {
+		case "user":
+			goal, _ := textutil.Clip(strings.ReplaceAll(msg.Content, "\n", " "), 200)
+			out = append(out, cYou.Render("❯ ")+goal)
+		case "assistant":
+			if strings.TrimSpace(msg.Content) == "" {
+				continue
+			}
+			lines := strings.Split(strings.TrimRight(msg.Content, "\n"), "\n")
+			if len(lines) > maxFinalLines {
+				lines = append(lines[:maxFinalLines:maxFinalLines], cDim.Render("  …"))
+			}
+			out = append(out, lines...)
+		}
+	}
+	return append(out, cDim.Render("  ── end of recap · continuing where you left off ──"), "")
 }
 
 // bannerLines builds the Claude-Code-style startup card: a rounded box with the

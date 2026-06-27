@@ -383,6 +383,32 @@ func TestStuckNudgeRecovers(t *testing.T) {
 	}
 }
 
+// An empty-action error must stay a single clean line — no full schema dump, no
+// learned hints piled on (that buries the example for a weak model).
+func TestEmptyActionErrorStaysTerse(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	kb, _ := knowledge.Open(filepath.Join(t.TempDir(), "k.json"))
+	kb.Add(knowledge.Pitfall{Domain: "calc", ErrorPattern: "no action given", Context: "calc", ProvenFix: "provide an action"})
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c", "calc", `{"action":"","params":{}}`),
+		{Role: "assistant", Content: "done"},
+	}}
+	a := New(fake, reg, kb, nil, "", 5)
+
+	tr, _ := a.Run(context.Background(), "x")
+	obs := toolObservation(tr.Messages)
+	if len(obs) == 0 {
+		t.Fatal("no observation")
+	}
+	c := obs[0].Content
+	if !strings.Contains(c, "no action given") {
+		t.Errorf("want the no-action message, got: %s", c)
+	}
+	if strings.Contains(c, "usage:") || strings.Contains(c, "Hints from past runs") {
+		t.Errorf("empty-action error should stay terse, got:\n%s", c)
+	}
+}
+
 func TestRunWrongToolHint(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc(), tool.NewWeb(nil))
 	fake := &scriptLLM{replies: []llm.Message{

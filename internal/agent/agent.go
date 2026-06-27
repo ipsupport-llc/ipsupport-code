@@ -281,7 +281,10 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool)
 
 	res := a.reg.Dispatch(ctx, c.Name, action, params)
 	content := res.Content
-	if res.IsError {
+	// An empty-action error already carries a concrete example; piling the full
+	// schema and learned hints on top just buries it for a weak model — keep it to
+	// the one clean line.
+	if res.IsError && !strings.Contains(res.Content, "no action given") {
 		var extra []string
 		// On a misuse error, put the tool's schema right at the error — a weak
 		// model corrects far more reliably from that than from a pointer it has
@@ -336,10 +339,9 @@ func (a *Agent) hints(domain, errText string) string {
 // schema helps it self-correct.
 func usageError(s string) bool {
 	l := strings.ToLower(s)
-	return strings.Contains(l, "missing required") ||
+	return strings.Contains(l, "missing required") || // covers "missing required param(s)"
 		strings.Contains(l, "unknown action") ||
-		strings.Contains(l, "belongs to tool") ||
-		strings.Contains(l, "param")
+		strings.Contains(l, "belongs to tool")
 }
 
 func (a *Agent) emit(kind string, fields map[string]any) {

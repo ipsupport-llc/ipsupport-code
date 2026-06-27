@@ -50,6 +50,7 @@ type tuiModel struct {
 	history       []string
 	queued        []string // type-ahead while a task runs
 	pending       *approvalReq
+	approveChoice bool // selected Yes(true)/No(false) while answering an approval
 	cancel        context.CancelFunc
 	taskStart     time.Time
 	startTok      int
@@ -199,11 +200,11 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case approvalMsg:
 		req := approvalReq(msg)
 		m.pending = &req
-		m.state = stApprove
-		m.push(cToolCall.Render("  ⚠ approve "+req.kind+": ") + req.detail + cDim.Render("  [y/N]"))
-		// Do NOT fetch the next approval yet — that would overwrite m.pending and
-		// orphan this one's reply channel (a hang when the model batches calls).
-		// The next is read only after this one is answered (see handleKey).
+		// Don't steal the keyboard: stay running so the input remains editable
+		// (finish your message). The user presses ↑ to switch to answering. Do NOT
+		// fetch the next approval yet — that would overwrite m.pending and orphan
+		// this one's reply channel (a hang when the model batches calls).
+		m.push(cToolCall.Render("  ⚠ approve "+req.kind+": ") + req.detail + cDim.Render("  — press ↑ to answer"))
 		return m, nil
 
 	case taskDoneMsg:
@@ -265,17 +266,34 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// A pending approval doesn't grab the keyboard — keep typing. Press ↑ to
+	// switch to answering it (your input text is preserved).
+	if m.pending != nil && m.state != stApprove && k.String() == "up" {
+		m.state = stApprove
+		m.approveChoice = true
+		return m, nil
+	}
+
 	switch m.state {
 	case stApprove:
-		// Resolve the current prompt, then (and only then) wait for the next
-		// queued approval — keeps exactly one reader, so none get overwritten.
+		// Answer the prompt, then (and only then) wait for the next queued
+		// approval — keeps exactly one reader, so none get overwritten.
 		switch k.String() {
+		case "left", "right", "up", "down", "tab":
+			m.approveChoice = !m.approveChoice // toggle Yes/No
+			return m, nil
 		case "y", "Y":
 			m.resolveApproval(true)
 			return m, m.waitApproval()
-		case "n", "N", "esc", "enter":
+		case "n", "N":
 			m.resolveApproval(false)
 			return m, m.waitApproval()
+		case "enter":
+			m.resolveApproval(m.approveChoice)
+			return m, m.waitApproval()
+		case "esc":
+			m.state = stRunning // back to typing; the approval stays pending
+			return m, nil
 		}
 		return m, nil // ignore other keys; keep showing the prompt
 
@@ -285,7 +303,14 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.cancel != nil {
 				m.cancel()
 			}
+			m.bridge.Abort() // deny any in-flight approvals so no tool goroutine hangs
 			m.push(cDim.Render("  …cancelling"))
+			if m.pending != nil {
+				// The shown approval consumed the single reader; re-arm one so the
+				// next task's approvals are still read.
+				m.pending = nil
+				return m, m.waitApproval()
+			}
 			return m, nil
 		case "enter":
 			line := strings.TrimSpace(m.input.Value())
@@ -536,6 +561,7 @@ func (m *tuiModel) runGoals(n int, goal string) tea.Cmd {
 	m.startTok = c // count completion (generated) tokens for this task
 	m.suggestion = ""
 	m.input.Placeholder = defaultPlaceholder
+	m.bridge.arm() // fresh abort signal so a previous cancel doesn't deny this task's approvals
 	tctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel
 	return func() tea.Msg {
@@ -560,8 +586,13 @@ func (m *tuiModel) View() string {
 	_, c := m.app.client.Usage() // c = cumulative completion (generated) tokens
 
 	var status string
-	switch m.state {
-	case stRunning:
+	switch {
+	case m.state == stApprove:
+		status = m.approvePrompt()
+	case m.pending != nil:
+		// An approval is waiting but you can keep typing; ↑ switches to answering.
+		status = cToolCall.Render("⚠ approval needed") + cDim.Render(" — press ↑ to answer")
+	case m.state == stRunning:
 		if m.retry != nil {
 			remain := time.Until(m.retry.until).Truncate(100 * time.Millisecond)
 			if remain < 0 {
@@ -579,8 +610,6 @@ func (m *tuiModel) View() string {
 			}
 			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" Thinking… (%s)", detail))
 		}
-	case stApprove:
-		status = cToolCall.Render("⚠ approve?  y / n  ·  esc denies  ·  ctrl-c quits")
 	default:
 		// ctx = size of the last prompt (how full the context is); ↑ = tokens the
 		// model generated this whole session.
@@ -589,11 +618,13 @@ func (m *tuiModel) View() string {
 	}
 
 	bottom := m.modeLine()
-	switch m.state {
-	case stRunning:
+	switch {
+	case m.state == stApprove:
+		bottom = cDim.Render("  ←→ select · enter confirm · y/n shortcut · esc back to typing")
+	case m.pending != nil:
+		bottom = m.modeLine() + cDim.Render("  · ↑ to answer the approval")
+	case m.state == stRunning:
 		bottom += cDim.Render("  · esc cancels")
-	case stApprove:
-		bottom = cDim.Render("  press y or n · esc denies · ctrl-c quits")
 	}
 
 	frame := lipgloss.NewStyle().Foreground(m.accent)
@@ -605,6 +636,21 @@ func (m *tuiModel) View() string {
 		frame.Render(strings.Repeat("─", m.width)),
 		bottom,
 	}, "\n")
+}
+
+// approvePrompt renders the Yes/No selector shown while answering an approval.
+func (m *tuiModel) approvePrompt() string {
+	detail := ""
+	if m.pending != nil {
+		detail = m.pending.kind + " " + m.pending.detail
+	}
+	yes, no := cDim.Render("  Yes  "), cDim.Render("  No  ")
+	if m.approveChoice {
+		yes = cOk.Bold(true).Render("  ▸Yes  ")
+	} else {
+		no = cErr.Bold(true).Render("  ▸No  ")
+	}
+	return cToolCall.Render("⚠ approve "+detail+"  ") + yes + no
 }
 
 // modeLine is the bottom indicator: auto (executes) or plan (proposes only),

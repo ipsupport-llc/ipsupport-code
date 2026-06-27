@@ -56,6 +56,15 @@ func TestTabCompletesSingleMatch(t *testing.T) {
 	}
 }
 
+func TestHighlightByExtension(t *testing.T) {
+	// A .py path must drive the Python lexer (so keywords get coloured) rather
+	// than relying on content guessing, which misses Python on short snippets.
+	out := highlightCode("def foo():\n    return 42", "organizer/main.py")
+	if !strings.Contains(out, "\x1b[") {
+		t.Errorf("Python (by .py path) should be colourised, got %q", out)
+	}
+}
+
 func TestRenderDiff(t *testing.T) {
 	m := &tuiModel{width: 80, accent: lipgloss.Color("13")}
 	diff := "--- a.txt\n+++ a.txt\n@@ -1,3 +1,3 @@\n line1\n-line2\n+LINE2\n line3\n"

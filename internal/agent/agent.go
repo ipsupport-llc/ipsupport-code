@@ -285,6 +285,7 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool)
 	}
 	a.emit("observation", map[string]any{
 		"tool": c.Name, "action": action, "is_error": res.IsError, "content": content,
+		"path": params["path"], // lets the UI pick a syntax lexer by extension
 	})
 	if res.Diff != "" {
 		a.emit("diff", map[string]any{"path": params["path"], "diff": res.Diff})

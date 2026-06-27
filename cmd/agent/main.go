@@ -235,7 +235,7 @@ func (a *app) isLocal() bool { return a.cfg.Provider == "" || a.cfg.Provider == 
 // provider — external providers don't expose /api/v0/models, and their window
 // comes from the preset. No-op after it succeeds once; best-effort, never blocks.
 func (a *app) detectContextWindow() {
-	if a.windowDetected || !a.isLocal() {
+	if a.windowDetected || !a.isLocal() || !a.cfg.LLM.LMStudio() {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -727,14 +727,46 @@ func (a *app) modelCommand(ctx context.Context, rest string) []string {
 	if name := strings.TrimSpace(rest); name != "" {
 		return a.setModel(name)
 	}
-	act := a.activeLLM()
 	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	ids, err := llm.ListModels(cctx, act.BaseURL, act.APIKey, http.DefaultClient)
+	return modelLines(cctx, a.activeLLM(), a.providerName())
+}
+
+// modelLines lists a provider's models — rich (state · context · quant) for LM
+// Studio via its native API, plain ids otherwise. Pure (no app state), so the
+// REPL and the TUI's async path share it.
+func modelLines(ctx context.Context, act config.LLM, provider string) []string {
+	head := fmt.Sprintf("models on %s (current %s) — /model <name> to pick:", provider, act.Model)
+	if act.LMStudio() {
+		ms, err := llm.ListLMStudioModels(ctx, act.BaseURL, http.DefaultClient)
+		if err != nil {
+			return []string{"couldn't list models: " + err.Error()}
+		}
+		out := []string{head}
+		for _, m := range ms {
+			tag := "·"
+			if m.State == "loaded" {
+				tag = "●"
+			}
+			win := ""
+			switch {
+			case m.LoadedContextLength > 0:
+				win = "ctx " + humanK(m.LoadedContextLength)
+			case m.MaxContextLength > 0:
+				win = "max " + humanK(m.MaxContextLength)
+			}
+			out = append(out, fmt.Sprintf("  %s %-36s %-9s %s", tag, m.ID, win, m.Quantization))
+		}
+		if len(ms) == 0 {
+			out = append(out, "  (none reported)")
+		}
+		return out
+	}
+	ids, err := llm.ListModels(ctx, act.BaseURL, act.APIKey, http.DefaultClient)
 	if err != nil {
 		return []string{"couldn't list models: " + err.Error()}
 	}
-	out := []string{fmt.Sprintf("models on %s (current %s) — /model <name> to pick:", a.providerName(), act.Model)}
+	out := []string{head}
 	for _, id := range ids {
 		out = append(out, "  "+id)
 	}

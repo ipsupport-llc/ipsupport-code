@@ -48,6 +48,29 @@ func TestDetectContextWindow(t *testing.T) {
 // An unloaded model reports only max_context_length — we must NOT adopt it
 // (that's the 260k bug); return 0 so the caller keeps its default and re-detects
 // once the model is loaded.
+func TestListLMStudioModels(t *testing.T) {
+	const body = `{"data":[
+		{"id":"a","state":"loaded","loaded_context_length":8192,"max_context_length":131072,"quantization":"Q4_K_M"},
+		{"id":"b","state":"not-loaded","max_context_length":4096}
+	]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v0/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	ms, err := ListLMStudioModels(context.Background(), srv.URL+"/v1", srv.Client())
+	if err != nil || len(ms) != 2 {
+		t.Fatalf("models=%+v err=%v", ms, err)
+	}
+	if ms[0].ID != "a" || ms[0].State != "loaded" || ms[0].LoadedContextLength != 8192 || ms[0].Quantization != "Q4_K_M" {
+		t.Errorf("parsed wrong: %+v", ms[0])
+	}
+}
+
 func TestDetectContextWindowUnloadedReturnsZero(t *testing.T) {
 	const body = `{"data":[{"id":"m","state":"not-loaded","max_context_length":262144}]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

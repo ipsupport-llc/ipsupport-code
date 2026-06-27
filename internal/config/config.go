@@ -23,10 +23,16 @@ type LLM struct {
 	Temperature float64 `json:"temperature"`
 	MaxSteps    int     `json:"max_steps"`
 	APIKey      string  `json:"api_key,omitempty"`
+	// Type selects extra capabilities: "lmstudio" uses LM Studio's native API
+	// (rich model list, context detection); anything else is plain OpenAI-compat.
+	Type string `json:"type,omitempty"`
 	// ContextWindow is the model's context size in tokens; auto-compact triggers
 	// as the prompt approaches it. 0 disables auto-compact.
 	ContextWindow int `json:"context_window,omitempty"`
 }
+
+// LMStudio reports whether this connection speaks LM Studio's native API.
+func (l LLM) LMStudio() bool { return l.Type == "lmstudio" }
 
 // RunPolicy gates shell execution. Resolution per command: a Deny glob (matched
 // anywhere) blocks, an Allow glob (whole command) auto-runs, otherwise Default.
@@ -65,6 +71,7 @@ type Config struct {
 // sensible default model) are known, so the user only needs to add an API key.
 var ProviderTemplates = map[string]LLM{
 	"openai":     {BaseURL: "https://api.openai.com/v1", Model: "gpt-4o-mini"},
+	"anthropic":  {BaseURL: "https://api.anthropic.com/v1", Model: "claude-3-5-sonnet-latest"}, // OpenAI-compat endpoint
 	"grok":       {BaseURL: "https://api.x.ai/v1", Model: "grok-2-latest"},
 	"groq":       {BaseURL: "https://api.groq.com/openai/v1", Model: "llama-3.3-70b-versatile"},
 	"openrouter": {BaseURL: "https://openrouter.ai/api/v1", Model: "openai/gpt-4o-mini"},
@@ -73,6 +80,7 @@ var ProviderTemplates = map[string]LLM{
 // providerEnvKey maps a provider to the env var its API key falls back to.
 var providerEnvKey = map[string]string{
 	"openai":     "OPENAI_API_KEY",
+	"anthropic":  "ANTHROPIC_API_KEY",
 	"grok":       "XAI_API_KEY",
 	"groq":       "GROQ_API_KEY",
 	"openrouter": "OPENROUTER_API_KEY",
@@ -137,6 +145,7 @@ func Default() Config {
 			Model:         "qwen2.5-7b-instruct",
 			Temperature:   0.2,
 			MaxSteps:      12,
+			Type:          "lmstudio",
 			ContextWindow: 8192,
 		},
 		Run: RunPolicy{

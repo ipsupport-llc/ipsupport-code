@@ -95,11 +95,7 @@ type updateDoneMsg struct{ text string } // /update result
 type shellDoneMsg struct{}               // returned from a drop-to-shell
 type shellCmdMsg struct{ out string }    // output of a one-off !cmd
 type windowMsg struct{ tokens int }      // re-detected context window
-type modelsMsg struct {                  // /model listing result
-	name, current string
-	ids           []string
-	err           error
-}
+type modelsMsg struct{ lines []string }  // /model listing result
 
 // newTUIModel installs the UI bridge as the agent's tracer + approver, wires the
 // stack, and builds the model. Split out from runTUI so tests can drive it.
@@ -325,17 +321,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case modelsMsg:
 		m.state = stIdle
-		if msg.err != nil {
-			m.push(cErr.Render("couldn't list models: " + msg.err.Error()))
-		} else {
-			m.push(cDim.Render(fmt.Sprintf("  models on %s (current %s) — /model <name>:", msg.name, msg.current)))
-			for _, id := range msg.ids {
-				m.push(cDim.Render("    " + id))
-			}
-			if len(msg.ids) == 0 {
-				m.push(cDim.Render("    (none reported)"))
-			}
-		}
+		m.pushLines(msg.lines)
 		return m, m.input.Focus()
 
 	case tea.KeyMsg:
@@ -570,8 +556,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			c, cancel := context.WithTimeout(ctx, 8*time.Second)
 			defer cancel()
-			ids, err := llm.ListModels(c, act.BaseURL, act.APIKey, http.DefaultClient)
-			return modelsMsg{name: name, current: act.Model, ids: ids, err: err}
+			return modelsMsg{lines: modelLines(c, act, name)}
 		}
 	case "/shell", "/sh":
 		sh := shellPath()

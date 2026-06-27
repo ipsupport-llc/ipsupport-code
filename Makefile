@@ -6,7 +6,7 @@ PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build release test race vet fmt fmtcheck tidy clean
+.PHONY: build release archives test race vet fmt fmtcheck tidy clean
 
 build: ## host binary for local testing
 	go build -ldflags "$(LDFLAGS)" -o dist/$(BIN) $(PKG)
@@ -18,6 +18,18 @@ release: ## stripped static binaries for every target into dist/
 	  echo "→ $$os/$$arch"; \
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BIN)-$$os-$$arch$$ext $(PKG); \
 	done
+
+archives: release ## package the release binaries into .tar.gz/.zip + SHA-256 checksums
+	@cd dist && rm -f *.tar.gz *.zip checksums.txt && \
+	for f in $(BIN)-*; do \
+	  oa=$${f#$(BIN)-}; \
+	  case $$f in \
+	    *.exe) oa=$${oa%.exe}; cp "$$f" $(BIN).exe; zip -q "$(BIN)_$(VERSION)_$$oa.zip" $(BIN).exe; rm $(BIN).exe ;; \
+	    *) cp "$$f" $(BIN); tar -czf "$(BIN)_$(VERSION)_$$oa.tar.gz" $(BIN); rm $(BIN) ;; \
+	  esac; \
+	done && \
+	sha256sum $(BIN)_*.tar.gz $(BIN)_*.zip > checksums.txt && \
+	echo "→ archives + checksums.txt in dist/"
 
 test: ## run all tests
 	go test ./...

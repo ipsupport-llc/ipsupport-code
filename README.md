@@ -26,16 +26,18 @@ machine, with your own model, under a permission policy you control.
 
 ## Install
 
-**Download a binary** from the [latest release](https://github.com/ipsupport-llc/ipsupport-code/releases/latest)
-(or the rolling [`nightly`](https://github.com/ipsupport-llc/ipsupport-code/releases/tag/nightly)).
-Pick your platform — `darwin-arm64` (Apple Silicon), `darwin-amd64` (Intel Mac),
-`linux-amd64`, `linux-arm64`, `windows-amd64`.
+**Download the archive** for your platform from the
+[latest release](https://github.com/ipsupport-llc/ipsupport-code/releases/latest)
+(or the rolling [`nightly`](https://github.com/ipsupport-llc/ipsupport-code/releases/tag/nightly)):
+`darwin-arm64` (Apple Silicon), `darwin-amd64` (Intel Mac), `linux-amd64`,
+`linux-arm64`, `windows-amd64`. Each release also ships `checksums.txt` (SHA-256).
 
 ```sh
-chmod +x ipsupport-code-darwin-arm64
+tar -xzf ipsupport-code_*_darwin-arm64.tar.gz   # .zip on Windows
+chmod +x ipsupport-code
 # macOS may quarantine a downloaded binary:
-xattr -d com.apple.quarantine ./ipsupport-code-darwin-arm64
-./ipsupport-code-darwin-arm64 -version
+xattr -d com.apple.quarantine ./ipsupport-code
+./ipsupport-code -version
 ```
 
 **Or build from source** (pure Go, `CGO_ENABLED=0`, cross-compiles from any host):

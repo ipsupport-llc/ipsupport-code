@@ -23,16 +23,15 @@ jobs:
           cache: true
       - name: tests (race)
         run: make race
-      - name: build
-        run: make release VERSION="nightly-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
-      - name: checksums
-        run: cd dist && sha256sum ipsupport-code-* > checksums.txt
+      - name: build & package archives
+        run: make archives VERSION="nightly-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
       - name: publish rolling nightly
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
-          gh release create nightly dist/* \
+          gh release create nightly \
+            dist/*.tar.gz dist/*.zip dist/checksums.txt \
             --prerelease \
             --title "Nightly build" \
             --notes "Automated build from main — commit $(git rev-parse --short HEAD), $(date -u +%Y-%m-%d). Pre-release; not a stable version."

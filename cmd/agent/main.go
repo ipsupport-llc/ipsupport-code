@@ -1570,7 +1570,7 @@ func (a *app) usageText() string {
   lessons     %d in knowledge base
 `, a.tasks, a.steps, a.toolCalls, p, c, p+c, len(a.kb.All()))
 	if roll := a.usageRollups(); len(roll) > 0 {
-		b.WriteString("\ntokens (cumulative, saved):\n")
+		b.WriteString("\ntokens (cumulative, saved · $ estimated):\n")
 		for _, r := range roll {
 			fmt.Fprintf(&b, "  %-12s %s\n", r[0], r[1])
 		}
@@ -1592,18 +1592,50 @@ func (a *app) usageText() string {
 	return b.String()
 }
 
-// usageRollups summarizes cumulative token spend over common windows from the
-// saved ledger (today / 7d / 30d / all time).
+// usageRollups summarizes cumulative token spend (and estimated $ cost) over
+// common windows from the saved ledger (today / 7d / 30d / all time).
 func (a *app) usageRollups() [][2]string {
 	if a.usage == nil {
 		return nil
 	}
 	now := time.Now()
+	ov := a.priceOverrides()
+	row := func(label, cutoff string) [2]string {
+		v := humanK(a.usage.TotalSince(cutoff).Tokens()) + " tok"
+		if c := fmtCost(a.usage.CostSince(cutoff, ov)); c != "" {
+			v += "  " + c
+		}
+		return [2]string{label, v}
+	}
 	return [][2]string{
-		{"today", humanK(a.usage.TotalSince(now.Format("2006-01-02")).Tokens()) + " tok"},
-		{"last 7 days", humanK(a.usage.TotalSince(now.AddDate(0, 0, -6).Format("2006-01-02")).Tokens()) + " tok"},
-		{"last 30 days", humanK(a.usage.TotalSince(now.AddDate(0, 0, -29).Format("2006-01-02")).Tokens()) + " tok"},
-		{"all time", humanK(a.usage.Total().Tokens()) + " tok"},
+		row("today", now.Format("2006-01-02")),
+		row("last 7 days", now.AddDate(0, 0, -6).Format("2006-01-02")),
+		row("last 30 days", now.AddDate(0, 0, -29).Format("2006-01-02")),
+		row("all time", ""),
+	}
+}
+
+// priceOverrides converts the config price table to the usage package's form.
+func (a *app) priceOverrides() map[string]usage.Price {
+	if len(a.cfg.Prices) == 0 {
+		return nil
+	}
+	m := make(map[string]usage.Price, len(a.cfg.Prices))
+	for k, v := range a.cfg.Prices {
+		m[k] = usage.Price{In: v[0], Out: v[1]}
+	}
+	return m
+}
+
+// fmtCost renders an estimated dollar cost ("" for ~0 so free models show no $).
+func fmtCost(c float64) string {
+	switch {
+	case c <= 0:
+		return ""
+	case c < 0.01:
+		return "<$0.01"
+	default:
+		return fmt.Sprintf("~$%.2f", c)
 	}
 }
 
@@ -1681,11 +1713,20 @@ func (a *app) usageLedger() (days, models [][2]string) {
 		}
 		days = append(days, [2]string{t.Key, humanK(t.Tokens()) + " tok"})
 	}
+	ov := a.priceOverrides()
 	for i, t := range a.usage.ByModel() {
 		if i >= 8 {
 			break
 		}
-		models = append(models, [2]string{t.Key, humanK(t.Tokens()) + " tok"})
+		model := t.Key
+		if idx := strings.IndexByte(t.Key, '/'); idx >= 0 {
+			model = t.Key[idx+1:] // strip the "provider/" prefix for price matching
+		}
+		v := humanK(t.Tokens()) + " tok"
+		if c := fmtCost(usage.CostUSD(model, t.Prompt, t.Completion, ov)); c != "" {
+			v += "  " + c
+		}
+		models = append(models, [2]string{t.Key, v})
 	}
 	return days, models
 }

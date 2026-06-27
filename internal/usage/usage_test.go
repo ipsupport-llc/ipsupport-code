@@ -50,6 +50,33 @@ func TestStoreTotalSincePurgeClear(t *testing.T) {
 	}
 }
 
+func TestPricing(t *testing.T) {
+	// built-in: gpt-4o = $2.50 in / $10 out per 1M
+	if got := CostUSD("gpt-4o", 1_000_000, 1_000_000, nil); got != 12.50 {
+		t.Errorf("gpt-4o cost = %v, want 12.50", got)
+	}
+	// :free is always $0 even if a substring would otherwise match
+	if got := CostUSD("nvidia/nemotron:free", 5_000_000, 5_000_000, nil); got != 0 {
+		t.Errorf(":free cost = %v, want 0", got)
+	}
+	// unknown model → $0 (no estimate)
+	if got := CostUSD("some-unknown-model", 1_000_000, 0, nil); got != 0 {
+		t.Errorf("unknown cost = %v, want 0", got)
+	}
+	// override wins over the built-in table
+	ov := map[string]Price{"gpt-4o": {In: 1, Out: 1}}
+	if got := CostUSD("gpt-4o", 1_000_000, 0, ov); got != 1 {
+		t.Errorf("override cost = %v, want 1", got)
+	}
+	// CostSince sums per-entry by model
+	s, _ := Open("")
+	s.Add("2026-06-27", "openai", "gpt-4o", 1_000_000, 0)         // $2.50
+	s.Add("2026-06-27", "openrouter", "x:free", 9_000_000, 9_000) // $0
+	if got := s.CostSince("", nil); got != 2.50 {
+		t.Errorf("CostSince = %v, want 2.50", got)
+	}
+}
+
 func TestStorePersist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.json")
 	s, _ := Open(path)

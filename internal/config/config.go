@@ -69,9 +69,12 @@ type Config struct {
 	UsagePath string         `json:"usage_path,omitempty"`
 	// UsageRetentionDays auto-drops usage-ledger entries older than N days on
 	// startup. 0 keeps history forever.
-	UsageRetentionDays int    `json:"usage_retention_days,omitempty"`
-	SkillsPath         string `json:"skills_path,omitempty"`
-	Workspace          string `json:"-"` // resolved absolute workspace root
+	UsageRetentionDays int `json:"usage_retention_days,omitempty"`
+	// Prices overrides the built-in per-model price estimates for /usage cost:
+	// model-id substring → [input, output] USD per 1M tokens.
+	Prices     map[string][2]float64 `json:"prices,omitempty"`
+	SkillsPath string                `json:"skills_path,omitempty"`
+	Workspace  string                `json:"-"` // resolved absolute workspace root
 }
 
 // ProviderTemplates are built-in OpenAI-compatible providers: base URL (and a

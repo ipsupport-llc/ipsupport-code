@@ -168,7 +168,7 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | `/skills` | list / toggle / install on-demand instruction packs |
 | `/permissions` | relax approval for non-destructive file/shell actions |
 | `/status` | config, knowledge base, and trace paths |
-| `/usage` | token spend (today / 7d / 30d / all, by day, by model); `clear` · `purge <days>` · `retain <days>` |
+| `/usage` | token spend + **estimated $** (today / 7d / 30d / all, by day, by model); `clear` · `purge <days>` · `retain <days>` |
 | `/login` | (re)configure server URL / model / key, then reload |
 | `/new` | clear the session conversation memory |
 | `/clear` | fresh start — clear the screen and the session |

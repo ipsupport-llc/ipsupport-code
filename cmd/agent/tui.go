@@ -1297,7 +1297,7 @@ func (m *tuiModel) renderUsage() []string {
 	})
 	if roll := m.app.usageRollups(); len(roll) > 0 {
 		out = append(out, "")
-		out = append(out, m.renderKV("tokens (cumulative, saved)", roll)...)
+		out = append(out, m.renderKV("tokens (cumulative, saved · $ estimated)", roll)...)
 	}
 	days, models := m.app.usageLedger()
 	if len(days) > 0 {

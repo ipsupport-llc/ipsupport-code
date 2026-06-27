@@ -58,6 +58,52 @@ func ListModels(ctx context.Context, baseURL, apiKey string, hc *http.Client) ([
 	return ids, nil
 }
 
+// DetectModelContext returns the advertised context length of `model` from an
+// OpenAI-style /v1/models list that carries a context_length field. OpenRouter
+// does (top-level and under top_provider); most others omit it → 0. Best-effort:
+// 0 on any failure, so the caller keeps its current window.
+func DetectModelContext(ctx context.Context, baseURL, apiKey, model string, hc *http.Client) int {
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
+	if err != nil {
+		return 0
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0
+	}
+	var out struct {
+		Data []struct {
+			ID            string `json:"id"`
+			ContextLength int    `json:"context_length"`
+			TopProvider   struct {
+				ContextLength int `json:"context_length"`
+			} `json:"top_provider"`
+		} `json:"data"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return 0
+	}
+	for _, m := range out.Data {
+		if m.ID == model {
+			if m.ContextLength > 0 {
+				return m.ContextLength
+			}
+			return m.TopProvider.ContextLength
+		}
+	}
+	return 0
+}
+
 // LMModel is one entry from LM Studio's native /api/v0/models.
 type LMModel struct {
 	ID                  string `json:"id"`

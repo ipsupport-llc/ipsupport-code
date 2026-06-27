@@ -243,20 +243,38 @@ func (a *app) isLocal() bool { return a.cfg.Provider == "" || a.cfg.Provider == 
 // providerModel is the "provider · model" label shown in the status line.
 func (a *app) providerModel() string { return a.providerName() + " · " + a.activeLLM().Model }
 
-// detectContextWindow asks LM Studio for the loaded model's context length and,
-// once it answers, uses it instead of the configured default. Only for the local
-// provider — external providers don't expose /api/v0/models, and their window
-// comes from the preset. No-op after it succeeds once; best-effort, never blocks.
+// detectContextWindow learns the active model's context window so the status bar
+// and auto-compact size against the real limit. LM Studio reports the loaded
+// model's window via its native API; external providers that list a
+// context_length (OpenRouter) report it via /models. Reset on every model/
+// provider switch (windowDetected=false) so it re-detects. Best-effort.
 func (a *app) detectContextWindow() {
-	if a.windowDetected || !a.isLocal() || !a.cfg.LLM.LMStudio() {
+	if a.windowDetected {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if w := llm.DetectContextWindow(ctx, a.cfg.LLM.BaseURL, a.cfg.LLM.Model, http.DefaultClient); w > 0 {
-		a.cfg.LLM.ContextWindow = w
+	if a.isLocal() {
+		if !a.cfg.LLM.LMStudio() {
+			return
+		}
+		if w := llm.DetectContextWindow(ctx, a.cfg.LLM.BaseURL, a.cfg.LLM.Model, http.DefaultClient); w > 0 {
+			a.cfg.LLM.ContextWindow = w
+			a.windowDetected = true
+			slog.Info("detected context window", "tokens", w, "model", a.cfg.LLM.Model)
+		}
+		return
+	}
+	act := a.activeLLM()
+	if w := llm.DetectModelContext(ctx, act.BaseURL, act.APIKey, act.Model, http.DefaultClient); w > 0 {
+		if a.cfg.Providers == nil {
+			a.cfg.Providers = map[string]config.LLM{}
+		}
+		p := a.cfg.Providers[a.cfg.Provider]
+		p.ContextWindow = w
+		a.cfg.Providers[a.cfg.Provider] = p
 		a.windowDetected = true
-		slog.Info("detected context window", "tokens", w, "model", a.cfg.LLM.Model)
+		slog.Info("detected context window", "tokens", w, "model", act.Model, "provider", a.providerName())
 	}
 }
 

@@ -81,7 +81,7 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		if act.APIKey != "" {
 			v = "● set"
 		}
-		return "api key", v, "enter: set"
+		return "api key", v, "enter: add/set a provider key"
 	case "mode":
 		v := "⏵⏵ auto"
 		if m.app.planMode {
@@ -120,13 +120,9 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 	case "model": // needs the live model list — hand off to /model
 		m.state = stIdle
 		return m.runCommand("/model")
-	case "apikey": // secret entry — prefill the command, let them type the token
+	case "apikey": // add or set a provider key — prefill; pick provider (Tab) + paste token
 		m.state = stIdle
-		prov := m.app.providerName()
-		if prov == "local" {
-			prov = ""
-		}
-		m.input.SetValue(strings.TrimRight("/ai key "+prov, " ") + " ")
+		m.input.SetValue("/ai key ")
 		m.input.CursorEnd()
 	case "name":
 		m.state = stIdle

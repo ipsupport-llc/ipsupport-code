@@ -1099,18 +1099,32 @@ func (m *tuiModel) completeCommand() {
 	}
 }
 
-// completeArg completes the first argument of a command against its candidates.
+// completeArg completes a command's argument against its candidates.
 func (m *tuiModel) completeArg(name, arg string) {
+	// "/ai key <provider>" — complete the provider (ANY known one, since you're
+	// adding a key) as the second token; the third token is the secret.
+	if name == "/ai" && strings.HasPrefix(arg, "key ") {
+		sub := strings.TrimPrefix(arg, "key ")
+		if !strings.ContainsRune(sub, ' ') {
+			m.applyCompletion("/ai key", sub, config.KnownProviders())
+		}
+		return
+	}
 	if strings.ContainsRune(arg, ' ') { // only the first token completes
 		return
 	}
-	cands := m.argCandidates(name)
+	m.applyCompletion(name, arg, m.argCandidates(name))
+}
+
+// applyCompletion sets the input to "prefix <match>" for a unique/common-prefix
+// match of partial against cands, or lists the matches when ambiguous.
+func (m *tuiModel) applyCompletion(prefix, partial string, cands []string) {
 	if len(cands) == 0 {
 		return
 	}
 	var matches []string
 	for _, c := range cands {
-		if strings.HasPrefix(c, arg) {
+		if strings.HasPrefix(c, partial) {
 			matches = append(matches, c)
 		}
 	}
@@ -1118,11 +1132,11 @@ func (m *tuiModel) completeArg(name, arg string) {
 	case 0:
 		return
 	case 1:
-		m.input.SetValue(name + " " + matches[0])
+		m.input.SetValue(prefix + " " + matches[0])
 		m.input.CursorEnd()
 	default:
-		if lcp := longestCommonPrefix(matches); len(lcp) > len(arg) {
-			m.input.SetValue(name + " " + lcp)
+		if lcp := longestCommonPrefix(matches); len(lcp) > len(partial) {
+			m.input.SetValue(prefix + " " + lcp)
 			m.input.CursorEnd()
 		} else {
 			m.push(cDim.Render("  " + strings.Join(matches, "   ")))

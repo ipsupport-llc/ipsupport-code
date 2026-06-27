@@ -82,6 +82,32 @@ func TestDetectContextWindowUnloadedReturnsZero(t *testing.T) {
 	}
 }
 
+func TestDetectModelContext(t *testing.T) {
+	// OpenRouter-style /v1/models with context_length (top-level and nested).
+	const body = `{"data":[
+		{"id":"x-ai/grok-4.3","context_length":131072},
+		{"id":"nested/model","top_provider":{"context_length":200000}}
+	]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/models" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	if got := DetectModelContext(context.Background(), srv.URL+"/v1", "k", "x-ai/grok-4.3", srv.Client()); got != 131072 {
+		t.Errorf("top-level context_length = %d, want 131072", got)
+	}
+	if got := DetectModelContext(context.Background(), srv.URL+"/v1", "k", "nested/model", srv.Client()); got != 200000 {
+		t.Errorf("nested top_provider.context_length = %d, want 200000", got)
+	}
+	if got := DetectModelContext(context.Background(), srv.URL+"/v1", "k", "unknown", srv.Client()); got != 0 {
+		t.Errorf("unknown model = %d, want 0", got)
+	}
+}
+
 func TestDetectContextWindowUnavailable(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNotFound) // not LM Studio's native API

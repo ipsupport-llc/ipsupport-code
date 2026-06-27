@@ -82,6 +82,27 @@ cycle a value in place (provider, mode, permissions, run timeout, color, channel
 or jump to the right flow (model, key, rename), **esc** to close — changes apply
 and save as you make them, no hand-editing JSON.
 
+## Sub-agents
+
+With a provider key (or a defined profile) the agent gains an `agent` tool: it can
+**delegate a self-contained task to a sub-agent on a different model** and use the
+answer — a second opinion, or another model's strength. Run your main loop on a
+local model, then have it ask a frontier model to review the diff; or review the
+same code across 2–3 models and compare. Define profiles in
+`~/.config/ipsupport-code/config.json`:
+
+```jsonc
+"agents": {
+  "reviewer":  { "provider": "openrouter", "model": "x-ai/grok-4.3", "prompt": "strict code reviewer" },
+  "architect": { "provider": "openai",     "model": "gpt-4o" }
+}
+```
+
+`/agents` lists them. Then just ask — e.g. *"have the reviewer review core/rules.go"*.
+Sub-agents inherit the current plan/auto mode and the workspace policy, can't spawn
+their own sub-agents (depth 1), and a **paid** (external) spawn asks for approval
+first. Their tokens are recorded in `/usage` like any other.
+
 ## Updating
 
 The binary updates itself in place from GitHub Releases:
@@ -176,6 +197,7 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | `/color [name]` | change the TUI frame color (cycles if no name) |
 | `/rename <name>` | rename the agent (saved in settings) |
 | `/sessions` | list / switch / delete saved sessions (per agent name) |
+| `/agents` | list sub-agent profiles (delegate a task to another model) |
 | `/loop <interval> [xN] <task>` | re-run a task on an interval (e.g. `/loop 5m <task>`, `/loop 30s x10 <task>`); **esc** stops it |
 | `/help` | command list |
 | `/exit`, `/quit` | leave |

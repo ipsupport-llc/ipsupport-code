@@ -4,6 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -303,6 +306,81 @@ func TestSessionsListSwitchDelete(t *testing.T) {
 	list2, _ := a.sessionsCommand("")
 	if strings.Contains(strings.Join(list2, "\n"), "alice") {
 		t.Errorf("alice should be gone:\n%s", strings.Join(list2, "\n"))
+	}
+}
+
+type fixedApprover bool
+
+func (f fixedApprover) Approve(_, _ string) bool { return bool(f) }
+
+func TestSubagentTargetsAndDepthCap(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	for _, env := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"} {
+		t.Setenv(env, "")
+	}
+	kb, _ := knowledge.Open("")
+	// pure local: no targets → no agent tool
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if a.hasSubagentTargets() {
+		t.Error("pure-local config should have no sub-agent targets")
+	}
+	// add a keyed provider → targets exist
+	a.cfg.Providers = map[string]config.LLM{"openrouter": {APIKey: "x"}}
+	if !a.hasSubagentTargets() {
+		t.Error("a keyed provider should be a sub-agent target")
+	}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	// depth cap: sub-agents must NOT get the agent tool
+	for _, fn := range a.subReg.OpenAITools() {
+		if f, _ := fn["function"].(map[string]any); f["name"] == "agent" {
+			t.Error("sub-agent registry must not contain the agent tool (recursion)")
+		}
+	}
+}
+
+func TestSpawnAgentPaidNeedsApproval(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.Providers = map[string]config.LLM{"openrouter": {APIKey: "x", Model: "m"}}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(false)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.spawnAgent(context.Background(), "do x", "", "openrouter", ""); err == nil || !strings.Contains(err.Error(), "denied") {
+		t.Errorf("paid spawn should be denied by the approver, got %v", err)
+	}
+	// unknown profile errors before any spawn
+	if _, err := a.spawnAgent(context.Background(), "do x", "nope", "", ""); err == nil || !strings.Contains(err.Error(), "unknown agent profile") {
+		t.Errorf("unknown profile = %v, want an error", err)
+	}
+}
+
+func TestSpawnAgentLocalRuns(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"reviewed: looks good"}}]}`)
+	}))
+	defer srv.Close()
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = "" // plain OpenAI-compat (skip LM Studio detection)
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.spawnAgent(context.Background(), "review the code", "", "local", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "looks good") {
+		t.Errorf("sub-agent answer = %q", out)
 	}
 }
 

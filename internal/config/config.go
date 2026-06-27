@@ -34,6 +34,15 @@ type LLM struct {
 // LMStudio reports whether this connection speaks LM Studio's native API.
 func (l LLM) LMStudio() bool { return l.Type == "lmstudio" }
 
+// AgentProfile is a named sub-agent target for the `agent` tool: which provider
+// and model to run the sub-agent on, plus an optional role prompt (e.g. "you are
+// a strict code reviewer").
+type AgentProfile struct {
+	Provider string `json:"provider"`
+	Model    string `json:"model,omitempty"`
+	Prompt   string `json:"prompt,omitempty"`
+}
+
 // RunPolicy gates shell execution. Resolution per command: a Deny glob (matched
 // anywhere) blocks, an Allow glob (whole command) auto-runs, otherwise Default.
 type RunPolicy struct {
@@ -72,9 +81,12 @@ type Config struct {
 	UsageRetentionDays int `json:"usage_retention_days,omitempty"`
 	// Prices overrides the built-in per-model price estimates for /usage cost:
 	// model-id substring → [input, output] USD per 1M tokens.
-	Prices     map[string][2]float64 `json:"prices,omitempty"`
-	SkillsPath string                `json:"skills_path,omitempty"`
-	Workspace  string                `json:"-"` // resolved absolute workspace root
+	Prices map[string][2]float64 `json:"prices,omitempty"`
+	// Agents are named sub-agent profiles for the `agent` tool (delegate a task to
+	// another model/provider): name → {provider, model, optional role prompt}.
+	Agents     map[string]AgentProfile `json:"agents,omitempty"`
+	SkillsPath string                  `json:"skills_path,omitempty"`
+	Workspace  string                  `json:"-"` // resolved absolute workspace root
 }
 
 // ProviderTemplates are built-in OpenAI-compatible providers: base URL (and a

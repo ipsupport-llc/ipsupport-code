@@ -74,7 +74,8 @@ type tuiModel struct {
 	accentIdx     int
 	width, height int
 	ready         bool
-	inputLines    int // current input box height in rows (grows with content)
+	inputLines    int    // current input box height in rows (grows with content)
+	busyMsg       string // status label while running non-task work (update/compact/model); "" = a model task ("thinking")
 
 	// model-proposed, Tab-acceptable next-step suggestion (parsed from NEXT:)
 	suggestion string
@@ -599,6 +600,9 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 			m.push(m.sessionRecap()...)
 		}
 		return m, nil
+	case "/agents":
+		m.pushLines(m.app.agentsLines())
+		return m, nil
 	case "/login":
 		if err := m.app.reconfigure(); err != nil {
 			m.push(cErr.Render("reload failed: " + err.Error()))
@@ -640,6 +644,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		if arg != "" {
 			verb = "finding \"" + arg + "\" on " + name
 		}
+		m.busyMsg = verb
 		m.push(cDim.Render("  " + verb + "…"))
 		ctx := m.ctx
 		return m, func() tea.Msg {
@@ -774,6 +779,7 @@ func (m *tuiModel) startUpdate(arg string) tea.Cmd {
 	}
 	m.state = stRunning
 	m.taskStart = time.Now()
+	m.busyMsg = "⬆ updating (" + channel + ")"
 	m.push(cDim.Render("  ⬆ checking the " + channel + " channel…"))
 	ctx, cur := m.ctx, version
 	return func() tea.Msg {
@@ -800,6 +806,7 @@ func (m *tuiModel) startUpdate(arg string) tea.Cmd {
 func (m *tuiModel) startCompact(auto bool) tea.Cmd {
 	m.state = stRunning
 	m.taskStart = time.Now()
+	m.busyMsg = "compacting the session"
 	_, c := m.app.client.Usage()
 	m.startTok = c
 	if auto {
@@ -817,6 +824,7 @@ func (m *tuiModel) startCompact(auto bool) tea.Cmd {
 func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
 	m.state = stRunning
 	m.taskStart = time.Now()
+	m.busyMsg = "" // a real model task → "thinking", not a labelled chore
 	_, c := m.app.client.Usage()
 	m.startTok = c // count completion (generated) tokens for this task
 	m.suggestion = ""
@@ -885,6 +893,11 @@ func (m *tuiModel) View() string {
 				remain = 0
 			}
 			status = cErr.Render(fmt.Sprintf("⟳ retrying (attempt %d) — backing off, %s left", m.retry.attempt, remain))
+		} else if m.busyMsg != "" {
+			// Non-task work (update / compact / model list) — label it as itself,
+			// not "thinking" (which reads as the model running).
+			elapsed := time.Since(m.taskStart).Truncate(time.Second)
+			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" %s… (%s)", m.busyMsg, elapsed))
 		} else {
 			elapsed := time.Since(m.taskStart).Truncate(time.Second)
 			gen := c - m.startTok // completion tokens generated this task
@@ -1108,6 +1121,7 @@ var commandList = []cmdInfo{
 	{"/color", "change the frame color (cycles if no name)"},
 	{"/rename", "rename the agent (saved in settings)"},
 	{"/sessions", "list / switch / delete saved sessions (per agent name)"},
+	{"/agents", "list sub-agent profiles (delegate to another model via the agent tool)"},
 	{"/loop", "re-run a task on an interval: /loop 5m <task> (esc to stop)"},
 	{"/exit", "leave"},
 }
@@ -1359,6 +1373,11 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 	case "fact":
 		f, _ := e.fields["text"].(string)
 		return []string{cLesson.Render("  ✦ noted ") + cDim.Render(f)}
+	case "subagent":
+		prov, _ := e.fields["provider"].(string)
+		model, _ := e.fields["model"].(string)
+		task, _ := e.fields["task"].(string)
+		return []string{cToolCall.Render("  ⇉ sub-agent ["+prov+" · "+model+"] ") + cDim.Render(task)}
 	case "loop":
 		label := fmt.Sprintf("↻ loop %d", toInt(e.fields["i"]))
 		if max := toInt(e.fields["max"]); max > 0 {

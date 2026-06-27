@@ -181,6 +181,7 @@ type app struct {
 
 	client          *llm.OpenAIClient
 	ag              *agent.Agent
+	subReg          *tool.Registry // tools for sub-agents (no `agent` tool → no recursion)
 	refl            *reflect.Reflector
 	instrSrc        string   // project instructions file in effect, "" if none
 	promptSrc       string   // "built-in" or the system.md override path
@@ -247,6 +248,136 @@ func (a *app) activeLLM() config.LLM {
 
 func (a *app) isLocal() bool { return a.cfg.Provider == "" || a.cfg.Provider == "local" }
 
+// hasSubagentTargets reports whether spawning a sub-agent is worthwhile: a
+// configured profile, or any external provider with a key.
+func (a *app) hasSubagentTargets() bool {
+	if len(a.cfg.Agents) > 0 {
+		return true
+	}
+	for _, n := range config.KnownProviders() {
+		if l, ok := config.ResolveProvider(a.cfg, n); ok && l.APIKey != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// spawnAgent runs a self-contained task on a sub-agent: it resolves the target
+// (a profile, or provider+model), asks approval for a paid/external spawn, builds
+// a fresh agent loop (same tools minus `agent`, so no recursion; inheriting the
+// current plan/auto mode), runs it, records its tokens, and returns its final
+// answer. Sub-agent steps stream to the same UI.
+func (a *app) spawnAgent(ctx context.Context, task, profile, provider, model string) (string, error) {
+	if strings.TrimSpace(task) == "" {
+		return "", fmt.Errorf("task is required")
+	}
+	var role string
+	if profile != "" {
+		p, ok := a.cfg.Agents[profile]
+		if !ok {
+			return "", fmt.Errorf("unknown agent profile %q (configured: %s)", profile, strings.Join(agentProfileNames(a.cfg), ", "))
+		}
+		role = p.Prompt
+		if provider == "" {
+			provider = p.Provider
+		}
+		if model == "" {
+			model = p.Model
+		}
+	}
+	if provider == "" {
+		provider = a.providerName() // default to the current provider
+	}
+
+	// Resolve the connection for the chosen provider.
+	var llmCfg config.LLM
+	if provider == "local" {
+		llmCfg = a.cfg.LLM
+	} else {
+		rp, ok := config.ResolveProvider(a.cfg, provider)
+		if !ok {
+			return "", fmt.Errorf("unknown provider %q", provider)
+		}
+		if rp.APIKey == "" {
+			return "", fmt.Errorf("%s has no API key — add one with /ai key %s <token>", provider, provider)
+		}
+		llmCfg = rp
+	}
+	if model != "" {
+		llmCfg.Model = model
+	}
+
+	// A paid (external) spawn spends real money and runs autonomously — gate it.
+	if provider != "local" {
+		detail := fmt.Sprintf("%s · %s — %s", provider, llmCfg.Model, oneLine(task, 80))
+		if !a.approver.Approve("spawn agent", detail) {
+			return "", fmt.Errorf("spawn denied by user")
+		}
+	}
+
+	sys := a.systemPrompt()
+	if strings.TrimSpace(role) != "" {
+		sys += "\n\n## Your role\n" + role
+	}
+	client := llm.NewOpenAIClient(llmCfg)
+	sub := agent.New(client, a.subReg, a.kb, a.tracer, sys, llmCfg.MaxSteps)
+	sub.SetPlanMode(a.planMode) // inherit the current mode
+	a.emit("subagent", map[string]any{"provider": provider, "model": llmCfg.Model, "task": oneLine(task, 80)})
+
+	tr, err := sub.Run(ctx, task)
+	if a.usage != nil { // the sub-agent's spend counts too
+		p, c := client.Usage()
+		a.usage.Add(today(), provider, llmCfg.Model, p, c)
+		_ = a.usage.Save()
+	}
+	if err != nil {
+		return "", err
+	}
+	return tr.Final, nil
+}
+
+// agentsLines lists configured agent profiles (for /agents).
+func (a *app) agentsLines() []string {
+	if len(a.cfg.Agents) == 0 {
+		return []string{
+			"no agent profiles. Add them under \"agents\" in config.json, then delegate via the agent tool:",
+			`  "agents": {"reviewer": {"provider": "openrouter", "model": "x-ai/grok-4.3", "prompt": "strict code reviewer"}}`,
+			"  then ask, e.g.: \"have the reviewer profile review core/rules.py\"",
+		}
+	}
+	out := []string{"agent profiles (delegate by asking, e.g. \"use <name> to …\"):"}
+	for _, n := range agentProfileNames(a.cfg) {
+		p := a.cfg.Agents[n]
+		model := p.Model
+		if model == "" {
+			model = "(provider default)"
+		}
+		line := fmt.Sprintf("  %-14s %s · %s", n, p.Provider, model)
+		if p.Prompt != "" {
+			line += "  — " + oneLine(p.Prompt, 40)
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
+// agentProfileNames lists configured agent-profile names (sorted), for errors.
+func agentProfileNames(cfg config.Config) []string {
+	names := make([]string, 0, len(cfg.Agents))
+	for n := range cfg.Agents {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// oneLine clips s to a single short line for prompts/labels.
+func oneLine(s string, max int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	out, _ := textutil.Clip(s, max)
+	return out
+}
+
 // providerModel is the "provider · model" label shown in the status line.
 func (a *app) providerModel() string { return a.providerName() + " · " + a.activeLLM().Model }
 
@@ -306,6 +437,14 @@ func (a *app) wire() error {
 	// the catalog until the user opts in.
 	if a.skills != nil && a.skills.HasEnabled() {
 		tools = append(tools, tool.NewSkill(a.skills))
+	}
+	// Sub-agents get the same tools MINUS the `agent` tool, so they can't recurse.
+	a.subReg = tool.NewRegistry(tools...)
+	// The `agent` tool (delegate to another model) is only worth its catalog space
+	// when there's somewhere to spawn — an external provider with a key, or a
+	// configured profile. Pure-local setups don't see it.
+	if a.hasSubagentTargets() {
+		tools = append(tools, tool.NewAgent(a.spawnAgent))
 	}
 	reg = tool.NewRegistry(tools...)
 	a.tracer = trace.Multi(a.fileTracer, a.uiTracer)
@@ -932,6 +1071,10 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	case "/sessions":
 		lines, _ := a.sessionsCommand(rest)
 		for _, l := range lines {
+			fmt.Println(l)
+		}
+	case "/agents":
+		for _, l := range a.agentsLines() {
 			fmt.Println(l)
 		}
 	case "/login", "/init":

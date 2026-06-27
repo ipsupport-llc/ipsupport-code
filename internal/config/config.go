@@ -47,10 +47,10 @@ type FilePolicy struct {
 
 // Config is the merged runtime configuration.
 type Config struct {
-	Name      string     `json:"name,omitempty"` // display name (renameable)
-	LLM       LLM        `json:"llm"`
-	Run       RunPolicy  `json:"run"`
-	File      FilePolicy `json:"file"`
+	Name       string     `json:"name,omitempty"` // display name (renameable)
+	LLM        LLM        `json:"llm"`
+	Run        RunPolicy  `json:"run"`
+	File       FilePolicy `json:"file"`
 	KBPath     string     `json:"kb_path,omitempty"`
 	TracePath  string     `json:"trace_path,omitempty"`
 	SkillsPath string     `json:"skills_path,omitempty"`

@@ -128,8 +128,8 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 	if err := a.wire(); err != nil {
 		return nil, nil, err
 	}
-	a.loadSession()           // restore the prior conversation for this workspace
-	a.detectContextWindow()   // ask LM Studio for the real window (auto-compact sizing)
+	a.loadSession()         // restore the prior conversation for this workspace
+	a.detectContextWindow() // ask LM Studio for the real window (auto-compact sizing)
 	return a, cleanup, nil
 }
 
@@ -217,7 +217,7 @@ func (a *app) reconfigure() error {
 	if err := a.wire(); err != nil {
 		return err
 	}
-	a.loadSession() // a fresh agent — restore the persisted session
+	a.loadSession()         // a fresh agent — restore the persisted session
 	a.detectContextWindow() // model may have changed — re-detect the window
 	return nil
 }

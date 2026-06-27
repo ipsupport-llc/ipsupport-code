@@ -13,9 +13,9 @@ type fakeTool struct {
 	last    string
 }
 
-func (f *fakeTool) Name() string        { return f.name }
-func (f *fakeTool) Description() string  { return f.name + " tool" }
-func (f *fakeTool) Actions() []string    { return f.actions }
+func (f *fakeTool) Name() string          { return f.name }
+func (f *fakeTool) Description() string   { return f.name + " tool" }
+func (f *fakeTool) Actions() []string     { return f.actions }
 func (f *fakeTool) Mutates(a string) bool { return contains(f.mutates, a) }
 func (f *fakeTool) Call(_ context.Context, action string, _ map[string]any) Result {
 	f.last = action

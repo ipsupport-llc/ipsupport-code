@@ -7,11 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 	"github.com/ipsupport-llc/ipsupport-code/internal/trace"
 )
@@ -122,6 +124,7 @@ func (a *Agent) remember(goal, final string) {
 func DefaultSystemPrompt() string {
 	return strings.TrimSpace(`You are the engine inside ipsupport-code, a local terminal coding agent. You run in a loop and act ONLY through tools; the user sees your tool calls and results.
 
+- You CAN edit files. The file tool's write/edit/append actions modify REAL files on disk in this workspace, and the user has already authorized you to use them. NEVER claim you "only have read/run", "can't modify files", or that the user must "enable file editing" / open a different mode — that is false. To change code, just call file (action edit, or write); for a multi-file change, do one file at a time.
 - DO the task with tools: write/edit files with file, run commands with run, use git/web/calc. NEVER just tell the user how to do it ("create a file", "chmod +x", "here's how…") — describing steps instead of doing them is a failure. (e.g. "make a hello script and run it" → file.write then run.shell, then report the output.)
 - If what you built is runnable, RUN it yourself with run and report the real output. Don't hand back a "how to test it" recipe — that's the user doing your job.
 - Each call is {"action": <name>, "params": {...}}. On an error, read it — it names the fix or the right tool — and retry.
@@ -145,6 +148,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	msgs = append(msgs, a.history...) // session memory
 	msgs = append(msgs, llm.User(goal))
 	tools := a.reg.OpenAITools()
+	slog.Debug("run start", "goal", clip(goal, 120), "tools", toolNames(tools), "plan_mode", a.planMode)
 
 	var tr Transcript
 	stuck, nudged := 0, false
@@ -156,12 +160,24 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 			tr.Messages = msgs
 			return tr, fmt.Errorf("llm chat (step %d): %w", step+1, err)
 		}
+		// At IPS_LOG=debug this shows exactly what the model returned each turn —
+		// the actual tool calls, or text with NO tool calls (e.g. a chat model
+		// refusing to edit instead of calling file.edit).
+		slog.Debug("model turn", "step", step+1,
+			"tool_calls", toolCallNames(assistant.ToolCalls),
+			"content", clip(strings.TrimSpace(assistant.Content), 240))
 		msgs = append(msgs, assistant)
 
 		// A reply with no tool calls IS the final answer — emit only "final"
 		// (emitting "assistant" too would render the same text twice).
 		if len(assistant.ToolCalls) == 0 {
 			clean, suggest := splitSuggestion(assistant.Content)
+			if strings.TrimSpace(clean) == "" {
+				// No tool call AND no text — a blank turn (some reasoning models
+				// emit only hidden reasoning). Don't end on silence; say so.
+				clean = "(the model returned an empty reply — no answer and no tool call. Try rephrasing, or pick a stronger model with /model.)"
+				suggest = ""
+			}
 			tr.Final = clean
 			tr.Messages = msgs
 			a.emit("final", map[string]any{"text": clean, "suggest": suggest})
@@ -206,6 +222,35 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	a.emit("final", map[string]any{"text": clean, "suggest": suggest, "exhausted": true})
 	a.remember(goal, clean)
 	return tr, nil
+}
+
+// clip shortens s for a debug log line (rune-safe).
+func clip(s string, n int) string { out, _ := textutil.Clip(s, n); return out }
+
+// toolNames extracts the function names from the OpenAI tool catalog (debug).
+func toolNames(tools []map[string]any) []string {
+	names := make([]string, 0, len(tools))
+	for _, t := range tools {
+		if fn, ok := t["function"].(map[string]any); ok {
+			if n, ok := fn["name"].(string); ok {
+				names = append(names, n)
+			}
+		}
+	}
+	return names
+}
+
+// toolCallNames lists the action names the model called this turn (debug). nil
+// when the model returned no tool calls — the tell for a chat-only reply.
+func toolCallNames(calls []llm.ToolCall) []string {
+	if len(calls) == 0 {
+		return nil
+	}
+	names := make([]string, len(calls))
+	for i, c := range calls {
+		names[i] = c.Name
+	}
+	return names
 }
 
 // splitSuggestion peels a trailing "NEXT: <step>" line off the final answer,

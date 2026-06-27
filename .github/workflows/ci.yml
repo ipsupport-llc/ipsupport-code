@@ -27,5 +27,9 @@ jobs:
         run: make vet
       - name: tests (race)
         run: make race
-      - name: cross-compile all targets
-        run: make release
+      # The code is pure, cross-platform Go (no build tags / GOOS-specific files),
+      # so a host build proves it compiles everywhere — no need to cross-compile
+      # all 5 targets on every push. The full matrix is built on tags
+      # (release.yml) and daily (nightly.yml).
+      - name: build (host)
+        run: make build

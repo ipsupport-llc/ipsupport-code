@@ -19,8 +19,11 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: tests (race)
-        run: make race
+      # ci.yml already runs the race suite on every commit; a tag points at a
+      # commit that passed it. Re-run the plain (non-race) suite as a fast guard
+      # against a tag that somehow skipped CI, without paying for race again.
+      - name: tests
+        run: make test
       - name: build & package archives
         run: make archives VERSION="${{ github.ref_name }}"
       - name: publish release

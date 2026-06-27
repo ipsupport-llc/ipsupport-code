@@ -166,7 +166,7 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | `/skills` | list / toggle / install on-demand instruction packs |
 | `/permissions` | relax approval for non-destructive file/shell actions |
 | `/status` | config, knowledge base, and trace paths |
-| `/usage` | session counters + token usage |
+| `/usage` | session counters + token history (by day, by provider/model) |
 | `/login` | (re)configure server URL / model / key, then reload |
 | `/new` | clear the session conversation memory |
 | `/clear` | fresh start — clear the screen and the session |
@@ -218,6 +218,8 @@ edit at your own risk.)
   from the workspace into the system prompt.
 - **Trace = dataset.** Every step (goal, tool call, observation, final, lesson) is
   appended as JSONL to `~/.config/ipsupport-code/traces.jsonl`.
+- **Usage ledger.** Token spend is recorded per day and per provider/model to
+  `~/.config/ipsupport-code/usage.json`; `/usage` shows the history.
 
 ## Configuration
 

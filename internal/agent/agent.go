@@ -152,6 +152,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 
 	var tr Transcript
 	stuck, nudged := 0, false
+	acted := false // did the model call any tool this run?
 	for step := 0; step < a.maxSteps; step++ {
 		tr.Steps = step + 1
 
@@ -173,9 +174,14 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		if len(assistant.ToolCalls) == 0 {
 			clean, suggest := splitSuggestion(assistant.Content)
 			if strings.TrimSpace(clean) == "" {
-				// No tool call AND no text — a blank turn (some reasoning models
-				// emit only hidden reasoning). Don't end on silence; say so.
-				clean = "(the model returned an empty reply — no answer and no tool call. Try rephrasing, or pick a stronger model with /model.)"
+				// Blank final turn. If the model already did work via tools, say it
+				// finished (the changes/output are above); otherwise it produced
+				// nothing — flag that instead of ending on silence.
+				if acted {
+					clean = "(done — finished without a written summary; see the changes/output above.)"
+				} else {
+					clean = "(the model returned an empty reply — no answer and no tool call. Try rephrasing, or pick a stronger model with /model.)"
+				}
 				suggest = ""
 			}
 			tr.Final = clean
@@ -188,6 +194,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		// Intermediate turn: show the model's reasoning text (if any) alongside
 		// the tool calls it's about to make.
 		a.emit("assistant", map[string]any{"content": assistant.Content, "tool_calls": len(assistant.ToolCalls)})
+		acted = true
 		results, nErr := a.runToolCalls(ctx, assistant.ToolCalls)
 		msgs = append(msgs, results...)
 

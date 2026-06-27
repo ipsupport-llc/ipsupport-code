@@ -988,7 +988,7 @@ type cmdInfo struct{ name, desc string }
 var commandList = []cmdInfo{
 	{"/help", "this list"},
 	{"/status", "config, knowledge base, trace paths"},
-	{"/usage", "session counters + live token usage"},
+	{"/usage", "session counters + token history by day and provider/model"},
 	{"/login", "(re)configure server URL / model / key, then reload"},
 	{"/new", "clear the session conversation memory"},
 	{"/clear", "fresh start — clear the screen and the session"},
@@ -1162,13 +1162,23 @@ func (m *tuiModel) renderStatus() []string {
 
 func (m *tuiModel) renderUsage() []string {
 	p, c := m.app.client.Usage()
-	return m.renderKV("usage (this session)", [][2]string{
+	out := m.renderKV("usage (this session)", [][2]string{
 		{"tasks", fmt.Sprintf("%d", m.app.tasks)},
 		{"steps", fmt.Sprintf("%d", m.app.steps)},
 		{"tool calls", fmt.Sprintf("%d", m.app.toolCalls)},
 		{"tokens", fmt.Sprintf("%d + %d = %d", p, c, p+c)},
 		{"lessons", fmt.Sprintf("%d", len(m.app.kb.All()))},
 	})
+	days, models := m.app.usageLedger()
+	if len(days) > 0 {
+		out = append(out, "")
+		out = append(out, m.renderKV("tokens by day", days)...)
+	}
+	if len(models) > 0 {
+		out = append(out, "")
+		out = append(out, m.renderKV("tokens by provider/model", models)...)
+	}
+	return out
 }
 
 // renderEvent renders one streamed agent event into styled history lines.

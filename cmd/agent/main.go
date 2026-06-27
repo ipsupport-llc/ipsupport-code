@@ -35,6 +35,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 	"github.com/ipsupport-llc/ipsupport-code/internal/trace"
+	"github.com/ipsupport-llc/ipsupport-code/internal/usage"
 )
 
 // version is stamped at build time via -ldflags "-X main.version=…" (GoReleaser
@@ -165,6 +166,7 @@ type app struct {
 	cfg       config.Config
 	workspace string
 	kb        *knowledge.KB
+	usage     *usage.Store
 	skills    *skill.Store
 	reader    *bufio.Reader
 
@@ -183,6 +185,7 @@ type app struct {
 	windowDetected bool     // got the real loaded context window (vs a default/guess)
 
 	tasks, steps, toolCalls int
+	lastPrompt, lastCompl   int // client usage snapshot for per-task ledger deltas
 }
 
 func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
@@ -199,9 +202,14 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 	if err != nil {
 		slog.Warn("skills unavailable", "err", err)
 	}
+	usageStore, err := usage.Open(cfg.UsagePath)
+	if err != nil {
+		slog.Warn("usage ledger unreadable; starting empty", "err", err)
+		usageStore, _ = usage.Open("")
+	}
 
 	cleanup := func() {}
-	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, skills: skills, reader: reader, approver: &stdinApprover{r: reader}}
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader, approver: &stdinApprover{r: reader}}
 	if ft, err := trace.NewFileTracer(cfg.TracePath, newRunID()); err != nil {
 		slog.Warn("trace disabled", "err", err)
 	} else {
@@ -494,6 +502,28 @@ func (a *app) recordRun(tr agent.Transcript) {
 	}
 }
 
+// recordUsage attributes the tokens spent since the last call to today's
+// provider/model bucket in the persistent ledger. Best-effort; called once a
+// task (and its reflection) has finished. The client's cumulative count carries
+// across re-wires, so the delta is always the work done since the prior task.
+func (a *app) recordUsage() {
+	if a.usage == nil {
+		return
+	}
+	p, c := a.client.Usage()
+	dp, dc := p-a.lastPrompt, c-a.lastCompl
+	a.lastPrompt, a.lastCompl = p, c
+	if dp <= 0 && dc <= 0 {
+		return
+	}
+	a.usage.Add(today(), a.providerName(), a.activeLLM().Model, dp, dc)
+	if err := a.usage.Save(); err != nil {
+		slog.Warn("usage ledger save failed", "err", err)
+	}
+}
+
+func today() string { return time.Now().Format("2006-01-02") }
+
 // reflectAndStore runs the post-task reflection and persists new lessons,
 // emitting a "lesson" event for each. Returns how many were new.
 func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
@@ -540,6 +570,7 @@ func (a *app) runOne(ctx context.Context, goal string) {
 	if learned := a.reflectAndStore(ctx, tr); learned > 0 {
 		fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
 	}
+	a.recordUsage()
 	a.saveSession()
 	a.detectContextWindow() // the model is loaded now — confirm the real window
 	if a.shouldAutoCompact() {
@@ -560,6 +591,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string) {
 	}
 	a.recordRun(tr)
 	a.reflectAndStore(ctx, tr)
+	a.recordUsage()
 	a.saveSession()
 }
 
@@ -1166,13 +1198,49 @@ func channelOf(cfg config.Config) string {
 
 func (a *app) usageText() string {
 	p, c := a.client.Usage()
-	return fmt.Sprintf(`usage (this session):
+	var b strings.Builder
+	fmt.Fprintf(&b, `usage (this session):
   tasks       %d
   steps       %d
   tool calls  %d
   tokens      %d prompt + %d completion = %d
   lessons     %d in knowledge base
 `, a.tasks, a.steps, a.toolCalls, p, c, p+c, len(a.kb.All()))
+	days, models := a.usageLedger()
+	if len(days) > 0 {
+		b.WriteString("\ntokens by day:\n")
+		for _, r := range days {
+			fmt.Fprintf(&b, "  %-12s %s\n", r[0], r[1])
+		}
+	}
+	if len(models) > 0 {
+		b.WriteString("\ntokens by provider/model:\n")
+		for _, r := range models {
+			fmt.Fprintf(&b, "  %-28s %s\n", r[0], r[1])
+		}
+	}
+	return b.String()
+}
+
+// usageLedger returns the per-day and per-provider/model token rows (capped) from
+// the persistent ledger, formatted "label" → "Nk tok" for display.
+func (a *app) usageLedger() (days, models [][2]string) {
+	if a.usage == nil {
+		return nil, nil
+	}
+	for i, t := range a.usage.ByDay() {
+		if i >= 14 {
+			break
+		}
+		days = append(days, [2]string{t.Key, humanK(t.Tokens()) + " tok"})
+	}
+	for i, t := range a.usage.ByModel() {
+		if i >= 8 {
+			break
+		}
+		models = append(models, [2]string{t.Key, humanK(t.Tokens()) + " tok"})
+	}
+	return days, models
 }
 
 // maybeInit runs the interactive first-time setup, writing the LM Studio

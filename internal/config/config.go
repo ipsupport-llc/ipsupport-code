@@ -66,6 +66,7 @@ type Config struct {
 	File       FilePolicy     `json:"file"`
 	KBPath     string         `json:"kb_path,omitempty"`
 	TracePath  string         `json:"trace_path,omitempty"`
+	UsagePath  string         `json:"usage_path,omitempty"`
 	SkillsPath string         `json:"skills_path,omitempty"`
 	Workspace  string         `json:"-"` // resolved absolute workspace root
 }
@@ -188,6 +189,9 @@ func DefaultKBPath() string { return filepath.Join(configHome(), "knowledge.json
 // DefaultTracePath is the global decision-trace (training dataset) location.
 func DefaultTracePath() string { return filepath.Join(configHome(), "traces.jsonl") }
 
+// DefaultUsagePath is the global token-usage ledger location.
+func DefaultUsagePath() string { return filepath.Join(configHome(), "usage.json") }
+
 // DefaultSkillsPath is the global skills directory.
 func DefaultSkillsPath() string { return filepath.Join(configHome(), "skills") }
 
@@ -296,6 +300,9 @@ func Load(workspace string) (Config, error) {
 	}
 	if cfg.TracePath == "" {
 		cfg.TracePath = DefaultTracePath()
+	}
+	if cfg.UsagePath == "" {
+		cfg.UsagePath = DefaultUsagePath()
 	}
 	if cfg.SkillsPath == "" {
 		cfg.SkillsPath = DefaultSkillsPath()

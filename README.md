@@ -171,8 +171,7 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | `/compact` | summarize the session so far to free up context |
 | `/color [name]` | change the TUI frame color (cycles if no name) |
 | `/rename <name>` | rename the agent (saved in settings) |
-| `/goal <task>` | run a task explicitly |
-| `/loop [n] <task>` | run a task `n` times (default 3) so lessons compound |
+| `/loop <interval> [xN] <task>` | re-run a task on an interval (e.g. `/loop 5m <task>`, `/loop 30s x10 <task>`); **esc** stops it |
 | `/help` | command list |
 | `/exit`, `/quit` | leave |
 

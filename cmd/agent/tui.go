@@ -261,7 +261,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.queued = m.queued[1:]
 			m.syncViewport() // it left the pinned queue
 			m.push(cYou.Render("❯ ") + next)
-			return m, tea.Batch(detect, m.runGoals(1, next))
+			return m, tea.Batch(detect, m.runTask(next))
 		}
 		if m.app.shouldAutoCompact() { // context near the limit — fold it down
 			return m, tea.Batch(detect, m.startCompact(true))
@@ -483,7 +483,7 @@ func (m *tuiModel) submit(line string) (tea.Model, tea.Cmd) {
 		return m.runCommand(line)
 	}
 	m.push(cYou.Render("❯ ") + line)
-	return m, m.runGoals(1, line)
+	return m, m.runTask(line)
 }
 
 // runShellCmd runs a single shell command (the !cmd shortcut) in the workspace
@@ -574,21 +574,14 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.setColor(rest)
 	case "/rename":
 		m.rename(rest)
-	case "/goal":
-		if rest == "" {
-			m.push(cDim.Render("usage: /goal <task>"))
-			return m, nil
-		}
-		m.push(cYou.Render("❯ ") + rest)
-		return m, m.runGoals(1, rest)
 	case "/loop":
-		n, goal := parseLoop(rest)
-		if goal == "" {
-			m.push(cDim.Render("usage: /loop [count] <task>"))
+		interval, max, goal, ok := parseLoop(rest)
+		if !ok {
+			m.push(cDim.Render(loopUsage))
 			return m, nil
 		}
-		m.push(cYou.Render(fmt.Sprintf("❯ /loop %d ", n)) + goal)
-		return m, m.runGoals(n, goal)
+		m.push(cYou.Render("❯ /loop "+loopLabel(interval, max)+" ") + goal)
+		return m, m.runLoop(interval, max, goal)
 	case "/exit", "/quit":
 		return m, tea.Quit
 	default:
@@ -633,23 +626,16 @@ func (m *tuiModel) pushLines(lines []string) {
 }
 
 // commandWhileBusy handles a /command typed while a task is running: exit quits
-// now, read-only commands run now, /goal queues the next task, everything else
-// waits — so you never have to sit through "thinking" just to leave or peek.
+// now, read-only commands run now, everything else waits — so you never have to
+// sit through "thinking" just to leave or peek. (To queue a follow-up task, just
+// type it — plain text is queued as type-ahead.)
 func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
-	cmd, rest := splitCommand(line)
+	cmd, _ := splitCommand(line)
 	switch cmd {
 	case "/exit", "/quit":
 		return m, tea.Quit
 	case "/status", "/usage", "/help", "/?", "/color":
 		return m.runCommand(line) // read-only — doesn't touch the running task
-	case "/goal":
-		if rest == "" {
-			m.push(cDim.Render("usage: /goal <task>"))
-			return m, nil
-		}
-		m.queued = append(m.queued, rest)
-		m.syncViewport()
-		return m, nil
 	default:
 		m.push(cDim.Render("busy — " + cmd + " will run once the current task finishes"))
 		return m, nil
@@ -734,9 +720,9 @@ func (m *tuiModel) startCompact(auto bool) tea.Cmd {
 	}
 }
 
-// runGoals sets running state and returns a cmd that runs the goal n times in the
-// background, streaming via the bridge and ending with taskDoneMsg.
-func (m *tuiModel) runGoals(n int, goal string) tea.Cmd {
+// startTask flips to running state with a fresh cancelable context and abort
+// signal, returning both so the caller's goroutine can defer the cancel.
+func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
 	m.state = stRunning
 	m.taskStart = time.Now()
 	_, c := m.app.client.Usage()
@@ -746,15 +732,38 @@ func (m *tuiModel) runGoals(n int, goal string) tea.Cmd {
 	m.bridge.arm() // fresh abort signal so a previous cancel doesn't deny this task's approvals
 	tctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel
+	return tctx, cancel
+}
+
+// runTask runs a single goal in the background, streaming via the bridge and
+// ending with taskDoneMsg.
+func (m *tuiModel) runTask(goal string) tea.Cmd {
+	tctx, cancel := m.startTask()
 	return func() tea.Msg {
 		defer cancel()
-		for i := 0; i < n; i++ {
+		m.app.runTaskStreaming(tctx, goal)
+		return taskDoneMsg{}
+	}
+}
+
+// runLoop re-runs a goal on an interval: it runs once, waits interval, runs
+// again, until max iterations (0 = until stopped) or the user cancels (esc).
+func (m *tuiModel) runLoop(interval time.Duration, max int, goal string) tea.Cmd {
+	tctx, cancel := m.startTask()
+	return func() tea.Msg {
+		defer cancel()
+		for i := 0; max == 0 || i < max; i++ {
+			if i > 0 {
+				select {
+				case <-tctx.Done():
+					return taskDoneMsg{}
+				case <-time.After(interval):
+				}
+			}
 			if tctx.Err() != nil {
 				break
 			}
-			if n > 1 {
-				m.bridge.Emit("loop", map[string]any{"i": i + 1, "n": n})
-			}
+			m.bridge.Emit("loop", map[string]any{"i": i + 1, "max": max, "every": interval.String()})
 			m.app.runTaskStreaming(tctx, goal)
 		}
 		return taskDoneMsg{}
@@ -974,8 +983,7 @@ var commandList = []cmdInfo{
 	{"/permissions", "relax approval for non-destructive file/shell actions"},
 	{"/color", "change the frame color (cycles if no name)"},
 	{"/rename", "rename the agent (saved in settings)"},
-	{"/goal", "run a task explicitly"},
-	{"/loop", "run a task n times so lessons compound"},
+	{"/loop", "re-run a task on an interval: /loop 5m <task> (esc to stop)"},
 	{"/exit", "leave"},
 }
 
@@ -1018,7 +1026,7 @@ func (m *tuiModel) completeArg(name, arg string) {
 	if strings.ContainsRune(arg, ' ') { // only the first token completes
 		return
 	}
-	cands := argCandidates(name)
+	cands := m.argCandidates(name)
 	if len(cands) == 0 {
 		return
 	}
@@ -1046,10 +1054,19 @@ func (m *tuiModel) completeArg(name, arg string) {
 
 // argCandidates returns the completion candidates for a command's first argument
 // (sorted), or nil for commands without a fixed set (e.g. /model is dynamic).
-func argCandidates(name string) []string {
+func (m *tuiModel) argCandidates(name string) []string {
 	switch name {
 	case "/ai":
-		return append([]string{"local"}, config.KnownProviders()...)
+		// Only offer providers you can actually switch to: local plus the
+		// external ones with a key configured (preset or env). Suggesting a
+		// keyless provider is a dead end — /ai would just reject it.
+		cands := []string{"local"}
+		for _, n := range config.KnownProviders() {
+			if l, ok := config.ResolveProvider(m.app.cfg, n); ok && l.APIKey != "" {
+				cands = append(cands, n)
+			}
+		}
+		return cands
 	case "/color":
 		names := make([]string, 0, len(colorNames))
 		for n := range colorNames {
@@ -1181,7 +1198,14 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		f, _ := e.fields["text"].(string)
 		return []string{cLesson.Render("  ✦ noted ") + cDim.Render(f)}
 	case "loop":
-		return []string{cDim.Render(fmt.Sprintf("— loop %d/%d —", toInt(e.fields["i"]), toInt(e.fields["n"])))}
+		label := fmt.Sprintf("↻ loop %d", toInt(e.fields["i"]))
+		if max := toInt(e.fields["max"]); max > 0 {
+			label += fmt.Sprintf("/%d", max)
+		}
+		if every, _ := e.fields["every"].(string); every != "" {
+			label += " · every " + every
+		}
+		return []string{cDim.Render("— " + label + " —")}
 	case "error":
 		c, _ := e.fields["text"].(string)
 		return []string{cErr.Render("error: " + c)}

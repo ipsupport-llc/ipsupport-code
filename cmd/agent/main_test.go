@@ -27,14 +27,24 @@ func TestSplitCommand(t *testing.T) {
 }
 
 func TestParseLoop(t *testing.T) {
-	if n, g := parseLoop("5 build it"); n != 5 || g != "build it" {
-		t.Errorf("parseLoop(5 build it) = %d,%q", n, g)
+	// interval + task, no count cap
+	if iv, max, g, ok := parseLoop("5m build it"); !ok || iv != 5*time.Minute || max != 0 || g != "build it" {
+		t.Errorf("parseLoop(5m build it) = %v,%d,%q,%v", iv, max, g, ok)
 	}
-	if n, g := parseLoop("just a task"); n != 3 || g != "just a task" {
-		t.Errorf("parseLoop default count = %d,%q", n, g)
+	// interval + xN count cap
+	if iv, max, g, ok := parseLoop("30s x10 tail the log"); !ok || iv != 30*time.Second || max != 10 || g != "tail the log" {
+		t.Errorf("parseLoop(30s x10 …) = %v,%d,%q,%v", iv, max, g, ok)
 	}
-	if n, g := parseLoop(""); n != 0 || g != "" {
-		t.Errorf("parseLoop empty = %d,%q", n, g)
+	// a bare number is NOT a valid interval anymore → not ok
+	if _, _, _, ok := parseLoop("5 build it"); ok {
+		t.Error("parseLoop should reject a bare count without a duration interval")
+	}
+	// missing task or interval → not ok
+	if _, _, _, ok := parseLoop("5m"); ok {
+		t.Error("parseLoop with no task should be !ok")
+	}
+	if _, _, _, ok := parseLoop(""); ok {
+		t.Error("parseLoop empty should be !ok")
 	}
 }
 
@@ -57,16 +67,27 @@ func TestTabCompletesSingleMatch(t *testing.T) {
 }
 
 func TestTabCompletesArgument(t *testing.T) {
-	m := &tuiModel{input: textinput.New()}
+	// /ai completes only providers that are actually configured (key set) + local.
+	// Clear provider env keys so the test doesn't pick up the host's, then
+	// configure only grok via a preset.
+	for _, env := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"} {
+		t.Setenv(env, "")
+	}
+	m := &tuiModel{input: textinput.New(), app: &app{
+		cfg: config.Config{Providers: map[string]config.LLM{"grok": {APIKey: "x"}}},
+	}}
+
 	m.input.SetValue("/ai l") // only "local" matches
 	m.completeCommand()
 	if m.input.Value() != "/ai local" {
 		t.Errorf("completed to %q, want '/ai local'", m.input.Value())
 	}
-	m.input.SetValue("/ai gr") // grok + groq share the prefix "gro"
+	// Only grok is configured, so "/ai g" completes straight to grok — groq is
+	// NOT offered (no key), so it isn't ambiguous.
+	m.input.SetValue("/ai g")
 	m.completeCommand()
-	if m.input.Value() != "/ai gro" {
-		t.Errorf("ambiguous arg completed to %q, want common prefix '/ai gro'", m.input.Value())
+	if m.input.Value() != "/ai grok" {
+		t.Errorf("completed to %q, want '/ai grok' (only configured provider)", m.input.Value())
 	}
 }
 

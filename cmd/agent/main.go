@@ -664,23 +664,27 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 				fmt.Println("renamed →", name)
 			}
 		}
-	case "/goal":
-		if rest == "" {
-			fmt.Println("usage: /goal <task>")
-		} else {
-			a.runOne(ctx, rest)
-		}
 	case "/loop":
-		n, goal := parseLoop(rest)
-		if goal == "" {
-			fmt.Println("usage: /loop [count] <task>")
+		interval, max, goal, ok := parseLoop(rest)
+		if !ok {
+			fmt.Println(loopUsage)
 			break
 		}
-		for i := 0; i < n; i++ {
+		for i := 0; max == 0 || i < max; i++ {
+			if i > 0 {
+				select {
+				case <-ctx.Done():
+				case <-time.After(interval):
+				}
+			}
 			if ctx.Err() != nil {
 				break
 			}
-			fmt.Printf("— loop %d/%d —\n", i+1, n)
+			if max > 0 {
+				fmt.Printf("— loop %d/%d · every %s —\n", i+1, max, interval)
+			} else {
+				fmt.Printf("— loop %d · every %s —\n", i+1, interval)
+			}
 			a.runOne(ctx, goal)
 		}
 	case "/exit", "/quit":
@@ -1044,20 +1048,51 @@ func splitCommand(line string) (cmd, rest string) {
 	return cmd, strings.TrimSpace(strings.TrimPrefix(line, cmd))
 }
 
-func parseLoop(rest string) (n int, goal string) {
-	n, goal = 3, rest
+const loopUsage = "usage: /loop <interval> [xN] <task>   e.g. /loop 5m check the build   ·   /loop 30s x10 tail the log   (esc stops it)"
+
+// parseLoop parses "/loop <interval> [xN] <task>": an interval (a Go duration
+// like 30s/5m/1h), an optional max-iteration cap written xN (e.g. x10; 0 = run
+// until stopped), and the task. ok=false (caller prints loopUsage) on a missing/
+// bad interval or empty task.
+func parseLoop(rest string) (interval time.Duration, max int, goal string, ok bool) {
 	parts := strings.Fields(rest)
-	if len(parts) == 0 {
-		return 0, ""
+	if len(parts) < 2 {
+		return 0, 0, "", false
 	}
-	if v, err := strconv.Atoi(parts[0]); err == nil {
-		n = v
-		goal = strings.TrimSpace(strings.TrimPrefix(rest, parts[0]))
+	d, err := time.ParseDuration(parts[0])
+	if err != nil || d <= 0 {
+		return 0, 0, "", false
 	}
-	if n < 1 {
-		n = 1
+	parts = parts[1:]
+	if n, isCount := parseLoopCount(parts[0]); isCount {
+		max = n
+		parts = parts[1:]
 	}
-	return n, strings.TrimSpace(goal)
+	goal = strings.TrimSpace(strings.Join(parts, " "))
+	if goal == "" {
+		return 0, 0, "", false
+	}
+	return d, max, goal, true
+}
+
+// parseLoopCount reads an "xN" max-iteration token (x10, X10). false if not one.
+func parseLoopCount(s string) (int, bool) {
+	if len(s) < 2 || (s[0] != 'x' && s[0] != 'X') {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s[1:])
+	if err != nil || n < 1 {
+		return 0, false
+	}
+	return n, true
+}
+
+// loopLabel renders the interval (and count cap, if any) for the echo line.
+func loopLabel(interval time.Duration, max int) string {
+	if max > 0 {
+		return fmt.Sprintf("%s x%d", interval, max)
+	}
+	return interval.String()
 }
 
 func helpText() string {
@@ -1078,8 +1113,7 @@ func helpText() string {
   /permissions     relax approval for non-destructive file/shell actions
   /color [name]    change the TUI frame color (cycles if no name)
   /rename <name>   rename the agent (saved in settings)
-  /goal <task>     run a task explicitly
-  /loop [n] <task> run a task n times (default 3) so lessons compound
+  /loop <ival> <task>  re-run a task on an interval (e.g. /loop 5m <task>, /loop 30s x10 <task>; esc stops)
   /help            this list
   /exit, /quit     leave
 Anything not starting with '/' is run as a task.

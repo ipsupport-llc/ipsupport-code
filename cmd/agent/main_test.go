@@ -119,6 +119,17 @@ func TestUpRecallsQueuedMessage(t *testing.T) {
 	}
 }
 
+func TestQueuedViewPinsMessages(t *testing.T) {
+	m := &tuiModel{queued: []string{"fix the bug", "add a test"}}
+	out := strings.Join(m.queuedView(), "\n")
+	if !strings.Contains(out, "fix the bug") || !strings.Contains(out, "add a test") {
+		t.Errorf("pinned queue missing messages:\n%s", out)
+	}
+	if got := (&tuiModel{}).queuedView(); len(got) != 0 {
+		t.Errorf("empty queue should pin nothing, got %v", got)
+	}
+}
+
 func TestRenderMarkdownKeepsContent(t *testing.T) {
 	out := renderMarkdown("Wrote **hello.sh** and ran it.", 80)
 	if !strings.Contains(out, "hello.sh") {

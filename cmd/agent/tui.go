@@ -201,7 +201,10 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pending = &req
 		m.state = stApprove
 		m.push(cToolCall.Render("  ⚠ approve "+req.kind+": ") + req.detail + cDim.Render("  [y/N]"))
-		return m, m.waitApproval()
+		// Do NOT fetch the next approval yet — that would overwrite m.pending and
+		// orphan this one's reply channel (a hang when the model batches calls).
+		// The next is read only after this one is answered (see handleKey).
+		return m, nil
 
 	case taskDoneMsg:
 		m.state = stIdle
@@ -264,13 +267,17 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch m.state {
 	case stApprove:
+		// Resolve the current prompt, then (and only then) wait for the next
+		// queued approval — keeps exactly one reader, so none get overwritten.
 		switch k.String() {
 		case "y", "Y":
 			m.resolveApproval(true)
+			return m, m.waitApproval()
 		case "n", "N", "esc", "enter":
 			m.resolveApproval(false)
+			return m, m.waitApproval()
 		}
-		return m, nil
+		return m, nil // ignore other keys; keep showing the prompt
 
 	case stRunning:
 		switch k.String() {

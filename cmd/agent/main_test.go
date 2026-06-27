@@ -91,6 +91,47 @@ func TestTabCompletesArgument(t *testing.T) {
 	}
 }
 
+func TestConfigPanelNav(t *testing.T) {
+	m := &tuiModel{app: &app{cfg: config.Default()}}
+	m.openConfig()
+	if m.state != stConfig || m.cfgCursor != 0 {
+		t.Fatalf("openConfig: state=%v cursor=%d", m.state, m.cfgCursor)
+	}
+	n := len(cfgKeys())
+	m.configMove(-1) // wrap to last
+	if m.cfgCursor != n-1 {
+		t.Errorf("configMove(-1) = %d, want %d (wrap)", m.cfgCursor, n-1)
+	}
+	m.configMove(1) // wrap back to first
+	if m.cfgCursor != 0 {
+		t.Errorf("configMove(1) = %d, want 0 (wrap)", m.cfgCursor)
+	}
+	// row views are non-empty for every selectable key
+	for _, k := range cfgKeys() {
+		if l, _, h := m.configRowView(k); l == "" || h == "" {
+			t.Errorf("configRowView(%q) label/hint empty: %q/%q", k, l, h)
+		}
+	}
+}
+
+func TestConfigCycles(t *testing.T) {
+	if got := nextStr("ask", permCycle); got != "allow" {
+		t.Errorf("nextStr(ask) = %q, want allow", got)
+	}
+	if got := nextStr("deny", permCycle); got != "ask" {
+		t.Errorf("nextStr(deny) = %q, want ask (wrap)", got)
+	}
+	if got := nextInt(60, timeoutCycle); got != 120 {
+		t.Errorf("nextInt(60) = %d, want 120", got)
+	}
+	if got := nextInt(600, timeoutCycle); got != 60 {
+		t.Errorf("nextInt(600) = %d, want 60 (wrap)", got)
+	}
+	if got := nextInt(0, timeoutCycle); got != 60 {
+		t.Errorf("nextInt(0=unset) = %d, want 60", got)
+	}
+}
+
 func TestHighlightByExtension(t *testing.T) {
 	// A .py path must drive the Python lexer (so keywords get coloured) rather
 	// than relying on content guessing, which misses Python on short snippets.

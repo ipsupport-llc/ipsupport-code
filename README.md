@@ -75,8 +75,10 @@ hard task, then drop back to your local one:
 Switching keeps your session, tokens, and mode. Keys live in
 `~/.config/ipsupport-code/config.json` (written `chmod 600`) or fall back to the
 env var (`OPENAI_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`).
-`/config` is a control panel: every setting plus the command to change it — no
-hand-editing JSON.
+`/config` opens an interactive settings panel: **↑↓** to move, **Enter** to
+cycle a value in place (provider, mode, permissions, run timeout, color, channel)
+or jump to the right flow (model, key, rename), **esc** to close — changes apply
+and save as you make them, no hand-editing JSON.
 
 ## Updating
 

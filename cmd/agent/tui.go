@@ -34,6 +34,7 @@ const (
 	stIdle uiState = iota
 	stRunning
 	stApprove
+	stConfig // interactive /config settings panel
 )
 
 // chromeRows: status line + top rule + input + bottom rule + hint line.
@@ -58,6 +59,7 @@ type tuiModel struct {
 	queued        []string // type-ahead while a task runs
 	pending       *approvalReq
 	approveChoice bool // selected Yes(true)/No(false) while answering an approval
+	cfgCursor     int  // selected row in the /config panel (stConfig)
 	cancel        context.CancelFunc
 	taskStart     time.Time
 	startTok      int
@@ -358,6 +360,19 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch m.state {
+	case stConfig:
+		switch k.String() {
+		case "up", "k":
+			m.configMove(-1)
+		case "down", "j":
+			m.configMove(1)
+		case "enter", "right", "l", " ":
+			return m.configActivate()
+		case "esc", "q":
+			m.state = stIdle
+		}
+		return m, nil
+
 	case stApprove:
 		// Answer the prompt, then (and only then) wait for the next queued
 		// approval — keeps exactly one reader, so none get overwritten.
@@ -542,7 +557,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.pushLines(m.app.aiCommand(rest))
 		return m, nil
 	case "/config":
-		m.pushLines(m.app.configOverview())
+		m.openConfig()
 		return m, nil
 	case "/model":
 		if r := strings.TrimSpace(rest); r != "" {
@@ -778,6 +793,8 @@ func (m *tuiModel) View() string {
 
 	var status string
 	switch {
+	case m.state == stConfig:
+		status = cDim.Render("settings — changes apply and save as you make them")
 	case m.state == stApprove:
 		status = m.approvePrompt()
 	case m.pending != nil:
@@ -823,8 +840,12 @@ func (m *tuiModel) View() string {
 		bottom += cDim.Render("  · esc cancels")
 	}
 
+	content := m.vp.View()
+	if m.state == stConfig {
+		content = m.renderConfigPanel()
+	}
 	frame := lipgloss.NewStyle().Foreground(m.accent)
-	parts := []string{m.vp.View(), status}
+	parts := []string{content, status}
 	parts = append(parts, m.queuedView()...) // pinned just above the input
 	parts = append(parts, m.topRule(frame), m.input.View(), frame.Render(strings.Repeat("─", m.width)), bottom)
 	return strings.Join(parts, "\n")
@@ -976,7 +997,7 @@ var commandList = []cmdInfo{
 	{"/auto", "auto mode — execute the task (default)"},
 	{"/ai", "switch AI provider (local|openai|grok|…); /ai key <name> <tok>"},
 	{"/model", "list the provider's models, or pick one"},
-	{"/config", "control panel: all settings + how to change them"},
+	{"/config", "interactive settings panel (↑↓ move · enter change · esc close)"},
 	{"/update", "self-update from GitHub (stable|nightly)"},
 	{"/shell", "drop to a shell in the workspace (exit to return)"},
 	{"/skills", "list/toggle/install on-demand instruction packs"},

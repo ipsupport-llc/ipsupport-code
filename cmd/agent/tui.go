@@ -217,6 +217,9 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.push(cYou.Render("❯ ") + next)
 			return m, m.runGoals(1, next)
 		}
+		if m.app.shouldAutoCompact() { // context near the limit — fold it down
+			return m, m.startCompact(true)
+		}
 		return m, m.input.Focus()
 
 	case compactDoneMsg:
@@ -426,15 +429,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		}
 		m.push(cDim.Render("cleared — fresh screen and session"))
 	case "/compact":
-		m.state = stRunning
-		m.taskStart = time.Now()
-		_, c := m.app.client.Usage()
-		m.startTok = c
-		ctx := m.ctx
-		return m, func() tea.Msg {
-			n, err := m.app.ag.Compact(ctx)
-			return compactDoneMsg{n: n, err: err}
-		}
+		return m, m.startCompact(false)
 	case "/plan":
 		m.push(cDim.Render(m.app.setMode(true)))
 	case "/auto":
@@ -552,6 +547,24 @@ func (m *tuiModel) setSuggestion(text string) {
 	m.push(cDim.Render("  💡 next: ") + m.accentBold().Render(text) + cDim.Render("   (Tab)"))
 }
 
+// startCompact folds the session into a summary in the background (manual via
+// /compact, or auto when the context nears the limit), ending with
+// compactDoneMsg.
+func (m *tuiModel) startCompact(auto bool) tea.Cmd {
+	m.state = stRunning
+	m.taskStart = time.Now()
+	_, c := m.app.client.Usage()
+	m.startTok = c
+	if auto {
+		m.push(cDim.Render("  ⓘ context near limit — auto-compacting to free room"))
+	}
+	ctx := m.ctx
+	return func() tea.Msg {
+		n, err := m.app.ag.Compact(ctx)
+		return compactDoneMsg{n: n, err: err}
+	}
+}
+
 // runGoals sets running state and returns a cmd that runs the goal n times in the
 // background, streaming via the bridge and ending with taskDoneMsg.
 func (m *tuiModel) runGoals(n int, goal string) tea.Cmd {
@@ -611,10 +624,14 @@ func (m *tuiModel) View() string {
 			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" Thinking… (%s)", detail))
 		}
 	default:
-		// ctx = size of the last prompt (how full the context is); ↑ = tokens the
-		// model generated this whole session.
+		// ctx = size of the last prompt vs the window (auto-compacts as it fills);
+		// ↑ = tokens the model generated this whole session.
+		ctxStr := humanK(m.app.client.Context())
+		if w := m.app.cfg.LLM.ContextWindow; w > 0 {
+			ctxStr += "/" + humanK(w)
+		}
 		status = cDim.Render(fmt.Sprintf("%s · %s · ctx %s · ↑%s · ready",
-			m.app.cfg.LLM.Model, filepath.Base(m.app.workspace), humanK(m.app.client.Context()), humanK(c)))
+			m.app.cfg.LLM.Model, filepath.Base(m.app.workspace), ctxStr, humanK(c)))
 	}
 
 	bottom := m.modeLine()

@@ -22,6 +22,9 @@ type LLM struct {
 	Temperature float64 `json:"temperature"`
 	MaxSteps    int     `json:"max_steps"`
 	APIKey      string  `json:"api_key,omitempty"`
+	// ContextWindow is the model's context size in tokens; auto-compact triggers
+	// as the prompt approaches it. 0 disables auto-compact.
+	ContextWindow int `json:"context_window,omitempty"`
 }
 
 // RunPolicy gates shell execution. Resolution per command: a Deny glob (matched
@@ -66,10 +69,11 @@ func Default() Config {
 	return Config{
 		Name: "ipsupport-code",
 		LLM: LLM{
-			BaseURL:     "http://localhost:1234/v1",
-			Model:       "qwen2.5-7b-instruct",
-			Temperature: 0.2,
-			MaxSteps:    12,
+			BaseURL:       "http://localhost:1234/v1",
+			Model:         "qwen2.5-7b-instruct",
+			Temperature:   0.2,
+			MaxSteps:      12,
+			ContextWindow: 8192,
 		},
 		Run: RunPolicy{
 			Default: "ask",

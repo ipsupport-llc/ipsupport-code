@@ -150,6 +150,20 @@ dev builds are never nagged.
    ./ipsupport-code -C ~/proj "summarize what main.go does"
    ```
 
+**Which session?** Memory is saved per **workspace** (the `-C` dir, default the
+current one) and per **agent name** (default `ipsupport-code`). A one-shot or
+piped run silently **continues** that saved thread; the interactive TUI **asks**
+([R]estore / [N]ew / [D]elete) when one exists. To start clean or pick a
+different thread:
+
+```sh
+./ipsupport-code -new "fresh task"              # ignore the saved session
+./ipsupport-code -session review "look at X"    # a separate named thread (review.json)
+```
+
+In the TUI, `/sessions` lists/switches/deletes threads, and `/new` clears the
+active one.
+
 ## Modes: auto vs plan
 
 Toggle with **shift+tab** (or `/plan` / `/auto`); the current mode shows at the

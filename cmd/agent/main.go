@@ -49,11 +49,15 @@ func main() {
 		doInit      bool
 		showVersion bool
 		dumpPrompt  bool
+		newSession  bool
+		sessionName string
 	)
 	flag.StringVar(&workspace, "C", ".", "workspace directory")
 	flag.BoolVar(&doInit, "init", false, "re-run first-time setup (server URL, model)")
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.BoolVar(&dumpPrompt, "dump-prompt", false, "print the built-in system prompt and exit (e.g. > .agent/system.md to start editing)")
+	flag.BoolVar(&newSession, "new", false, "start a fresh session (don't restore the saved one)")
+	flag.StringVar(&sessionName, "session", "", "use a named session (a separate saved thread)")
 	flag.Parse()
 	if showVersion {
 		fmt.Println("ipsupport-code", version)
@@ -79,20 +83,33 @@ func main() {
 	}
 	defer cleanup()
 
+	// -session selects a named thread for this run (its own saved file); the
+	// agent's identity in the prompt follows the name.
+	if sessionName != "" {
+		app.cfg.Name = sessionName
+		app.ag.SetSystem(app.systemPrompt())
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
 	switch {
 	case strings.TrimSpace(strings.Join(flag.Args(), " ")) != "":
-		app.loadSession() // one-shot: silently continue the saved session
+		if !newSession {
+			app.loadSession() // one-shot: silently continue the saved session
+		}
 		app.runOne(ctx, strings.TrimSpace(strings.Join(flag.Args(), " ")))
 	case isTTY():
-		app.chooseSession() // restore / new / delete the saved session for this name
+		if !newSession {
+			app.chooseSession() // restore / new / delete the saved session for this name
+		}
 		if err := app.runTUI(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "tui:", err)
 		}
 	default:
-		app.loadSession() // piped: silently continue
+		if !newSession {
+			app.loadSession() // piped: silently continue
+		}
 		app.repl(ctx)
 	}
 }

@@ -14,6 +14,12 @@ recovers from tool errors using lessons it learned on past runs, and — after e
 task — reflects and writes new lessons to disk so it actually gets better over
 time.
 
+Local by default, but the same loop runs **any OpenAI-compatible provider**
+(OpenAI, Anthropic, Grok, Groq, OpenRouter) — switch in one command — and it can
+**delegate a task to a sub-agent on a different model**, so a local agent can hand
+a review to a frontier one and compare. See [Providers](#providers--local-or-external)
+and [Sub-agents](#sub-agents).
+
 The interactive UI is a Claude-Code-style **TUI** (Bubble Tea): live-streamed
 tool calls and observations, markdown answers, syntax-highlighted diffs, a
 **plan / auto** mode toggle, non-stealing approval prompts, and a status bar

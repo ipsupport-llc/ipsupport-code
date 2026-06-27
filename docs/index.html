@@ -122,7 +122,9 @@
        <a href="https://lmstudio.ai">LM Studio</a> — in a single static binary.</p>
     <p class="sub">It drives your own local model through a reason → act → observe loop over a
        handful of fat tools, recovers from errors using lessons it learned on past runs, and gets
-       better over time. Your model, your machine, under a permission policy you control.</p>
+       better over time. Local by default — but the same loop runs any OpenAI-compatible provider
+       (OpenAI, Anthropic, Grok, Groq, OpenRouter), and it can <b>delegate a task to a sub-agent on
+       a different model</b>. Your machine, your keys, under a permission policy you control.</p>
 
     <div class="badges">
       <a href="https://github.com/ipsupport-llc/ipsupport-code/actions/workflows/ci.yml"><img alt="ci" src="https://github.com/ipsupport-llc/ipsupport-code/actions/workflows/ci.yml/badge.svg"></a>
@@ -158,9 +160,14 @@
   <span class="d">→ exit 0</span>   <span class="ok">ok</span>  ./...  <span class="d">(0.4s)</span>
   <span class="note">✦ noted</span>  <span class="d">tests run with: go test ./...</span>
   Added <span class="ok">GET /health</span> returning 200 "ok"; all tests pass.
-  <span class="d">NEXT: register it in the router</span>
 
-<span class="d">qwen2.5-7b-instruct · ~/myproject · ctx 3.2k/8k · ↑1.1k · ready</span></pre>
+<span class="p">❯</span> have the reviewer profile check that change
+  <span class="c">⇉ sub-agent</span> <span class="d">[openrouter · grok-4.3]</span>  review the /health endpoint
+  <span class="d">→ correct; suggest a test for the 503 (unhealthy) case.</span>
+  Reviewer agrees it's solid; I'll add the 503 test.
+  <span class="d">NEXT: add the 503-case test</span>
+
+<span class="d">qwen2.5-7b-instruct · ~/myproject · ctx 4.0k/8k · ↑1.6k · ready</span></pre>
   </div>
 
   <section id="features">

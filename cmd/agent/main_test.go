@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +21,8 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
+	"github.com/ipsupport-llc/ipsupport-code/internal/usage"
 )
 
 func TestSplitCommand(t *testing.T) {
@@ -364,42 +367,64 @@ func TestSubagentTargetsAndDepthCap(t *testing.T) {
 		t.Setenv(env, "")
 	}
 	kb, _ := knowledge.Open("")
-	// pure local: no targets → no agent tool
+	// no profiles → no agent tool, even with a keyed provider (a profile is the
+	// only way to delegate, so it's also the gate)
 	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
-	if a.hasSubagentTargets() {
-		t.Error("pure-local config should have no sub-agent targets")
-	}
-	// add a keyed provider → targets exist
 	a.cfg.Providers = map[string]config.LLM{"openrouter": {APIKey: "x"}}
+	if a.hasSubagentTargets() {
+		t.Error("no profiles → no sub-agent targets (a keyed provider alone is not enough)")
+	}
+	// add a profile → targets exist
+	a.cfg.Agents = map[string]config.AgentProfile{"rev": {Provider: "openrouter", Model: "m"}}
 	if !a.hasSubagentTargets() {
-		t.Error("a keyed provider should be a sub-agent target")
+		t.Error("a configured profile should be a sub-agent target")
 	}
 	if err := a.wire(); err != nil {
 		t.Fatal(err)
 	}
 	// depth cap: sub-agents must NOT get the agent tool
-	for _, fn := range a.subReg.OpenAITools() {
-		if f, _ := fn["function"].(map[string]any); f["name"] == "agent" {
-			t.Error("sub-agent registry must not contain the agent tool (recursion)")
+	if subRegHasTool(a.subReg, "agent") {
+		t.Error("sub-agent registry must not contain the agent tool (recursion)")
+	}
+	// spawn.exec is off by default → no run tool for sub-agents
+	if subRegHasTool(a.subReg, "run") {
+		t.Error("spawn.exec off (default) → sub-agents must not have the run tool")
+	}
+	a.cfg.Spawn.Exec = true
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if !subRegHasTool(a.subReg, "run") {
+		t.Error("spawn.exec on → sub-agents should have the run tool")
+	}
+}
+
+func subRegHasTool(reg *tool.Registry, name string) bool {
+	for _, fn := range reg.OpenAITools() {
+		if f, _ := fn["function"].(map[string]any); f["name"] == name {
+			return true
 		}
 	}
+	return false
 }
 
 func TestSpawnAgentPaidNeedsApproval(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
 	cfg.Providers = map[string]config.LLM{"openrouter": {APIKey: "x", Model: "m"}}
+	cfg.Agents = map[string]config.AgentProfile{"rev": {Provider: "openrouter", Model: "m"}}
 	kb, _ := knowledge.Open("")
 	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
 		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(false)}
 	if err := a.wire(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.spawnAgent(context.Background(), "do x", "", "openrouter", ""); err == nil || !strings.Contains(err.Error(), "denied") {
-		t.Errorf("paid spawn should be denied by the approver, got %v", err)
+	// spawn.Default is "ask" by default, so the denying approver blocks it
+	if _, err := a.spawnAgent(context.Background(), "rev", "do x", ""); err == nil || !strings.Contains(err.Error(), "denied") {
+		t.Errorf("spawn should be denied by the approver, got %v", err)
 	}
 	// unknown profile errors before any spawn
-	if _, err := a.spawnAgent(context.Background(), "do x", "nope", "", ""); err == nil || !strings.Contains(err.Error(), "unknown agent profile") {
+	if _, err := a.spawnAgent(context.Background(), "nope", "do x", ""); err == nil || !strings.Contains(err.Error(), "unknown profile") {
 		t.Errorf("unknown profile = %v, want an error", err)
 	}
 }
@@ -413,19 +438,56 @@ func TestSpawnAgentLocalRuns(t *testing.T) {
 	cfg.Workspace = t.TempDir()
 	cfg.LLM.BaseURL = srv.URL + "/v1"
 	cfg.LLM.Type = "" // plain OpenAI-compat (skip LM Studio detection)
+	cfg.Agents = map[string]config.AgentProfile{"loc": {Provider: "local"}}
 	kb, _ := knowledge.Open("")
 	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
 		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
 	if err := a.wire(); err != nil {
 		t.Fatal(err)
 	}
-	out, err := a.spawnAgent(context.Background(), "review the code", "", "local", "")
+	// even a local spawn asks by default; the allowing approver lets it through
+	out, err := a.spawnAgent(context.Background(), "loc", "review the code", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out, "looks good") {
 		t.Errorf("sub-agent answer = %q", out)
 	}
+}
+
+func TestSpawnAgentConcurrent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+	}))
+	defer srv.Close()
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = ""
+	cfg.Spawn.Default = "allow" // relaxed: no prompts, so the fan-out runs unattended
+	cfg.Agents = map[string]config.AgentProfile{
+		"a": {Provider: "local"}, "b": {Provider: "local"}, "c": {Provider: "local"},
+	}
+	usageStore, _ := usage.Open(filepath.Join(t.TempDir(), "u.json"))
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	// spawn three sub-agents at once — the parallel fan-out path. -race guards the
+	// shared usage ledger and spawn counter.
+	var wg sync.WaitGroup
+	for _, p := range []string{"a", "b", "c"} {
+		wg.Add(1)
+		go func(p string) {
+			defer wg.Done()
+			if out, err := a.spawnAgent(context.Background(), p, "do x", ""); err != nil || !strings.Contains(out, "done") {
+				t.Errorf("profile %s: out=%q err=%v", p, out, err)
+			}
+		}(p)
+	}
+	wg.Wait()
 }
 
 func TestRestoredSessionRendersRecap(t *testing.T) {

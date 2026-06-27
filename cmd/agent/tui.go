@@ -77,11 +77,23 @@ type tuiModel struct {
 	accentIdx     int
 	width, height int
 	ready         bool
-	inputLines    int    // current input box height in rows (grows with content)
-	busyMsg       string // status label while running non-task work (update/compact/model); "" = a model task ("thinking")
+	inputLines    int        // current input box height in rows (grows with content)
+	busyMsg       string     // status label while running non-task work (update/compact/model); "" = a model task ("thinking")
+	subs          []*liveSub // sub-agents running right now, one live status line each
 
 	// model-proposed, Tab-acceptable next-step suggestion (parsed from NEXT:)
 	suggestion string
+}
+
+// liveSub is a sub-agent currently running, shown as its own status line during a
+// parallel fan-out. Its detailed steps stay out of the scrollback (which would
+// interleave chaotically across several sub-agents); only spawn/finish markers go
+// to the log.
+type liveSub struct {
+	id       string // matches the "agent" field on the sub-agent's events
+	label    string // "profile · dir"
+	activity string // what it's doing right now
+	steps    int
 }
 
 const defaultPlaceholder = "type a task, or /help"
@@ -366,10 +378,21 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			wait := time.Duration(toInt(e.fields["wait_ms"])) * time.Millisecond
 			m.retry = &retryInfo{attempt: toInt(e.fields["attempt"]), until: time.Now().Add(wait)}
 			m.push(cErr.Render(fmt.Sprintf("  ⟳ server hiccup — retry %d, backing off %s", m.retry.attempt, wait)))
-		} else {
-			m.retry = nil // progress resumed
+			return m, m.waitEvent()
+		}
+		m.retry = nil // progress resumed
+		switch {
+		case e.kind == "subagent": // a sub-agent started — log it + open a live line
+			m.subStart(e)
+			m.push(m.renderEvent(e)...)
+		case e.kind == "subagent_done": // finished — close the line, log the outcome
+			m.push(m.subDone(e)...)
+		case e.fields["agent"] != nil: // a sub-agent's own step — update its line only
+			m.subUpdate(e)
+		default:
 			m.push(m.renderEvent(e)...)
 			if e.kind == "final" {
+				m.subs = nil // a stray sub-agent line can't outlive the task
 				if sug, _ := e.fields["suggest"].(string); strings.TrimSpace(sug) != "" {
 					m.setSuggestion(strings.TrimSpace(sug))
 				}
@@ -706,8 +729,8 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 			m.push(m.sessionRecap()...)
 		}
 		return m, nil
-	case "/agents":
-		m.pushLines(m.app.agentsLines())
+	case "/agents", "/agent":
+		m.pushLines(m.app.agentsCommand(m.ctx, rest))
 		return m, nil
 	case "/login":
 		if err := m.app.reconfigure(); err != nil {
@@ -943,6 +966,7 @@ func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
 	m.state = stRunning
 	m.taskStart = time.Now()
 	m.busyMsg = "" // a real model task → "thinking", not a labelled chore
+	m.subs = nil   // no sub-agents from a previous task linger
 	_, c := m.app.client.Usage()
 	m.startTok = c // count completion (generated) tokens for this task
 	m.suggestion = ""
@@ -1059,7 +1083,11 @@ func (m *tuiModel) View() string {
 		content = m.renderChooser()
 	}
 	frame := lipgloss.NewStyle().Foreground(m.accent)
-	parts := []string{content, status}
+	parts := []string{content}
+	if sub := m.renderSubs(); sub != "" { // live sub-agent lines, above the status
+		parts = append(parts, sub)
+	}
+	parts = append(parts, status)
 	parts = append(parts, m.queuedView()...) // pinned just above the input
 	parts = append(parts, m.topRule(frame), m.input.View(), frame.Render(strings.Repeat("─", m.width)), bottom)
 	return strings.Join(parts, "\n")
@@ -1240,11 +1268,11 @@ var commandList = []cmdInfo{
 	{"/update", "self-update from GitHub (stable|nightly)"},
 	{"/shell", "drop to a shell in the workspace (exit to return)"},
 	{"/skills", "list/toggle/install on-demand instruction packs"},
-	{"/permissions", "relax approval for non-destructive file/shell actions"},
+	{"/permissions", "relax approval for file / shell / sub-agent-spawn actions"},
 	{"/color", "change the frame color (cycles if no name)"},
 	{"/rename", "rename the agent (saved in settings)"},
 	{"/sessions", "list / switch / delete saved sessions (per agent name)"},
-	{"/agents", "list sub-agent profiles (delegate to another model via the agent tool)"},
+	{"/agents", "manage sub-agent profiles: /agents add|rm|exec (models the agent tool delegates to)"},
 	{"/loop", "re-run a task on an interval: /loop 5m <task> (esc to stop)"},
 	{"/exit", "leave"},
 }
@@ -1450,6 +1478,81 @@ func (m *tuiModel) renderUsage() []string {
 }
 
 // renderEvent renders one streamed agent event into styled history lines.
+// subStart opens a live status line for a freshly spawned sub-agent.
+func (m *tuiModel) subStart(e uiEvent) {
+	id, _ := e.fields["agent"].(string)
+	label, _ := e.fields["profile"].(string)
+	if dir, _ := e.fields["dir"].(string); dir != "" {
+		label += " · " + filepath.Base(dir)
+	}
+	m.subs = append(m.subs, &liveSub{id: id, label: label, activity: "starting…"})
+}
+
+// subUpdate advances a sub-agent's live line from one of its own events.
+func (m *tuiModel) subUpdate(e uiEvent) {
+	id, _ := e.fields["agent"].(string)
+	s := m.findSub(id)
+	if s == nil {
+		return
+	}
+	switch e.kind {
+	case "tool_call":
+		t, _ := e.fields["tool"].(string)
+		act, _ := e.fields["action"].(string)
+		s.steps++
+		s.activity = strings.TrimSpace(t + " " + act)
+	case "goal":
+		s.activity = "reading the task…"
+	case "nudge":
+		s.activity = "rethinking…"
+	case "final":
+		s.activity = "wrapping up…"
+	}
+}
+
+// subDone closes a sub-agent's live line and returns its outcome marker for the log.
+func (m *tuiModel) subDone(e uiEvent) []string {
+	id, _ := e.fields["agent"].(string)
+	prof, _ := e.fields["profile"].(string)
+	m.dropSub(id)
+	if ok, _ := e.fields["ok"].(bool); !ok {
+		errs, _ := e.fields["error"].(string)
+		return []string{cErr.Render("  ✖ sub-agent "+prof+" failed") + cDim.Render(" "+errs)}
+	}
+	return []string{cOk.Render("  ✓ sub-agent " + prof + " finished")}
+}
+
+func (m *tuiModel) findSub(id string) *liveSub {
+	for _, s := range m.subs {
+		if s.id == id {
+			return s
+		}
+	}
+	return nil
+}
+
+func (m *tuiModel) dropSub(id string) {
+	for i, s := range m.subs {
+		if s.id == id {
+			m.subs = append(m.subs[:i], m.subs[i+1:]...)
+			return
+		}
+	}
+}
+
+// renderSubs is the live block of running sub-agents, one line each, shown just
+// above the status line during a fan-out.
+func (m *tuiModel) renderSubs() string {
+	if len(m.subs) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(m.subs))
+	for _, s := range m.subs {
+		lines = append(lines, cToolCall.Render("  ● "+s.label)+cDim.Render(fmt.Sprintf("  %s (step %d)", s.activity, s.steps)))
+	}
+	return strings.Join(lines, "\n")
+}
+
 func (m *tuiModel) renderEvent(e uiEvent) []string {
 	switch e.kind {
 	case "assistant":
@@ -1497,10 +1600,18 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		f, _ := e.fields["text"].(string)
 		return []string{cLesson.Render("  ✦ noted ") + cDim.Render(f)}
 	case "subagent":
-		prov, _ := e.fields["provider"].(string)
+		prof, _ := e.fields["profile"].(string)
 		model, _ := e.fields["model"].(string)
+		dir, _ := e.fields["dir"].(string)
 		task, _ := e.fields["task"].(string)
-		return []string{cToolCall.Render("  ⇉ sub-agent ["+prov+" · "+model+"] ") + cDim.Render(task)}
+		head := prof
+		if model != "" {
+			head += " · " + model
+		}
+		if dir != "" {
+			head += " · " + filepath.Base(dir)
+		}
+		return []string{cToolCall.Render("  ⇉ spawned "+head) + cDim.Render("  "+task)}
 	case "loop":
 		label := fmt.Sprintf("↻ loop %d", toInt(e.fields["i"]))
 		if max := toInt(e.fields["max"]); max > 0 {

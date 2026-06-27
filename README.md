@@ -100,24 +100,35 @@ and save as you make them, no hand-editing JSON.
 
 ## Sub-agents
 
-With a provider key (or a defined profile) the agent gains an `agent` tool: it can
-**delegate a self-contained task to a sub-agent on a different model** and use the
-answer — a second opinion, or another model's strength. Run your main loop on a
-local model, then have it ask a frontier model to review the diff; or review the
-same code across 2–3 models and compare. Define profiles in
-`~/.config/ipsupport-code/config.json`:
+Define a **profile** — a named model — and the agent gains an `agent` tool: it can
+**delegate a self-contained task to a sub-agent on that model** and use the answer.
+A second opinion, another model's strength, or the same code reviewed across 2–3
+models at once. Run your main loop on a local model, then have it fan a review out
+to a couple of frontier models and merge the findings.
 
-```jsonc
-"agents": {
-  "reviewer":  { "provider": "openrouter", "model": "x-ai/grok-4.3", "prompt": "strict code reviewer" },
-  "architect": { "provider": "openai",     "model": "gpt-4o" }
-}
+A profile is the only way to delegate (and so the curated list of what the
+assistant may spawn). Build one interactively — provider → model list → name —
+from `/config`, or on the command line:
+
+```text
+/agents add grok   openrouter x-ai/grok-4.3     # omit the model to list them
+/agents add architect openai gpt-4o
+/agents                                          # list profiles
+/agents rm grok                                  # remove one
 ```
 
-`/agents` lists them. Then just ask — e.g. *"have the reviewer review core/rules.go"*.
-Sub-agents inherit the current plan/auto mode and the workspace policy, can't spawn
-their own sub-agents (depth 1), and a **paid** (external) spawn asks for approval
-first. Their tokens are recorded in `/usage` like any other.
+Then just ask — e.g. *"review internal/tool across grok and architect, then merge."*
+The assistant calls `agent(profile, task, dir)`: `dir` (optional, `~` expanded)
+points a sub-agent at **another project** — it gets its own jail there, so it can
+work on `~/other-repo` without leaving the rest of your disk exposed. A pure
+fan-out of several profiles **runs in parallel**, each on its own live status line;
+the main model then merges the results into one answer.
+
+Safety: every spawn **asks for approval** (even local ones cost compute) until you
+relax it with `/permissions agents on`. Sub-agents read/write files and use git but
+**only run shell commands if you enable it** with `/agents exec on`. They inherit
+the current plan/auto mode, can't spawn their own sub-agents (depth 1), and their
+tokens are recorded in `/usage` like any other.
 
 ## Updating
 
@@ -192,10 +203,10 @@ for `/permissions run on`. The choice is saved to the workspace config.
 On-demand instruction packs — the user-extensible version of guides-on-demand.
 Only an **enabled** skill adds a single line to the system prompt; the model
 loads a skill's full instructions on demand, so the base prompt stays lean no
-matter how many you install. Six curated skills ship in the binary
+matter how many you install. Seven curated skills ship in the binary
 (`test-first`, `debug-systematically`, `git-flow`, `research-first`,
-`minimal-code`, and `review` — multi-model review via sub-agents), seeded
-**disabled** so you opt in.
+`minimal-code`, `review` — multi-model review via sub-agents — and `subagents`,
+how to delegate and fan work out), seeded **disabled** so you opt in.
 
 ```
 /skills                       list installed skills (on/off)
@@ -230,7 +241,7 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | `/color [name]` | change the TUI frame color (cycles if no name) |
 | `/rename <name>` | rename the agent (saved in settings) |
 | `/sessions` | list / switch / delete saved sessions (per agent name) |
-| `/agents` | list sub-agent profiles (delegate a task to another model) |
+| `/agents` | manage sub-agent profiles: `add` / `rm` / `exec` (models the agent tool delegates to) |
 | `/loop <interval> [xN] <task>` | re-run a task on an interval (e.g. `/loop 5m <task>`, `/loop 30s x10 <task>`); **esc** stops it |
 | `/help` | command list |
 | `/exit`, `/quit` | leave |

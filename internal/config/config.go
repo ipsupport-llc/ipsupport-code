@@ -35,12 +35,22 @@ type LLM struct {
 func (l LLM) LMStudio() bool { return l.Type == "lmstudio" }
 
 // AgentProfile is a named sub-agent target for the `agent` tool: which provider
-// and model to run the sub-agent on, plus an optional role prompt (e.g. "you are
-// a strict code reviewer").
+// and model to run the sub-agent on. The task always comes from the delegating
+// assistant; Prompt is an optional, persistent role note for that model.
 type AgentProfile struct {
 	Provider string `json:"provider"`
 	Model    string `json:"model,omitempty"`
 	Prompt   string `json:"prompt,omitempty"`
+}
+
+// SpawnPolicy gates the `agent` tool. Default is the approval mode before a
+// sub-agent runs (ask | allow — ask guards against runaway spawns, even local
+// ones that still cost compute); Exec controls whether sub-agents get the run
+// (shell) tool — off by default, the sharpest capability to hand an autonomous
+// sub-agent.
+type SpawnPolicy struct {
+	Default string `json:"default"` // ask (default) | allow
+	Exec    bool   `json:"exec"`    // give sub-agents the run (shell) tool
 }
 
 // RunPolicy gates shell execution. Resolution per command: a Deny glob (matched
@@ -84,9 +94,12 @@ type Config struct {
 	Prices map[string][2]float64 `json:"prices,omitempty"`
 	// Agents are named sub-agent profiles for the `agent` tool (delegate a task to
 	// another model/provider): name → {provider, model, optional role prompt}.
-	Agents     map[string]AgentProfile `json:"agents,omitempty"`
-	SkillsPath string                  `json:"skills_path,omitempty"`
-	Workspace  string                  `json:"-"` // resolved absolute workspace root
+	Agents map[string]AgentProfile `json:"agents,omitempty"`
+	// Spawn gates the `agent` tool: approval mode before a sub-agent runs, and
+	// whether sub-agents may run shell commands.
+	Spawn      SpawnPolicy `json:"spawn"`
+	SkillsPath string      `json:"skills_path,omitempty"`
+	Workspace  string      `json:"-"` // resolved absolute workspace root
 }
 
 // ProviderTemplates are built-in OpenAI-compatible providers: base URL (and a
@@ -180,6 +193,7 @@ func Default() Config {
 			AllowWrite: []string{},
 			DenyWrite:  append([]string{}, fileDenyFloor...),
 		},
+		Spawn: SpawnPolicy{Default: "ask", Exec: false},
 	}
 }
 
@@ -291,6 +305,14 @@ func SaveUsageRetention(days int) error {
 
 // SaveProviders persists the active provider name and the external provider
 // presets (which may include API keys — the file is written 0600).
+// SaveSpawn persists the sub-agent spawn policy (approval mode + exec) globally.
+func SaveSpawn(s SpawnPolicy) error { return mergeGlobalKeys(map[string]any{"spawn": s}) }
+
+// SaveAgents persists the sub-agent profile map globally.
+func SaveAgents(agents map[string]AgentProfile) error {
+	return mergeGlobalKeys(map[string]any{"agents": agents})
+}
+
 func SaveProviders(provider string, providers map[string]LLM) error {
 	return mergeGlobalKeys(map[string]any{"provider": provider, "providers": providers})
 }

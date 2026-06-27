@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/term"
@@ -200,7 +201,10 @@ type app struct {
 
 	client          *llm.OpenAIClient
 	ag              *agent.Agent
+	pol             *policy.Engine // host policy/jail; sub-agents in a dir get their own
 	subReg          *tool.Registry // tools for sub-agents (no `agent` tool → no recursion)
+	spawnMu         sync.Mutex     // serializes spawn-approval prompts during parallel fan-out
+	spawnSeq        atomic.Int64   // unique id per sub-agent spawn (for grouping its UI events)
 	refl            *reflect.Reflector
 	instrSrc        string   // project instructions file in effect, "" if none
 	promptSrc       string   // "built-in" or the system.md override path
@@ -269,104 +273,234 @@ func (a *app) activeLLM() config.LLM {
 
 func (a *app) isLocal() bool { return a.cfg.Provider == "" || a.cfg.Provider == "local" }
 
-// hasSubagentTargets reports whether spawning a sub-agent is worthwhile: a
-// configured profile, or any external provider with a key.
+// hasSubagentTargets reports whether the `agent` tool should exist: only when at
+// least one profile is configured (a profile is the sole way to delegate, so it
+// is also the user's curated list of what the assistant may spawn).
 func (a *app) hasSubagentTargets() bool {
-	if len(a.cfg.Agents) > 0 {
-		return true
-	}
-	for _, n := range config.KnownProviders() {
-		if l, ok := config.ResolveProvider(a.cfg, n); ok && l.APIKey != "" {
-			return true
-		}
-	}
-	return false
+	return len(a.cfg.Agents) > 0
 }
 
-// spawnAgent runs a self-contained task on a sub-agent: it resolves the target
-// (a profile, or provider+model), asks approval for a paid/external spawn, builds
-// a fresh agent loop (same tools minus `agent`, so no recursion; inheriting the
-// current plan/auto mode), runs it, records its tokens, and returns its final
-// answer. Sub-agent steps stream to the same UI.
-func (a *app) spawnAgent(ctx context.Context, task, profile, provider, model string) (string, error) {
+// spawnAgent runs a delegated task on a sub-agent: it resolves the profile (which
+// carries the provider+model), optionally re-roots to a directory (its own jail),
+// asks approval unless the spawn policy is relaxed, builds a fresh agent loop (the
+// host tools minus `agent` so it can't recurse — and minus run unless spawn.exec
+// is on; it inherits the current plan/auto mode), runs it, records its tokens,
+// and returns its final answer. Safe to call concurrently (fan-out).
+func (a *app) spawnAgent(ctx context.Context, profile, task, dir string) (string, error) {
 	if strings.TrimSpace(task) == "" {
 		return "", fmt.Errorf("task is required")
 	}
-	var role string
-	if profile != "" {
-		p, ok := a.cfg.Agents[profile]
-		if !ok {
-			return "", fmt.Errorf("unknown agent profile %q (configured: %s)", profile, strings.Join(agentProfileNames(a.cfg), ", "))
-		}
-		role = p.Prompt
-		if provider == "" {
-			provider = p.Provider
-		}
-		if model == "" {
-			model = p.Model
-		}
+	profile = strings.TrimSpace(profile)
+	if profile == "" {
+		return "", fmt.Errorf("profile is required — configured: %s", a.profilesOrHint())
 	}
+	p, ok := a.cfg.Agents[profile]
+	if !ok {
+		return "", fmt.Errorf("unknown profile %q — configured: %s", profile, a.profilesOrHint())
+	}
+	provider := p.Provider
 	if provider == "" {
-		provider = a.providerName() // default to the current provider
+		provider = "local"
 	}
 
-	// Resolve the connection for the chosen provider.
+	// Resolve the connection for the profile's provider.
 	var llmCfg config.LLM
 	if provider == "local" {
 		llmCfg = a.cfg.LLM
 	} else {
-		rp, ok := config.ResolveProvider(a.cfg, provider)
-		if !ok {
-			return "", fmt.Errorf("unknown provider %q", provider)
+		rp, rok := config.ResolveProvider(a.cfg, provider)
+		if !rok {
+			return "", fmt.Errorf("profile %q: unknown provider %q", profile, provider)
 		}
 		if rp.APIKey == "" {
-			return "", fmt.Errorf("%s has no API key — add one with /ai key %s <token>", provider, provider)
+			return "", fmt.Errorf("profile %q: %s has no API key — add one with /ai key %s <token>", profile, provider, provider)
 		}
 		llmCfg = rp
 	}
-	if model != "" {
-		llmCfg.Model = model
+	if p.Model != "" {
+		llmCfg.Model = p.Model
 	}
 
-	// A paid (external) spawn spends real money and runs autonomously — gate it.
-	if provider != "local" {
-		detail := fmt.Sprintf("%s · %s — %s", provider, llmCfg.Model, oneLine(task, 80))
-		if !a.approver.Approve("spawn agent", detail) {
+	// Resolve the working directory (default: the session workspace). The path may
+	// point anywhere — ~ is expanded, relatives resolve against the session — but
+	// the sub-agent gets its OWN jail rooted there, so it still can't escape it.
+	subReg, subWorkspace := a.subReg, a.workspace
+	if d := strings.TrimSpace(dir); d != "" {
+		root, err := a.resolveSpawnDir(d)
+		if err != nil {
+			return "", err
+		}
+		if fi, statErr := os.Stat(root); statErr != nil || !fi.IsDir() {
+			return "", fmt.Errorf("dir %q is not a directory", dir)
+		}
+		subCfg := a.cfg
+		subCfg.Workspace = root
+		subCfg.File.Jail = "." // keep the jail — confine the sub-agent to its own dir
+		subPol, pErr := policy.New(subCfg)
+		if pErr != nil {
+			return "", pErr
+		}
+		subReg, subWorkspace = a.buildSubReg(subPol), root
+	}
+
+	// Ask before spawning unless the policy is relaxed. "ask" (default) guards
+	// every spawn — even local ones still cost compute, and a runaway main model
+	// could fan out endlessly. Serialize the prompt so parallel fan-out spawns ask
+	// one at a time instead of racing on the approver.
+	if a.cfg.Spawn.Default != "allow" {
+		a.spawnMu.Lock()
+		approved := a.approver.Approve("spawn agent", fmt.Sprintf("%s · %s · %s — %s", profile, llmCfg.Model, subWorkspace, oneLine(task, 60)))
+		a.spawnMu.Unlock()
+		if !approved {
 			return "", fmt.Errorf("spawn denied by user")
 		}
 	}
 
-	sys := a.systemPrompt()
-	if strings.TrimSpace(role) != "" {
-		sys += "\n\n## Your role\n" + role
-	}
+	id := fmt.Sprintf("sub%d", a.spawnSeq.Add(1)) // groups this sub-agent's UI events
 	client := llm.NewOpenAIClient(llmCfg)
-	sub := agent.New(client, a.subReg, a.kb, a.tracer, sys, llmCfg.MaxSteps)
+	sub := agent.New(client, subReg, a.kb, a.tracer, a.subAgentPrompt(subWorkspace, p.Prompt), llmCfg.MaxSteps)
 	sub.SetPlanMode(a.planMode) // inherit the current mode
-	a.emit("subagent", map[string]any{"provider": provider, "model": llmCfg.Model, "task": oneLine(task, 80)})
+	sub.SetLabel(id)
+	a.emit("subagent", map[string]any{"agent": id, "profile": profile, "provider": provider, "model": llmCfg.Model, "dir": subWorkspace, "task": oneLine(task, 80)})
 
 	tr, err := sub.Run(ctx, task)
 	if a.usage != nil { // the sub-agent's spend counts too
-		p, c := client.Usage()
-		a.usage.Add(today(), provider, llmCfg.Model, p, c)
+		pt, ct := client.Usage()
+		a.usage.Add(today(), provider, llmCfg.Model, pt, ct)
 		_ = a.usage.Save()
 	}
+	done := map[string]any{"agent": id, "profile": profile, "ok": err == nil}
+	if err != nil {
+		done["error"] = oneLine(err.Error(), 60)
+	}
+	a.emit("subagent_done", done)
 	if err != nil {
 		return "", err
 	}
 	return tr.Final, nil
 }
 
-// agentsLines lists configured agent profiles (for /agents).
-func (a *app) agentsLines() []string {
-	if len(a.cfg.Agents) == 0 {
-		return []string{
-			"no agent profiles. Add them under \"agents\" in config.json, then delegate via the agent tool:",
-			`  "agents": {"reviewer": {"provider": "openrouter", "model": "x-ai/grok-4.3", "prompt": "strict code reviewer"}}`,
-			"  then ask, e.g.: \"have the reviewer profile review core/rules.py\"",
+// profilesOrHint lists configured profile names, or a hint to make one.
+func (a *app) profilesOrHint() string {
+	if names := agentProfileNames(a.cfg); len(names) > 0 {
+		return strings.Join(names, ", ")
+	}
+	return "none yet — add one in /config"
+}
+
+// resolveSpawnDir turns a sub-agent's dir argument into an absolute path: ~ and
+// ~/… expand to the home dir, a relative path resolves against the session
+// workspace. The path may point anywhere — the sub-agent is jailed to it later.
+func (a *app) resolveSpawnDir(dir string) (string, error) {
+	if dir == "~" || strings.HasPrefix(dir, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		dir = filepath.Join(home, strings.TrimPrefix(dir, "~"))
+	}
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(a.workspace, dir)
+	}
+	return filepath.Clean(dir), nil
+}
+
+// buildSubReg builds a sub-agent's tool registry against a given policy: the host
+// tools except `agent` (so sub-agents can't recurse) and except help (a usage
+// helper they don't need). The run (shell) tool is included only when spawn.exec
+// is on — the sharpest capability to hand an autonomous sub-agent.
+func (a *app) buildSubReg(pol *policy.Engine) *tool.Registry {
+	tools := []tool.Tool{tool.NewFile(pol, a.approver)}
+	if a.cfg.Spawn.Exec {
+		tools = append(tools, tool.NewRun(pol, a.approver, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second))
+	}
+	tools = append(tools, tool.NewGit(pol, a.approver), tool.NewWeb(http.DefaultClient), tool.NewCalc())
+	if a.skills != nil && a.skills.HasEnabled() {
+		tools = append(tools, tool.NewSkill(a.skills))
+	}
+	return tool.NewRegistry(tools...)
+}
+
+// subAgentPrompt builds a sub-agent's system prompt: the dedicated sub-agent base
+// (deliberately different from the interactive one), its working directory, any
+// project instructions found there, the enabled-skills index, and the profile's
+// role. It does NOT inject the host's learned facts — those belong to the host
+// workspace, not the directory the sub-agent was pointed at.
+func (a *app) subAgentPrompt(workspace, role string) string {
+	out := agent.SubAgentSystemPrompt()
+	out += fmt.Sprintf(
+		"\n\nEnvironment: you are running on %s; your working directory is %s. Use commands that exist on this OS. All file/run/git paths resolve in that directory.",
+		runtime.GOOS, workspace)
+	if text, src := loadInstructions(workspace); text != "" {
+		out += "\n\n## Project instructions (from " + src + ") — follow these:\n" + text
+	}
+	if a.skills != nil {
+		if idx := a.skills.Index(); idx != "" {
+			out += "\n\n## Skills (load full instructions with the skill tool when the topic fits):\n" + idx
 		}
 	}
-	out := []string{"agent profiles (delegate by asking, e.g. \"use <name> to …\"):"}
+	if strings.TrimSpace(role) != "" {
+		out += "\n\n## Your role\n" + role
+	}
+	return out
+}
+
+// subagentTargetsPrompt is the dynamic roster injected into the main assistant's
+// system prompt so it knows WHO it can delegate to — the configured profiles.
+// Only emitted when a profile exists (so it costs nothing otherwise), and kept to
+// a couple of lines.
+func (a *app) subagentTargetsPrompt() string {
+	names := agentProfileNames(a.cfg)
+	if len(names) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(names))
+	for _, n := range names {
+		p := a.cfg.Agents[n]
+		m := p.Model
+		if m == "" {
+			m = "default"
+		}
+		parts = append(parts, fmt.Sprintf("%s→%s·%s", n, p.Provider, m))
+	}
+	return "\n\n## Sub-agents you can delegate to (the agent tool)\n" +
+		"Profiles (call agent with profile=<name>): " + strings.Join(parts, ", ") + "\n" +
+		"Pass dir=<path> to point one at another project. Fan a task out across several profiles in one turn — they run in parallel — then merge their findings into one answer."
+}
+
+// agentsCommand manages sub-agent profiles: list, add (listing the provider's
+// models when the model is omitted), remove, and toggle shell exec. Profiles are
+// the only way to delegate, so they're also the curated list of allowed targets.
+func (a *app) agentsCommand(ctx context.Context, rest string) []string {
+	sub, arg := splitCommand(rest)
+	switch sub {
+	case "":
+		return a.agentsLines()
+	case "add", "set":
+		return a.agentsAdd(ctx, arg)
+	case "rm", "remove", "del", "delete":
+		return a.agentsRemove(arg)
+	case "exec":
+		return a.agentsExec(arg)
+	default:
+		return []string{"usage: /agents [add <name> <provider> [model]] [rm <name>] [exec on|off]"}
+	}
+}
+
+// agentsLines lists configured agent profiles (for /agents).
+func (a *app) agentsLines() []string {
+	exec := "off"
+	if a.cfg.Spawn.Exec {
+		exec = "on"
+	}
+	if len(a.cfg.Agents) == 0 {
+		return []string{
+			"no sub-agent profiles yet. A profile is a named model the assistant can delegate a task to.",
+			"  add one: /agents add <name> <provider> [model]   (omit the model to list them)",
+			"  e.g.:    /agents add grok openrouter x-ai/grok-4.3",
+		}
+	}
+	out := []string{fmt.Sprintf("sub-agent profiles (spawn: %s · shell exec: %s):", a.cfg.Spawn.Default, exec)}
 	for _, n := range agentProfileNames(a.cfg) {
 		p := a.cfg.Agents[n]
 		model := p.Model
@@ -378,6 +512,114 @@ func (a *app) agentsLines() []string {
 			line += "  — " + oneLine(p.Prompt, 40)
 		}
 		out = append(out, line)
+	}
+	out = append(out, "  /agents add <name> <provider> [model] · /agents rm <name> · /agents exec on|off")
+	return out
+}
+
+// agentsAdd creates (or replaces) a profile. With no model it lists the chosen
+// provider's models so the user can re-run with one; with a model it resolves the
+// query to a single id (exact or unique substring) and saves.
+func (a *app) agentsAdd(ctx context.Context, arg string) []string {
+	fields := strings.Fields(arg)
+	if len(fields) < 2 {
+		return []string{"usage: /agents add <name> <provider> [model]", "  e.g. /agents add grok openrouter x-ai/grok-4.3"}
+	}
+	name, provider := fields[0], fields[1]
+	conn, errLine := a.providerConn(provider)
+	if errLine != "" {
+		return []string{errLine}
+	}
+	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	ids := listModelIDs(cctx, conn)
+	if len(fields) < 3 { // no model → list them to pick from
+		if len(ids) == 0 {
+			return []string{fmt.Sprintf("could not list %s models — pass one: /agents add %s %s <model>", provider, name, provider)}
+		}
+		out := []string{fmt.Sprintf("%s models — re-run: /agents add %s %s <model>", provider, name, provider)}
+		for i, id := range ids {
+			if i >= 50 {
+				out = append(out, fmt.Sprintf("  …and %d more (narrow by typing part of the id)", len(ids)-50))
+				break
+			}
+			out = append(out, "  "+id)
+		}
+		return out
+	}
+	setTo, lines := resolveModelArg(ids, strings.Join(fields[2:], " "))
+	if setTo == "" {
+		return lines // ambiguous — the matches are listed
+	}
+	if a.cfg.Agents == nil {
+		a.cfg.Agents = map[string]config.AgentProfile{}
+	}
+	a.cfg.Agents[name] = config.AgentProfile{Provider: provider, Model: setTo}
+	if err := config.SaveAgents(a.cfg.Agents); err != nil {
+		return []string{"warning: not persisted: " + err.Error()}
+	}
+	_ = a.wire() // the agent tool may now exist (or its roster changed)
+	return []string{fmt.Sprintf("profile %q → %s · %s — saved", name, provider, setTo)}
+}
+
+// agentsRemove deletes a profile by name.
+func (a *app) agentsRemove(name string) []string {
+	name = strings.TrimSpace(name)
+	if _, ok := a.cfg.Agents[name]; !ok {
+		return []string{fmt.Sprintf("no profile %q (have: %s)", name, a.profilesOrHint())}
+	}
+	delete(a.cfg.Agents, name)
+	if err := config.SaveAgents(a.cfg.Agents); err != nil {
+		return []string{"warning: not persisted: " + err.Error()}
+	}
+	_ = a.wire()
+	return []string{fmt.Sprintf("removed profile %q", name)}
+}
+
+// agentsExec toggles whether sub-agents get the run (shell) tool.
+func (a *app) agentsExec(arg string) []string {
+	switch strings.TrimSpace(arg) {
+	case "on", "yes", "true":
+		a.cfg.Spawn.Exec = true
+	case "off", "no", "false", "":
+		a.cfg.Spawn.Exec = false
+	default:
+		return []string{"usage: /agents exec on|off"}
+	}
+	if err := config.SaveSpawn(a.cfg.Spawn); err != nil {
+		return []string{"warning: not persisted: " + err.Error()}
+	}
+	_ = a.wire()
+	state := "off"
+	if a.cfg.Spawn.Exec {
+		state = "on"
+	}
+	return []string{"sub-agent shell exec → " + state + " — saved"}
+}
+
+// providerConn resolves a provider name (local or external-with-key) to its
+// connection, or returns a one-line error for the caller to show.
+func (a *app) providerConn(provider string) (config.LLM, string) {
+	if provider == "local" {
+		return a.cfg.LLM, ""
+	}
+	rp, ok := config.ResolveProvider(a.cfg, provider)
+	if !ok {
+		return config.LLM{}, fmt.Sprintf("unknown provider %q — configured: %s", provider, strings.Join(a.configuredProviderNames(), ", "))
+	}
+	if rp.APIKey == "" {
+		return config.LLM{}, fmt.Sprintf("%s has no API key — add one with /ai key %s <token> first", provider, provider)
+	}
+	return rp, ""
+}
+
+// configuredProviderNames is local plus external providers that have a key.
+func (a *app) configuredProviderNames() []string {
+	out := []string{"local"}
+	for _, n := range config.KnownProviders() {
+		if l, ok := config.ResolveProvider(a.cfg, n); ok && l.APIKey != "" {
+			out = append(out, n)
+		}
 	}
 	return out
 }
@@ -473,6 +715,7 @@ func (a *app) wire() error {
 	if err != nil {
 		return fmt.Errorf("policy: %w", err)
 	}
+	a.pol = pol // host jail; a sub-agent pointed at a dir gets its own
 	var reg *tool.Registry
 	tools := []tool.Tool{
 		tool.NewFile(pol, a.approver),
@@ -487,11 +730,11 @@ func (a *app) wire() error {
 	if a.skills != nil && a.skills.HasEnabled() {
 		tools = append(tools, tool.NewSkill(a.skills))
 	}
-	// Sub-agents get the same tools MINUS the `agent` tool, so they can't recurse.
-	a.subReg = tool.NewRegistry(tools...)
-	// The `agent` tool (delegate to another model) is only worth its catalog space
-	// when there's somewhere to spawn — an external provider with a key, or a
-	// configured profile. Pure-local setups don't see it.
+	// Sub-agents get their own registry: no `agent` tool (no recursion) and no run
+	// tool unless spawn.exec is on. buildSubReg is the single source of truth.
+	a.subReg = a.buildSubReg(pol)
+	// The `agent` tool is only worth its catalog space when there is a profile to
+	// delegate to; with no profiles configured, the tool is hidden entirely.
 	if a.hasSubagentTargets() {
 		tools = append(tools, tool.NewAgent(a.spawnAgent))
 	}
@@ -924,7 +1167,8 @@ func (a *app) systemPrompt() string {
 			out += "\n\n## Skills (load full instructions with the skill tool when the topic fits):\n" + idx
 		}
 	}
-	if len(a.facts) > 0 { // learned project facts — keep the injected set small
+	out += a.subagentTargetsPrompt() // dynamic roster of delegate targets (empty if none)
+	if len(a.facts) > 0 {            // learned project facts — keep the injected set small
 		facts := a.facts
 		if len(facts) > 15 {
 			facts = facts[len(facts)-15:]
@@ -1095,8 +1339,8 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		for _, l := range lines {
 			fmt.Println(l)
 		}
-	case "/agents":
-		for _, l := range a.agentsLines() {
+	case "/agents", "/agent":
+		for _, l := range a.agentsCommand(ctx, rest) {
 			fmt.Println(l)
 		}
 	case "/login", "/init":
@@ -1445,6 +1689,7 @@ func (a *app) configOverview() []string {
 		fmt.Sprintf("  context      %-22s (auto-compact ~75%%)", ctxLabel(act.ContextWindow)),
 		fmt.Sprintf("  channel      %-22s update stable|nightly", channelOf(a.cfg)),
 		fmt.Sprintf("  permissions  files=%-5s run=%-5s    /permissions", a.cfg.File.Default, a.cfg.Run.Default),
+		fmt.Sprintf("  sub-agents   %-22s /agents", fmt.Sprintf("%d profile(s)", len(a.cfg.Agents))),
 		fmt.Sprintf("  name         %-22s /rename <name>", a.cfg.Name),
 		fmt.Sprintf("  prompt       %-22s -dump-prompt > .agent/system.md", promptOrDefault(a.promptSrc)),
 		"  file: ~/.config/ipsupport-code/config.json (chmod 600)",
@@ -1546,19 +1791,43 @@ func (a *app) permissionsCommand(rest string) []string {
 		return a.permissionsSet(&a.cfg.File.Default, arg, "file writes")
 	case "run", "shell":
 		return a.permissionsSet(&a.cfg.Run.Default, arg, "shell commands")
+	case "agents", "agent", "spawn":
+		return a.permissionsSetSpawn(arg)
 	default:
-		return []string{"usage: /permissions [files on|off] [run on|off]"}
+		return []string{"usage: /permissions [files on|off] [run on|off] [agents on|off]"}
 	}
 }
 
+// permissionsSetSpawn relaxes (on) or restores (off) the spawn-approval prompt
+// for the agent tool, and persists it globally (profiles live there too).
+func (a *app) permissionsSetSpawn(arg string) []string {
+	switch strings.TrimSpace(arg) {
+	case "on", "allow", "yes":
+		a.cfg.Spawn.Default = "allow"
+	case "off", "ask", "no", "":
+		a.cfg.Spawn.Default = "ask"
+	default:
+		return []string{"usage: on (spawn without asking) | off (ask each spawn)"}
+	}
+	if err := config.SaveSpawn(a.cfg.Spawn); err != nil {
+		return []string{"warning: not persisted: " + err.Error()}
+	}
+	return []string{fmt.Sprintf("sub-agent spawns → %s — saved", a.cfg.Spawn.Default)}
+}
+
 func (a *app) permissionsStatus() []string {
+	exec := "off"
+	if a.cfg.Spawn.Exec {
+		exec = "on"
+	}
 	return []string{
 		"permissions:",
-		fmt.Sprintf("  files  %s   (jail %q)", a.cfg.File.Default, a.cfg.File.Jail),
-		fmt.Sprintf("  run    %s", a.cfg.Run.Default),
+		fmt.Sprintf("  files   %s   (jail %q)", a.cfg.File.Default, a.cfg.File.Jail),
+		fmt.Sprintf("  run     %s", a.cfg.Run.Default),
+		fmt.Sprintf("  agents  %s   (sub-agent shell exec: %s — set in /config)", a.cfg.Spawn.Default, exec),
 		"  deny floor (always on): secrets, .git, .env, rm -rf, sudo, …",
 		"  /permissions files on  → stop asking before file writes in the workspace",
-		"  /permissions files off → ask again",
+		"  /permissions agents on → spawn sub-agents without asking each time",
 	}
 }
 
@@ -1683,7 +1952,8 @@ func helpText() string {
   /update [chan]   self-update from GitHub (chan = stable|nightly, saved)
   /shell, /sh      drop to a shell in the workspace (exit to return)
   /skills          list/toggle/install on-demand instruction packs
-  /permissions     relax approval for non-destructive file/shell actions
+  /agents          sub-agent profiles: /agents add|rm|exec (models the agent tool delegates to)
+  /permissions     relax approval for file / shell / sub-agent-spawn actions
   /color [name]    change the TUI frame color (cycles if no name)
   /rename <name>   rename the agent (saved in settings)
   /sessions        list / switch / delete saved sessions (per agent name)

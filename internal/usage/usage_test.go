@@ -2,8 +2,22 @@ package usage
 
 import (
 	"path/filepath"
+	"sync"
 	"testing"
 )
+
+func TestStoreConcurrentAdd(t *testing.T) {
+	s, _ := Open("") // run with -race: the mutex must make this safe
+	var wg sync.WaitGroup
+	for i := 0; i < 64; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); s.Add("2026-06-27", "p", "m", 1, 1) }()
+	}
+	wg.Wait()
+	if got := s.Total().Tokens(); got != 128 {
+		t.Errorf("concurrent Add total = %d, want 128", got)
+	}
+}
 
 func TestStoreAddAndAggregate(t *testing.T) {
 	s, _ := Open("")

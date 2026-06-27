@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 )
 
 // Entry is one (day, provider, model) bucket of token counts.
@@ -21,8 +22,10 @@ type Entry struct {
 	Completion int    `json:"completion"`
 }
 
-// Store is the ledger, persisted to a JSON file (in-memory if path is "").
+// Store is the ledger, persisted to a JSON file (in-memory if path is ""). Safe
+// for concurrent use (sub-agents record from parallel tool calls).
 type Store struct {
+	mu      sync.Mutex
 	path    string
 	entries []Entry
 }
@@ -54,6 +57,8 @@ func (s *Store) Add(date, provider, model string, prompt, completion int) {
 	if prompt <= 0 && completion <= 0 {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for i := range s.entries {
 		e := &s.entries[i]
 		if e.Date == date && e.Provider == provider && e.Model == model {
@@ -70,11 +75,13 @@ func (s *Store) Save() error {
 	if s.path == "" {
 		return nil
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	s.mu.Lock()
+	data, err := json.MarshalIndent(s.entries, "", "  ")
+	s.mu.Unlock()
+	if err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(s.entries, "", "  ")
-	if err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return err
 	}
 	return os.WriteFile(s.path, data, 0o644)
@@ -93,6 +100,13 @@ func (t Total) Tokens() int { return t.Prompt + t.Completion }
 // TotalSince sums all entries on or after cutoff (an ISO YYYY-MM-DD date; ISO
 // dates compare correctly as strings). cutoff "" sums everything.
 func (s *Store) TotalSince(cutoff string) Total {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.totalSince(cutoff)
+}
+
+// totalSince is TotalSince without locking (callers hold the lock).
+func (s *Store) totalSince(cutoff string) Total {
 	t := Total{Key: cutoff}
 	for _, e := range s.entries {
 		if e.Date >= cutoff {
@@ -104,11 +118,17 @@ func (s *Store) TotalSince(cutoff string) Total {
 }
 
 // Total is the all-time total.
-func (s *Store) Total() Total { return s.TotalSince("") }
+func (s *Store) Total() Total {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.totalSince("")
+}
 
 // Purge drops entries older than cutoff (Date < cutoff) and returns how many were
 // removed. The caller persists with Save.
 func (s *Store) Purge(cutoff string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	kept := s.entries[:0]
 	removed := 0
 	for _, e := range s.entries {
@@ -123,20 +143,28 @@ func (s *Store) Purge(cutoff string) int {
 }
 
 // Clear drops the entire ledger. The caller persists with Save.
-func (s *Store) Clear() { s.entries = nil }
+func (s *Store) Clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.entries = nil
+}
 
 // ByDay returns per-day totals, most recent day first.
 func (s *Store) ByDay() []Total {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.aggregate(func(e Entry) string { return e.Date }, true)
 }
 
 // ByModel returns per provider/model totals, largest first.
 func (s *Store) ByModel() []Total {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.aggregate(func(e Entry) string { return e.Provider + "/" + e.Model }, false)
 }
 
-// aggregate sums entries by key; byKeyDesc sorts on the key (for dates),
-// otherwise on token count.
+// aggregate sums entries by key (callers hold the lock); byKeyDesc sorts on the
+// key (for dates), otherwise on token count.
 func (s *Store) aggregate(keyOf func(Entry) string, byKeyDesc bool) []Total {
 	m := map[string]*Total{}
 	for _, e := range s.entries {

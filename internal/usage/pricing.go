@@ -69,6 +69,8 @@ func CostUSD(model string, prompt, completion int, overrides map[string]Price) f
 // CostSince sums the estimated cost of all entries on or after cutoff, pricing
 // each by its own model. cutoff "" totals everything.
 func (s *Store) CostSince(cutoff string, overrides map[string]Price) float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var total float64
 	for _, e := range s.entries {
 		if e.Date >= cutoff {

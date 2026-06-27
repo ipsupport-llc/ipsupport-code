@@ -361,14 +361,19 @@ var refusalMarkers = []string{
 	"скопируйте", "полные обновлённые версии", "не имею возможности",
 }
 
-// runToolCalls executes every call from one assistant turn, concurrently when
-// the model batched more than one, keeping results in the emitted order. It also
-// reports how many of the calls errored (for stuck-loop detection).
+// runToolCalls executes every call from one assistant turn, keeping results in
+// the emitted order, and reports how many errored (for stuck-loop detection).
+// Calls run concurrently ONLY when nothing in the batch has side effects; if any
+// call writes files / runs a command / changes git / spawns a sub-agent, the
+// whole batch runs sequentially so the calls can't race each other (or the shared
+// filesystem / usage ledger).
 func (a *Agent) runToolCalls(ctx context.Context, calls []llm.ToolCall) ([]llm.Message, int) {
 	out := make([]llm.Message, len(calls))
 	errs := make([]bool, len(calls))
-	if len(calls) == 1 {
-		out[0], errs[0] = a.execOne(ctx, calls[0])
+	if len(calls) == 1 || a.anyMutating(calls) {
+		for i, c := range calls {
+			out[i], errs[i] = a.execOne(ctx, c)
+		}
 	} else {
 		var wg sync.WaitGroup
 		for i, c := range calls {
@@ -387,6 +392,21 @@ func (a *Agent) runToolCalls(ctx context.Context, calls []llm.ToolCall) ([]llm.M
 		}
 	}
 	return out, n
+}
+
+// anyMutating reports whether the batch has any side-effecting call — a mutating
+// tool action, or an `agent` spawn (sub-agents touch files / the ledger).
+func (a *Agent) anyMutating(calls []llm.ToolCall) bool {
+	for _, c := range calls {
+		if c.Name == "agent" {
+			return true
+		}
+		action, _ := parseArgs(c.Arguments)
+		if a.reg.Mutates(c.Name, action) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool) {

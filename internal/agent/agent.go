@@ -40,6 +40,7 @@ type Agent struct {
 	history    []llm.Message
 	maxHistory int
 	planMode   bool
+	label      string // non-empty for a sub-agent; tags its events so the UI can group them
 }
 
 // New builds an Agent. maxSteps <= 0 defaults to 12.
@@ -59,6 +60,11 @@ func (a *Agent) Reset() { a.history = nil }
 // SetSystem swaps the base system prompt (e.g. after learning new project facts),
 // so the next run uses it without a full re-wire.
 func (a *Agent) SetSystem(s string) { a.system = s }
+
+// SetLabel tags this agent as a sub-agent: the label is attached to every event
+// it emits (as the "agent" field) so the UI can group a sub-agent's progress on
+// its own status line during a parallel fan-out.
+func (a *Agent) SetLabel(s string) { a.label = s }
 
 // SetPlanMode toggles plan mode. In plan mode the agent investigates with
 // read-only tools and proposes a plan; mutating tool calls are refused, so it
@@ -130,6 +136,21 @@ func DefaultSystemPrompt() string {
 - Each call is {"action": <name>, "params": {...}}. On an error, read it — it names the fix or the right tool — and retry.
 - Small local model in a terminal: be brief. Finish with a one-line summary of what you did — not a tutorial, and not a menu of optional features to add — and no tool call.
 - After that summary, add ONE last line exactly: "NEXT: <one short next step the user might want>" (≤6 words; skip the line if nothing fits).`)
+}
+
+// SubAgentSystemPrompt is the baseline for a sub-agent — a fresh LLM session the
+// main assistant spawns to carry out ONE delegated task. Deliberately different
+// from the interactive prompt: a sub-agent has no user to talk to and no chat to
+// see, so it works autonomously and returns a single, complete answer instead of
+// a terse line plus a NEXT suggestion.
+func SubAgentSystemPrompt() string {
+	return strings.TrimSpace(`You are a sub-agent: a separate LLM session that a coding assistant spawned to carry out ONE delegated task on its own. You act ONLY through tools, and your final output goes back to that assistant, not to a human.
+
+- You CANNOT see the main conversation. Everything you need is in the task. If something is ambiguous, make a reasonable assumption and proceed — you cannot ask back.
+- You CAN edit files. The file tool's write/edit/append actions modify REAL files in your working directory, and you are authorized to use them. NEVER claim you "only have read access" or must "enable editing" — that is false.
+- DO the task with tools (file/run/git/web/calc); never just describe how. If what you build or change is runnable, RUN it and report the real result.
+- Stay inside your working directory — all your paths resolve there.
+- Be thorough and complete: this is one shot. End with a single, self-contained final answer — your findings, the result, or exactly what you changed — written for the main assistant to use directly. Don't ask questions back.`)
 }
 
 // planDirective is added (only in plan mode) on top of the system prompt. Kept
@@ -370,7 +391,12 @@ var refusalMarkers = []string{
 func (a *Agent) runToolCalls(ctx context.Context, calls []llm.ToolCall) ([]llm.Message, int) {
 	out := make([]llm.Message, len(calls))
 	errs := make([]bool, len(calls))
-	if len(calls) == 1 || a.anyMutating(calls) {
+	// Concurrency: a single call, or a side-effecting batch, runs sequentially so
+	// calls can't race the filesystem/ledger — EXCEPT a pure fan-out of `agent`
+	// spawns, which are independent sub-agents (own dirs/clients/usage-locking), so
+	// we run those in parallel. A mixed batch (spawns + writes) stays sequential.
+	concurrent := len(calls) > 1 && (!a.anyMutating(calls) || a.allAgentCalls(calls))
+	if !concurrent {
 		for i, c := range calls {
 			out[i], errs[i] = a.execOne(ctx, c)
 		}
@@ -392,6 +418,17 @@ func (a *Agent) runToolCalls(ctx context.Context, calls []llm.ToolCall) ([]llm.M
 		}
 	}
 	return out, n
+}
+
+// allAgentCalls reports whether every call in the batch is an `agent` spawn — a
+// pure fan-out that is safe to run in parallel (each sub-agent is independent).
+func (a *Agent) allAgentCalls(calls []llm.ToolCall) bool {
+	for _, c := range calls {
+		if c.Name != "agent" {
+			return false
+		}
+	}
+	return len(calls) > 0
 }
 
 // anyMutating reports whether the batch has any side-effecting call — a mutating
@@ -487,9 +524,16 @@ func usageError(s string) bool {
 }
 
 func (a *Agent) emit(kind string, fields map[string]any) {
-	if a.tr != nil {
-		a.tr.Emit(kind, fields)
+	if a.tr == nil {
+		return
 	}
+	if a.label != "" { // a sub-agent — tag every event so the UI can group it
+		if fields == nil {
+			fields = map[string]any{}
+		}
+		fields["agent"] = a.label
+	}
+	a.tr.Emit(kind, fields)
 }
 
 // parseArgs decodes a tool-call argument string into (action, params), tolerating

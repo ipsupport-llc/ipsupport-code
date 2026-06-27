@@ -32,6 +32,10 @@ var configRows = []cfgRow{
 	{key: "mode"},
 	{key: "permissions"},
 	{key: "timeout"},
+	{header: "Sub-agents"},
+	{key: "agents"},
+	{key: "spawn"},
+	{key: "subexec"},
 	{header: "Appearance & updates"},
 	{key: "color"},
 	{key: "channel"},
@@ -92,6 +96,16 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		return "permissions", fmt.Sprintf("files %s · run %s", m.app.cfg.File.Default, m.app.cfg.Run.Default), "enter: cycle"
 	case "timeout":
 		return "run timeout", runTimeoutLabel(m.app.cfg.Run.TimeoutSeconds), "enter: cycle"
+	case "agents":
+		return "profiles", fmt.Sprintf("%d configured", len(m.app.cfg.Agents)), "enter: add (provider → model)"
+	case "spawn":
+		return "spawn approval", m.app.cfg.Spawn.Default, "enter: toggle ask/allow"
+	case "subexec":
+		v := "off"
+		if m.app.cfg.Spawn.Exec {
+			v = "on"
+		}
+		return "sub-agent shell", v, "enter: toggle (give sub-agents run)"
 	case "color":
 		return "color", colorLabel(m.accent), "enter: cycle"
 	case "channel":
@@ -117,6 +131,22 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		m.setColor("") // cycle accent
 	case "channel":
 		m.toggleChannel()
+	case "spawn": // toggle ask ⇄ allow
+		arg := "on" // → allow (spawn without asking)
+		if m.app.cfg.Spawn.Default == "allow" {
+			arg = "off" // → ask
+		}
+		m.app.permissionsSetSpawn(arg)
+	case "subexec": // toggle whether sub-agents get the run tool
+		arg := "on"
+		if m.app.cfg.Spawn.Exec {
+			arg = "off"
+		}
+		m.app.agentsExec(arg)
+	case "agents": // build a profile: prefill, then provider → model list → name
+		m.state = stIdle
+		m.input.SetValue("/agents add ")
+		m.input.CursorEnd()
 	case "model": // needs the live model list — hand off to /model
 		m.state = stIdle
 		return m.runCommand("/model")

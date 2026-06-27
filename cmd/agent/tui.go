@@ -592,6 +592,13 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 			m.push(m.renderUsage()...)
 		}
 		return m, nil
+	case "/sessions":
+		lines, switched := m.app.sessionsCommand(rest)
+		m.pushLines(lines)
+		if switched {
+			m.push(m.sessionRecap()...)
+		}
+		return m, nil
 	case "/login":
 		if err := m.app.reconfigure(); err != nil {
 			m.push(cErr.Render("reload failed: " + err.Error()))
@@ -1100,6 +1107,7 @@ var commandList = []cmdInfo{
 	{"/permissions", "relax approval for non-destructive file/shell actions"},
 	{"/color", "change the frame color (cycles if no name)"},
 	{"/rename", "rename the agent (saved in settings)"},
+	{"/sessions", "list / switch / delete saved sessions (per agent name)"},
 	{"/loop", "re-run a task on an interval: /loop 5m <task> (esc to stop)"},
 	{"/exit", "leave"},
 }
@@ -1200,6 +1208,12 @@ func (m *tuiModel) argCandidates(name string) []string {
 		return cands
 	case "/usage":
 		return []string{"clear", "purge", "retain"}
+	case "/sessions":
+		names := []string{"delete"}
+		for _, s := range m.app.listSessions() {
+			names = append(names, s.name)
+		}
+		return names
 	case "/color":
 		names := make([]string, 0, len(colorNames))
 		for n := range colorNames {

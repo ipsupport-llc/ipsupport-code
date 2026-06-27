@@ -255,6 +255,57 @@ func TestSessionsKeyedByName(t *testing.T) {
 	}
 }
 
+func TestSessionsListSwitchDelete(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())            // isolate SaveGlobal from the real ~/.config
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // (belt-and-suspenders)
+	cfg := config.Default()                  // default name "ipsupport-code"
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	// save a thread under the default name
+	a.ag.SetHistory([]llm.Message{llm.User("g0"), {Role: "assistant", Content: "a0"}})
+	a.saveSession()
+
+	// switch to a new name "alice" — adopts the name, fresh (empty) thread
+	lines, switched := a.sessionsCommand("alice")
+	if !switched || a.cfg.Name != "alice" {
+		t.Fatalf("switch: switched=%v name=%q lines=%v", switched, a.cfg.Name, lines)
+	}
+	if a.ag.SessionLen() != 0 {
+		t.Errorf("alice should start empty, got %d", a.ag.SessionLen())
+	}
+	a.ag.SetHistory([]llm.Message{llm.User("g1"), {Role: "assistant", Content: "a1"}})
+	a.saveSession()
+
+	// list shows both, alice active
+	list, _ := a.sessionsCommand("")
+	joined := strings.Join(list, "\n")
+	if !strings.Contains(joined, "alice") || !strings.Contains(joined, "ipsupport-code") {
+		t.Errorf("list missing a session:\n%s", joined)
+	}
+	if !strings.Contains(joined, "● alice") {
+		t.Errorf("alice should be marked active:\n%s", joined)
+	}
+
+	// switch back to the default — its thread restores
+	a.sessionsCommand("ipsupport-code")
+	if a.ag.SessionLen() != 2 || a.cfg.Name != "ipsupport-code" {
+		t.Errorf("switch-back: len=%d name=%q", a.ag.SessionLen(), a.cfg.Name)
+	}
+
+	// delete alice
+	if out := a.deleteSessionNamed("alice"); !strings.Contains(strings.Join(out, " "), "deleted") {
+		t.Errorf("delete alice: %v", out)
+	}
+	list2, _ := a.sessionsCommand("")
+	if strings.Contains(strings.Join(list2, "\n"), "alice") {
+		t.Errorf("alice should be gone:\n%s", strings.Join(list2, "\n"))
+	}
+}
+
 func TestRestoredSessionRendersRecap(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()

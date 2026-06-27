@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -533,6 +534,136 @@ func (a *app) saveSession() {
 	}
 }
 
+// sessionMeta describes one saved session for the /sessions list.
+type sessionMeta struct {
+	name   string
+	count  int
+	mod    time.Time
+	active bool
+}
+
+// readSessionMeta reads a session file's message count and mod time (0 on error).
+func readSessionMeta(path string) (count int, mod time.Time) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0, time.Time{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, time.Time{}
+	}
+	var h []llm.Message
+	if json.Unmarshal(data, &h) != nil {
+		return 0, time.Time{}
+	}
+	return len(h), fi.ModTime()
+}
+
+// listSessions returns every saved session in this workspace (the per-name files
+// plus the legacy one for the default name), most recently used first.
+func (a *app) listSessions() []sessionMeta {
+	active := slugName(a.cfg.Name)
+	seen := map[string]bool{}
+	var out []sessionMeta
+	dir := filepath.Join(a.workspace, ".agent", "sessions")
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		slug := strings.TrimSuffix(e.Name(), ".json")
+		count, mod := readSessionMeta(filepath.Join(dir, e.Name()))
+		if count == 0 {
+			continue
+		}
+		seen[slug] = true
+		out = append(out, sessionMeta{name: slug, count: count, mod: mod, active: slug == active})
+	}
+	if !seen["ipsupport-code"] { // legacy file counts as the default name
+		if count, mod := readSessionMeta(a.legacySessionPath()); count > 0 {
+			out = append(out, sessionMeta{name: "ipsupport-code", count: count, mod: mod, active: active == "ipsupport-code"})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].mod.After(out[j].mod) })
+	return out
+}
+
+// sessionsCommand handles /sessions: list (no arg), delete <name>, or switch to a
+// name (any other arg). Switching adopts that name (like /rename) and loads its
+// thread. Returns lines to show plus whether a switch happened (the TUI then
+// replays a recap).
+func (a *app) sessionsCommand(rest string) (lines []string, switched bool) {
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return a.listSessionsLines(), false
+	}
+	sub, arg := splitCommand(rest)
+	if sub == "delete" || sub == "rm" {
+		return a.deleteSessionNamed(arg), false
+	}
+	// otherwise the whole arg is the target session name to switch to
+	if err := a.switchSession(rest); err != nil {
+		return []string{"switch failed: " + err.Error()}, false
+	}
+	return []string{"switched to session " + a.cfg.Name}, true
+}
+
+func (a *app) listSessionsLines() []string {
+	ss := a.listSessions()
+	if len(ss) == 0 {
+		return []string{"no saved sessions yet — the current one saves after each task"}
+	}
+	out := []string{"saved sessions (● active) — /sessions <name> to switch · /sessions delete <name>:"}
+	for _, s := range ss {
+		mark := "  "
+		if s.active {
+			mark = "● "
+		}
+		out = append(out, fmt.Sprintf("  %s%-20s %d exchange(s) · %s", mark, s.name, s.count/2, humanizeAgo(s.mod)))
+	}
+	return out
+}
+
+// switchSession persists the current thread, adopts name as the agent's identity
+// (saved, like /rename), re-wires so the prompt reflects it, and loads that name's
+// thread (empty if it's a brand-new name).
+func (a *app) switchSession(name string) error {
+	a.saveSession()
+	a.cfg.Name = name
+	if err := config.SaveGlobal(name, a.cfg.LLM); err != nil {
+		return err
+	}
+	if err := a.wire(); err != nil { // new-name prompt; carries (old) history
+		return err
+	}
+	a.ag.Reset()
+	a.loadSession() // replace with the target name's thread
+	return nil
+}
+
+// deleteSessionNamed removes a named session's file (and the legacy file for the
+// default name). If it's the active thread, memory is cleared too.
+func (a *app) deleteSessionNamed(name string) []string {
+	if strings.TrimSpace(name) == "" {
+		return []string{"usage: /sessions delete <name>"}
+	}
+	slug := slugName(name)
+	removed := false
+	if os.Remove(filepath.Join(a.workspace, ".agent", "sessions", slug+".json")) == nil {
+		removed = true
+	}
+	if slug == "ipsupport-code" && os.Remove(a.legacySessionPath()) == nil {
+		removed = true
+	}
+	if !removed {
+		return []string{"no saved session named " + slug}
+	}
+	if slug == slugName(a.cfg.Name) && a.ag != nil {
+		a.ag.Reset()
+	}
+	return []string{"deleted session " + slug}
+}
+
 // maxFacts caps how many learned project facts we keep (most recent win).
 const maxFacts = 30
 
@@ -797,6 +928,11 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 			}
 		} else {
 			fmt.Print(a.usageText())
+		}
+	case "/sessions":
+		lines, _ := a.sessionsCommand(rest)
+		for _, l := range lines {
+			fmt.Println(l)
 		}
 	case "/login", "/init":
 		maybeInit(a.reader, true)
@@ -1371,6 +1507,7 @@ func helpText() string {
   /permissions     relax approval for non-destructive file/shell actions
   /color [name]    change the TUI frame color (cycles if no name)
   /rename <name>   rename the agent (saved in settings)
+  /sessions        list / switch / delete saved sessions (per agent name)
   /loop <ival> <task>  re-run a task on an interval (e.g. /loop 5m <task>, /loop 30s x10 <task>; esc stops)
   /help            this list
   /exit, /quit     leave

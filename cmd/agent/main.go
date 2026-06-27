@@ -198,6 +198,24 @@ func (a *app) reconfigure() error {
 	return nil
 }
 
+// autoCompactRatio is the fraction of the context window at which the session is
+// auto-compacted, leaving headroom for the next task.
+const autoCompactRatio = 0.75
+
+// autoCompactNeeded decides whether to fold the session into a summary: the last
+// prompt is past the threshold and there's enough history to be worth it. A zero
+// window disables it.
+func autoCompactNeeded(ctxTokens, window, sessionLen int) bool {
+	if window <= 0 || sessionLen < 4 {
+		return false
+	}
+	return ctxTokens >= int(float64(window)*autoCompactRatio)
+}
+
+func (a *app) shouldAutoCompact() bool {
+	return autoCompactNeeded(a.client.Context(), a.cfg.LLM.ContextWindow, a.ag.SessionLen())
+}
+
 // Session memory persists per workspace so "the prior context" survives a
 // restart. /new and /clear wipe it.
 func (a *app) sessionPath() string { return filepath.Join(a.workspace, ".agent", "session.json") }
@@ -319,6 +337,12 @@ func (a *app) runOne(ctx context.Context, goal string) {
 		fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
 	}
 	a.saveSession()
+	if a.shouldAutoCompact() {
+		if n, err := a.ag.Compact(ctx); err == nil && n > 0 {
+			a.saveSession()
+			fmt.Fprintf(os.Stderr, "(auto-compacted %d messages to free context)\n", n)
+		}
+	}
 }
 
 // runTaskStreaming is the TUI path: no printing — progress reaches the screen via
@@ -651,11 +675,12 @@ func maybeInit(reader *bufio.Reader, force bool) {
 	}
 	fmt.Println("Setup — configure your model connection (press Enter to keep current).")
 	l := config.LLM{
-		BaseURL:     ask(reader, "LM Studio server URL", def.LLM.BaseURL),
-		Model:       ask(reader, "Model name", def.LLM.Model),
-		Temperature: def.LLM.Temperature,
-		MaxSteps:    atoiOr(ask(reader, "Max steps per task", strconv.Itoa(def.LLM.MaxSteps)), def.LLM.MaxSteps),
-		APIKey:      ask(reader, "API key (blank for LM Studio)", def.LLM.APIKey),
+		BaseURL:       ask(reader, "LM Studio server URL", def.LLM.BaseURL),
+		Model:         ask(reader, "Model name", def.LLM.Model),
+		Temperature:   def.LLM.Temperature,
+		MaxSteps:      atoiOr(ask(reader, "Max steps per task", strconv.Itoa(def.LLM.MaxSteps)), def.LLM.MaxSteps),
+		ContextWindow: atoiOr(ask(reader, "Context window in tokens (0 = no auto-compact)", strconv.Itoa(def.LLM.ContextWindow)), def.LLM.ContextWindow),
+		APIKey:        ask(reader, "API key (blank for LM Studio)", def.LLM.APIKey),
 	}
 	if err := config.SaveGlobal(def.Name, l); err != nil { // preserve any custom name
 		slog.Warn("could not save config", "err", err)

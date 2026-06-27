@@ -243,6 +243,21 @@ func TestBridgeAbortDeniesBlockedApproval(t *testing.T) {
 	}
 }
 
+func TestAutoCompactNeeded(t *testing.T) {
+	if !autoCompactNeeded(6200, 8192, 4) {
+		t.Error("76% of the window with history should trigger compaction")
+	}
+	if autoCompactNeeded(4000, 8192, 4) {
+		t.Error("49% is well under the threshold")
+	}
+	if autoCompactNeeded(7000, 8192, 2) {
+		t.Error("too little history to bother compacting")
+	}
+	if autoCompactNeeded(7000, 0, 4) {
+		t.Error("a zero window disables auto-compact")
+	}
+}
+
 // The pipe-through-script smoke test can't reliably confirm quit semantics, so
 // verify the exit path directly: /exit must yield tea.Quit.
 func TestExitCommandQuits(t *testing.T) {

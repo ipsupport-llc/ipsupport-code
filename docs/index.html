@@ -116,7 +116,7 @@
 <div class="wrap">
 
   <header>
-    <div class="mark">local · private · self-learning</div>
+    <div class="mark">single static binary · zero dependencies · local-first</div>
     <h1><span class="star">✦</span> ipsupport-code</h1>
     <p class="tagline">A <b>self-learning</b> local coding agent for
        <a href="https://lmstudio.ai">LM Studio</a> — in a single static binary.</p>
@@ -134,10 +134,14 @@
     </div>
 
     <div class="install">
-      <code id="cmd"><span class="p">$</span> curl -fsSL https://raw.githubusercontent.com/ipsupport-llc/ipsupport-code/main/scripts/install.sh | sh</code>
+      <code><span class="p">$</span> curl -fsSL https://raw.githubusercontent.com/ipsupport-llc/ipsupport-code/main/scripts/install.sh | sh</code>
       <button onclick="copyCmd(this)">copy</button>
     </div>
-    <p class="install-note mono">macOS / Linux · auto-detects platform · verifies SHA-256 · installs to ~/.local/bin</p>
+    <div class="install">
+      <code><span class="p">PS&gt;</span> iex (irm https://ipsupport-llc.github.io/ipsupport-code/install.ps1)</code>
+      <button onclick="copyCmd(this)">copy</button>
+    </div>
+    <p class="install-note mono">macOS · Linux · Windows — one binary, <b>no Python, no runtime, no dependencies</b> · verifies SHA-256</p>
 
     <div class="cta">
       <a class="btn primary" href="https://github.com/ipsupport-llc/ipsupport-code">View on GitHub</a>
@@ -175,6 +179,7 @@
     <p class="lead">Built for <b>micro-tasks</b> on your own machine. It won't match a frontier model —
        it's a private, controllable agent that compounds what it learns.</p>
     <div class="grid">
+      <div class="card"><h3><span class="i">▪</span>Single static binary</h3><p>One executable, <span class="mono">CGO_ENABLED=0</span> — no Python, no Node, no runtime, no virtualenv to rot. Download, run, done. It updates itself in place.</p></div>
       <div class="card"><h3><span class="i">✦</span>Self-learning</h3><p>After each task it reflects and writes durable lessons and project facts to disk, then folds them into the next run. Tool errors are met with fixes it found before.</p></div>
       <div class="card"><h3><span class="i">⚙</span>Fat tools</h3><p>One tool per domain — <span class="mono">file · run · git · web · calc</span> — so the catalog stays tiny and small models route well. Native tool-calls only.</p></div>
       <div class="card"><h3><span class="i">∙</span>Your model, your machine</h3><p>LM Studio by default over its OpenAI-compatible server. Nothing leaves your box unless you point it at a cloud provider.</p></div>
@@ -234,7 +239,8 @@
 
 <script>
   function copyCmd(btn){
-    var cmd = document.getElementById('cmd').innerText.replace(/^\$\s*/,'');
+    var code = btn.parentElement.querySelector('code');
+    var cmd = code.innerText.replace(/^(PS&gt;|PS>|\$|>)\s*/,'');
     navigator.clipboard.writeText(cmd).then(function(){
       var old = btn.textContent; btn.textContent = 'copied ✓';
       setTimeout(function(){ btn.textContent = old; }, 1600);

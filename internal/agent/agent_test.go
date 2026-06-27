@@ -274,6 +274,66 @@ func TestParseArgsStringifiedParams(t *testing.T) {
 	}
 }
 
+func TestLooksLikeRefusal(t *testing.T) {
+	refusals := []string{
+		"Here are the files:\n```\ncode\n```",
+		"I don't have access to your files, copy them manually.",
+		"Как языковая модель, я не имею доступа к файловой системе.",
+	}
+	for _, s := range refusals {
+		if !looksLikeRefusal(s) {
+			t.Errorf("looksLikeRefusal(%q) = false, want true", s)
+		}
+	}
+	ok := []string{"Added a /health endpoint; tests pass.", "Done — wrote main.py and ran the tests."}
+	for _, s := range ok {
+		if looksLikeRefusal(s) {
+			t.Errorf("looksLikeRefusal(%q) = true, want false", s)
+		}
+	}
+}
+
+// A chat model that dodges an action task (pastes files / "I can't access your
+// filesystem") with no tool calls gets nudged once, then proceeds to use tools.
+func TestRunNudgesRefusalThenActs(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "I don't have access to your filesystem. Here are the files:\n```py\nx=1\n```"},
+		toolCallReply("c1", "calc", `{"action":"calculate","params":{"expression":"2+2"}}`),
+		{Role: "assistant", Content: "done — 4"},
+	}}
+	a := New(fake, reg, nil, nil, "", 6)
+	tr, err := a.Run(context.Background(), "edit the files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Final != "done — 4" {
+		t.Errorf("final = %q, want it to proceed past the refusal", tr.Final)
+	}
+	if len(toolObservation(tr.Messages)) != 1 {
+		t.Error("expected the tool to run after the refusal nudge")
+	}
+}
+
+// The refusal nudge fires at most once: a model that refuses twice has its second
+// refusal accepted as the final answer (no infinite loop).
+func TestRunAcceptsRefusalAfterOneNudge(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	refusal := llm.Message{Role: "assistant", Content: "As a language model I cannot modify files. Copy:\n```\nx\n```"}
+	fake := &scriptLLM{replies: []llm.Message{refusal, refusal}}
+	a := New(fake, reg, nil, nil, "", 6)
+	tr, err := a.Run(context.Background(), "edit the files")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(tr.Final, "cannot modify files") {
+		t.Errorf("final = %q, want the 2nd refusal accepted", tr.Final)
+	}
+	if tr.Steps != 2 {
+		t.Errorf("steps = %d, want 2 (refuse → nudge → refuse-accept)", tr.Steps)
+	}
+}
+
 func TestParseArgsNestedObject(t *testing.T) {
 	action, params := parseArgs(`{"action":"edit","params":{"path":"a","find":"x","replace":"y"}}`)
 	if action != "edit" || params["find"] != "x" || params["replace"] != "y" {

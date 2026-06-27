@@ -152,7 +152,8 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 
 	var tr Transcript
 	stuck, nudged := 0, false
-	acted := false // did the model call any tool this run?
+	acted := false         // did the model call any tool this run?
+	refusalNudged := false // already pushed back on a "can't edit / here are the files" dodge?
 	for step := 0; step < a.maxSteps; step++ {
 		tr.Steps = step + 1
 
@@ -173,6 +174,15 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		// (emitting "assistant" too would render the same text twice).
 		if len(assistant.ToolCalls) == 0 {
 			clean, suggest := splitSuggestion(assistant.Content)
+			// Refusal guard: a chat model answering an action task by pasting file
+			// contents or claiming it "can't access your files" — and doing nothing
+			// via tools this run. Push back once, hard, before accepting it.
+			if !a.planMode && !refusalNudged && !acted && looksLikeRefusal(clean) {
+				msgs = append(msgs, llm.User(refusalNudge))
+				a.emit("nudge", map[string]any{})
+				refusalNudged = true
+				continue
+			}
 			if strings.TrimSpace(clean) == "" {
 				// Blank final turn. If the model already did work via tools, say it
 				// finished (the changes/output are above); otherwise it produced
@@ -294,6 +304,36 @@ const stuckNudge = `Those tool calls keep failing the same way — stop repeatin
 
 // stuckSuggest is offered to the user (one tap) when even the nudge didn't help.
 const stuckSuggest = "take a different approach — outline the steps first"
+
+// refusalNudge is the one forceful push-back when a chat model dodges an action
+// task — pasting file contents or claiming it can't touch the filesystem —
+// instead of using its tools.
+const refusalNudge = `You changed nothing — you only described changes or pasted file contents. You are NOT a plain chat model here: you are an agent with working tools in THIS session — file (write/edit/append), run, git — that modify real files on disk, and the user has authorized them. Do not paste file contents, and never say you lack file access (it is false). Make every change now by calling the file tool (write or edit) for each file, then run anything relevant and report the real result.`
+
+// looksLikeRefusal reports whether a no-tool-call reply is a chat model dodging
+// the work — pasting file/code in a fence, or claiming it can't reach the
+// filesystem — rather than a real answer. Used only to push back once.
+func looksLikeRefusal(s string) bool {
+	if strings.Contains(s, "```") { // pasted file/code instead of writing it
+		return true
+	}
+	low := strings.ToLower(s)
+	for _, p := range refusalMarkers {
+		if strings.Contains(low, p) {
+			return true
+		}
+	}
+	return false
+}
+
+var refusalMarkers = []string{
+	"have access to your", "have direct access", "access to the file system",
+	"access to your file", "as a language model", "as an ai", "i'm unable to",
+	"i am unable to", "can't directly", "cannot directly", "can't modify files",
+	"cannot modify files", "provide you with the", "updated versions of",
+	"не имею доступа", "нет доступа к файл", "языковая модель", "не могу напрямую",
+	"скопируйте", "полные обновлённые версии", "не имею возможности",
+}
 
 // runToolCalls executes every call from one assistant turn, concurrently when
 // the model batched more than one, keeping results in the emitted order. It also

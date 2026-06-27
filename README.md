@@ -26,7 +26,16 @@ machine, with your own model, under a permission policy you control.
 
 ## Install
 
-**Download the archive** for your platform from the
+**One-liner** (macOS/Linux) — auto-detects your platform, verifies the SHA-256,
+and drops `./ipsupport-code` in the current directory:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/ipsupport-llc/ipsupport-code/main/scripts/install.sh | sh
+# newest stable release instead of nightly:
+curl -fsSL https://raw.githubusercontent.com/ipsupport-llc/ipsupport-code/main/scripts/install.sh | sh -s -- latest
+```
+
+**Or download the archive** for your platform from the
 [latest release](https://github.com/ipsupport-llc/ipsupport-code/releases/latest)
 (or the rolling [`nightly`](https://github.com/ipsupport-llc/ipsupport-code/releases/tag/nightly)):
 `darwin-arm64` (Apple Silicon), `darwin-amd64` (Intel Mac), `linux-amd64`,

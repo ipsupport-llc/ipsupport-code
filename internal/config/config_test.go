@@ -145,6 +145,34 @@ func TestResolveProvider(t *testing.T) {
 	}
 }
 
+func TestSaveGlobalPreservesOtherKeys(t *testing.T) {
+	isolate(t)
+	// stash providers (with a key) + a channel in the global file
+	if err := SaveProviders("openrouter", map[string]LLM{"openrouter": {APIKey: "sk-keep"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveChannel("nightly"); err != nil {
+		t.Fatal(err)
+	}
+	// a /rename or /model-on-local would call SaveGlobal — it must NOT wipe them
+	if err := SaveGlobal("bob", Default().LLM); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Name != "bob" {
+		t.Errorf("name = %q, want bob", cfg.Name)
+	}
+	if cfg.Providers["openrouter"].APIKey != "sk-keep" {
+		t.Errorf("provider key lost after SaveGlobal: %+v", cfg.Providers)
+	}
+	if cfg.Channel != "nightly" {
+		t.Errorf("channel lost after SaveGlobal: %q", cfg.Channel)
+	}
+}
+
 func TestSaveProvidersRoundTrip(t *testing.T) {
 	isolate(t)
 	if err := SaveProviders("openai", map[string]LLM{"openai": {APIKey: "sk-x", Model: "gpt-4o"}}); err != nil {

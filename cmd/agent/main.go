@@ -1598,8 +1598,12 @@ func (a *app) runShellLine(ctx context.Context, cmdline string) {
 }
 
 func splitCommand(line string) (cmd, rest string) {
-	cmd = strings.Fields(line)[0]
-	return cmd, strings.TrimSpace(strings.TrimPrefix(line, cmd))
+	f := strings.Fields(line)
+	if len(f) == 0 {
+		return "", ""
+	}
+	cmd = f[0]
+	return cmd, strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), cmd))
 }
 
 const loopUsage = "usage: /loop <interval> [xN] <task>   e.g. /loop 5m check the build   ·   /loop 30s x10 tail the log   (esc stops it)"

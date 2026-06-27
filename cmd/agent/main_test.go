@@ -27,6 +27,17 @@ func TestSplitCommand(t *testing.T) {
 	if cmd != "/loop" || rest != "3 do the thing" {
 		t.Errorf("splitCommand = %q,%q", cmd, rest)
 	}
+	// Empty/whitespace must not panic (regression: /usage and /ai key crashed).
+	for _, in := range []string{"", "   ", "\t"} {
+		if c, r := splitCommand(in); c != "" || r != "" {
+			t.Errorf("splitCommand(%q) = %q,%q, want empty", in, c, r)
+		}
+	}
+	// usageManage("") must show the report, not crash.
+	a := &app{cfg: config.Default()}
+	if _, handled := a.usageManage(""); handled {
+		t.Error("usageManage(\"\") should not be handled as a subcommand (no panic, shows report)")
+	}
 }
 
 func TestParseLoop(t *testing.T) {

@@ -223,14 +223,10 @@ func SaveGlobal(name string, l LLM) error {
 	if name == "" {
 		name = "ipsupport-code"
 	}
-	if err := os.MkdirAll(configHome(), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(map[string]any{"name": name, "llm": l}, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(GlobalPath(), data, 0o600) // may hold an API key
+	// Merge, don't overwrite: the global file also holds providers (with keys),
+	// channel, prices, agents, retention — clobbering them on a /model or /rename
+	// would silently lose the user's keys/config.
+	return mergeGlobalKeys(map[string]any{"name": name, "llm": l})
 }
 
 // SaveWorkspacePolicy persists the run/file permission policy to the workspace

@@ -264,6 +264,44 @@ func TestSessionsKeyedByName(t *testing.T) {
 	}
 }
 
+func TestNewSessionPreservesOld(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // newNamedSession(persist) writes the global config
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag.SetHistory([]llm.Message{llm.User("g0"), {Role: "assistant", Content: "a0"}})
+	a.saveSession() // ipsupport-code.json
+
+	auto := a.autoSessionName()
+	if auto != "ipsupport-code-2" {
+		t.Fatalf("autoSessionName = %q, want ipsupport-code-2", auto)
+	}
+	if err := a.newNamedSession(auto, false); err != nil { // bare /new (scratch, no persist)
+		t.Fatal(err)
+	}
+	if a.ag.SessionLen() != 0 {
+		t.Errorf("new session should start empty, got %d", a.ag.SessionLen())
+	}
+	a.ag.SetHistory([]llm.Message{llm.User("g1")})
+	a.saveSession()
+
+	names := map[string]bool{}
+	for _, s := range a.listSessions() {
+		names[s.name] = true
+	}
+	if !names["ipsupport-code"] || !names["ipsupport-code-2"] {
+		t.Errorf("both sessions should exist, got %v", names)
+	}
+	if loaded, _ := config.Load(cfg.Workspace); loaded.Name == "ipsupport-code-2" {
+		t.Errorf("a bare /new must not persist the auto name as the default identity")
+	}
+}
+
 func TestSessionsListSwitchDelete(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())            // isolate SaveGlobal from the real ~/.config
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // (belt-and-suspenders)

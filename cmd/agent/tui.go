@@ -204,8 +204,12 @@ func (m *tuiModel) sessionRecap() []string {
 func (m *tuiModel) chooseActivate() (tea.Model, tea.Cmd) {
 	m.state = stIdle
 	if m.chooseCursor >= len(m.chooseRows) { // the "start new" row
+		// Don't restore anything; take a fresh auto-named thread so we don't save
+		// the empty startup state over an existing session. Don't persist the name.
+		m.app.cfg.Name = m.app.autoSessionName()
 		m.app.ag.Reset()
-		m.push(cDim.Render("  — new session —"))
+		m.app.ag.SetSystem(m.app.systemPrompt())
+		m.push(cDim.Render("  — new session: " + m.app.cfg.Name + " —"))
 		return m, nil
 	}
 	name := m.chooseRows[m.chooseCursor].name
@@ -712,26 +716,29 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		}
 		m.push(cDim.Render("config reloaded from " + config.GlobalPath() + " — edit it or run `ipsupport-code -init` to change the connection"))
 		return m, m.detectWindowCmd()
-	case "/new", "/reset":
-		if name := strings.TrimSpace(rest); name != "" { // /new <name> — fresh named session, old stays in /sessions
-			if err := m.app.newNamedSession(name); err != nil {
-				m.push(cErr.Render("could not start session: " + err.Error()))
-				return m, nil
-			}
-			m.push(cDim.Render("started a new session “" + m.app.cfg.Name + "” — the previous one is in /sessions"))
+	case "/new": // branch to a NEW session; the current one stays in /sessions
+		name, persist := strings.TrimSpace(rest), true
+		if name == "" {
+			name, persist = m.app.autoSessionName(), false // scratch thread; don't drift the default name
+		}
+		if err := m.app.newNamedSession(name, persist); err != nil {
+			m.push(cErr.Render("could not start session: " + err.Error()))
 			return m, nil
 		}
-		m.app.ag.Reset()
-		m.app.saveSession()
-		m.push(cDim.Render("session cleared"))
-	case "/clear":
+		m.history = m.history[:0]
+		if m.ready {
+			m.vp.SetContent("")
+		}
+		m.push(cDim.Render("started a new session “" + m.app.cfg.Name + "” — the previous one is in /sessions"))
+		return m, m.detectWindowCmd()
+	case "/clear", "/reset": // wipe THIS thread + the screen
 		m.app.ag.Reset()
 		m.app.saveSession()
 		m.history = m.history[:0]
 		if m.ready {
 			m.vp.SetContent("")
 		}
-		m.push(cDim.Render("cleared — fresh screen and session"))
+		m.push(cDim.Render("cleared — fresh screen, same session"))
 	case "/compact":
 		return m, m.startCompact(false)
 	case "/plan":
@@ -1222,8 +1229,8 @@ var commandList = []cmdInfo{
 	{"/status", "config, knowledge base, trace paths"},
 	{"/usage", "token history (day/week/month, by model); clear · purge <days> · retain <days>"},
 	{"/login", "(re)configure server URL / model / key, then reload"},
-	{"/new", "clear the session conversation memory"},
-	{"/clear", "fresh start — clear the screen and the session"},
+	{"/new", "start a NEW session (old stays in /sessions); /new <name> to name it"},
+	{"/clear", "wipe this session's context + the screen (same session)"},
 	{"/compact", "summarize the session so far to free up context"},
 	{"/plan", "plan mode — propose a plan, change nothing"},
 	{"/auto", "auto mode — execute the task (default)"},

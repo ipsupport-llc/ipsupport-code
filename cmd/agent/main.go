@@ -638,18 +638,37 @@ func (a *app) loadSession() {
 }
 
 // newNamedSession saves the current thread (so it stays returnable via /sessions),
-// adopts name as the agent's identity, re-wires, and starts a FRESH empty thread.
-func (a *app) newNamedSession(name string) error {
+// adopts name for this run, re-wires, and starts a FRESH empty thread. persist
+// writes name as the default identity (explicit /new <name>); a bare /new's
+// auto-named scratch thread doesn't persist, so the default doesn't drift.
+func (a *app) newNamedSession(name string, persist bool) error {
 	a.saveSession()
 	a.cfg.Name = name
-	if err := config.SaveGlobal(name, a.cfg.LLM); err != nil {
-		return err
+	if persist {
+		if err := config.SaveGlobal(name, a.cfg.LLM); err != nil {
+			return err
+		}
 	}
 	if err := a.wire(); err != nil {
 		return err
 	}
 	a.ag.Reset() // fresh — don't load name's prior thread
 	return nil
+}
+
+// autoSessionName picks the next free "<base>-N" so a bare /new gets a fresh
+// scratch thread without clobbering an existing one.
+func (a *app) autoSessionName() string {
+	base := slugName(a.cfg.Name)
+	taken := map[string]bool{}
+	for _, s := range a.listSessions() {
+		taken[s.name] = true
+	}
+	for i := 2; ; i++ {
+		if n := fmt.Sprintf("%s-%d", base, i); !taken[n] {
+			return n
+		}
+	}
 }
 
 // humanizeAgo renders how long ago t was, compactly.
@@ -1087,15 +1106,17 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		} else {
 			fmt.Println("config reloaded.")
 		}
-	case "/new", "/reset", "/clear":
-		if name := strings.TrimSpace(rest); name != "" && cmd != "/clear" {
-			if err := a.newNamedSession(name); err != nil {
-				fmt.Println("could not start session:", err)
-			} else {
-				fmt.Printf("started a new session %q — the previous one is in /sessions\n", a.cfg.Name)
-			}
-			break
+	case "/new": // branch to a NEW session; the current one stays in /sessions
+		name, persist := strings.TrimSpace(rest), true
+		if name == "" {
+			name, persist = a.autoSessionName(), false
 		}
+		if err := a.newNamedSession(name, persist); err != nil {
+			fmt.Println("could not start session:", err)
+		} else {
+			fmt.Printf("started a new session %q — the previous one is in /sessions\n", a.cfg.Name)
+		}
+	case "/reset", "/clear": // wipe THIS thread
 		a.ag.Reset()
 		a.saveSession()
 		fmt.Println("session cleared.")
@@ -1652,8 +1673,8 @@ func helpText() string {
   /status          show config, knowledge base, and trace paths
   /usage           session counters + token usage
   /login           (re)configure the server URL / model / key, then reload
-  /new             clear the session conversation memory
-  /clear           fresh start — clear the screen and the session
+  /new [name]      start a NEW session (the old one stays in /sessions)
+  /clear           wipe this session's context (same session)
   /compact         summarize the session so far to free up context
   /plan, /auto     plan mode (propose only) vs auto mode (execute)
   /ai [name]       switch AI provider (local|openai|grok|groq|openrouter); /ai key <name> <tok>

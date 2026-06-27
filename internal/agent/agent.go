@@ -406,25 +406,52 @@ func (a *Agent) emit(kind string, fields map[string]any) {
 	}
 }
 
-// parseArgs decodes a tool-call argument string into (action, params). It
-// tolerates models that put per-action fields at the top level instead of inside
-// "params".
+// parseArgs decodes a tool-call argument string into (action, params), tolerating
+// the three shapes weak models emit: params as a nested object, params as a
+// JSON-encoded STRING (double-encoded — a very common mistake), or the per-action
+// fields flattened at the top level. Action may live at the top level or inside
+// a stringified params blob.
 func parseArgs(raw string) (string, map[string]any) {
-	var m map[string]any
-	if err := json.Unmarshal([]byte(strings.TrimSpace(raw)), &m); err != nil || m == nil {
+	m := decodeObj(raw)
+	if m == nil {
 		return "", map[string]any{}
 	}
 	action, _ := m["action"].(string)
-	if p, ok := m["params"].(map[string]any); ok {
+
+	switch p := m["params"].(type) {
+	case map[string]any:
+		if a, ok := p["action"].(string); ok && action == "" {
+			action = a
+		}
+		delete(p, "action")
 		return action, p
+	case string: // params double-encoded as a JSON string — decode it
+		if inner := decodeObj(p); inner != nil {
+			if a, ok := inner["action"].(string); ok && action == "" {
+				action = a
+			}
+			delete(inner, "action")
+			return action, inner
+		}
 	}
+
+	// Flattened: everything except action/params is a param.
 	params := map[string]any{}
 	for k, v := range m {
-		if k != "action" {
+		if k != "action" && k != "params" {
 			params[k] = v
 		}
 	}
 	return action, params
+}
+
+// decodeObj unmarshals s into a JSON object, or nil if it isn't one.
+func decodeObj(s string) map[string]any {
+	var m map[string]any
+	if json.Unmarshal([]byte(strings.TrimSpace(s)), &m) != nil {
+		return nil
+	}
+	return m
 }
 
 func lastAssistantContent(msgs []llm.Message) string {

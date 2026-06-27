@@ -255,6 +255,32 @@ func TestParseArgsFoldsTopLevel(t *testing.T) {
 	}
 }
 
+func TestParseArgsStringifiedParams(t *testing.T) {
+	// The most common malformation: params double-encoded as a JSON string.
+	action, params := parseArgs(`{"action":"write","params":"{\"path\":\"main.py\",\"content\":\"x\"}"}`)
+	if action != "write" {
+		t.Errorf("action = %q, want write", action)
+	}
+	if params["path"] != "main.py" || params["content"] != "x" {
+		t.Errorf("params = %v, want decoded path+content", params)
+	}
+	// Action nested inside the stringified blob, none at top level.
+	action, params = parseArgs(`{"params":"{\"action\":\"write\",\"path\":\"a.txt\",\"content\":\"hi\"}"}`)
+	if action != "write" || params["path"] != "a.txt" {
+		t.Errorf("nested-action: action=%q params=%v", action, params)
+	}
+	if _, leaked := params["action"]; leaked {
+		t.Error("action leaked into decoded params")
+	}
+}
+
+func TestParseArgsNestedObject(t *testing.T) {
+	action, params := parseArgs(`{"action":"edit","params":{"path":"a","find":"x","replace":"y"}}`)
+	if action != "edit" || params["find"] != "x" || params["replace"] != "y" {
+		t.Errorf("nested object: action=%q params=%v", action, params)
+	}
+}
+
 func TestRunConcurrentToolCallsStayOrdered(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
 	twoCalls := llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{

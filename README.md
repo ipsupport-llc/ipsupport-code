@@ -5,6 +5,8 @@
 [![license](https://img.shields.io/github/license/ipsupport-llc/ipsupport-code)](LICENSE)
 [![go](https://img.shields.io/github/go-mod/go-version/ipsupport-llc/ipsupport-code)](go.mod)
 
+**Website: [ipsupport-llc.github.io/ipsupport-code](https://ipsupport-llc.github.io/ipsupport-code/)**
+
 A small **self-learning local coding agent** for [LM Studio](https://lmstudio.ai),
 in a single static binary. It drives a local model through a reason → act →
 observe loop over a handful of fat tools (`file`, `run`, `git`, `web`, `calc`),

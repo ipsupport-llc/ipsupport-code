@@ -69,9 +69,10 @@ type OpenAIClient struct {
 	// forever. Set once at construction; tests shorten it before use.
 	idle time.Duration
 
-	mu       sync.Mutex
-	promptTk int
-	complTk  int
+	mu           sync.Mutex
+	promptTk     int
+	complTk      int
+	lastPromptTk int // prompt size of the most recent request (context fullness)
 }
 
 // NewOpenAIClient builds a client from LLM config (LM Studio by default). The
@@ -308,6 +309,9 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func()) (Message, error) {
 			c.mu.Lock()
 			c.promptTk += ch.Usage.PromptTokens
 			c.complTk += ch.Usage.CompletionTokens - reqCompl
+			if ch.Usage.PromptTokens > 0 {
+				c.lastPromptTk = ch.Usage.PromptTokens
+			}
 			c.mu.Unlock()
 		}
 	}
@@ -346,6 +350,9 @@ func (c *OpenAIClient) parseJSON(r io.Reader) (Message, error) {
 	c.mu.Lock()
 	c.promptTk += out.Usage.PromptTokens
 	c.complTk += out.Usage.CompletionTokens
+	if out.Usage.PromptTokens > 0 {
+		c.lastPromptTk = out.Usage.PromptTokens
+	}
 	c.mu.Unlock()
 	return fromWire(out.Choices[0].Message), nil
 }
@@ -391,6 +398,14 @@ func (c *OpenAIClient) SeedUsage(prompt, completion int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.promptTk, c.complTk = prompt, completion
+}
+
+// Context returns the prompt size of the most recent request — a proxy for how
+// full the model's context window is right now.
+func (c *OpenAIClient) Context() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastPromptTk
 }
 
 func toWire(m Message) wireMessage {

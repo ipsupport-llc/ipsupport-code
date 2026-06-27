@@ -1,0 +1,38 @@
+name: nightly
+
+# A rolling pre-release built from main every day (and on demand). The `nightly`
+# tag/release is replaced each run, so its assets always track the latest main.
+on:
+  schedule:
+    - cron: '0 6 * * *' # 06:00 UTC daily
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  nightly:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: tests (race)
+        run: make race
+      - name: build
+        run: make release VERSION="nightly-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
+      - name: checksums
+        run: cd dist && sha256sum ipsupport-code-* > checksums.txt
+      - name: publish rolling nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
+          gh release create nightly dist/* \
+            --prerelease \
+            --title "Nightly build" \
+            --notes "Automated build from main — commit $(git rev-parse --short HEAD), $(date -u +%Y-%m-%d). Pre-release; not a stable version."

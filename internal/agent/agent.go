@@ -301,10 +301,13 @@ func splitSuggestion(text string) (clean, suggestion string) {
 	trimmed := strings.TrimRight(text, " \n")
 	nl := strings.LastIndexByte(trimmed, '\n') // -1 when single line
 	last := strings.TrimSpace(trimmed[nl+1:])
-	if !strings.HasPrefix(strings.ToUpper(last), "NEXT:") {
+	// Strip leading markdown/bullet decoration so "**NEXT:**", "- NEXT:", "› NEXT:"
+	// are recognized too — otherwise the decorated line leaks into the answer.
+	bare := strings.TrimLeft(last, "*_~#>-•·› \t")
+	if !strings.HasPrefix(strings.ToUpper(bare), "NEXT:") {
 		return text, ""
 	}
-	suggestion = strings.TrimSpace(strings.Trim(last[len("NEXT:"):], " \"'`"))
+	suggestion = strings.TrimSpace(strings.Trim(bare[len("NEXT:"):], " \t\"'`*_~"))
 	// Models sometimes echo the placeholder shape "NEXT: <do the thing>"; unwrap a
 	// fully-bracketed suggestion so it doesn't read as an unfilled template.
 	if strings.HasPrefix(suggestion, "<") && strings.HasSuffix(suggestion, ">") {

@@ -239,6 +239,17 @@ func TestSplitSuggestion(t *testing.T) {
 	if c, s := splitSuggestion(mid); c != mid || s != "" {
 		t.Errorf("mid-answer NEXT wrongly peeled: clean=%q sug=%q", c, s)
 	}
+	// Markdown/bullet-decorated NEXT must still be peeled (the reported bug).
+	for _, in := range []string{
+		"Done.\n**NEXT:** add a test",
+		"Done.\n- NEXT: add a test",
+		"Done.\n**NEXT: add a test**",
+	} {
+		c, s := splitSuggestion(in)
+		if c != "Done." || s != "add a test" {
+			t.Errorf("decorated NEXT %q → clean=%q sug=%q", in, c, s)
+		}
+	}
 }
 
 func TestParseArgsFoldsTopLevel(t *testing.T) {

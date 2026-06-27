@@ -367,6 +367,28 @@ func TestRunStopsOnRepeatedIdenticalCalls(t *testing.T) {
 	}
 }
 
+func TestUnwrapEnvelope(t *testing.T) {
+	// nested content.text (the reported leak)
+	if got := unwrapEnvelope(`{"role":"assistant","content":{"text":"hello there"}}`); got != "hello there" {
+		t.Errorf("nested = %q, want 'hello there'", got)
+	}
+	// content as a plain string
+	if got := unwrapEnvelope(`{"role":"assistant","content":"hi"}`); got != "hi" {
+		t.Errorf("string content = %q, want 'hi'", got)
+	}
+	// a normal answer is untouched, even one that contains JSON
+	for _, s := range []string{
+		"Here is the plan: do X then Y.",
+		"```json\n{\"role\":\"assistant\"}\n```", // a JSON code block in prose
+		`{"role":"user","content":"x"}`,          // not an assistant envelope
+		`{"some":"object","without":"role"}`,     // no role
+	} {
+		if got := unwrapEnvelope(s); got != s {
+			t.Errorf("unwrapEnvelope(%q) = %q, want unchanged", s, got)
+		}
+	}
+}
+
 func TestParseArgsNestedObject(t *testing.T) {
 	action, params := parseArgs(`{"action":"edit","params":{"path":"a","find":"x","replace":"y"}}`)
 	if action != "edit" || params["find"] != "x" || params["replace"] != "y" {

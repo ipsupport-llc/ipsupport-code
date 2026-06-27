@@ -169,6 +169,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		slog.Debug("model turn", "step", step+1,
 			"tool_calls", toolCallNames(assistant.ToolCalls),
 			"content", clip(strings.TrimSpace(assistant.Content), 240))
+		assistant.Content = unwrapEnvelope(assistant.Content) // salvage envelope-as-content leaks
 		msgs = append(msgs, assistant)
 
 		// A reply with no tool calls IS the final answer — emit only "final"
@@ -508,6 +509,55 @@ func parseArgs(raw string) (string, map[string]any) {
 		}
 	}
 	return action, params
+}
+
+// unwrapEnvelope salvages answers from models that emit their whole chat-message
+// envelope as the content — e.g. {"role":"assistant","content":{"text":"…"}} or
+// {"role":"assistant","content":"…"} — returning just the inner text. It only
+// fires when the content IS exactly such an object (role=="assistant" + a
+// content/text field), so a normal answer (even one containing JSON) is untouched.
+func unwrapEnvelope(s string) string {
+	t := strings.TrimSpace(s)
+	if !strings.HasPrefix(t, "{") || !strings.HasSuffix(t, "}") {
+		return s
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal([]byte(t), &m) != nil {
+		return s
+	}
+	var role string
+	if json.Unmarshal(m["role"], &role) != nil || role != "assistant" {
+		return s
+	}
+	if inner := envelopeText(m["content"]); inner != "" {
+		return inner
+	}
+	if inner := envelopeText(m["text"]); inner != "" {
+		return inner
+	}
+	return s
+}
+
+// envelopeText pulls a string out of a raw value that is either a JSON string or
+// an object with a "text"/"content" string field.
+func envelopeText(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(raw, &obj) != nil {
+		return ""
+	}
+	for _, k := range []string{"text", "content"} {
+		if json.Unmarshal(obj[k], &s) == nil && s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // decodeObj unmarshals s into a JSON object, or nil if it isn't one.

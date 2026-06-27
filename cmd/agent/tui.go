@@ -219,6 +219,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if len(m.queued) > 0 { // run the next type-ahead
 			next := m.queued[0]
 			m.queued = m.queued[1:]
+			m.syncViewport() // it left the pinned queue
 			m.push(cYou.Render("❯ ") + next)
 			return m, m.runGoals(1, next)
 		}
@@ -330,7 +331,7 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m.commandWhileBusy(line)
 			}
 			m.queued = append(m.queued, line) // type-ahead: run after the task
-			m.push(cDim.Render("queued ❯ ") + line)
+			m.syncViewport()                  // show it pinned above the input
 			return m, nil
 		case "up":
 			// Changed your mind about a queued message? With an empty input, Up
@@ -340,7 +341,7 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.queued = m.queued[:len(m.queued)-1]
 				m.input.SetValue(last)
 				m.input.CursorEnd()
-				m.push(cDim.Render("  ↑ editing queued — Enter re-queues, clear to drop"))
+				m.syncViewport() // the pinned queue shrank
 				return m, nil
 			}
 			fallthrough
@@ -522,7 +523,7 @@ func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.queued = append(m.queued, rest)
-		m.push(cDim.Render("queued ❯ ") + rest)
+		m.syncViewport()
 		return m, nil
 	default:
 		m.push(cDim.Render("busy — " + cmd + " will run once the current task finishes"))
@@ -650,14 +651,10 @@ func (m *tuiModel) View() string {
 	}
 
 	frame := lipgloss.NewStyle().Foreground(m.accent)
-	return strings.Join([]string{
-		m.vp.View(),
-		status,
-		m.topRule(frame),
-		m.input.View(),
-		frame.Render(strings.Repeat("─", m.width)),
-		bottom,
-	}, "\n")
+	parts := []string{m.vp.View(), status}
+	parts = append(parts, m.queuedView()...) // pinned just above the input
+	parts = append(parts, m.topRule(frame), m.input.View(), frame.Render(strings.Repeat("─", m.width)), bottom)
+	return strings.Join(parts, "\n")
 }
 
 // approvePrompt renders the Yes/No selector shown while answering an approval.
@@ -715,10 +712,45 @@ func (m *tuiModel) setColor(arg string) {
 }
 
 func (m *tuiModel) viewportHeight() int {
-	if h := m.height - chromeRows - 1; h > 0 { // -1: status row sits above the rule
+	// The pinned queue region (if any) eats into the log height so nothing
+	// overflows the screen.
+	if h := m.height - chromeRows - 1 - len(m.queuedView()); h > 0 {
 		return h
 	}
 	return 1
+}
+
+// queuedView renders the type-ahead queue pinned just above the input, so
+// waiting messages stay visible (and ↑-editable) instead of scrolling away in
+// the log. Empty when nothing is queued.
+func (m *tuiModel) queuedView() []string {
+	if len(m.queued) == 0 {
+		return nil
+	}
+	const max = 4
+	out := []string{cDim.Render("  queued — runs after this · ↑ to edit or drop the last:")}
+	for i, q := range m.queued {
+		if i == max {
+			out = append(out, cDim.Render(fmt.Sprintf("  … +%d more", len(m.queued)-max)))
+			break
+		}
+		out = append(out, cYou.Render("  ⟳ ")+q)
+	}
+	return out
+}
+
+// syncViewport re-fits the log to the current size (the queue region changed how
+// much room it has) and re-renders, keeping the bottom pinned if we were there.
+func (m *tuiModel) syncViewport() {
+	if !m.ready {
+		return
+	}
+	atBottom := m.vp.AtBottom()
+	m.vp.Height = m.viewportHeight()
+	m.vp.SetContent(m.renderContent())
+	if atBottom {
+		m.vp.GotoBottom()
+	}
 }
 
 // push appends styled lines to the log, auto-scrolling to the bottom only if the

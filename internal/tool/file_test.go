@@ -80,6 +80,24 @@ func TestFileSearch(t *testing.T) {
 	}
 }
 
+func TestFileSearchSkipsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt") // outside the jail
+	if err := os.WriteFile(outside, []byte("TOPSECRET_TOKEN\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "link.txt")); err != nil {
+		t.Skipf("symlinks unsupported here: %v", err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+	r := tl.Call(context.Background(), "search", map[string]any{"query": "TOPSECRET_TOKEN"})
+	// A real hit would be a "link.txt:1: …" line; the no-match message echoes the
+	// query, so assert the symlink simply wasn't matched.
+	if strings.Contains(r.Content, "link.txt") {
+		t.Errorf("search followed a symlink out of the jail:\n%s", r.Content)
+	}
+}
+
 func TestFileJailEscape(t *testing.T) {
 	tl := fileToolFor(t, t.TempDir(), "allow", yes())
 	r := tl.Call(context.Background(), "write", map[string]any{"path": "../evil.txt", "content": "x"})

@@ -98,6 +98,9 @@ func (f *fileTool) search(_ context.Context, a Args) Result {
 			}
 			return nil
 		}
+		if d.Type()&fs.ModeSymlink != 0 { // don't follow symlinks — they can point out of the jail
+			return nil
+		}
 		if info, e := d.Info(); e != nil || info.Size() > 1<<20 { // skip files > 1 MiB
 			return nil
 		}

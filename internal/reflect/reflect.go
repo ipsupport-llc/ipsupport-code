@@ -139,7 +139,11 @@ func parseLessons(content string) Lessons {
 				out.Facts = append(out.Facts, s)
 			}
 		}
-		return out // first candidate that parses as the object wins
+		// Keep scanning past a decoy/empty object (e.g. a format-example `{}` the
+		// model emits before the real one) — only a candidate with actual content wins.
+		if len(out.Pitfalls) > 0 || len(out.Facts) > 0 {
+			return out
+		}
 	}
 	return Lessons{}
 }

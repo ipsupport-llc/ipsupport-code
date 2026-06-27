@@ -245,6 +245,11 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bo
 	case resp.StatusCode >= 500:
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		return Message{}, fmt.Errorf("llm server error (http %d)", resp.StatusCode), true
+	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusRequestTimeout:
+		// Rate-limit / request-timeout is transient — back off and retry rather
+		// than aborting the task (the common failure on hosted providers).
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return Message{}, fmt.Errorf("llm rate-limited (http %d)", resp.StatusCode), true
 	case resp.StatusCode >= 400:
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return Message{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, oneLine(string(data))), false

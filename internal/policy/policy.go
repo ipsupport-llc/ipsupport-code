@@ -72,17 +72,78 @@ func New(c config.Config) (*Engine, error) {
 	return e, nil
 }
 
-// Run decides whether a shell command may execute. Deny (matched anywhere) wins
-// over allow (whole-command); an unmatched command falls through to the default.
+// shellOps splits a command on the operators that chain one command into the
+// next (&&, ||, ;, |, newline). A separator inside quotes only over-splits, which
+// makes allow-matching MORE cautious (more segments to satisfy) — safe by design.
+var shellOps = regexp.MustCompile(`&&|\|\||[;|\n]`)
+
+// Run decides whether a shell command may execute:
+//   - the hard floor (dangerous base exe / rm -r…, plus configured deny globs) → Deny;
+//   - else EVERY chained segment must match an allow glob → Allow (so an allowed
+//     prefix like "git *" can't smuggle a second command after && / |);
+//   - else the default.
 func (e *Engine) Run(command string) Decision {
 	cmd := normWS(command)
-	if anyMatch(e.deny, cmd) {
+	segs := shellOps.Split(cmd, -1)
+	for _, s := range segs {
+		if dangerousSegment(strings.TrimSpace(s)) {
+			return Deny
+		}
+	}
+	if anyMatch(e.deny, cmd) { // configured deny globs + the glob floor, matched anywhere
 		return Deny
 	}
-	if anyMatch(e.allow, cmd) {
+	if e.allowsAll(cmd, segs) {
 		return Allow
 	}
 	return parseDefault(e.runDefault)
+}
+
+// allowsAll reports whether every chained segment matches an allow glob. Command
+// substitution ($()/backticks/${}) is never auto-allowed — it hides a subcommand
+// an allow glob can't see.
+func (e *Engine) allowsAll(cmd string, segs []string) bool {
+	if len(e.allow) == 0 {
+		return false
+	}
+	if strings.Contains(cmd, "$(") || strings.Contains(cmd, "`") || strings.Contains(cmd, "${") {
+		return false
+	}
+	matchedAny := false
+	for _, s := range segs {
+		if s = strings.TrimSpace(s); s == "" {
+			continue
+		}
+		if !anyMatch(e.allow, s) {
+			return false
+		}
+		matchedAny = true
+	}
+	return matchedAny
+}
+
+// dangerousSegment is the argv-aware hard floor: base executables unsafe whatever
+// the flags, and rm with a recursive flag (reordering-proof, unlike a glob). It is
+// denied even under an allow glob, and can't be turned off by config.
+func dangerousSegment(seg string) bool {
+	fields := strings.Fields(seg)
+	if len(fields) == 0 {
+		return false
+	}
+	switch filepath.Base(fields[0]) {
+	case "sudo", "doas", "mkfs", "dd", "shutdown", "reboot", "halt", "poweroff", "init":
+		return true
+	case "rm":
+		for _, a := range fields[1:] {
+			if a == "--recursive" {
+				return true
+			}
+			if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && strings.ContainsAny(a, "rR") {
+				return true // -r, -R, -rf, -fr, -Rf, ...
+			}
+		}
+	}
+	return false
 }
 
 // Write decides whether a file may be written: jail first (escape is an error),

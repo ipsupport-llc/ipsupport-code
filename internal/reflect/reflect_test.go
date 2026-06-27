@@ -73,6 +73,20 @@ func TestReflectFactsOnly(t *testing.T) {
 	}
 }
 
+func TestReflectSkipsDecoyObject(t *testing.T) {
+	// A model that echoes a format example (empty object) before the real lessons
+	// must not lose the real ones to the decoy.
+	reply := "Format reminder: {\"pitfalls\": [], \"facts\": []}\nHere is what I learned:\n" +
+		`{"pitfalls":[],"facts":["build with: go build ./..."]}`
+	l, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if len(l.Facts) != 1 || l.Facts[0] != "build with: go build ./..." {
+		t.Errorf("decoy object won instead of the real lessons: %+v", l)
+	}
+}
+
 func TestReflectNoJSONIsEmpty(t *testing.T) {
 	l, err := New(fixedLLM{reply: "I see nothing durable to learn here."}).
 		Reflect(context.Background(), sampleTranscript())

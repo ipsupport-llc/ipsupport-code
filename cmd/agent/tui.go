@@ -95,6 +95,11 @@ type updateDoneMsg struct{ text string } // /update result
 type shellDoneMsg struct{}               // returned from a drop-to-shell
 type shellCmdMsg struct{ out string }    // output of a one-off !cmd
 type windowMsg struct{ tokens int }      // re-detected context window
+type modelsMsg struct {                  // /model listing result
+	name, current string
+	ids           []string
+	err           error
+}
 
 // newTUIModel installs the UI bridge as the agent's tracer + approver, wires the
 // stack, and builds the model. Split out from runTUI so tests can drive it.
@@ -120,7 +125,8 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 		name = "ipsupport-code"
 	}
 	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: lipgloss.Color("13")}
-	m.history = bannerLines(name, version, a.cfg.LLM.Model, a.workspace, a.cfg.LLM.ContextWindow, m.accent)
+	act := a.activeLLM()
+	m.history = bannerLines(name, version, act.Model, a.workspace, act.ContextWindow, m.accent)
 	return m, nil
 }
 
@@ -316,6 +322,21 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.app.windowDetected = true
 		}
 		return m, nil
+
+	case modelsMsg:
+		m.state = stIdle
+		if msg.err != nil {
+			m.push(cErr.Render("couldn't list models: " + msg.err.Error()))
+		} else {
+			m.push(cDim.Render(fmt.Sprintf("  models on %s (current %s) — /model <name>:", msg.name, msg.current)))
+			for _, id := range msg.ids {
+				m.push(cDim.Render("    " + id))
+			}
+			if len(msg.ids) == 0 {
+				m.push(cDim.Render("    (none reported)"))
+			}
+		}
+		return m, m.input.Focus()
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -530,6 +551,28 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.push(cDim.Render(m.app.setMode(false)))
 	case "/update":
 		return m, m.startUpdate(strings.TrimSpace(rest))
+	case "/ai":
+		m.pushLines(m.app.aiCommand(rest))
+		return m, nil
+	case "/config":
+		m.pushLines(m.app.configOverview())
+		return m, nil
+	case "/model":
+		if r := strings.TrimSpace(rest); r != "" {
+			m.pushLines(m.app.setModel(r))
+			return m, nil
+		}
+		act, name := m.app.activeLLM(), m.app.providerName()
+		m.state = stRunning
+		m.taskStart = time.Now()
+		m.push(cDim.Render("  listing models on " + name + "…"))
+		ctx := m.ctx
+		return m, func() tea.Msg {
+			c, cancel := context.WithTimeout(ctx, 8*time.Second)
+			defer cancel()
+			ids, err := llm.ListModels(c, act.BaseURL, act.APIKey, http.DefaultClient)
+			return modelsMsg{name: name, current: act.Model, ids: ids, err: err}
+		}
 	case "/shell", "/sh":
 		sh := shellPath()
 		c := exec.Command(sh)
@@ -766,12 +809,13 @@ func (m *tuiModel) View() string {
 	default:
 		// ctx = size of the last prompt vs the window (auto-compacts as it fills);
 		// ↑ = tokens the model generated this whole session.
+		act := m.app.activeLLM()
 		ctxStr := humanK(m.app.client.Context())
-		if w := m.app.cfg.LLM.ContextWindow; w > 0 {
-			ctxStr += "/" + humanK(w)
+		if act.ContextWindow > 0 {
+			ctxStr += "/" + humanK(act.ContextWindow)
 		}
 		status = cDim.Render(fmt.Sprintf("%s · %s · ctx %s · ↑%s · ready",
-			m.app.cfg.LLM.Model, filepath.Base(m.app.workspace), ctxStr, humanK(c)))
+			act.Model, filepath.Base(m.app.workspace), ctxStr, humanK(c)))
 	}
 
 	bottom := m.modeLine()
@@ -935,6 +979,9 @@ var commandList = []cmdInfo{
 	{"/compact", "summarize the session so far to free up context"},
 	{"/plan", "plan mode — propose a plan, change nothing"},
 	{"/auto", "auto mode — execute the task (default)"},
+	{"/ai", "switch AI provider (local|openai|grok|…); /ai key <name> <tok>"},
+	{"/model", "list the provider's models, or pick one"},
+	{"/config", "control panel: all settings + how to change them"},
 	{"/update", "self-update from GitHub (stable|nightly)"},
 	{"/shell", "drop to a shell in the workspace (exit to return)"},
 	{"/skills", "list/toggle/install on-demand instruction packs"},
@@ -1017,10 +1064,12 @@ func (m *tuiModel) renderStatus() []string {
 	if instr == "" {
 		instr = "(none)"
 	}
+	act := m.app.activeLLM()
 	return m.renderKV("status", [][2]string{
 		{"version", fmt.Sprintf("%s (%s channel)", version, channelOf(c))},
-		{"server", c.LLM.BaseURL},
-		{"model", c.LLM.Model},
+		{"provider", m.app.providerName()},
+		{"server", act.BaseURL},
+		{"model", act.Model},
 		{"workspace", c.Workspace},
 		{"jail", c.File.Jail},
 		{"defaults", fmt.Sprintf("run=%s  file=%s", c.Run.Default, c.File.Default)},

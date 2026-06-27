@@ -3,9 +3,50 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 )
+
+// ListModels returns the model IDs an OpenAI-compatible server advertises at
+// /v1/models (sorted). Works for LM Studio, OpenAI, xAI, Groq, OpenRouter, etc.
+func ListModels(ctx context.Context, baseURL, apiKey string, hc *http.Client) ([]string, error) {
+	if hc == nil {
+		hc = http.DefaultClient
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("list models: http %d", resp.StatusCode)
+	}
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		if m.ID != "" {
+			ids = append(ids, m.ID)
+		}
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
 
 // DetectContextWindow asks an LM Studio server for the loaded model's context
 // length via its native /api/v0/models endpoint (the OpenAI /v1 surface doesn't

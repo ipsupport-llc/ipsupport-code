@@ -291,6 +291,22 @@ func TestBridgeAbortDeniesBlockedApproval(t *testing.T) {
 	}
 }
 
+func TestActiveLLM(t *testing.T) {
+	a := &app{cfg: config.Config{LLM: config.LLM{BaseURL: "http://localhost:1234/v1", Model: "local-m"}}}
+	if a.activeLLM().BaseURL != "http://localhost:1234/v1" || !a.isLocal() {
+		t.Error("default → local connection")
+	}
+	a.cfg.Provider = "openai"
+	a.cfg.Providers = map[string]config.LLM{"openai": {APIKey: "k", Model: "gpt-4o"}}
+	if got := a.activeLLM(); got.Model != "gpt-4o" || got.BaseURL != "https://api.openai.com/v1" || a.isLocal() {
+		t.Errorf("active = %+v, want the openai provider", got)
+	}
+	a.cfg.Provider = "local"
+	if a.activeLLM().BaseURL != "http://localhost:1234/v1" || !a.isLocal() {
+		t.Error("/ai local → cfg.LLM")
+	}
+}
+
 func TestAutoCompactNeeded(t *testing.T) {
 	if !autoCompactNeeded(6200, 8192, 4) {
 		t.Error("76% of the window with history should trigger compaction")

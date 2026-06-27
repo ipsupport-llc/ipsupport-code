@@ -122,6 +122,43 @@ func TestSaveWorkspacePolicyRoundTrips(t *testing.T) {
 	}
 }
 
+func TestResolveProvider(t *testing.T) {
+	t.Setenv("OPENAI_API_KEY", "sk-env")
+	// template-only: base_url/model from the template, key from the env var.
+	l, ok := ResolveProvider(Config{}, "openai")
+	if !ok || l.BaseURL != "https://api.openai.com/v1" || l.Model != "gpt-4o-mini" || l.APIKey != "sk-env" {
+		t.Fatalf("openai template = %+v ok=%v", l, ok)
+	}
+	if l.MaxSteps == 0 || l.Temperature == 0 {
+		t.Error("numeric defaults should be filled")
+	}
+	// a user preset overrides the template (key + model), base_url still filled.
+	cfg := Config{Providers: map[string]LLM{"openai": {APIKey: "sk-preset", Model: "gpt-4o"}}}
+	if l, _ := ResolveProvider(cfg, "openai"); l.APIKey != "sk-preset" || l.Model != "gpt-4o" || l.BaseURL != "https://api.openai.com/v1" {
+		t.Errorf("preset merge = %+v", l)
+	}
+	if _, ok := ResolveProvider(Config{}, "nope"); ok {
+		t.Error("unknown provider should be false")
+	}
+}
+
+func TestSaveProvidersRoundTrip(t *testing.T) {
+	isolate(t)
+	if err := SaveProviders("openai", map[string]LLM{"openai": {APIKey: "sk-x", Model: "gpt-4o"}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "openai" || cfg.Providers["openai"].APIKey != "sk-x" {
+		t.Errorf("providers not persisted: provider=%q providers=%+v", cfg.Provider, cfg.Providers)
+	}
+	if fi, _ := os.Stat(GlobalPath()); fi.Mode().Perm() != 0o600 {
+		t.Errorf("config perms = %o, want 600 (holds API keys)", fi.Mode().Perm())
+	}
+}
+
 func writeWorkspaceConfig(t *testing.T, js string) string {
 	t.Helper()
 	dir := t.TempDir()

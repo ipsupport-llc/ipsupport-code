@@ -59,6 +59,25 @@ make release   # every target into dist/
 go install github.com/ipsupport-llc/ipsupport-code/cmd/agent@latest  # installs as `agent`
 ```
 
+## Providers — local or external
+
+The agent and tools are model-agnostic, so you can point them at any
+OpenAI-compatible API and switch in one command — run a strong cloud model for a
+hard task, then drop back to your local one:
+
+```
+/ai                       list providers (local + openai, grok, groq, openrouter)
+/ai key openai sk-…       add an API key for a provider
+/ai openai                switch to it   ·   /ai local   back to LM Studio
+/model                    list the active provider's models   ·   /model gpt-4o   pick one
+```
+
+Switching keeps your session, tokens, and mode. Keys live in
+`~/.config/ipsupport-code/config.json` (written `chmod 600`) or fall back to the
+env var (`OPENAI_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`).
+`/config` is a control panel: every setting plus the command to change it — no
+hand-editing JSON.
+
 ## Updating
 
 The binary updates itself in place from GitHub Releases:

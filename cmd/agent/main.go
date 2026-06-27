@@ -215,13 +215,27 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 	return a, cleanup, nil
 }
 
+// activeLLM resolves the connection for the active provider. "" / "local" is the
+// LM Studio connection (cfg.LLM); any other name is an external provider preset
+// (template + key/env merged).
+func (a *app) activeLLM() config.LLM {
+	if a.cfg.Provider == "" || a.cfg.Provider == "local" {
+		return a.cfg.LLM
+	}
+	if l, ok := config.ResolveProvider(a.cfg, a.cfg.Provider); ok {
+		return l
+	}
+	return a.cfg.LLM
+}
+
+func (a *app) isLocal() bool { return a.cfg.Provider == "" || a.cfg.Provider == "local" }
+
 // detectContextWindow asks LM Studio for the loaded model's context length and,
-// once it answers (the model must be loaded), uses that real value instead of
-// the configured default. No-op after it has succeeded once. Best-effort with a
-// short timeout so it never blocks. The model is usually unloaded at startup, so
-// this also runs after the first task (see the re-detect call sites).
+// once it answers, uses it instead of the configured default. Only for the local
+// provider — external providers don't expose /api/v0/models, and their window
+// comes from the preset. No-op after it succeeds once; best-effort, never blocks.
 func (a *app) detectContextWindow() {
-	if a.windowDetected {
+	if a.windowDetected || !a.isLocal() {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -263,7 +277,7 @@ func (a *app) wire() error {
 	if a.client != nil {
 		seedP, seedC = a.client.Usage()
 	}
-	a.client = llm.NewOpenAIClient(a.cfg.LLM)
+	a.client = llm.NewOpenAIClient(a.activeLLM())
 	a.client.SeedUsage(seedP, seedC)
 	a.client.OnRetry = func(attempt int, wait time.Duration, reason string) {
 		slog.Warn("llm retry", "attempt", attempt, "wait", wait, "reason", reason)
@@ -276,7 +290,7 @@ func (a *app) wire() error {
 	if a.ag != nil {
 		prior = a.ag.History()
 	}
-	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.cfg.LLM.MaxSteps)
+	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.activeLLM().MaxSteps)
 	a.ag.SetHistory(prior)
 	a.ag.SetPlanMode(a.planMode) // carry the mode into the rebuilt agent
 	a.refl = reflect.New(a.client)
@@ -326,7 +340,7 @@ func autoCompactNeeded(ctxTokens, window, sessionLen int) bool {
 }
 
 func (a *app) shouldAutoCompact() bool {
-	return autoCompactNeeded(a.client.Context(), a.cfg.LLM.ContextWindow, a.ag.SessionLen())
+	return autoCompactNeeded(a.client.Context(), a.activeLLM().ContextWindow, a.ag.SessionLen())
 }
 
 // Session memory persists per workspace so "the prior context" survives a
@@ -557,6 +571,18 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		fmt.Println(a.setMode(false))
 	case "/update":
 		runUpdate(strings.Fields(rest))
+	case "/ai":
+		for _, l := range a.aiCommand(rest) {
+			fmt.Println(l)
+		}
+	case "/model":
+		for _, l := range a.modelCommand(ctx, rest) {
+			fmt.Println(l)
+		}
+	case "/config":
+		for _, l := range a.configOverview() {
+			fmt.Println(l)
+		}
 	case "/shell", "/sh":
 		a.runShell(ctx)
 	case "/skills":
@@ -605,6 +631,168 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		fmt.Printf("unknown command %q — try /help\n", cmd)
 	}
 	return false
+}
+
+// --- providers: switch the AI between LM Studio and external OpenAI-compatible
+// providers (OpenAI, Grok/xAI, Groq, OpenRouter). The agent and tools are
+// model-agnostic, so this only swaps the connection and re-wires. ---
+
+func (a *app) providerName() string {
+	if a.cfg.Provider == "" {
+		return "local"
+	}
+	return a.cfg.Provider
+}
+
+func (a *app) aiCommand(rest string) []string {
+	if strings.TrimSpace(rest) == "" {
+		return a.providerList()
+	}
+	sub, arg := splitCommand(rest)
+	if sub == "key" {
+		name, tok := splitCommand(arg)
+		return a.setProviderKey(name, tok)
+	}
+	return a.setProvider(sub)
+}
+
+func (a *app) providerList() []string {
+	out := []string{"providers (active ●):"}
+	row := func(name, base, note string) {
+		mark := "  "
+		if name == a.providerName() {
+			mark = "● "
+		}
+		out = append(out, fmt.Sprintf("  %s%-11s %s  %s", mark, name, base, note))
+	}
+	row("local", a.cfg.LLM.BaseURL, "(LM Studio)")
+	for _, n := range config.KnownProviders() {
+		l, _ := config.ResolveProvider(a.cfg, n)
+		note := "no key"
+		if l.APIKey != "" {
+			note = "key set"
+		}
+		row(n, l.BaseURL, note)
+	}
+	return append(out, "  /ai <name> switch · /ai key <name> <token> · /model pick model")
+}
+
+func (a *app) setProvider(name string) []string {
+	if name != "local" {
+		l, ok := config.ResolveProvider(a.cfg, name)
+		if !ok {
+			return []string{fmt.Sprintf("unknown provider %q — try: local, %s", name, strings.Join(config.KnownProviders(), ", "))}
+		}
+		if l.APIKey == "" {
+			return []string{fmt.Sprintf("%s needs an API key — run: /ai key %s <token>  (or set the env var)", name, name)}
+		}
+	}
+	a.cfg.Provider = name
+	a.windowDetected = false
+	if err := config.SaveProviders(a.cfg.Provider, a.cfg.Providers); err != nil {
+		return []string{"error: " + err.Error()}
+	}
+	if err := a.wire(); err != nil {
+		return []string{"error: " + err.Error()}
+	}
+	a.detectContextWindow()
+	act := a.activeLLM()
+	return []string{fmt.Sprintf("→ %s · %s · model %s", a.providerName(), act.BaseURL, act.Model)}
+}
+
+func (a *app) setProviderKey(name, token string) []string {
+	if _, ok := config.ProviderTemplates[name]; !ok {
+		return []string{fmt.Sprintf("unknown provider %q — keys are for: %s", name, strings.Join(config.KnownProviders(), ", "))}
+	}
+	if strings.TrimSpace(token) == "" {
+		return []string{"usage: /ai key " + name + " <token>"}
+	}
+	if a.cfg.Providers == nil {
+		a.cfg.Providers = map[string]config.LLM{}
+	}
+	p := a.cfg.Providers[name]
+	p.APIKey = strings.TrimSpace(token)
+	a.cfg.Providers[name] = p
+	if err := config.SaveProviders(a.cfg.Provider, a.cfg.Providers); err != nil {
+		return []string{"error: " + err.Error()}
+	}
+	if a.cfg.Provider == name {
+		_ = a.wire()
+	}
+	return []string{"key saved for " + name}
+}
+
+// modelCommand lists the active provider's models (no arg) or sets one.
+func (a *app) modelCommand(ctx context.Context, rest string) []string {
+	if name := strings.TrimSpace(rest); name != "" {
+		return a.setModel(name)
+	}
+	act := a.activeLLM()
+	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	ids, err := llm.ListModels(cctx, act.BaseURL, act.APIKey, http.DefaultClient)
+	if err != nil {
+		return []string{"couldn't list models: " + err.Error()}
+	}
+	out := []string{fmt.Sprintf("models on %s (current %s) — /model <name> to pick:", a.providerName(), act.Model)}
+	for _, id := range ids {
+		out = append(out, "  "+id)
+	}
+	if len(ids) == 0 {
+		out = append(out, "  (none reported)")
+	}
+	return out
+}
+
+func (a *app) setModel(name string) []string {
+	if a.isLocal() {
+		a.cfg.LLM.Model = name
+		_ = config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
+	} else {
+		if a.cfg.Providers == nil {
+			a.cfg.Providers = map[string]config.LLM{}
+		}
+		p := a.cfg.Providers[a.cfg.Provider]
+		p.Model = name
+		a.cfg.Providers[a.cfg.Provider] = p
+		_ = config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+	}
+	a.windowDetected = false
+	if err := a.wire(); err != nil {
+		return []string{"error: " + err.Error()}
+	}
+	a.detectContextWindow()
+	return []string{"model → " + name}
+}
+
+// configOverview is the control panel: current settings + the command to change
+// each, so the config file never needs hand-editing.
+func (a *app) configOverview() []string {
+	act := a.activeLLM()
+	key := "—"
+	if act.APIKey != "" {
+		key = "set"
+	}
+	return []string{
+		"config — change with the command on the right:",
+		fmt.Sprintf("  provider     %-22s /ai <name> · /ai key <name> <tok>", a.providerName()),
+		fmt.Sprintf("  server       %s", act.BaseURL),
+		fmt.Sprintf("  model        %-22s /model", act.Model),
+		fmt.Sprintf("  api key      %s", key),
+		fmt.Sprintf("  context      %-22s (auto-compact ~75%%)", ctxLabel(act.ContextWindow)),
+		fmt.Sprintf("  channel      %-22s update stable|nightly", channelOf(a.cfg)),
+		fmt.Sprintf("  permissions  files=%-5s run=%-5s    /permissions", a.cfg.File.Default, a.cfg.Run.Default),
+		fmt.Sprintf("  name         %-22s /rename <name>", a.cfg.Name),
+		fmt.Sprintf("  prompt       %-22s -dump-prompt > .agent/system.md", promptOrDefault(a.promptSrc)),
+		"  file: ~/.config/ipsupport-code/config.json (chmod 600)",
+	}
+}
+
+func ctxLabel(w int) string {
+	if w <= 0 {
+		return "(provider default)"
+	}
+	return humanK(w)
 }
 
 // --- skills: surface-agnostic handlers, returning plain lines the REPL prints
@@ -791,6 +979,9 @@ func helpText() string {
   /clear           fresh start — clear the screen and the session
   /compact         summarize the session so far to free up context
   /plan, /auto     plan mode (propose only) vs auto mode (execute)
+  /ai [name]       switch AI provider (local|openai|grok|groq|openrouter); /ai key <name> <tok>
+  /model [name]    list the provider's models, or pick one
+  /config          control panel: all settings + how to change them
   /update [chan]   self-update from GitHub (chan = stable|nightly, saved)
   /shell, /sh      drop to a shell in the workspace (exit to return)
   /skills          list/toggle/install on-demand instruction packs
@@ -810,8 +1001,10 @@ func (a *app) statusText() string {
 	if instr == "" {
 		instr = "(none)"
 	}
+	act := a.activeLLM()
 	return fmt.Sprintf(`status:
   version      %s (%s channel)
+  provider     %s
   server       %s
   model        %s
   max_steps    %d
@@ -824,8 +1017,8 @@ func (a *app) statusText() string {
   knowledge    %s (%d lessons)
   trace        %s
 `,
-		version, channelOf(a.cfg),
-		a.cfg.LLM.BaseURL, a.cfg.LLM.Model, a.cfg.LLM.MaxSteps,
+		version, channelOf(a.cfg), a.providerName(),
+		act.BaseURL, act.Model, act.MaxSteps,
 		a.cfg.Workspace, a.cfg.File.Jail, a.cfg.Run.Default, a.cfg.File.Default,
 		promptOrDefault(a.promptSrc), instr, a.ag.SessionLen(),
 		a.cfg.KBPath, len(a.kb.All()), a.cfg.TracePath)

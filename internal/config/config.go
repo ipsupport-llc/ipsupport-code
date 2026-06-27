@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 // LLM describes the OpenAI-compatible endpoint (LM Studio by default). The same
@@ -47,15 +48,76 @@ type FilePolicy struct {
 
 // Config is the merged runtime configuration.
 type Config struct {
-	Name       string     `json:"name,omitempty"`    // display name (renameable)
-	Channel    string     `json:"channel,omitempty"` // update channel: stable | nightly
-	LLM        LLM        `json:"llm"`
-	Run        RunPolicy  `json:"run"`
-	File       FilePolicy `json:"file"`
-	KBPath     string     `json:"kb_path,omitempty"`
-	TracePath  string     `json:"trace_path,omitempty"`
-	SkillsPath string     `json:"skills_path,omitempty"`
-	Workspace  string     `json:"-"` // resolved absolute workspace root
+	Name       string         `json:"name,omitempty"`      // display name (renameable)
+	Channel    string         `json:"channel,omitempty"`   // update channel: stable | nightly
+	Provider   string         `json:"provider,omitempty"`  // active provider ("" / "local" = LLM below)
+	LLM        LLM            `json:"llm"`                 // the local connection (the "local" provider)
+	Providers  map[string]LLM `json:"providers,omitempty"` // external provider presets
+	Run        RunPolicy      `json:"run"`
+	File       FilePolicy     `json:"file"`
+	KBPath     string         `json:"kb_path,omitempty"`
+	TracePath  string         `json:"trace_path,omitempty"`
+	SkillsPath string         `json:"skills_path,omitempty"`
+	Workspace  string         `json:"-"` // resolved absolute workspace root
+}
+
+// ProviderTemplates are built-in OpenAI-compatible providers: base URL (and a
+// sensible default model) are known, so the user only needs to add an API key.
+var ProviderTemplates = map[string]LLM{
+	"openai":     {BaseURL: "https://api.openai.com/v1", Model: "gpt-4o-mini"},
+	"grok":       {BaseURL: "https://api.x.ai/v1", Model: "grok-2-latest"},
+	"groq":       {BaseURL: "https://api.groq.com/openai/v1", Model: "llama-3.3-70b-versatile"},
+	"openrouter": {BaseURL: "https://openrouter.ai/api/v1", Model: "openai/gpt-4o-mini"},
+}
+
+// providerEnvKey maps a provider to the env var its API key falls back to.
+var providerEnvKey = map[string]string{
+	"openai":     "OPENAI_API_KEY",
+	"grok":       "XAI_API_KEY",
+	"groq":       "GROQ_API_KEY",
+	"openrouter": "OPENROUTER_API_KEY",
+}
+
+// KnownProviders lists the built-in template names (sorted), for help/listing.
+func KnownProviders() []string {
+	names := make([]string, 0, len(ProviderTemplates))
+	for n := range ProviderTemplates {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ResolveProvider returns the connection for an external provider name, merging
+// a user preset over the built-in template and falling back to the env var for
+// the key. Not for "local" (that's cfg.LLM). false if the name is unknown.
+func ResolveProvider(cfg Config, name string) (LLM, bool) {
+	p, hasPreset := cfg.Providers[name]
+	tmpl, hasTmpl := ProviderTemplates[name]
+	if !hasPreset && !hasTmpl {
+		return LLM{}, false
+	}
+	if hasTmpl {
+		if p.BaseURL == "" {
+			p.BaseURL = tmpl.BaseURL
+		}
+		if p.Model == "" {
+			p.Model = tmpl.Model
+		}
+	}
+	if p.APIKey == "" {
+		if env := providerEnvKey[name]; env != "" {
+			p.APIKey = os.Getenv(env)
+		}
+	}
+	d := Default().LLM
+	if p.Temperature == 0 {
+		p.Temperature = d.Temperature
+	}
+	if p.MaxSteps == 0 {
+		p.MaxSteps = d.MaxSteps
+	}
+	return p, true
 }
 
 // Non-overridable safety floor, always unioned into the resolved policy.
@@ -135,7 +197,7 @@ func SaveGlobal(name string, l LLM) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(GlobalPath(), data, 0o644)
+	return os.WriteFile(GlobalPath(), data, 0o600) // may hold an API key
 }
 
 // SaveWorkspacePolicy persists the run/file permission policy to the workspace
@@ -164,18 +226,21 @@ func SaveWorkspacePolicy(workspace string, run RunPolicy, file FilePolicy) error
 	return os.WriteFile(path, data, 0o644)
 }
 
-// SaveChannel persists the update channel (stable|nightly) into the user config,
-// preserving the other keys already there.
-func SaveChannel(channel string) error {
+// mergeGlobalKeys writes the given top-level keys into the user config,
+// preserving everything else already there. The file is 0600 — it can hold API
+// keys.
+func mergeGlobalKeys(kv map[string]any) error {
 	raw := map[string]json.RawMessage{}
 	if data, err := os.ReadFile(GlobalPath()); err == nil {
 		_ = json.Unmarshal(data, &raw)
 	}
-	b, err := json.Marshal(channel)
-	if err != nil {
-		return err
+	for k, v := range kv {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return err
+		}
+		raw[k] = b
 	}
-	raw["channel"] = b
 	if err := os.MkdirAll(configHome(), 0o755); err != nil {
 		return err
 	}
@@ -183,7 +248,16 @@ func SaveChannel(channel string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(GlobalPath(), data, 0o644)
+	return os.WriteFile(GlobalPath(), data, 0o600)
+}
+
+// SaveChannel persists the update channel (stable|nightly).
+func SaveChannel(channel string) error { return mergeGlobalKeys(map[string]any{"channel": channel}) }
+
+// SaveProviders persists the active provider name and the external provider
+// presets (which may include API keys — the file is written 0600).
+func SaveProviders(provider string, providers map[string]LLM) error {
+	return mergeGlobalKeys(map[string]any{"provider": provider, "providers": providers})
 }
 
 // Load merges the user config then the workspace config over Default(), unions

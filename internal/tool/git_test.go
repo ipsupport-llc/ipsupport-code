@@ -63,6 +63,20 @@ func TestGitStatusAddCommitLog(t *testing.T) {
 	}
 }
 
+func TestGitInit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir() // a bare, non-repo workspace
+	tl := gitToolFor(t, dir, yes())
+	if r := tl.Call(context.Background(), "init", nil); r.IsError {
+		t.Fatalf("init: %s", r.Content)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".git")); err != nil {
+		t.Errorf("expected a .git directory after init: %v", err)
+	}
+}
+
 func TestGitMutatingDeniedByUser(t *testing.T) {
 	dir := initRepo(t)
 	tl := gitToolFor(t, dir, no())

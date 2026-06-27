@@ -23,9 +23,10 @@ func NewGit(p *policy.Engine, ap Approver) Tool {
 	g := &gitTool{pol: p, ap: ap}
 	return NewDomain(DomainSpec{
 		Name:    "git",
-		Summary: "Git in the workspace. Mutating actions (add/commit/branch/checkout) ask approval.",
+		Summary: "Git in the workspace. Mutating actions (init/add/commit/branch/checkout) ask approval.",
 		NotHere: "NOT here — non-git shell → run; files → file.",
 		Actions: []Action{
+			{Name: "init", Mutates: true, Run: g.initRepo, Note: "(start a repo in the workspace)"},
 			{Name: "status", Run: g.status},
 			{Name: "diff", Params: []Param{Opt("path", "str", ""), Opt("staged", "bool", "")}, Run: g.diff},
 			{Name: "log", Params: []Param{Opt("n", "int", "15")}, Run: g.log},
@@ -36,6 +37,10 @@ func NewGit(p *policy.Engine, ap Approver) Tool {
 			{Name: "checkout", Mutates: true, Params: []Param{Req("ref", "str")}, Run: g.checkout},
 		},
 	})
+}
+
+func (g *gitTool) initRepo(ctx context.Context, _ Args) Result {
+	return g.run(ctx, "init", true, "init")
 }
 
 func (g *gitTool) status(ctx context.Context, _ Args) Result {

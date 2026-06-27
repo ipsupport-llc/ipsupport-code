@@ -45,6 +45,22 @@ func TestFileWriteThenRead(t *testing.T) {
 	}
 }
 
+// Creating an empty file (e.g. a Python __init__.py) must work — write with no
+// content, not an error. Previously content was required and "" rejected, which
+// trapped the model in a retry loop.
+func TestFileWriteEmpty(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	r := tl.Call(context.Background(), "write", map[string]any{"path": "pkg/__init__.py"})
+	if r.IsError {
+		t.Fatalf("empty write should succeed, got: %s", r.Content)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "pkg", "__init__.py"))
+	if err != nil || len(data) != 0 {
+		t.Errorf("file = %q (err %v), want an empty file", data, err)
+	}
+}
+
 func TestFileJailEscape(t *testing.T) {
 	tl := fileToolFor(t, t.TempDir(), "allow", yes())
 	r := tl.Call(context.Background(), "write", map[string]any{"path": "../evil.txt", "content": "x"})

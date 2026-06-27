@@ -557,8 +557,7 @@ func (m *tuiModel) View() string {
 	if !m.ready {
 		return "loading…"
 	}
-	p, c := m.app.client.Usage()
-	total := p + c
+	_, c := m.app.client.Usage() // c = cumulative completion (generated) tokens
 
 	var status string
 	switch m.state {
@@ -583,7 +582,10 @@ func (m *tuiModel) View() string {
 	case stApprove:
 		status = cToolCall.Render("⚠ approve?  y / n  ·  esc denies  ·  ctrl-c quits")
 	default:
-		status = cDim.Render(fmt.Sprintf("%s · %s · %d tok · ready", m.app.cfg.LLM.Model, filepath.Base(m.app.workspace), total))
+		// ctx = size of the last prompt (how full the context is); ↑ = tokens the
+		// model generated this whole session.
+		status = cDim.Render(fmt.Sprintf("%s · %s · ctx %s · ↑%s · ready",
+			m.app.cfg.LLM.Model, filepath.Base(m.app.workspace), humanK(m.app.client.Context()), humanK(c)))
 	}
 
 	bottom := m.modeLine()

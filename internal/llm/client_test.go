@@ -98,6 +98,20 @@ func TestChatStreamingContent(t *testing.T) {
 	}
 }
 
+func TestContextTracksLastPrompt(t *testing.T) {
+	url := sseServer(t,
+		`{"choices":[{"delta":{"content":"hi"}}]}`,
+		`{"choices":[{"delta":{}}],"usage":{"prompt_tokens":4061,"completion_tokens":1}}`,
+	)
+	cl := NewOpenAIClient(config.LLM{BaseURL: url, Model: "fake"})
+	if _, err := cl.Chat(context.Background(), []Message{User("hi")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if cl.Context() != 4061 {
+		t.Errorf("Context() = %d, want 4061 (last prompt size)", cl.Context())
+	}
+}
+
 func TestChatStreamingToolCall(t *testing.T) {
 	url := sseServer(t,
 		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"calc","arguments":""}}]}}]}`,

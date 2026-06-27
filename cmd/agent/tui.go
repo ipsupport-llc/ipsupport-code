@@ -10,7 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alecthomas/chroma/v2/quick"
+	"github.com/alecthomas/chroma/v2/formatters"
+	"github.com/alecthomas/chroma/v2/lexers"
+	"github.com/alecthomas/chroma/v2/styles"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -927,7 +929,8 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		c, _ := e.fields["content"].(string)
 		if tool, _ := e.fields["tool"].(string); tool == "file" && !isErr {
 			if action, _ := e.fields["action"].(string); action == "read" {
-				return renderCode(c) // syntax-highlight file reads
+				path, _ := e.fields["path"].(string)
+				return renderCode(c, path) // syntax-highlight file reads
 			}
 		}
 		if isErr {
@@ -975,7 +978,7 @@ func (m *tuiModel) renderDiff(path, diff string) []string {
 			oldNo, newNo = parseHunk(ln)
 		case strings.HasPrefix(ln, "+"):
 			add++
-			body = append(body, diffAddRow(newNo, ln[1:], width))
+			body = append(body, diffAddRow(newNo, ln[1:], path, width))
 			newNo++
 		case strings.HasPrefix(ln, "-"):
 			del++
@@ -1025,8 +1028,8 @@ const (
 // stripped, letting our green/red show through.
 var ansiBG = regexp.MustCompile("\x1b\\[(4[0-9]|48;5;[0-9]+|49)m")
 
-func diffAddRow(no int, code string, width int) string {
-	hl := ansiBG.ReplaceAllString(highlightCode(code), "")
+func diffAddRow(no int, code, path string, width int) string {
+	hl := ansiBG.ReplaceAllString(highlightCode(code, path), "")
 	hl = strings.ReplaceAll(strings.TrimRight(hl, "\r\n"), allOff, fgReset)
 	content := fmt.Sprintf(" %4d +  ", no) + hl
 	if pad := width - lipgloss.Width(content); pad > 0 {
@@ -1051,14 +1054,14 @@ func plural(n int, w string) string {
 }
 
 // renderCode syntax-highlights a file's content (capped) for a file.read result.
-func renderCode(content string) []string {
+func renderCode(content, path string) []string {
 	lines := strings.Split(content, "\n")
 	capped := false
 	if len(lines) > 40 {
 		lines, capped = lines[:40], true
 	}
 	out := []string{cDim.Render("  → read:")}
-	for _, ln := range strings.Split(highlightCode(strings.Join(lines, "\n")), "\n") {
+	for _, ln := range strings.Split(highlightCode(strings.Join(lines, "\n"), path), "\n") {
 		out = append(out, "    "+ln)
 	}
 	if capped {
@@ -1067,9 +1070,35 @@ func renderCode(content string) []string {
 	return out
 }
 
-func highlightCode(code string) string {
+// highlightCode colours code for the terminal, choosing the lexer by file path
+// when known (reliable) and only falling back to content analysis otherwise —
+// guessing alone often misses Python on short or single-line snippets.
+func highlightCode(code, path string) string {
+	lexer := lexers.Fallback
+	if path != "" {
+		if l := lexers.Match(path); l != nil {
+			lexer = l
+		}
+	}
+	if lexer == lexers.Fallback {
+		if l := lexers.Analyse(code); l != nil {
+			lexer = l
+		}
+	}
+	style := styles.Get("github-dark")
+	if style == nil {
+		style = styles.Fallback
+	}
+	formatter := formatters.Get("terminal256")
+	if formatter == nil {
+		formatter = formatters.Fallback
+	}
+	it, err := lexer.Tokenise(nil, code)
+	if err != nil {
+		return code
+	}
 	var b strings.Builder
-	if err := quick.Highlight(&b, code, "", "terminal256", "github-dark"); err != nil {
+	if err := formatter.Format(&b, style, it); err != nil {
 		return code
 	}
 	return b.String()

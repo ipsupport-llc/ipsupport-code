@@ -240,6 +240,9 @@ func (a *app) activeLLM() config.LLM {
 
 func (a *app) isLocal() bool { return a.cfg.Provider == "" || a.cfg.Provider == "local" }
 
+// providerModel is the "provider · model" label shown in the status line.
+func (a *app) providerModel() string { return a.providerName() + " · " + a.activeLLM().Model }
+
 // detectContextWindow asks LM Studio for the loaded model's context length and,
 // once it answers, uses it instead of the configured default. Only for the local
 // provider — external providers don't expose /api/v0/models, and their window
@@ -816,21 +819,81 @@ func (a *app) setProviderKey(name, token string) []string {
 	return []string{"key saved for " + name}
 }
 
-// modelCommand lists the active provider's models (no arg) or sets one.
+// modelCommand lists the active provider's models (no arg), or resolves an arg:
+// an exact id or unique substring switches the model, an ambiguous substring
+// lists the matches (handy for OpenRouter's hundreds of models).
 func (a *app) modelCommand(ctx context.Context, rest string) []string {
-	if name := strings.TrimSpace(rest); name != "" {
-		return a.setModel(name)
-	}
 	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
-	return modelLines(cctx, a.activeLLM(), a.providerName())
+	arg := strings.TrimSpace(rest)
+	if arg == "" {
+		return modelLines(cctx, a.activeLLM(), a.providerName())
+	}
+	setTo, lines := resolveModelArg(listModelIDs(cctx, a.activeLLM()), arg)
+	if setTo != "" {
+		return a.setModel(setTo)
+	}
+	return lines
+}
+
+// listModelIDs returns just the model ids a provider advertises (LM Studio's
+// native list or the OpenAI /models list), nil on failure.
+func listModelIDs(ctx context.Context, act config.LLM) []string {
+	if act.LMStudio() {
+		ms, err := llm.ListLMStudioModels(ctx, act.BaseURL, http.DefaultClient)
+		if err != nil {
+			return nil
+		}
+		ids := make([]string, len(ms))
+		for i, m := range ms {
+			ids[i] = m.ID
+		}
+		return ids
+	}
+	ids, _ := llm.ListModels(ctx, act.BaseURL, act.APIKey, http.DefaultClient)
+	return ids
+}
+
+// resolveModelArg decides what `/model <arg>` does against the advertised ids:
+// an exact id or a unique substring match returns setTo (switch to it); an
+// ambiguous substring returns the matching list; no list or no match falls back
+// to setTo=arg (trust the user — offline, or a model not yet listed).
+func resolveModelArg(ids []string, arg string) (setTo string, lines []string) {
+	for _, id := range ids {
+		if id == arg {
+			return arg, nil
+		}
+	}
+	var matches []string
+	lower := strings.ToLower(arg)
+	for _, id := range ids {
+		if strings.Contains(strings.ToLower(id), lower) {
+			matches = append(matches, id)
+		}
+	}
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		return arg, nil
+	default:
+		lines = []string{fmt.Sprintf("%d models match %q — /model <id> to pick:", len(matches), arg)}
+		for _, id := range matches {
+			lines = append(lines, "  "+id)
+		}
+		return "", lines
+	}
 }
 
 // modelLines lists a provider's models — rich (state · context · quant) for LM
 // Studio via its native API, plain ids otherwise. Pure (no app state), so the
 // REPL and the TUI's async path share it.
+// modelListCap bounds the no-arg model list so a provider with hundreds of
+// models (OpenRouter) doesn't flood the screen; /model <substr> filters instead.
+const modelListCap = 50
+
 func modelLines(ctx context.Context, act config.LLM, provider string) []string {
-	head := fmt.Sprintf("models on %s (current %s) — /model <name> to pick:", provider, act.Model)
+	head := fmt.Sprintf("models on %s (current %s) — /model <id> to pick · /model <text> to filter:", provider, act.Model)
 	if act.LMStudio() {
 		ms, err := llm.ListLMStudioModels(ctx, act.BaseURL, http.DefaultClient)
 		if err != nil {
@@ -861,7 +924,11 @@ func modelLines(ctx context.Context, act config.LLM, provider string) []string {
 		return []string{"couldn't list models: " + err.Error()}
 	}
 	out := []string{head}
-	for _, id := range ids {
+	for i, id := range ids {
+		if i >= modelListCap {
+			out = append(out, fmt.Sprintf("  …and %d more — /model <text> to filter", len(ids)-modelListCap))
+			break
+		}
 		out = append(out, "  "+id)
 	}
 	if len(ids) == 0 {

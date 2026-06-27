@@ -98,7 +98,10 @@ type updateDoneMsg struct{ text string } // /update result
 type shellDoneMsg struct{}               // returned from a drop-to-shell
 type shellCmdMsg struct{ out string }    // output of a one-off !cmd
 type windowMsg struct{ tokens int }      // re-detected context window
-type modelsMsg struct{ lines []string }  // /model listing result
+type modelsMsg struct {                  // /model result: lines to show, or setTo to switch model
+	lines []string
+	setTo string
+}
 
 // newTUIModel installs the UI bridge as the agent's tracer + approver, wires the
 // stack, and builds the model. Split out from runTUI so tests can drive it.
@@ -324,7 +327,11 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case modelsMsg:
 		m.state = stIdle
-		m.pushLines(msg.lines)
+		if msg.setTo != "" { // resolved a /model arg to one model — switch (UI thread)
+			m.pushLines(m.app.setModel(msg.setTo))
+		} else {
+			m.pushLines(msg.lines)
+		}
 		return m, m.input.Focus()
 
 	case tea.KeyMsg:
@@ -560,19 +567,24 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.openConfig()
 		return m, nil
 	case "/model":
-		if r := strings.TrimSpace(rest); r != "" {
-			m.pushLines(m.app.setModel(r))
-			return m, nil
-		}
 		act, name := m.app.activeLLM(), m.app.providerName()
+		arg := strings.TrimSpace(rest)
 		m.state = stRunning
 		m.taskStart = time.Now()
-		m.push(cDim.Render("  listing models on " + name + "…"))
+		verb := "listing models on " + name
+		if arg != "" {
+			verb = "finding \"" + arg + "\" on " + name
+		}
+		m.push(cDim.Render("  " + verb + "…"))
 		ctx := m.ctx
 		return m, func() tea.Msg {
 			c, cancel := context.WithTimeout(ctx, 8*time.Second)
 			defer cancel()
-			return modelsMsg{lines: modelLines(c, act, name)}
+			if arg == "" {
+				return modelsMsg{lines: modelLines(c, act, name)}
+			}
+			setTo, lines := resolveModelArg(listModelIDs(c, act), arg)
+			return modelsMsg{setTo: setTo, lines: lines}
 		}
 	case "/shell", "/sh":
 		sh := shellPath()
@@ -816,7 +828,7 @@ func (m *tuiModel) View() string {
 			if gen > 0 {
 				detail = fmt.Sprintf("%s · ↑%s tok", elapsed, humanK(gen))
 			}
-			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" Thinking… (%s)", detail))
+			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" %s · thinking… (%s)", m.app.providerModel(), detail))
 		}
 	default:
 		// ctx = size of the last prompt vs the window (auto-compacts as it fills);
@@ -827,7 +839,7 @@ func (m *tuiModel) View() string {
 			ctxStr += "/" + humanK(act.ContextWindow)
 		}
 		status = cDim.Render(fmt.Sprintf("%s · %s · ctx %s · ↑%s · ready",
-			act.Model, filepath.Base(m.app.workspace), ctxStr, humanK(c)))
+			m.app.providerModel(), filepath.Base(m.app.workspace), ctxStr, humanK(c)))
 	}
 
 	bottom := m.modeLine()

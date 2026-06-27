@@ -114,6 +114,30 @@ func TestConfigPanelNav(t *testing.T) {
 	}
 }
 
+func TestResolveModelArg(t *testing.T) {
+	ids := []string{"openai/gpt-4o", "openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "x-ai/grok-4.3"}
+	// exact id → switch
+	if set, _ := resolveModelArg(ids, "x-ai/grok-4.3"); set != "x-ai/grok-4.3" {
+		t.Errorf("exact: set=%q", set)
+	}
+	// unique substring → switch
+	if set, _ := resolveModelArg(ids, "sonnet"); set != "anthropic/claude-3.5-sonnet" {
+		t.Errorf("unique substring: set=%q", set)
+	}
+	// ambiguous substring → list, no switch
+	if set, lines := resolveModelArg(ids, "gpt-4o"); set != "" || len(lines) != 3 {
+		t.Errorf("ambiguous: set=%q lines=%v (want no set, header+2 matches)", set, lines)
+	}
+	// no match → trust the user verbatim
+	if set, _ := resolveModelArg(ids, "brand-new-model"); set != "brand-new-model" {
+		t.Errorf("no match: set=%q, want verbatim", set)
+	}
+	// no list (offline) → verbatim
+	if set, _ := resolveModelArg(nil, "whatever"); set != "whatever" {
+		t.Errorf("no list: set=%q", set)
+	}
+}
+
 func TestConfigCycles(t *testing.T) {
 	if got := nextStr("ask", permCycle); got != "allow" {
 		t.Errorf("nextStr(ask) = %q, want allow", got)

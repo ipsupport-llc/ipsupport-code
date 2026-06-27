@@ -222,6 +222,12 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bo
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	if strings.Contains(c.baseURL, "openrouter.ai") {
+		// OpenRouter uses these to attribute traffic to the app (rankings, some
+		// free-tier access). Harmless elsewhere, so only set for OpenRouter.
+		req.Header.Set("HTTP-Referer", "https://github.com/ipsupport-llc/ipsupport-code")
+		req.Header.Set("X-Title", "ipsupport-code")
+	}
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
@@ -288,6 +294,12 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func()) (Message, error) {
 			d := ch.Choices[0].Delta
 			if d.Content != "" {
 				content.WriteString(d.Content)
+				reqCompl++
+				c.bumpToken()
+			}
+			// Count reasoning deltas toward live progress (reconciled to the
+			// server's real total by the usage chunk) — but don't show them.
+			if d.ReasoningContent != "" || d.Reasoning != "" {
 				reqCompl++
 				c.bumpToken()
 			}
@@ -372,8 +384,14 @@ func (c *OpenAIClient) bumpToken() {
 type streamChunk struct {
 	Choices []struct {
 		Delta struct {
-			Content   string `json:"content"`
-			ToolCalls []struct {
+			Content string `json:"content"`
+			// Reasoning models stream their hidden thinking here before any
+			// content/tool calls (xAI: reasoning_content; OpenRouter: reasoning).
+			// We don't show it, but we count it so the UI shows live progress
+			// instead of looking frozen for minutes.
+			ReasoningContent string `json:"reasoning_content"`
+			Reasoning        string `json:"reasoning"`
+			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
 				Function struct {

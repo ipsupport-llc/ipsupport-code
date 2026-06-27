@@ -69,7 +69,7 @@ hard task, then drop back to your local one:
 /ai                       list providers (local + openai, grok, groq, openrouter)
 /ai key openai sk-…       add an API key for a provider
 /ai openai                switch to it   ·   /ai local   back to LM Studio
-/model                    list the active provider's models   ·   /model gpt-4o   pick one
+/model                    list models   ·   /model gpt-4o   pick   ·   /model sonnet   filter (great for OpenRouter)
 ```
 
 Switching keeps your session, tokens, and mode. Keys live in

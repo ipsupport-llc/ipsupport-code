@@ -96,7 +96,15 @@ func (r *runTool) shell(ctx context.Context, a Args) Result {
 		var ee *exec.ExitError
 		switch {
 		case cctx.Err() == context.DeadlineExceeded:
-			return Err(fmt.Sprintf("command timed out after %s (raise the run timeout, or pass a larger `timeout`): %s", timeout, command))
+			// Not silent: tell the model it was killed, how to allow longer (the
+			// exact param + an example), and hand back whatever ran before the kill.
+			msg := fmt.Sprintf("command timed out after %s and was killed: %s\n"+
+				"If it just needs more time, re-run with a larger timeout — add \"timeout\": %d (seconds) to the params.",
+				timeout, command, int(timeout.Seconds())*4)
+			if body != "" {
+				msg += "\n--- output captured before the timeout ---\n" + body
+			}
+			return Err(msg)
 		case errors.As(runErr, &ee):
 			exit = ee.ExitCode()
 		default:

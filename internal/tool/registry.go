@@ -11,18 +11,17 @@ import (
 type Registry struct {
 	order        []string
 	tools        map[string]Tool
-	actionToTool map[string]string
+	actionToTool map[string][]string // an action can be owned by >1 tool (e.g. "search")
 }
 
-// NewRegistry indexes tools by name and their actions by owning tool. Action
-// names are expected to be globally unique across tools.
+// NewRegistry indexes tools by name and their actions by owning tool(s).
 func NewRegistry(ts ...Tool) *Registry {
-	r := &Registry{tools: map[string]Tool{}, actionToTool: map[string]string{}}
+	r := &Registry{tools: map[string]Tool{}, actionToTool: map[string][]string{}}
 	for _, t := range ts {
 		r.order = append(r.order, t.Name())
 		r.tools[t.Name()] = t
 		for _, a := range t.Actions() {
-			r.actionToTool[a] = t.Name()
+			r.actionToTool[a] = append(r.actionToTool[a], t.Name())
 		}
 	}
 	return r
@@ -69,16 +68,31 @@ func (r *Registry) Dispatch(ctx context.Context, name, action string, params map
 	// model copies the example), not the whole schema dump.
 	if action == "" {
 		acts := t.Actions()
+		if len(acts) == 0 {
+			return Err(name + ": this tool has no actions")
+		}
 		return Err(fmt.Sprintf(`%s: no action given. Call it like {"action":%q,"params":{...}} — actions: %s`,
 			name, acts[0], strings.Join(acts, ", ")))
 	}
 	if !contains(t.Actions(), action) {
-		if owner, ok := r.actionToTool[action]; ok && owner != name {
-			return Err(fmt.Sprintf("action %q belongs to tool %q, not %q; call %q with that action instead", action, owner, name, owner))
+		if owners := otherOwners(r.actionToTool[action], name); len(owners) > 0 {
+			return Err(fmt.Sprintf("action %q belongs to tool %q, not %q; call %q with that action instead",
+				action, strings.Join(owners, "/"), name, owners[0]))
 		}
 		return Err(fmt.Sprintf("%s: unknown action %q; valid actions: %s", name, action, strings.Join(t.Actions(), ", ")))
 	}
 	return t.Call(ctx, action, params)
+}
+
+// otherOwners returns the action's owner tools excluding self.
+func otherOwners(owners []string, self string) []string {
+	var out []string
+	for _, o := range owners {
+		if o != self {
+			out = append(out, o)
+		}
+	}
+	return out
 }
 
 // Usage returns a tool's self-describing contract (its Description), or "" if no

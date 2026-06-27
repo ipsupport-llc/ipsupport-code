@@ -70,10 +70,12 @@ func (r *runTool) shell(ctx context.Context, a Args) Result {
 	}
 
 	timeout := r.timeout
-	if s := a.Int("timeout", 0); s > 0 { // per-call override, capped
-		if timeout = time.Duration(s) * time.Second; timeout > maxRunTimeout {
-			timeout = maxRunTimeout
+	if s := a.Int("timeout", 0); s > 0 { // per-call override, capped (clamp before
+		maxSecs := int(maxRunTimeout / time.Second) // multiplying so a huge value
+		if s > maxSecs {                            // can't overflow to a negative
+			s = maxSecs // duration → instant timeout
 		}
+		timeout = time.Duration(s) * time.Second
 	}
 
 	cctx, cancel := context.WithTimeout(ctx, timeout)

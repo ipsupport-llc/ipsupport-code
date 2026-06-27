@@ -32,6 +32,8 @@ func TestWebSearch(t *testing.T) {
 }
 
 func TestWebFetch(t *testing.T) {
+	webAllowPrivate = true // the test server is on loopback
+	t.Cleanup(func() { webAllowPrivate = false })
 	page := `<html><head><title>Hello</title></head><body><article>
 		<h1>Big Heading</h1>
 		<p>Some paragraph text that is reasonably long so the reader keeps it around.</p>
@@ -51,6 +53,16 @@ func TestWebFetch(t *testing.T) {
 	}
 	if strings.Contains(r.Content, "<h1>") {
 		t.Errorf("html not converted: %q", r.Content)
+	}
+}
+
+func TestWebFetchBlocksPrivate(t *testing.T) {
+	// SSRF guard ON (default): fetching loopback/metadata must be refused.
+	for _, u := range []string{"http://127.0.0.1:80/", "http://localhost:8080/x", "http://169.254.169.254/latest/meta-data/"} {
+		r := NewWeb(http.DefaultClient).Call(context.Background(), "fetch", map[string]any{"url": u})
+		if !r.IsError || !strings.Contains(r.Content, "SSRF") {
+			t.Errorf("fetch(%q) = %+v, want an SSRF refusal", u, r)
+		}
 	}
 }
 

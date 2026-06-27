@@ -510,6 +510,16 @@ func parseArgs(raw string) (string, map[string]any) {
 			action = a
 		}
 		delete(p, "action")
+		// Fold in any sibling fields the model split out to the top level
+		// ({"action":"edit","path":"x","params":{"find":..}}); params wins.
+		for k, v := range m {
+			if k == "action" || k == "params" {
+				continue
+			}
+			if _, exists := p[k]; !exists {
+				p[k] = v
+			}
+		}
 		return action, p
 	case string: // params double-encoded as a JSON string — decode it
 		if inner := decodeObj(p); inner != nil {

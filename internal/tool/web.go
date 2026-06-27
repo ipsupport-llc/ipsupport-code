@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -102,7 +103,11 @@ func (w *webTool) fetch(ctx context.Context, a Args) Result {
 		return Err("invalid url (need http/https): " + raw)
 	}
 
-	body, err := w.get(ctx, raw)
+	if !webAllowPrivate && privateHost(pu.Host) {
+		return Err("refusing to fetch a private/loopback/link-local address (SSRF guard): " + pu.Host)
+	}
+
+	body, err := w.fetchGet(ctx, raw)
 	if err != nil {
 		return Fail("web", "fetch", "fetch failed: "+err.Error(), err)
 	}
@@ -201,6 +206,70 @@ func (w *webTool) get(ctx context.Context, urlStr string) (string, error) {
 		return "", fmt.Errorf("http %d", resp.StatusCode)
 	}
 	return string(data), nil
+}
+
+// fetchGet is get for model-supplied URLs: it re-checks every redirect hop so a
+// public URL can't bounce to a private/loopback/link-local address (SSRF).
+func (w *webTool) fetchGet(ctx context.Context, urlStr string) (string, error) {
+	client := *w.hc // copy: don't mutate the shared client's CheckRedirect
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if !webAllowPrivate && privateHost(req.URL.Host) {
+			return fmt.Errorf("redirect to a private address blocked: %s", req.URL.Host)
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPBytes))
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode >= 400 {
+		return "", fmt.Errorf("http %d", resp.StatusCode)
+	}
+	return string(data), nil
+}
+
+// webAllowPrivate disables the SSRF guard (tests point fetch at loopback servers).
+var webAllowPrivate bool
+
+// privateHost reports whether host resolves to a loopback/private/link-local/
+// unspecified address — the SSRF targets fetch refuses (cloud metadata at
+// 169.254.169.254 is link-local; internal services are loopback/private).
+func privateHost(host string) bool {
+	h := host
+	if hh, _, err := net.SplitHostPort(host); err == nil {
+		h = hh
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return blockedIP(ip)
+	}
+	ips, err := net.LookupIP(h)
+	if err != nil {
+		return false // can't resolve → let the request fail normally
+	}
+	for _, ip := range ips {
+		if blockedIP(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func blockedIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
 
 // decodeDDG unwraps DuckDuckGo's redirect href (…/l/?uddg=<encoded url>).

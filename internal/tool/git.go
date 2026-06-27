@@ -79,13 +79,20 @@ func (g *gitTool) commit(ctx context.Context, a Args) Result {
 
 func (g *gitTool) branch(ctx context.Context, a Args) Result {
 	if name := a.Str("name"); name != "" {
-		return g.run(ctx, "branch", true, "branch", name)
+		if strings.HasPrefix(name, "-") { // a leading dash would be read as a git flag
+			return Err("invalid branch name (leading dash): " + name)
+		}
+		return g.run(ctx, "branch", true, "branch", "--", name)
 	}
 	return g.run(ctx, "branch", false, "branch")
 }
 
 func (g *gitTool) checkout(ctx context.Context, a Args) Result {
-	return g.run(ctx, "checkout", true, "checkout", a.Str("ref"))
+	ref := a.Str("ref")
+	if strings.HasPrefix(ref, "-") { // e.g. "-f" → "git checkout -f" force-discards changes
+		return Err("invalid ref (leading dash): " + ref)
+	}
+	return g.run(ctx, "checkout", true, "checkout", "--", ref)
 }
 
 func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ...string) Result {

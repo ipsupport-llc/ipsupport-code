@@ -394,6 +394,11 @@ func TestParseArgsNestedObject(t *testing.T) {
 	if action != "edit" || params["find"] != "x" || params["replace"] != "y" {
 		t.Errorf("nested object: action=%q params=%v", action, params)
 	}
+	// Mixed shape: path at the top level, the rest under params — fold them together.
+	action, params = parseArgs(`{"action":"edit","path":"main.go","params":{"find":"x","replace":"y"}}`)
+	if action != "edit" || params["path"] != "main.go" || params["find"] != "x" {
+		t.Errorf("mixed shape dropped a sibling: action=%q params=%v", action, params)
+	}
 }
 
 func TestRunConcurrentToolCallsStayOrdered(t *testing.T) {

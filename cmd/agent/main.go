@@ -118,8 +118,21 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 	if err := a.wire(); err != nil {
 		return nil, nil, err
 	}
-	a.loadSession() // restore the prior conversation for this workspace
+	a.loadSession()           // restore the prior conversation for this workspace
+	a.detectContextWindow()   // ask LM Studio for the real window (auto-compact sizing)
 	return a, cleanup, nil
+}
+
+// detectContextWindow asks LM Studio for the loaded model's context length and,
+// if it answers, uses that real value instead of the configured default. Best-
+// effort with a short timeout so startup never blocks on it.
+func (a *app) detectContextWindow() {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if w := llm.DetectContextWindow(ctx, a.cfg.LLM.BaseURL, a.cfg.LLM.Model, http.DefaultClient); w > 0 {
+		a.cfg.LLM.ContextWindow = w
+		slog.Info("detected context window", "tokens", w, "model", a.cfg.LLM.Model)
+	}
 }
 
 // wire (re)builds the policy-gated tools, LLM client, agent, and reflector from
@@ -195,6 +208,7 @@ func (a *app) reconfigure() error {
 		return err
 	}
 	a.loadSession() // a fresh agent — restore the persisted session
+	a.detectContextWindow() // model may have changed — re-detect the window
 	return nil
 }
 

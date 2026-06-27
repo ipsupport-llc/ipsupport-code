@@ -27,13 +27,15 @@ machine, with your own model, under a permission policy you control.
 ## Install
 
 **One-liner** (macOS/Linux) — auto-detects your platform, verifies the SHA-256,
-and drops `./ipsupport-code` in the current directory:
+installs to `~/.local/bin`, and prints how to run it (and how to add it to PATH
+if needed):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ipsupport-llc/ipsupport-code/main/scripts/install.sh | sh
-# newest stable release instead of nightly:
-curl -fsSL https://raw.githubusercontent.com/ipsupport-llc/ipsupport-code/main/scripts/install.sh | sh -s -- latest
 ```
+
+That installs the latest **nightly**; append `-s -- latest` for the newest stable
+release, `-s -- v0.3.1` for a specific tag, or a second arg for a custom path.
 
 **Or download the archive** for your platform from the
 [latest release](https://github.com/ipsupport-llc/ipsupport-code/releases/latest)

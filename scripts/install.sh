@@ -13,15 +13,21 @@ set -eu
 REPO="ipsupport-llc/ipsupport-code"
 TAG="${1:-nightly}"
 
-# Where to install: an explicit 2nd arg wins; otherwise a personal bin dir that
-# already exists (so it's likely on PATH); otherwise the current directory.
+# Where to install: an explicit 2nd arg wins; otherwise a personal bin dir —
+# an existing ~/.local/bin or ~/bin, else ~/.local/bin is created. Only when
+# there's no HOME do we fall back to the current directory.
 if [ "${2:-}" ]; then
   DEST="$2"
+elif [ -n "${HOME:-}" ]; then
+  bindir=""
+  for d in "$HOME/.local/bin" "$HOME/bin"; do
+    [ -d "$d" ] && { bindir="$d"; break; }
+  done
+  [ -z "$bindir" ] && bindir="$HOME/.local/bin"
+  mkdir -p "$bindir"
+  DEST="$bindir/ipsupport-code"
 else
   DEST="./ipsupport-code"
-  for d in "$HOME/.local/bin" "$HOME/bin"; do
-    [ -d "$d" ] && { DEST="$d/ipsupport-code"; break; }
-  done
 fi
 
 os=$(uname -s | tr '[:upper:]' '[:lower:]')

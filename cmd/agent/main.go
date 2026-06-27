@@ -210,6 +210,7 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 
 	cleanup := func() {}
 	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader, approver: &stdinApprover{r: reader}}
+	a.applyUsageRetention() // honor usage_retention_days on startup
 	if ft, err := trace.NewFileTracer(cfg.TracePath, newRunID()); err != nil {
 		slog.Warn("trace disabled", "err", err)
 	} else {
@@ -656,7 +657,13 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	case "/status":
 		fmt.Print(a.statusText())
 	case "/usage":
-		fmt.Print(a.usageText())
+		if lines, handled := a.usageManage(rest); handled {
+			for _, l := range lines {
+				fmt.Println(l)
+			}
+		} else {
+			fmt.Print(a.usageText())
+		}
 	case "/login", "/init":
 		maybeInit(a.reader, true)
 		if err := a.reconfigure(); err != nil {
@@ -1291,6 +1298,12 @@ func (a *app) usageText() string {
   tokens      %d prompt + %d completion = %d
   lessons     %d in knowledge base
 `, a.tasks, a.steps, a.toolCalls, p, c, p+c, len(a.kb.All()))
+	if roll := a.usageRollups(); len(roll) > 0 {
+		b.WriteString("\ntokens (cumulative, saved):\n")
+		for _, r := range roll {
+			fmt.Fprintf(&b, "  %-12s %s\n", r[0], r[1])
+		}
+	}
 	days, models := a.usageLedger()
 	if len(days) > 0 {
 		b.WriteString("\ntokens by day:\n")
@@ -1304,7 +1317,85 @@ func (a *app) usageText() string {
 			fmt.Fprintf(&b, "  %-28s %s\n", r[0], r[1])
 		}
 	}
+	b.WriteString("\nmanage: /usage clear · /usage purge <days> · /usage retain <days>\n")
 	return b.String()
+}
+
+// usageRollups summarizes cumulative token spend over common windows from the
+// saved ledger (today / 7d / 30d / all time).
+func (a *app) usageRollups() [][2]string {
+	if a.usage == nil {
+		return nil
+	}
+	now := time.Now()
+	return [][2]string{
+		{"today", humanK(a.usage.TotalSince(now.Format("2006-01-02")).Tokens()) + " tok"},
+		{"last 7 days", humanK(a.usage.TotalSince(now.AddDate(0, 0, -6).Format("2006-01-02")).Tokens()) + " tok"},
+		{"last 30 days", humanK(a.usage.TotalSince(now.AddDate(0, 0, -29).Format("2006-01-02")).Tokens()) + " tok"},
+		{"all time", humanK(a.usage.Total().Tokens()) + " tok"},
+	}
+}
+
+// cutoffDays is the ISO date N days ago — entries older than it are "older than N
+// days" for purge/retention.
+func cutoffDays(days int) string { return time.Now().AddDate(0, 0, -days).Format("2006-01-02") }
+
+// applyUsageRetention drops ledger entries older than the configured window, on
+// startup. No-op when retention is off (0).
+func (a *app) applyUsageRetention() {
+	if a.usage == nil || a.cfg.UsageRetentionDays <= 0 {
+		return
+	}
+	if n := a.usage.Purge(cutoffDays(a.cfg.UsageRetentionDays)); n > 0 {
+		_ = a.usage.Save()
+	}
+}
+
+// usageManage handles /usage subcommands. handled=false (for no/unknown args)
+// tells the caller to show the report instead.
+func (a *app) usageManage(rest string) ([]string, bool) {
+	sub, arg := splitCommand(rest)
+	switch sub {
+	case "":
+		return nil, false
+	case "clear":
+		if a.usage != nil {
+			a.usage.Clear()
+			_ = a.usage.Save()
+		}
+		return []string{"usage history cleared"}, true
+	case "purge":
+		days, err := strconv.Atoi(strings.TrimSpace(arg))
+		if err != nil || days <= 0 {
+			return []string{"usage: /usage purge <days>   (drop saved entries older than N days)"}, true
+		}
+		n := 0
+		if a.usage != nil {
+			n = a.usage.Purge(cutoffDays(days))
+			_ = a.usage.Save()
+		}
+		return []string{fmt.Sprintf("purged %d entries older than %d day(s)", n, days)}, true
+	case "retain":
+		days, err := strconv.Atoi(strings.TrimSpace(arg))
+		if err != nil || days < 0 {
+			return []string{"usage: /usage retain <days>   (auto-drop older than N days on startup; 0 = keep forever)"}, true
+		}
+		a.cfg.UsageRetentionDays = days
+		if err := config.SaveUsageRetention(days); err != nil {
+			return []string{"error: " + err.Error()}, true
+		}
+		if days == 0 {
+			return []string{"retention off — keeping usage history forever"}, true
+		}
+		n := 0
+		if a.usage != nil {
+			n = a.usage.Purge(cutoffDays(days))
+			_ = a.usage.Save()
+		}
+		return []string{fmt.Sprintf("retention set to %d day(s) — purged %d older entries", days, n)}, true
+	default:
+		return []string{"usage: /usage [clear | purge <days> | retain <days>]"}, true
+	}
 }
 
 // usageLedger returns the per-day and per-provider/model token rows (capped) from

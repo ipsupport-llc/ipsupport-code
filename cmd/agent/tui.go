@@ -552,7 +552,12 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/status":
 		m.push(m.renderStatus()...)
 	case "/usage":
-		m.push(m.renderUsage()...)
+		if lines, handled := m.app.usageManage(strings.TrimSpace(rest)); handled {
+			m.pushLines(lines)
+		} else {
+			m.push(m.renderUsage()...)
+		}
+		return m, nil
 	case "/login":
 		if err := m.app.reconfigure(); err != nil {
 			m.push(cErr.Render("reload failed: " + err.Error()))
@@ -1045,7 +1050,7 @@ type cmdInfo struct{ name, desc string }
 var commandList = []cmdInfo{
 	{"/help", "this list"},
 	{"/status", "config, knowledge base, trace paths"},
-	{"/usage", "session counters + token history by day and provider/model"},
+	{"/usage", "token history (day/week/month, by model); clear · purge <days> · retain <days>"},
 	{"/login", "(re)configure server URL / model / key, then reload"},
 	{"/new", "clear the session conversation memory"},
 	{"/clear", "fresh start — clear the screen and the session"},
@@ -1159,6 +1164,8 @@ func (m *tuiModel) argCandidates(name string) []string {
 			}
 		}
 		return cands
+	case "/usage":
+		return []string{"clear", "purge", "retain"}
 	case "/color":
 		names := make([]string, 0, len(colorNames))
 		for n := range colorNames {
@@ -1240,6 +1247,10 @@ func (m *tuiModel) renderUsage() []string {
 		{"tokens", fmt.Sprintf("%d + %d = %d", p, c, p+c)},
 		{"lessons", fmt.Sprintf("%d", len(m.app.kb.All()))},
 	})
+	if roll := m.app.usageRollups(); len(roll) > 0 {
+		out = append(out, "")
+		out = append(out, m.renderKV("tokens (cumulative, saved)", roll)...)
+	}
 	days, models := m.app.usageLedger()
 	if len(days) > 0 {
 		out = append(out, "")
@@ -1249,6 +1260,7 @@ func (m *tuiModel) renderUsage() []string {
 		out = append(out, "")
 		out = append(out, m.renderKV("tokens by provider/model", models)...)
 	}
+	out = append(out, "", cDim.Render("  manage · /usage clear · /usage purge <days> · /usage retain <days>"))
 	return out
 }
 

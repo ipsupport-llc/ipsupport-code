@@ -26,6 +26,30 @@ func TestStoreAddAndAggregate(t *testing.T) {
 	}
 }
 
+func TestStoreTotalSincePurgeClear(t *testing.T) {
+	s, _ := Open("")
+	s.Add("2026-06-01", "p", "m", 10, 10)
+	s.Add("2026-06-20", "p", "m", 20, 20)
+	s.Add("2026-06-27", "p", "m", 30, 30)
+
+	if got := s.Total().Tokens(); got != 120 {
+		t.Errorf("Total = %d, want 120", got)
+	}
+	if got := s.TotalSince("2026-06-20").Tokens(); got != 100 {
+		t.Errorf("TotalSince(06-20) = %d, want 100 (20+20+30+30)", got)
+	}
+	if n := s.Purge("2026-06-20"); n != 1 { // drops only 2026-06-01
+		t.Errorf("Purge older than 06-20 removed %d, want 1", n)
+	}
+	if got := s.Total().Tokens(); got != 100 {
+		t.Errorf("after purge Total = %d, want 100", got)
+	}
+	s.Clear()
+	if got := s.Total().Tokens(); got != 0 {
+		t.Errorf("after Clear Total = %d, want 0", got)
+	}
+}
+
 func TestStorePersist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.json")
 	s, _ := Open(path)

@@ -90,6 +90,41 @@ type Total struct {
 // Tokens is the combined prompt+completion count.
 func (t Total) Tokens() int { return t.Prompt + t.Completion }
 
+// TotalSince sums all entries on or after cutoff (an ISO YYYY-MM-DD date; ISO
+// dates compare correctly as strings). cutoff "" sums everything.
+func (s *Store) TotalSince(cutoff string) Total {
+	t := Total{Key: cutoff}
+	for _, e := range s.entries {
+		if e.Date >= cutoff {
+			t.Prompt += e.Prompt
+			t.Completion += e.Completion
+		}
+	}
+	return t
+}
+
+// Total is the all-time total.
+func (s *Store) Total() Total { return s.TotalSince("") }
+
+// Purge drops entries older than cutoff (Date < cutoff) and returns how many were
+// removed. The caller persists with Save.
+func (s *Store) Purge(cutoff string) int {
+	kept := s.entries[:0]
+	removed := 0
+	for _, e := range s.entries {
+		if e.Date < cutoff {
+			removed++
+			continue
+		}
+		kept = append(kept, e)
+	}
+	s.entries = kept
+	return removed
+}
+
+// Clear drops the entire ledger. The caller persists with Save.
+func (s *Store) Clear() { s.entries = nil }
+
 // ByDay returns per-day totals, most recent day first.
 func (s *Store) ByDay() []Total {
 	return s.aggregate(func(e Entry) string { return e.Date }, true)

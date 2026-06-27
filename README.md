@@ -168,7 +168,7 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | `/skills` | list / toggle / install on-demand instruction packs |
 | `/permissions` | relax approval for non-destructive file/shell actions |
 | `/status` | config, knowledge base, and trace paths |
-| `/usage` | session counters + token history (by day, by provider/model) |
+| `/usage` | token spend (today / 7d / 30d / all, by day, by model); `clear` · `purge <days>` · `retain <days>` |
 | `/login` | (re)configure server URL / model / key, then reload |
 | `/new` | clear the session conversation memory |
 | `/clear` | fresh start — clear the screen and the session |
@@ -225,7 +225,9 @@ edit at your own risk.)
 - **Trace = dataset.** Every step (goal, tool call, observation, final, lesson) is
   appended as JSONL to `~/.config/ipsupport-code/traces.jsonl`.
 - **Usage ledger.** Token spend is recorded per day and per provider/model to
-  `~/.config/ipsupport-code/usage.json`; `/usage` shows the history.
+  `~/.config/ipsupport-code/usage.json` and accumulates across runs; `/usage`
+  shows today / 7-day / 30-day / all-time rollups, with `clear`, `purge <days>`,
+  and a `retain <days>` retention window.
 
 ## Configuration
 

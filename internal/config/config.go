@@ -57,18 +57,21 @@ type FilePolicy struct {
 
 // Config is the merged runtime configuration.
 type Config struct {
-	Name       string         `json:"name,omitempty"`      // display name (renameable)
-	Channel    string         `json:"channel,omitempty"`   // update channel: stable | nightly
-	Provider   string         `json:"provider,omitempty"`  // active provider ("" / "local" = LLM below)
-	LLM        LLM            `json:"llm"`                 // the local connection (the "local" provider)
-	Providers  map[string]LLM `json:"providers,omitempty"` // external provider presets
-	Run        RunPolicy      `json:"run"`
-	File       FilePolicy     `json:"file"`
-	KBPath     string         `json:"kb_path,omitempty"`
-	TracePath  string         `json:"trace_path,omitempty"`
-	UsagePath  string         `json:"usage_path,omitempty"`
-	SkillsPath string         `json:"skills_path,omitempty"`
-	Workspace  string         `json:"-"` // resolved absolute workspace root
+	Name      string         `json:"name,omitempty"`      // display name (renameable)
+	Channel   string         `json:"channel,omitempty"`   // update channel: stable | nightly
+	Provider  string         `json:"provider,omitempty"`  // active provider ("" / "local" = LLM below)
+	LLM       LLM            `json:"llm"`                 // the local connection (the "local" provider)
+	Providers map[string]LLM `json:"providers,omitempty"` // external provider presets
+	Run       RunPolicy      `json:"run"`
+	File      FilePolicy     `json:"file"`
+	KBPath    string         `json:"kb_path,omitempty"`
+	TracePath string         `json:"trace_path,omitempty"`
+	UsagePath string         `json:"usage_path,omitempty"`
+	// UsageRetentionDays auto-drops usage-ledger entries older than N days on
+	// startup. 0 keeps history forever.
+	UsageRetentionDays int    `json:"usage_retention_days,omitempty"`
+	SkillsPath         string `json:"skills_path,omitempty"`
+	Workspace          string `json:"-"` // resolved absolute workspace root
 }
 
 // ProviderTemplates are built-in OpenAI-compatible providers: base URL (and a
@@ -268,6 +271,12 @@ func mergeGlobalKeys(kv map[string]any) error {
 
 // SaveChannel persists the update channel (stable|nightly).
 func SaveChannel(channel string) error { return mergeGlobalKeys(map[string]any{"channel": channel}) }
+
+// SaveUsageRetention persists the usage-ledger retention window (days; 0 = keep
+// forever).
+func SaveUsageRetention(days int) error {
+	return mergeGlobalKeys(map[string]any{"usage_retention_days": days})
+}
 
 // SaveProviders persists the active provider name and the external provider
 // presets (which may include API keys — the file is written 0600).

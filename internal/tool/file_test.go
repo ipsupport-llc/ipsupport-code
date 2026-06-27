@@ -61,6 +61,25 @@ func TestFileWriteEmpty(t *testing.T) {
 	}
 }
 
+func TestFileSearch(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+	tl.Call(ctx, "write", map[string]any{"path": "a.go", "content": "package main\nfunc Foo() {}\n"})
+	tl.Call(ctx, "write", map[string]any{"path": "sub/b.go", "content": "// calls Foo here\nvar x = 1\n"})
+
+	r := tl.Call(ctx, "search", map[string]any{"query": "Foo"})
+	if r.IsError {
+		t.Fatalf("search: %s", r.Content)
+	}
+	if !strings.Contains(r.Content, "a.go:2:") || !strings.Contains(r.Content, "sub/b.go:1:") {
+		t.Errorf("search missed matches:\n%s", r.Content)
+	}
+	if r2 := tl.Call(ctx, "search", map[string]any{"query": "zzz-nope"}); !strings.Contains(r2.Content, "no matches") {
+		t.Errorf("expected no-matches, got: %s", r2.Content)
+	}
+}
+
 func TestFileJailEscape(t *testing.T) {
 	tl := fileToolFor(t, t.TempDir(), "allow", yes())
 	r := tl.Call(context.Background(), "write", map[string]any{"path": "../evil.txt", "content": "x"})

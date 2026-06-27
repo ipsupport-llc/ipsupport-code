@@ -204,7 +204,11 @@ edit at your own risk.)
 - **Proactive help.** When a tool fails, a matching lesson from past runs is
   injected straight into the error the model sees — it doesn't have to ask.
 - **Reflection.** After a task, a second model pass distills durable lessons into
-  `~/.config/ipsupport-code/knowledge.json`, available next run.
+  `~/.config/ipsupport-code/knowledge.json` (env-general tool pitfalls) and durable
+  **facts** about the current project (build/test/run commands, where things live,
+  conventions) into `<workspace>/.agent/facts.json` — folded into the prompt next run.
+- **Code search.** The `file` tool's `search` action greps the workspace by regex
+  (`file:line: match`), skipping VCS/dep/build dirs and binaries — no external `grep`.
 - **Session memory.** Remembers your goals and its answers across turns and across
   restarts (`.agent/session.json`, per workspace). `/new` wipes it.
 - **Resilience.** Exponential-backoff retry on transient 5xx/network errors, an
@@ -223,6 +227,9 @@ Settings merge over safe defaults from two JSON files:
 - **`<workspace>/.agent/config.json`** — per-project: the permission policy (see
   [`.agent/config.example.json`](.agent/config.example.json)). Wins over the user
   file.
+
+`run.timeout_seconds` caps how long a shell command may run (default 60s); raise
+it for slow builds/test suites, or let the model pass a larger per-call `timeout`.
 
 Permissions for `run` and `file` resolve per action: a **deny** glob blocks, an
 **allow** glob runs without asking, otherwise the **default** (`ask`/`allow`/`deny`)
@@ -243,7 +250,7 @@ internal/tool       fat tools: file, run, git, web, calc, skill, help
 internal/skill      downloadable, toggleable instruction packs
 internal/policy     workspace permission engine (+ jail, deny floor)
 internal/knowledge  persistent pitfall store
-internal/reflect    post-task lesson distillation
+internal/reflect    post-task lesson + project-fact distillation
 internal/trace      JSONL decision trace (the dataset)
 internal/config     config load/merge
 ```

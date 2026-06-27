@@ -4,10 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
 )
+
+// oneLineList collapses a (possibly JSON/HTML) error body to a short single line.
+func oneLineList(s string) string {
+	return truncate(strings.Join(strings.Fields(s), " "), 200)
+}
 
 // ListModels returns the model IDs an OpenAI-compatible server advertises at
 // /v1/models (sorted). Works for LM Studio, OpenAI, xAI, Groq, OpenRouter, etc.
@@ -28,6 +34,10 @@ func ListModels(ctx context.Context, baseURL, apiKey string, hc *http.Client) ([
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		if msg := strings.TrimSpace(string(body)); msg != "" {
+			return nil, fmt.Errorf("list models: http %d: %s", resp.StatusCode, oneLineList(msg))
+		}
 		return nil, fmt.Errorf("list models: http %d", resp.StatusCode)
 	}
 	var out struct {

@@ -8,7 +8,8 @@
   "run": {
     "default": "ask",
     "allow": ["ls*", "cat*", "git status", "go build*", "go test*"],
-    "deny": ["rm -rf*", "sudo*", "*| sh", "*curl*sh*"]
+    "deny": ["rm -rf*", "sudo*", "*| sh", "*curl*sh*"],
+    "timeout_seconds": 120
   },
   "file": {
     "default": "ask",

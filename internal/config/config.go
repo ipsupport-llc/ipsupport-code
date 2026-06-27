@@ -40,6 +40,9 @@ type RunPolicy struct {
 	Default string   `json:"default"`
 	Allow   []string `json:"allow"`
 	Deny    []string `json:"deny"`
+	// TimeoutSeconds is the default wall-clock limit for a shell command. 0 uses
+	// the built-in default (60s). A command may pass a larger per-call `timeout`.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
 }
 
 // FilePolicy gates file writes and confines all file ops to Jail (empty = no
@@ -118,12 +121,11 @@ func ResolveProvider(cfg Config, name string) (LLM, bool) {
 			p.APIKey = os.Getenv(env)
 		}
 	}
-	d := Default().LLM
-	if p.Temperature == 0 {
-		p.Temperature = d.Temperature
-	}
+	// Leave Temperature at 0 unless the user set one: the client omits a zero
+	// temperature so hosted models that only accept their default (OpenAI gpt-5.x,
+	// chat-latest) keep working. Only MaxSteps falls back to the baseline.
 	if p.MaxSteps == 0 {
-		p.MaxSteps = d.MaxSteps
+		p.MaxSteps = Default().LLM.MaxSteps
 	}
 	return p, true
 }

@@ -29,31 +29,40 @@ type Reflector struct{ LLM llm.Chatter }
 // New constructs a Reflector.
 func New(l llm.Chatter) *Reflector { return &Reflector{LLM: l} }
 
-const reflectPrompt = `You review a finished run by a tool-using agent and extract durable lessons for next time.
-Return ONLY a JSON array of objects with keys: "domain", "error_pattern", "context", "proven_fix".
-- "domain" must be one of: file, run, web, calc.
-- Include a lesson ONLY where the agent hit an error AND a later action fixed it.
-- "error_pattern" is a short substring of the error; "proven_fix" is the concrete fix that worked.
-- Keep lessons environment-general (tool/OS behaviour). EXCLUDE anything specific to this project, path, or task.
-- If there is nothing durable to learn, return exactly [].`
+// Lessons is what a reflection pass distills: environment-general tool pitfalls
+// (saved to the global knowledge base) and durable facts about THIS project
+// (saved per workspace, folded into the prompt next time).
+type Lessons struct {
+	Pitfalls []knowledge.Pitfall
+	Facts    []string
+}
 
-// Reflect returns the durable pitfalls learned from t. A turn with no tool use
-// (a plain chat exchange) has nothing to learn, so it skips the model call
-// entirely — no point making a small model reason over an empty run.
-func (r *Reflector) Reflect(ctx context.Context, t agent.Transcript) ([]knowledge.Pitfall, error) {
+const reflectPrompt = `You review a finished run by a tool-using agent and extract two things for next time, as ONE JSON object:
+{"pitfalls": [...], "facts": [...]}
+
+"pitfalls" — environment-general tool lessons. Each: {"domain" (file|run|web|calc), "error_pattern" (short substring of the error), "context", "proven_fix" (the concrete fix that worked)}. Include ONE only where an error was hit AND a later action fixed it. EXCLUDE anything specific to this project/path.
+
+"facts" — short, durable, reusable facts about THIS project worth remembering next time: build/test/run commands, where things live, conventions, gotchas. Solid reusable facts only, not one-off details.
+
+Use [] for an empty list. Return ONLY the JSON object.`
+
+// Reflect distills lessons from t. A turn with no tool use (a plain chat) has
+// nothing to learn, so it skips the model call — no point making a small model
+// reason over an empty run.
+func (r *Reflector) Reflect(ctx context.Context, t agent.Transcript) (Lessons, error) {
 	if !usedTools(t) {
-		return nil, nil
+		return Lessons{}, nil
 	}
 	summary := summarize(t)
 	if strings.TrimSpace(summary) == "" {
-		return nil, nil
+		return Lessons{}, nil
 	}
 	reply, err := r.LLM.Chat(ctx, []llm.Message{
 		llm.System(reflectPrompt),
 		llm.User(summary),
 	}, nil)
 	if err != nil {
-		return nil, &ReflectionError{Err: err}
+		return Lessons{}, &ReflectionError{Err: err}
 	}
 	return parseLessons(reply.Content), nil
 }
@@ -102,46 +111,49 @@ func oneLine(s string) string {
 	return s
 }
 
-func parseLessons(content string) []knowledge.Pitfall {
-	for _, candidate := range jsonArrayCandidates(content) {
-		var raw []struct {
-			Domain       string `json:"domain"`
-			ErrorPattern string `json:"error_pattern"`
-			Context      string `json:"context"`
-			ProvenFix    string `json:"proven_fix"`
+func parseLessons(content string) Lessons {
+	for _, candidate := range jsonObjectCandidates(content) {
+		var raw struct {
+			Pitfalls []struct {
+				Domain       string `json:"domain"`
+				ErrorPattern string `json:"error_pattern"`
+				Context      string `json:"context"`
+				ProvenFix    string `json:"proven_fix"`
+			} `json:"pitfalls"`
+			Facts []string `json:"facts"`
 		}
 		if err := json.Unmarshal([]byte(candidate), &raw); err != nil {
 			continue
 		}
-		var out []knowledge.Pitfall
-		for _, r := range raw {
-			if strings.TrimSpace(r.Domain) == "" || strings.TrimSpace(r.ProvenFix) == "" {
+		var out Lessons
+		for _, p := range raw.Pitfalls {
+			if strings.TrimSpace(p.Domain) == "" || strings.TrimSpace(p.ProvenFix) == "" {
 				continue
 			}
-			out = append(out, knowledge.Pitfall{
-				Domain:       r.Domain,
-				ErrorPattern: r.ErrorPattern,
-				Context:      r.Context,
-				ProvenFix:    r.ProvenFix,
+			out.Pitfalls = append(out.Pitfalls, knowledge.Pitfall{
+				Domain: p.Domain, ErrorPattern: p.ErrorPattern, Context: p.Context, ProvenFix: p.ProvenFix,
 			})
 		}
-		return out // first candidate that parses as an array wins
+		for _, f := range raw.Facts {
+			if s := strings.TrimSpace(f); s != "" {
+				out.Facts = append(out.Facts, s)
+			}
+		}
+		return out // first candidate that parses as the object wins
 	}
-	return nil
+	return Lessons{}
 }
 
-// jsonArrayCandidates returns every substring of s that starts at a '[' and
-// decodes as a complete JSON array, in order. This tolerates prose around the
-// array — and prose that itself contains brackets — unlike a naive
-// first-'['-to-last-']' slice.
-func jsonArrayCandidates(s string) []string {
+// jsonObjectCandidates returns every substring of s that starts at a '{' and
+// decodes as a complete JSON object, in order — tolerating prose around it.
+func jsonObjectCandidates(s string) []string {
 	var out []string
 	for i := 0; i < len(s); i++ {
-		if s[i] != '[' {
+		if s[i] != '{' {
 			continue
 		}
 		var raw json.RawMessage
-		if err := json.NewDecoder(strings.NewReader(s[i:])).Decode(&raw); err == nil && len(raw) > 0 && raw[0] == '[' {
+		if err := json.NewDecoder(strings.NewReader(s[i:])).Decode(&raw); err == nil && len(raw) > 0 && raw[0] == '{' {
 			out = append(out, string(raw))
 		}
 	}

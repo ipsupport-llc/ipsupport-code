@@ -34,38 +34,53 @@ func sampleTranscript() agent.Transcript {
 }
 
 func TestReflectParsesLessons(t *testing.T) {
-	reply := "Here are the lessons:\n" +
-		`[{"domain":"run","error_pattern":"permission denied","context":"writing to /root","proven_fix":"use sudo"}]`
-	ps, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
+	reply := "Here is what I learned:\n" +
+		`{"pitfalls":[{"domain":"run","error_pattern":"permission denied","context":"writing to /root","proven_fix":"use sudo"}],` +
+		`"facts":["build with: go build ./...","tests live in internal/*_test.go"]}`
+	l, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
 	if err != nil {
 		t.Fatalf("Reflect: %v", err)
 	}
-	if len(ps) != 1 || ps[0].Domain != "run" || ps[0].ProvenFix != "use sudo" {
-		t.Errorf("lessons = %+v", ps)
+	if len(l.Pitfalls) != 1 || l.Pitfalls[0].Domain != "run" || l.Pitfalls[0].ProvenFix != "use sudo" {
+		t.Errorf("pitfalls = %+v", l.Pitfalls)
+	}
+	if len(l.Facts) != 2 || l.Facts[0] != "build with: go build ./..." {
+		t.Errorf("facts = %+v", l.Facts)
 	}
 }
 
-func TestReflectParsesArrayAfterBracketProse(t *testing.T) {
-	// Prose contains a bracketed phrase before the real JSON array.
-	reply := "The lessons [for run] are below:\n" +
-		`[{"domain":"run","error_pattern":"permission denied","context":"writing /root","proven_fix":"use sudo"}]`
-	ps, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
+func TestReflectParsesObjectAfterBraceProse(t *testing.T) {
+	// Prose contains a braced phrase that isn't JSON before the real object.
+	reply := "The lessons {for this run} are below:\n" +
+		`{"pitfalls":[{"domain":"run","error_pattern":"permission denied","context":"writing /root","proven_fix":"use sudo"}],"facts":[]}`
+	l, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
 	if err != nil {
 		t.Fatalf("Reflect: %v", err)
 	}
-	if len(ps) != 1 || ps[0].ProvenFix != "use sudo" {
-		t.Errorf("lessons = %+v, want the real array parsed past the prose brackets", ps)
+	if len(l.Pitfalls) != 1 || l.Pitfalls[0].ProvenFix != "use sudo" {
+		t.Errorf("pitfalls = %+v, want the real object parsed past the prose braces", l.Pitfalls)
+	}
+}
+
+func TestReflectFactsOnly(t *testing.T) {
+	reply := `{"pitfalls":[],"facts":["run the server with: make dev"]}`
+	l, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if len(l.Pitfalls) != 0 || len(l.Facts) != 1 || l.Facts[0] != "run the server with: make dev" {
+		t.Errorf("lessons = %+v, want facts-only", l)
 	}
 }
 
 func TestReflectNoJSONIsEmpty(t *testing.T) {
-	ps, err := New(fixedLLM{reply: "I see nothing durable to learn here."}).
+	l, err := New(fixedLLM{reply: "I see nothing durable to learn here."}).
 		Reflect(context.Background(), sampleTranscript())
 	if err != nil {
 		t.Fatalf("Reflect: %v", err)
 	}
-	if len(ps) != 0 {
-		t.Errorf("want no lessons, got %+v", ps)
+	if len(l.Pitfalls) != 0 || len(l.Facts) != 0 {
+		t.Errorf("want no lessons, got %+v", l)
 	}
 }
 
@@ -73,7 +88,7 @@ type recordingLLM struct{ called bool }
 
 func (r *recordingLLM) Chat(_ context.Context, _ []llm.Message, _ []map[string]any) (llm.Message, error) {
 	r.called = true
-	return llm.Message{Role: "assistant", Content: "[]"}, nil
+	return llm.Message{Role: "assistant", Content: "{}"}, nil
 }
 
 func TestReflectSkipsWithoutToolUse(t *testing.T) {
@@ -82,15 +97,15 @@ func TestReflectSkipsWithoutToolUse(t *testing.T) {
 		llm.User("hi"),
 		{Role: "assistant", Content: "Hi there!"},
 	}}
-	lessons, err := New(r).Reflect(context.Background(), transcript)
+	l, err := New(r).Reflect(context.Background(), transcript)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if r.called {
 		t.Error("reflection called the model for a chat turn with no tool use")
 	}
-	if len(lessons) != 0 {
-		t.Errorf("lessons = %v, want none", lessons)
+	if len(l.Pitfalls) != 0 || len(l.Facts) != 0 {
+		t.Errorf("lessons = %+v, want none", l)
 	}
 }
 

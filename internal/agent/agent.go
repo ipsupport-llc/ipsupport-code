@@ -54,6 +54,10 @@ func New(l llm.Chatter, reg *tool.Registry, kb *knowledge.KB, tr trace.Tracer, s
 // Reset clears the session conversation memory.
 func (a *Agent) Reset() { a.history = nil }
 
+// SetSystem swaps the base system prompt (e.g. after learning new project facts),
+// so the next run uses it without a full re-wire.
+func (a *Agent) SetSystem(s string) { a.system = s }
+
 // SetPlanMode toggles plan mode. In plan mode the agent investigates with
 // read-only tools and proposes a plan; mutating tool calls are refused, so it
 // can't change anything until switched back to auto.

@@ -17,7 +17,7 @@ func TestCatalogTokenBudget(t *testing.T) {
 	pol, _ := policy.New(c)
 	kb, _ := knowledge.Open("")
 	reg := NewRegistry(
-		NewFile(pol, nil), NewRun(pol, nil), NewGit(pol, nil),
+		NewFile(pol, nil), NewRun(pol, nil, 0), NewGit(pol, nil),
 		NewWeb(nil), NewHelp(kb, nil), NewCalc(),
 	)
 	b, _ := json.Marshal(reg.OpenAITools())

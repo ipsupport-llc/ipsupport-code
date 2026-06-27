@@ -141,7 +141,7 @@ func buildStack(t *testing.T, url, ws string, kb *knowledge.KB) (*agent.Agent, *
 	var reg *tool.Registry
 	reg = tool.NewRegistry(
 		tool.NewFile(pol, ap),
-		tool.NewRun(pol, ap),
+		tool.NewRun(pol, ap, 0),
 		tool.NewGit(pol, ap),
 		tool.NewWeb(http.DefaultClient),
 		tool.NewHelp(kb, func(d string) string { return reg.Usage(d) }),
@@ -263,7 +263,7 @@ func TestE2E_PitfallInjectedOnError(t *testing.T) {
 func TestE2E_ReflectionPersistsLesson(t *testing.T) {
 	f := &fakeLM{queue: []string{
 		contentResp(`Here is what I learned:
-[{"domain":"run","error_pattern":"permission denied","context":"writing system paths","proven_fix":"use sudo via the run tool"}]`),
+{"pitfalls":[{"domain":"run","error_pattern":"permission denied","context":"writing system paths","proven_fix":"use sudo via the run tool"}],"facts":["this project writes to system paths"]}`),
 	}}
 	client := llm.NewOpenAIClient(config.LLM{BaseURL: serve(t, f), Model: "fake"})
 
@@ -278,8 +278,11 @@ func TestE2E_ReflectionPersistsLesson(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(lessons) != 1 || lessons[0].Domain != "run" || !strings.Contains(lessons[0].ProvenFix, "sudo") {
-		t.Fatalf("reflection lessons = %+v", lessons)
+	if len(lessons.Pitfalls) != 1 || lessons.Pitfalls[0].Domain != "run" || !strings.Contains(lessons.Pitfalls[0].ProvenFix, "sudo") {
+		t.Fatalf("reflection pitfalls = %+v", lessons.Pitfalls)
+	}
+	if len(lessons.Facts) != 1 {
+		t.Fatalf("reflection facts = %+v", lessons.Facts)
 	}
 }
 

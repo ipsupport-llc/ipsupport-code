@@ -150,10 +150,16 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 
 	body := map[string]any{
 		"model":          c.model,
-		"temperature":    c.temp,
 		"messages":       wm,
 		"stream":         true,
 		"stream_options": map[string]any{"include_usage": true},
+	}
+	// Only send temperature when explicitly set (> 0). Some newer hosted models
+	// (e.g. OpenAI gpt-5.x / chat-latest) reject any non-default temperature with
+	// a 400; omitting the field lets the server use its default and keeps them
+	// working, while local models still honor a configured value.
+	if c.temp > 0 {
+		body["temperature"] = c.temp
 	}
 	if len(tools) > 0 {
 		body["tools"] = tools

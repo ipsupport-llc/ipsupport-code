@@ -176,10 +176,11 @@ type app struct {
 	client         *llm.OpenAIClient
 	ag             *agent.Agent
 	refl           *reflect.Reflector
-	instrSrc       string // project instructions file in effect, "" if none
-	promptSrc      string // "built-in" or the system.md override path
-	planMode       bool   // plan (propose) vs auto (execute); survives re-wire
-	windowDetected bool   // got the real loaded context window (vs a default/guess)
+	instrSrc       string   // project instructions file in effect, "" if none
+	promptSrc      string   // "built-in" or the system.md override path
+	facts          []string // durable project facts learned over time (per workspace)
+	planMode       bool     // plan (propose) vs auto (execute); survives re-wire
+	windowDetected bool     // got the real loaded context window (vs a default/guess)
 
 	tasks, steps, toolCalls int
 }
@@ -207,6 +208,7 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 		a.fileTracer = ft
 		cleanup = func() { _ = ft.Close() }
 	}
+	a.loadFacts() // learned project facts → folded into the prompt by wire()
 	if err := a.wire(); err != nil {
 		return nil, nil, err
 	}
@@ -258,7 +260,7 @@ func (a *app) wire() error {
 	var reg *tool.Registry
 	tools := []tool.Tool{
 		tool.NewFile(pol, a.approver),
-		tool.NewRun(pol, a.approver),
+		tool.NewRun(pol, a.approver, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second),
 		tool.NewGit(pol, a.approver),
 		tool.NewWeb(http.DefaultClient),
 		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),
@@ -367,6 +369,49 @@ func (a *app) saveSession() {
 	}
 }
 
+// maxFacts caps how many learned project facts we keep (most recent win).
+const maxFacts = 30
+
+func (a *app) factsPath() string { return filepath.Join(a.workspace, ".agent", "facts.json") }
+
+func (a *app) loadFacts() {
+	if data, err := os.ReadFile(a.factsPath()); err == nil {
+		var f []string
+		if json.Unmarshal(data, &f) == nil {
+			a.facts = f
+		}
+	}
+}
+
+// addFacts dedupe-appends learned facts (most recent maxFacts kept), persists,
+// and returns the genuinely new ones.
+func (a *app) addFacts(facts []string) []string {
+	seen := map[string]bool{}
+	for _, f := range a.facts {
+		seen[strings.ToLower(f)] = true
+	}
+	var added []string
+	for _, f := range facts {
+		f = strings.TrimSpace(f)
+		if f == "" || seen[strings.ToLower(f)] {
+			continue
+		}
+		seen[strings.ToLower(f)] = true
+		a.facts = append(a.facts, f)
+		added = append(added, f)
+	}
+	if len(a.facts) > maxFacts {
+		a.facts = append([]string(nil), a.facts[len(a.facts)-maxFacts:]...)
+	}
+	if len(added) > 0 {
+		_ = os.MkdirAll(filepath.Dir(a.factsPath()), 0o755)
+		if data, err := json.Marshal(a.facts); err == nil {
+			_ = os.WriteFile(a.factsPath(), data, 0o644)
+		}
+	}
+	return added
+}
+
 const maxInstructions = 6000
 
 // loadInstructions reads a project instructions file from the workspace (the
@@ -423,6 +468,13 @@ func (a *app) systemPrompt() string {
 			out += "\n\n## Skills (load full instructions with the skill tool when the topic fits):\n" + idx
 		}
 	}
+	if len(a.facts) > 0 { // learned project facts — keep the injected set small
+		facts := a.facts
+		if len(facts) > 15 {
+			facts = facts[len(facts)-15:]
+		}
+		out += "\n\n## Known facts about this project (learned on past runs):\n- " + strings.Join(facts, "\n- ")
+	}
 	return out
 }
 
@@ -451,7 +503,7 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 		return 0
 	}
 	learned := 0
-	for _, p := range lessons {
+	for _, p := range lessons.Pitfalls {
 		if a.kb.Add(p) {
 			learned++
 			a.emit("lesson", map[string]any{"domain": p.Domain, "proven_fix": p.ProvenFix})
@@ -460,6 +512,12 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 	if learned > 0 {
 		if err := a.kb.Save(); err != nil {
 			slog.Warn("knowledge save failed", "err", err)
+		}
+	}
+	if added := a.addFacts(lessons.Facts); len(added) > 0 {
+		a.ag.SetSystem(a.systemPrompt()) // fold new facts into the prompt for the next task
+		for _, f := range added {
+			a.emit("fact", map[string]any{"text": f})
 		}
 	}
 	return learned

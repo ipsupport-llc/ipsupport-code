@@ -56,6 +56,20 @@ func TestTabCompletesSingleMatch(t *testing.T) {
 	}
 }
 
+func TestTabCompletesArgument(t *testing.T) {
+	m := &tuiModel{input: textinput.New()}
+	m.input.SetValue("/ai l") // only "local" matches
+	m.completeCommand()
+	if m.input.Value() != "/ai local" {
+		t.Errorf("completed to %q, want '/ai local'", m.input.Value())
+	}
+	m.input.SetValue("/ai gr") // grok + groq share the prefix "gro"
+	m.completeCommand()
+	if m.input.Value() != "/ai gro" {
+		t.Errorf("ambiguous arg completed to %q, want common prefix '/ai gro'", m.input.Value())
+	}
+}
+
 func TestHighlightByExtension(t *testing.T) {
 	// A .py path must drive the Python lexer (so keywords get coloured) rather
 	// than relying on content guessing, which misses Python on short snippets.

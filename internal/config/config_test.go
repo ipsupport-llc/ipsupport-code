@@ -129,8 +129,11 @@ func TestResolveProvider(t *testing.T) {
 	if !ok || l.BaseURL != "https://api.openai.com/v1" || l.Model != "gpt-4o-mini" || l.APIKey != "sk-env" {
 		t.Fatalf("openai template = %+v ok=%v", l, ok)
 	}
-	if l.MaxSteps == 0 || l.Temperature == 0 {
-		t.Error("numeric defaults should be filled")
+	if l.MaxSteps == 0 {
+		t.Error("MaxSteps default should be filled")
+	}
+	if l.Temperature != 0 {
+		t.Errorf("Temperature = %v, want 0 left unset (client omits it so hosted models accept their default)", l.Temperature)
 	}
 	// a user preset overrides the template (key + model), base_url still filled.
 	cfg := Config{Providers: map[string]LLM{"openai": {APIKey: "sk-preset", Model: "gpt-4o"}}}

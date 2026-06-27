@@ -1,10 +1,13 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -35,6 +38,7 @@ func NewFile(p *policy.Engine, ap Approver) Tool {
 			{Name: "append", Mutates: true, Params: []Param{Req("path", "str"), Req("content", "str")}, Run: f.appendFile},
 			{Name: "edit", Mutates: true, Params: []Param{Req("path", "str"), Req("find", "str"), Req("replace", "str")}, Note: "(replaces first match; prefer this for partial changes)", Run: f.edit},
 			{Name: "list", Params: []Param{Opt("path", "str", ".")}, Run: f.list},
+			{Name: "search", Params: []Param{Req("query", "str"), Opt("path", "str", ".")}, Note: "(regex; find matching lines across files — file:line: match)", Run: f.search},
 			{Name: "mkdir", Mutates: true, Params: []Param{Req("path", "str")}, Run: f.mkdir},
 		},
 	})
@@ -58,6 +62,70 @@ func (f *fileTool) read(_ context.Context, a Args) Result {
 		out += fmt.Sprintf("\n…[truncated; %d bytes total]", len(data))
 	}
 	return Ok(out)
+}
+
+// search greps the workspace for a regex (literal if it doesn't compile), under
+// the jail, skipping VCS/dep/build dirs and binary or oversized files. Read-only.
+func (f *fileTool) search(_ context.Context, a Args) Result {
+	query := a.Str("query")
+	root := a.Str("path")
+	if root == "" {
+		root = "."
+	}
+	if err := f.pol.Read(root); err != nil {
+		return Err(err.Error())
+	}
+	abs, err := f.pol.Resolve(root)
+	if err != nil {
+		return Err(err.Error())
+	}
+	re, err := regexp.Compile(query)
+	if err != nil {
+		re = regexp.MustCompile(regexp.QuoteMeta(query)) // not valid regex → literal
+	}
+
+	const maxMatches = 200
+	skipDir := map[string]bool{".git": true, "node_modules": true, "vendor": true, "dist": true, ".agent": true}
+	var b strings.Builder
+	n := 0
+	_ = filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if p != abs && (skipDir[d.Name()] || strings.HasPrefix(d.Name(), ".")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info, e := d.Info(); e != nil || info.Size() > 1<<20 { // skip files > 1 MiB
+			return nil
+		}
+		data, e := os.ReadFile(p)
+		if e != nil {
+			return nil
+		}
+		if bytes.IndexByte(data[:min(len(data), 512)], 0) >= 0 { // binary
+			return nil
+		}
+		rel, _ := filepath.Rel(abs, p)
+		for i, line := range strings.Split(string(data), "\n") {
+			if !re.MatchString(line) {
+				continue
+			}
+			clipped, _ := textutil.Clip(strings.TrimSpace(line), 200)
+			fmt.Fprintf(&b, "%s:%d: %s\n", rel, i+1, clipped)
+			if n++; n >= maxMatches {
+				fmt.Fprintf(&b, "… stopped at %d matches\n", maxMatches)
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	if n == 0 {
+		return Ok("(no matches for " + query + ")")
+	}
+	return Ok(strings.TrimRight(b.String(), "\n"))
 }
 
 func (f *fileTool) write(_ context.Context, a Args) Result { return f.writeFile("write", a, false) }

@@ -97,7 +97,7 @@ func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ..
 		return Err(err.Error())
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, runTimeout)
+	cctx, cancel := context.WithTimeout(ctx, defaultRunTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "git", args...)
 	cmd.Dir = dir

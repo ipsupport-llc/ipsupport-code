@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -978,10 +979,16 @@ var commandList = []cmdInfo{
 	{"/exit", "leave"},
 }
 
-// completeCommand completes a partial /command on Tab.
+// completeCommand completes a partial /command on Tab. Before the first space it
+// completes the command name; after it, the first argument for commands with a
+// fixed candidate set (e.g. /ai <provider>, /color <name>).
 func (m *tuiModel) completeCommand() {
 	val := m.input.Value()
 	if !strings.HasPrefix(val, "/") {
+		return
+	}
+	if i := strings.IndexByte(val, ' '); i >= 0 {
+		m.completeArg(val[:i], strings.TrimLeft(val[i+1:], " "))
 		return
 	}
 	var matches []string
@@ -1004,6 +1011,54 @@ func (m *tuiModel) completeCommand() {
 			m.push(cDim.Render("  " + strings.Join(matches, "   ")))
 		}
 	}
+}
+
+// completeArg completes the first argument of a command against its candidates.
+func (m *tuiModel) completeArg(name, arg string) {
+	if strings.ContainsRune(arg, ' ') { // only the first token completes
+		return
+	}
+	cands := argCandidates(name)
+	if len(cands) == 0 {
+		return
+	}
+	var matches []string
+	for _, c := range cands {
+		if strings.HasPrefix(c, arg) {
+			matches = append(matches, c)
+		}
+	}
+	switch len(matches) {
+	case 0:
+		return
+	case 1:
+		m.input.SetValue(name + " " + matches[0])
+		m.input.CursorEnd()
+	default:
+		if lcp := longestCommonPrefix(matches); len(lcp) > len(arg) {
+			m.input.SetValue(name + " " + lcp)
+			m.input.CursorEnd()
+		} else {
+			m.push(cDim.Render("  " + strings.Join(matches, "   ")))
+		}
+	}
+}
+
+// argCandidates returns the completion candidates for a command's first argument
+// (sorted), or nil for commands without a fixed set (e.g. /model is dynamic).
+func argCandidates(name string) []string {
+	switch name {
+	case "/ai":
+		return append([]string{"local"}, config.KnownProviders()...)
+	case "/color":
+		names := make([]string, 0, len(colorNames))
+		for n := range colorNames {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		return names
+	}
+	return nil
 }
 
 func longestCommonPrefix(ss []string) string {
@@ -1062,6 +1117,7 @@ func (m *tuiModel) renderStatus() []string {
 		{"instructions", instr},
 		{"session", fmt.Sprintf("%d messages", m.app.ag.SessionLen())},
 		{"knowledge", fmt.Sprintf("%s (%d lessons)", c.KBPath, len(m.app.kb.All()))},
+		{"facts", fmt.Sprintf("%s (%d learned)", m.app.factsPath(), len(m.app.facts))},
 		{"trace", c.TracePath},
 	})
 }
@@ -1121,6 +1177,9 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		d, _ := e.fields["domain"].(string)
 		f, _ := e.fields["proven_fix"].(string)
 		return []string{cLesson.Render("  ✦ learned ["+d+"] ") + cDim.Render(f)}
+	case "fact":
+		f, _ := e.fields["text"].(string)
+		return []string{cLesson.Render("  ✦ noted ") + cDim.Render(f)}
 	case "loop":
 		return []string{cDim.Render(fmt.Sprintf("— loop %d/%d —", toInt(e.fields["i"]), toInt(e.fields["n"])))}
 	case "error":

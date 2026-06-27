@@ -105,8 +105,11 @@ type updateMsg struct{ notice string }   // startup freshness check result
 type updateDoneMsg struct{ text string } // /update result
 type shellDoneMsg struct{}               // returned from a drop-to-shell
 type shellCmdMsg struct{ out string }    // output of a one-off !cmd
-type windowMsg struct{ tokens int }      // re-detected context window
-type modelsMsg struct {                  // /model result: lines to show, or setTo to switch model
+type windowMsg struct {                  // re-detected context window for a provider
+	provider string
+	tokens   int
+}
+type modelsMsg struct { // /model result: lines to show, or setTo to switch model
 	lines []string
 	setTo string
 }
@@ -117,6 +120,7 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	b := newBridge()
 	a.uiTracer = b
 	a.approver = b
+	a.tui = true // detect the context window off-thread, not inline
 	if err := a.wire(); err != nil {
 		return nil, err
 	}
@@ -235,11 +239,22 @@ func (m *tuiModel) detectWindowCmd() tea.Cmd {
 	if m.app.windowDetected {
 		return nil
 	}
-	base, model := m.app.cfg.LLM.BaseURL, m.app.cfg.LLM.Model
+	// Capture the target on the UI thread (race-free); probe off-thread; apply via
+	// windowMsg on the UI thread. Handles local (LM Studio) and external providers
+	// (context_length from /models) so a /ai or /model switch never blocks the UI.
+	act, provider, local := m.app.activeLLM(), m.app.providerName(), m.app.isLocal()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		return windowMsg{tokens: llm.DetectContextWindow(ctx, base, model, http.DefaultClient)}
+		tok := 0
+		if local {
+			if act.LMStudio() {
+				tok = llm.DetectContextWindow(ctx, act.BaseURL, act.Model, http.DefaultClient)
+			}
+		} else {
+			tok = llm.DetectModelContext(ctx, act.BaseURL, act.APIKey, act.Model, http.DefaultClient)
+		}
+		return windowMsg{provider: provider, tokens: tok}
 	}
 }
 
@@ -373,9 +388,11 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case windowMsg:
 		// applied on the UI thread, so View/auto-compact never race the write
-		if msg.tokens > 0 && !m.app.windowDetected {
-			m.app.cfg.LLM.ContextWindow = msg.tokens
-			m.app.windowDetected = true
+		if msg.tokens > 0 {
+			m.app.applyWindow(msg.provider, msg.tokens)
+			if msg.provider == m.app.providerName() {
+				m.app.windowDetected = true
+			}
 		}
 		return m, nil
 
@@ -383,9 +400,9 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stIdle
 		if msg.setTo != "" { // resolved a /model arg to one model — switch (UI thread)
 			m.pushLines(m.app.setModel(msg.setTo))
-		} else {
-			m.pushLines(msg.lines)
+			return m, tea.Batch(m.input.Focus(), m.detectWindowCmd()) // re-detect off-thread
 		}
+		m.pushLines(msg.lines)
 		return m, m.input.Focus()
 
 	case tea.KeyMsg:
@@ -408,6 +425,9 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "shift+tab":
+		if m.state == stRunning { // don't flip plan/auto mid-task — the running agent reads it
+			return m, nil
+		}
 		m.app.setMode(!m.app.planMode) // cycle plan/auto; the bottom indicator updates
 		return m, nil
 	}
@@ -606,9 +626,10 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/login":
 		if err := m.app.reconfigure(); err != nil {
 			m.push(cErr.Render("reload failed: " + err.Error()))
-		} else {
-			m.push(cDim.Render("config reloaded from " + config.GlobalPath() + " — edit it or run `ipsupport-code -init` to change the connection"))
+			return m, nil
 		}
+		m.push(cDim.Render("config reloaded from " + config.GlobalPath() + " — edit it or run `ipsupport-code -init` to change the connection"))
+		return m, m.detectWindowCmd()
 	case "/new", "/reset":
 		m.app.ag.Reset()
 		m.app.saveSession()
@@ -631,7 +652,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		return m, m.startUpdate(strings.TrimSpace(rest))
 	case "/ai":
 		m.pushLines(m.app.aiCommand(rest))
-		return m, nil
+		return m, m.detectWindowCmd() // re-detect the window off-thread after a switch
 	case "/config":
 		m.openConfig()
 		return m, nil

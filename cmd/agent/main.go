@@ -206,6 +206,7 @@ type app struct {
 	planMode        bool     // plan (propose) vs auto (execute); survives re-wire
 	windowDetected  bool     // got the real loaded context window (vs a default/guess)
 	sessionRestored bool     // a saved session was restored at startup (TUI renders a recap)
+	tui             bool     // running the TUI (detect the context window off-thread, not inline)
 
 	tasks, steps, toolCalls int
 	lastPrompt, lastCompl   int // client usage snapshot for per-task ledger deltas
@@ -398,6 +399,34 @@ func oneLine(s string, max int) string {
 // providerModel is the "provider · model" label shown in the status line.
 func (a *app) providerModel() string { return a.providerName() + " · " + a.activeLLM().Model }
 
+// maybeDetectWindowSync detects the window inline for the REPL/one-shot paths;
+// the TUI skips this and re-detects off the UI thread (detectWindowCmd) so a slow
+// provider can't freeze the screen.
+func (a *app) maybeDetectWindowSync() {
+	if !a.tui {
+		a.detectContextWindow()
+	}
+}
+
+// applyWindow records a detected context window for a provider (UI thread, so it
+// never races View/auto-compact). "local" sets the LM Studio connection; any
+// other name sets that provider's preset.
+func (a *app) applyWindow(provider string, tokens int) {
+	if tokens <= 0 {
+		return
+	}
+	if provider == "local" {
+		a.cfg.LLM.ContextWindow = tokens
+		return
+	}
+	if a.cfg.Providers == nil {
+		a.cfg.Providers = map[string]config.LLM{}
+	}
+	p := a.cfg.Providers[provider]
+	p.ContextWindow = tokens
+	a.cfg.Providers[provider] = p
+}
+
 // detectContextWindow learns the active model's context window so the status bar
 // and auto-compact size against the real limit. LM Studio reports the loaded
 // model's window via its native API; external providers that list a
@@ -515,7 +544,7 @@ func (a *app) reconfigure() error {
 	}
 	a.loadSession()          // a fresh agent — restore the persisted session
 	a.windowDetected = false // model may have changed (/login) — re-detect
-	a.detectContextWindow()
+	a.maybeDetectWindowSync()
 	return nil
 }
 
@@ -1247,7 +1276,7 @@ func (a *app) setProvider(name string) []string {
 	if err := a.wire(); err != nil {
 		return []string{"error: " + err.Error()}
 	}
-	a.detectContextWindow()
+	a.maybeDetectWindowSync() // REPL only — the TUI re-detects off-thread
 	act := a.activeLLM()
 	return []string{fmt.Sprintf("→ %s · %s · model %s", a.providerName(), act.BaseURL, act.Model)}
 }
@@ -1409,7 +1438,7 @@ func (a *app) setModel(name string) []string {
 	if err := a.wire(); err != nil {
 		return []string{"error: " + err.Error()}
 	}
-	a.detectContextWindow()
+	a.maybeDetectWindowSync() // REPL only — the TUI re-detects off-thread
 	return []string{"model → " + name}
 }
 

@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
 )
 
 // LLM describes the OpenAI-compatible endpoint (LM Studio by default). The same
@@ -105,9 +107,12 @@ type Config struct {
 	// Offline disables all internet egress (web tool, startup update check) and
 	// makes anything that would reach the net fail fast with a clear message.
 	// Local model calls (e.g. LM Studio on localhost) are unaffected.
-	Offline    bool   `json:"offline,omitempty"`
-	SkillsPath string `json:"skills_path,omitempty"`
-	Workspace  string `json:"-"` // resolved absolute workspace root
+	Offline bool `json:"offline,omitempty"`
+	// McpServers are MCP servers the `mcp` proxy tool can use: name → stdio launch
+	// spec. Empty = the mcp tool isn't offered.
+	McpServers map[string]mcp.Server `json:"mcp_servers,omitempty"`
+	SkillsPath string                `json:"skills_path,omitempty"`
+	Workspace  string                `json:"-"` // resolved absolute workspace root
 }
 
 // ProviderTemplates are built-in OpenAI-compatible providers: base URL (and a

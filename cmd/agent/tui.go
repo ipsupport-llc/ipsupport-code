@@ -703,10 +703,10 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		switch k.String() {
 		case "enter":
 			line := strings.TrimSpace(m.input.Value())
-			m.input.SetValue("")
 			if line == "" {
-				return m.runCommand("/shell") // empty Enter → drop to a shell
+				return m, nil // empty Enter is a no-op (shell is `!` or /shell)
 			}
+			m.input.SetValue("")
 			return m.submit(line)
 		case "tab":
 			switch {
@@ -1368,7 +1368,7 @@ func (m *tuiModel) renderContent() string {
 
 // keyHelp documents the keyboard shortcuts for /help.
 var keyHelp = [][2]string{
-	{"Enter", "send (empty Enter drops to a shell)"},
+	{"Enter", "send the message"},
 	{"alt+enter", "newline in the input (also ctrl+j)"},
 	{"Tab", "complete a /command, or accept the NEXT suggestion"},
 	{"shift+tab", "toggle plan ⇄ auto mode"},

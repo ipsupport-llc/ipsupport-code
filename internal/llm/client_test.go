@@ -98,6 +98,18 @@ func TestChatStreamingContent(t *testing.T) {
 	}
 }
 
+func TestChatRunawayCapped(t *testing.T) {
+	var chunks []string
+	for i := 0; i < 50; i++ {
+		chunks = append(chunks, `{"choices":[{"delta":{"content":"x"}}]}`)
+	}
+	cl := NewOpenAIClient(config.LLM{BaseURL: sseServer(t, chunks...), Model: "fake"})
+	cl.maxRespTk = 10 // small cap so the 50-token stream trips the runaway guard
+	if _, err := cl.Chat(context.Background(), []Message{User("go")}, nil); err == nil || !strings.Contains(err.Error(), "looping") {
+		t.Errorf("expected a runaway abort, got %v", err)
+	}
+}
+
 func TestContextTracksLastPrompt(t *testing.T) {
 	url := sseServer(t,
 		`{"choices":[{"delta":{"content":"hi"}}]}`,

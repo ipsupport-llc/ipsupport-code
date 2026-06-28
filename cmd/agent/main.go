@@ -2731,6 +2731,7 @@ func (a *app) statusText() string {
   prompt       %s
   instructions %s
   session      %d messages
+  goal         %s
   knowledge    %s (%d lessons)
   trace        %s
 `,
@@ -2738,7 +2739,20 @@ func (a *app) statusText() string {
 		act.BaseURL, act.Model, act.MaxSteps,
 		a.cfg.Workspace, a.cfg.File.Jail, a.cfg.Run.Default, a.cfg.File.Default,
 		promptOrDefault(a.promptSrc), instr, a.ag.SessionLen(),
+		a.goalStatusLine(),
 		a.cfg.KBPath, len(a.kb.All()), a.cfg.TracePath)
+}
+
+// goalStatusLine is the one-line goal summary shown in /status.
+func (a *app) goalStatusLine() string {
+	ttl := fmt.Sprintf("TTL %d", a.cfg.GoalMaxReturns)
+	if a.cfg.GoalMaxReturns == 0 {
+		ttl = "loop off"
+	}
+	if a.goal.Text == "" {
+		return "(none) · " + ttl
+	}
+	return fmt.Sprintf("%s [%s] · %s", oneLine(a.goal.Text, 50), a.goal.Status, ttl)
 }
 
 // promptOrDefault labels the system-prompt source for /status.

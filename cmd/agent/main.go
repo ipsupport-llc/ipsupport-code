@@ -1960,6 +1960,14 @@ func helpText() string {
   /loop <ival> <task>  re-run a task on an interval (e.g. /loop 5m <task>, /loop 30s x10 <task>; esc stops)
   /help            this list
   /exit, /quit     leave
+
+keys: Enter send · alt+enter newline · Tab complete (works while busy) ·
+  shift+tab plan/auto · ctrl+u clear input · ctrl+l clear screen · esc cancel
+
+sub-agents: define profiles in /config → Sub-agents (provider → model → name),
+  then ask e.g. "review internal/tool across grok and claude, then merge". The
+  assistant fans out in parallel; /agents add|rm|exec, /permissions agents on.
+
 Anything not starting with '/' is run as a task.
 `
 }

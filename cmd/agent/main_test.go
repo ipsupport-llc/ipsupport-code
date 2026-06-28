@@ -500,6 +500,15 @@ func TestAgentsPanelBuild(t *testing.T) {
 	}
 }
 
+func TestCtrlUClearsInput(t *testing.T) {
+	m := &tuiModel{input: textarea.New()}
+	m.input.SetValue("oops, pasted clipboard garbage")
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlU})
+	if m.input.Value() != "" {
+		t.Errorf("ctrl+u should clear the input, got %q", m.input.Value())
+	}
+}
+
 func TestCommandWhileBusy(t *testing.T) {
 	m := &tuiModel{width: 80, input: textarea.New(),
 		app: &app{cfg: config.Default(), workspace: t.TempDir()}}

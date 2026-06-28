@@ -8,7 +8,9 @@ package skill
 
 import (
 	"context"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -72,35 +74,51 @@ func Open(dir string, hc *http.Client) (*Store, error) {
 	return s, nil
 }
 
-// seedBuiltins copies embedded skills into the directory, DISABLED by default, so
-// there's something to enable out of the box without bloating the prompt. Each
-// built-in is seeded at most once (tracked by name in .seeded), so a built-in the
-// user later removed stays removed — but a NEW built-in added in a later release
-// is still seeded on upgrade (the old design used a single marker and missed
-// those entirely). It never clobbers a user file of the same name.
+// seedBuiltins keeps the embedded skills in sync on disk, DISABLED by default.
+// `.seeded` records the content hash we last wrote per built-in, which lets us:
+//   - seed a NEW built-in added in a later release (it isn't in .seeded yet);
+//   - REFRESH a built-in's content on upgrade when the user hasn't edited it (the
+//     on-disk hash still matches what we wrote) — so fixes to built-in skills
+//     actually reach existing installs;
+//   - leave a built-in the user EDITED (hash differs) or REMOVED (no file) alone.
+//
+// It never clobbers a user file of the same name on first seed.
 func (s *Store) seedBuiltins() {
 	seeded := s.loadSeeded()
 	entries, _ := builtinFS.ReadDir("builtin")
 	changed := false
 	for _, e := range entries {
 		name := strings.TrimSuffix(e.Name(), ".md")
-		if seeded[name] {
-			continue // already seeded once (even if the user later removed it)
-		}
-		seeded[name] = true
-		changed = true
-		if _, err := os.Stat(s.skillPath(name)); err == nil {
-			continue // a user file already owns this name
-		}
 		data, err := builtinFS.ReadFile("builtin/" + e.Name())
 		if err != nil {
 			continue
 		}
-		if os.WriteFile(s.skillPath(name), data, 0o644) == nil {
-			if _, ok := s.state[name]; !ok {
-				s.state[name] = entry{Enabled: false, Source: "built-in"}
+		sum := hashBytes(data)
+		prev, was := seeded[name]
+		if !was { // never seeded → install unless a user file already owns the name
+			if _, err := os.Stat(s.skillPath(name)); err != nil {
+				if os.WriteFile(s.skillPath(name), data, 0o644) == nil {
+					if _, ok := s.state[name]; !ok {
+						s.state[name] = entry{Enabled: false, Source: "built-in"}
+					}
+				}
+			}
+			seeded[name], changed = sum, true
+			continue
+		}
+		if prev == sum { // embedded content unchanged since we wrote it
+			continue
+		}
+		// Embedded content changed: refresh ONLY if the on-disk file is still what
+		// we last wrote (user hasn't edited it). prev == "" is a pre-hash upgrade —
+		// treat the on-disk copy as a previous built-in version and refresh it.
+		onDisk, rerr := os.ReadFile(s.skillPath(name))
+		if rerr == nil && (prev == "" || hashBytes(onDisk) == prev) {
+			if os.WriteFile(s.skillPath(name), data, 0o644) == nil {
+				seeded[name], changed = sum, true
 			}
 		}
+		// else: user edited it (keep their copy) or removed it (stays removed).
 	}
 	if changed {
 		_ = s.saveState()
@@ -110,40 +128,44 @@ func (s *Store) seedBuiltins() {
 
 func (s *Store) seededPath() string { return filepath.Join(s.dir, ".seeded") }
 
-// loadSeeded reads the set of built-in names already seeded. A fresh install has
-// no file (seed everything). The old format was a single "1" marker; migrate it
-// by treating every built-in that currently has a file as already seeded, so the
-// upgrade seeds only the genuinely new ones.
-func (s *Store) loadSeeded() map[string]bool {
-	set := map[string]bool{}
+func hashBytes(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// loadSeeded reads the per-built-in content hashes already written. Handles three
+// formats: the current {name: hash} map; the previous ["name", …] list (unknown
+// hashes → "" so they refresh once); and the oldest single "1" marker (migrate by
+// treating every built-in that has a file on disk as seeded).
+func (s *Store) loadSeeded() map[string]string {
+	out := map[string]string{}
 	data, err := os.ReadFile(s.seededPath())
 	if err != nil {
-		return set
+		return out
 	}
+	if json.Unmarshal(data, &out) == nil && len(out) > 0 {
+		return out
+	}
+	out = map[string]string{}
 	var names []string
 	if json.Unmarshal(data, &names) == nil {
 		for _, n := range names {
-			set[n] = true
+			out[n] = ""
 		}
-		return set
+		return out
 	}
-	entries, _ := builtinFS.ReadDir("builtin") // old "1" marker → migrate
+	entries, _ := builtinFS.ReadDir("builtin") // oldest "1" marker → migrate
 	for _, e := range entries {
 		name := strings.TrimSuffix(e.Name(), ".md")
 		if _, err := os.Stat(s.skillPath(name)); err == nil {
-			set[name] = true
+			out[name] = ""
 		}
 	}
-	return set
+	return out
 }
 
-func (s *Store) saveSeeded(set map[string]bool) error {
-	names := make([]string, 0, len(set))
-	for n := range set {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	data, err := json.Marshal(names)
+func (s *Store) saveSeeded(m map[string]string) error {
+	data, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}

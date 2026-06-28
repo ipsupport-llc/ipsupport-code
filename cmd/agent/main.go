@@ -212,7 +212,6 @@ type app struct {
 	spawnSeq        atomic.Int64   // unique id per sub-agent spawn (for grouping its UI events)
 	mcpMu           sync.Mutex     // guards the lazy MCP client cache
 	mcpClients      map[string]*mcp.Client
-	refl            *reflect.Reflector
 	instrSrc        string   // project instructions file in effect, "" if none
 	promptSrc       string   // "built-in" or the system.md override path
 	facts           []string // durable project facts learned over time (per workspace)
@@ -367,7 +366,7 @@ func (a *app) spawnAgent(ctx context.Context, profile, task, dir string) (string
 	}
 
 	id := fmt.Sprintf("sub%d", a.spawnSeq.Add(1)) // groups this sub-agent's UI events
-	client := llm.NewOpenAIClient(llmCfg)
+	client := llm.NewOpenAIClient(a.withReasoning(llmCfg, provider, ""))
 	sub := agent.New(client, subReg, a.kb, a.tracer, a.subAgentPrompt(subWorkspace, p.Prompt), llmCfg.MaxSteps)
 	sub.SetPlanMode(a.planMode) // inherit the current mode
 	sub.SetLabel(id)
@@ -798,24 +797,151 @@ func onOff(b bool) string {
 	return "off"
 }
 
-// reflectCommand toggles the post-task reflection (lesson distillation). Off is
-// the cure when a weak/looping model wastes the reflection pass.
+// reflectCommand controls the post-task reflection: on/off, or run it on a
+// configured profile (a capable model) instead of the current one.
 func (a *app) reflectCommand(arg string) []string {
-	switch strings.TrimSpace(arg) {
+	arg = strings.TrimSpace(arg)
+	switch arg {
+	case "":
+		return []string{"reflection: " + onOff(!a.cfg.ReflectDisabled) + " · using " + a.reflectUsing(),
+			"  /reflect on|off · /reflect <profile> (distill on another model) · /reflect self"}
 	case "on", "yes", "true":
 		a.cfg.ReflectDisabled = false
 	case "off", "no", "false":
 		a.cfg.ReflectDisabled = true
-	case "":
-		return []string{"reflection is " + onOff(!a.cfg.ReflectDisabled) + " — /reflect on|off",
-			"  off = skip the post-task lesson pass (use it if a small model loops there)"}
+	case "self", "main", "local":
+		a.cfg.ReflectProfile, a.cfg.ReflectDisabled = "", false
 	default:
-		return []string{"usage: /reflect on|off"}
+		if _, ok := a.cfg.Agents[arg]; !ok {
+			return []string{fmt.Sprintf("unknown profile %q — have: %s; or use on|off|self", arg, a.profilesOrHint())}
+		}
+		a.cfg.ReflectProfile, a.cfg.ReflectDisabled = arg, false
 	}
-	if err := config.SaveReflect(a.cfg.ReflectDisabled); err != nil {
+	if err := config.SaveReflectCfg(a.cfg.ReflectDisabled, a.cfg.ReflectProfile); err != nil {
 		return []string{"warning: not persisted: " + err.Error()}
 	}
-	return []string{"reflection → " + onOff(!a.cfg.ReflectDisabled)}
+	return []string{"reflection → " + onOff(!a.cfg.ReflectDisabled) + " · using " + a.reflectUsing()}
+}
+
+func (a *app) reflectUsing() string {
+	if a.cfg.ReflectProfile != "" {
+		return "profile " + a.cfg.ReflectProfile
+	}
+	return "current model"
+}
+
+// reasoningParams resolves the merge-params for (provider, model). scope ""
+// checks "<provider>/<model>" then "<provider>"; scope "reflect" checks the
+// reflect-prefixed keys first (a separate setting for the learning pass), then
+// falls back to the normal ones.
+func (a *app) reasoningParams(provider, model, scope string) map[string]any {
+	keys := []string{provider + "/" + model, provider}
+	if scope != "" {
+		keys = append([]string{scope + ":" + provider + "/" + model, scope + ":" + provider}, keys...)
+	}
+	for _, k := range keys {
+		if raw, ok := a.cfg.Reasoning[k]; ok {
+			var m map[string]any
+			if json.Unmarshal(raw, &m) == nil {
+				return m
+			}
+		}
+	}
+	return nil
+}
+
+// withReasoning attaches the resolved reasoning params (Extra) to a connection
+// before a client is built.
+func (a *app) withReasoning(l config.LLM, provider, scope string) config.LLM {
+	l.Extra = a.reasoningParams(provider, l.Model, scope)
+	return l
+}
+
+// reasoningShape returns the request-body params that set reasoning to level
+// (low|medium|high|minimal) or turn it off, in the given provider's own format.
+// ok=false for a provider whose shape we don't know — the user sets it raw.
+func reasoningShape(provider, level string) (json.RawMessage, bool) {
+	off := level == "off"
+	switch provider {
+	case "local", "openai", "grok", "groq":
+		// OpenAI-style reasoning_effort. "off" has no portable value → caller deletes.
+		if off {
+			return nil, true
+		}
+		return json.RawMessage(fmt.Sprintf(`{"reasoning_effort":%q}`, level)), true
+	case "openrouter":
+		if off {
+			return json.RawMessage(`{"reasoning":{"enabled":false}}`), true
+		}
+		return json.RawMessage(fmt.Sprintf(`{"reasoning":{"effort":%q}}`, level)), true
+	case "anthropic":
+		if off {
+			return json.RawMessage(`{}`), true // omit thinking = off
+		}
+		return nil, false // budget_tokens is model-specific — set raw
+	}
+	return nil, false
+}
+
+// reasoningCommand sets reasoning for the CURRENT provider+model in that
+// provider's own shape (low|medium|high|minimal|off), stored as a per-model
+// override. Unknown providers / custom shapes: edit config.reasoning directly.
+func (a *app) reasoningCommand(arg string) []string {
+	arg = strings.ToLower(strings.TrimSpace(arg))
+	// "/reasoning reflect <level>" targets the learning pass's model with a
+	// reflect-scoped override; otherwise the current task model.
+	scope, provider, model := "", a.providerName(), a.activeLLM().Model
+	if rest, ok := strings.CutPrefix(arg, "reflect"); ok && (rest == "" || rest[0] == ' ') {
+		scope, arg = "reflect:", strings.TrimSpace(rest)
+		_, _, _, provider, model = a.reflectTarget()
+	}
+	key := scope + provider + "/" + model
+	label := provider + " · " + model
+	if scope != "" {
+		label = "reflection · " + label
+	}
+	if arg == "" {
+		cur := "default"
+		if raw, ok := a.cfg.Reasoning[key]; ok {
+			cur = string(raw)
+		} else if raw, ok := a.cfg.Reasoning[scope+provider]; ok {
+			cur = string(raw) + " (provider default)"
+		}
+		return []string{
+			fmt.Sprintf("reasoning for %s: %s", label, cur),
+			"  /reasoning off|minimal|low|medium|high — set it for this model",
+			"  /reasoning reflect <level> — a separate setting for the learning pass",
+			"  custom shapes: edit \"reasoning\" in config.json (key " + key + ")",
+		}
+	}
+	switch arg {
+	case "off", "minimal", "low", "medium", "high":
+	default:
+		return []string{"usage: /reasoning off|minimal|low|medium|high"}
+	}
+	shape, known := reasoningShape(provider, arg)
+	if !known {
+		return []string{
+			fmt.Sprintf("don't know %s's reasoning param — set it raw in config.json under", provider),
+			fmt.Sprintf("  \"reasoning\": { %q: { …provider's params… } }", key),
+		}
+	}
+	if a.cfg.Reasoning == nil {
+		a.cfg.Reasoning = map[string]json.RawMessage{}
+	}
+	if shape == nil { // "off" with no portable param → clear the override (server default)
+		delete(a.cfg.Reasoning, key)
+	} else {
+		a.cfg.Reasoning[key] = shape
+	}
+	if err := config.SaveReasoning(a.cfg.Reasoning); err != nil {
+		return []string{"warning: not persisted: " + err.Error()}
+	}
+	_ = a.wire() // rebuild the client so the change takes effect
+	if shape == nil {
+		return []string{fmt.Sprintf("reasoning → default for %s · %s (cleared)", provider, model)}
+	}
+	return []string{fmt.Sprintf("reasoning → %s for %s · %s  %s", arg, provider, model, string(shape))}
 }
 
 // mcpServerNames lists configured MCP server names, sorted.
@@ -1034,7 +1160,7 @@ func (a *app) wire() error {
 	if a.client != nil {
 		seedP, seedC = a.client.Usage()
 	}
-	a.client = llm.NewOpenAIClient(a.activeLLM())
+	a.client = llm.NewOpenAIClient(a.withReasoning(a.activeLLM(), a.providerName(), ""))
 	a.client.SeedUsage(seedP, seedC)
 	a.client.OnRetry = func(attempt int, wait time.Duration, reason string) {
 		slog.Warn("llm retry", "attempt", attempt, "wait", wait, "reason", reason)
@@ -1050,7 +1176,6 @@ func (a *app) wire() error {
 	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.activeLLM().MaxSteps)
 	a.ag.SetHistory(prior)
 	a.ag.SetPlanMode(a.planMode) // carry the mode into the rebuilt agent
-	a.refl = reflect.New(a.client)
 	return nil
 }
 
@@ -1504,16 +1629,67 @@ func (a *app) recordUsage() {
 
 func today() string { return time.Now().Format("2006-01-02") }
 
+// reflectTarget picks the model for the reflection pass: a configured profile
+// (reflect_profile) on a capable model, else the current model. Returns the
+// client, whether to use the lite (local) prompt, whether it's a separate client
+// (so its token spend must be recorded), and its provider/model for the ledger.
+func (a *app) reflectTarget() (client *llm.OpenAIClient, lite, separate bool, provider, model string) {
+	prov, cfg, usingProfile := a.providerName(), a.activeLLM(), false
+	if name := strings.TrimSpace(a.cfg.ReflectProfile); name != "" {
+		if p, ok := a.cfg.Agents[name]; ok {
+			pp := p.Provider
+			if pp == "" {
+				pp = "local"
+			}
+			c, usable := a.cfg.LLM, true
+			if pp != "local" {
+				if rp, rok := config.ResolveProvider(a.cfg, pp); rok && rp.APIKey != "" {
+					c = rp
+				} else {
+					usable = false
+				}
+			}
+			if usable {
+				if p.Model != "" {
+					c.Model = p.Model
+				}
+				prov, cfg, usingProfile = pp, c, true
+			}
+		}
+	}
+	model, lite = cfg.Model, prov == "local"
+	// reflect-scope reasoning lets the learning pass differ from the main run.
+	_, ovM := a.cfg.Reasoning["reflect:"+prov+"/"+model]
+	_, ovP := a.cfg.Reasoning["reflect:"+prov]
+	if !usingProfile && !ovM && !ovP { // same model, no reflect override → reuse main client
+		return a.client, lite, false, prov, model
+	}
+	cfg.Extra = a.reasoningParams(prov, model, "reflect")
+	return llm.NewOpenAIClient(cfg), lite, true, prov, model
+}
+
 // reflectAndStore runs the post-task reflection and persists new lessons,
 // emitting a "lesson" event for each. Returns how many were new.
 func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 	if a.cfg.ReflectDisabled { // /reflect off — skip the lesson-distillation pass
 		return 0
 	}
-	lessons, err := a.refl.Reflect(ctx, tr)
+	client, lite, separate, provider, model := a.reflectTarget()
+	// Signal the learning phase: the task is already DONE; anything slow/looping
+	// from here is the reflection pass, not the task (so it's clear where a hang is).
+	a.emit("reflecting", map[string]any{"model": model})
+	refl := reflect.New(client)
+	refl.Lite = lite // facts-only, terse — for a small local model that loops
+	lessons, err := refl.Reflect(ctx, tr)
 	if err != nil {
 		slog.Warn("reflection failed", "err", err)
 		return 0
+	}
+	if separate && a.usage != nil { // a dedicated reflect model's spend isn't in the main client
+		if p, c := client.Usage(); p > 0 || c > 0 {
+			a.usage.Add(today(), provider, model, p, c)
+			_ = a.usage.Save()
+		}
 	}
 	learned := 0
 	for _, p := range lessons.Pitfalls {
@@ -1689,6 +1865,10 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		fmt.Println(a.mcpList(ctx))
 	case "/reflect":
 		for _, l := range a.reflectCommand(rest) {
+			fmt.Println(l)
+		}
+	case "/reasoning":
+		for _, l := range a.reasoningCommand(rest) {
 			fmt.Println(l)
 		}
 	case "/ai":
@@ -2319,7 +2499,8 @@ func helpText() string {
   /cd [dir]        set the working directory (relative paths + sub-agents use it)
   /knowledge       learned-lessons store: report · clear · purge <days> · retain <days>
   /mcp             list configured MCP servers and their tools (mcp_servers in config.json)
-  /reflect [on|off] post-task lesson distillation (turn off if a weak model loops there)
+  /reflect [on|off|<profile>] post-task learning; run it on a stronger model
+  /reasoning [off|low|…] trim a thinking model's reasoning (minimal|low|medium|high)
   /shell, /sh      drop to a shell in the workspace (exit to return)
   /skills          list/toggle/install on-demand instruction packs
   /agents          sub-agent profiles: /agents add|rm|exec (models the agent tool delegates to)

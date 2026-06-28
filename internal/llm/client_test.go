@@ -110,6 +110,24 @@ func TestChatRunawayCapped(t *testing.T) {
 	}
 }
 
+func TestReasoningEffortSent(t *testing.T) {
+	seen := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		seen = strings.Contains(string(b), `"reasoning_effort":"low"`)
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "m",
+		Extra: map[string]any{"reasoning_effort": "low"}})
+	if _, err := cl.Chat(context.Background(), []Message{User("hi")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !seen {
+		t.Error("extra reasoning param was not merged into the request")
+	}
+}
+
 func TestContextTracksLastPrompt(t *testing.T) {
 	url := sseServer(t,
 		`{"choices":[{"delta":{"content":"hi"}}]}`,

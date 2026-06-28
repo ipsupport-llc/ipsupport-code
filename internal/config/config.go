@@ -32,6 +32,10 @@ type LLM struct {
 	// ContextWindow is the model's context size in tokens; auto-compact triggers
 	// as the prompt approaches it. 0 disables auto-compact.
 	ContextWindow int `json:"context_window,omitempty"`
+	// Extra is resolved per request (NOT persisted here): extra top-level body
+	// params merged into the chat request — used for per-model reasoning controls
+	// (see Config.Reasoning), whose shape varies by provider.
+	Extra map[string]any `json:"-"`
 }
 
 // LMStudio reports whether this connection speaks LM Studio's native API.
@@ -98,6 +102,13 @@ type Config struct {
 	// Prices overrides the built-in per-model price estimates for /usage cost:
 	// model-id substring → [input, output] USD per 1M tokens.
 	Prices map[string][2]float64 `json:"prices,omitempty"`
+	// Reasoning holds per-model reasoning controls, merged as raw params into the
+	// chat request body. Keyed by "<provider>" (default for all its models) or
+	// "<provider>/<model>" (overrides the provider default). The value is the
+	// provider's own shape — e.g. {"reasoning_effort":"low"} (openai),
+	// {"reasoning":{"effort":"low"}} (openrouter),
+	// {"chat_template_kwargs":{"enable_thinking":false}} (qwen/lmstudio).
+	Reasoning map[string]json.RawMessage `json:"reasoning,omitempty"`
 	// Agents are named sub-agent profiles for the `agent` tool (delegate a task to
 	// another model/provider): name → {provider, model, optional role prompt}.
 	Agents map[string]AgentProfile `json:"agents,omitempty"`
@@ -111,6 +122,9 @@ type Config struct {
 	// ReflectDisabled skips the post-task reflection pass (lesson distillation).
 	// Reflection is on by default; turn it off when a weak model loops there.
 	ReflectDisabled bool `json:"reflect_disabled,omitempty"`
+	// ReflectProfile, when set, runs the reflection pass on this agent profile
+	// (a capable model) instead of the current one. Empty = the current model.
+	ReflectProfile string `json:"reflect_profile,omitempty"`
 	// McpServers are MCP servers the `mcp` proxy tool can use: name → stdio launch
 	// spec. Empty = the mcp tool isn't offered.
 	McpServers map[string]mcp.Server `json:"mcp_servers,omitempty"`
@@ -329,9 +343,14 @@ func SaveSpawn(s SpawnPolicy) error { return mergeGlobalKeys(map[string]any{"spa
 // SaveOffline persists the offline-mode flag globally.
 func SaveOffline(off bool) error { return mergeGlobalKeys(map[string]any{"offline": off}) }
 
-// SaveReflect persists the reflection on/off flag globally.
-func SaveReflect(disabled bool) error {
-	return mergeGlobalKeys(map[string]any{"reflect_disabled": disabled})
+// SaveReflectCfg persists the reflection flag + profile globally.
+func SaveReflectCfg(disabled bool, profile string) error {
+	return mergeGlobalKeys(map[string]any{"reflect_disabled": disabled, "reflect_profile": profile})
+}
+
+// SaveReasoning persists the per-model reasoning params map globally.
+func SaveReasoning(m map[string]json.RawMessage) error {
+	return mergeGlobalKeys(map[string]any{"reasoning": m})
 }
 
 // SaveKnowledgeRetention persists the lesson-retention window (days) globally.

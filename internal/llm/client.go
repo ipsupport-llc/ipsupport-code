@@ -55,6 +55,7 @@ type OpenAIClient struct {
 	model   string
 	apiKey  string
 	temp    float64
+	extra   map[string]any // extra top-level request params (per-model reasoning, etc.)
 	hc      *http.Client
 
 	// OnRetry, if set, is called before each backoff so the UI can show that
@@ -90,6 +91,7 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 		model:     c.Model,
 		apiKey:    c.APIKey,
 		temp:      c.Temperature,
+		extra:     c.Extra,
 		hc:        &http.Client{},
 		idle:      90 * time.Second,
 		maxRespTk: maxResponseTokens(c.ContextWindow),
@@ -178,6 +180,13 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	// working, while local models still honor a configured value.
 	if c.temp > 0 {
 		body["temperature"] = c.temp
+	}
+	// Per-model reasoning controls (and any other extra params) — the user supplies
+	// the provider's own shape; we just merge it in. Doesn't clobber core fields.
+	for k, v := range c.extra {
+		if _, core := body[k]; !core {
+			body[k] = v
+		}
 	}
 	if len(tools) > 0 {
 		body["tools"] = tools

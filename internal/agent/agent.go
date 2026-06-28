@@ -256,7 +256,11 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 				}
 			}
 		} else {
-			stuck = 0
+			// A productive turn (a tool call succeeded and it's not a verbatim repeat)
+			// clears BOTH the counter and the already-nudged latch: real progress
+			// earns a fresh nudge budget, so a couple of early errors followed by good
+			// work don't insta-stop the next time the model briefly stumbles.
+			stuck, nudged = 0, false
 		}
 	}
 

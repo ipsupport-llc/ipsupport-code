@@ -1,28 +1,27 @@
-// Package mcp is a minimal Model Context Protocol client: it launches a
-// user-configured MCP server (stdio transport, newline-delimited JSON-RPC 2.0),
-// lists the tools it offers, and calls them. Deliberately lean — the agent
-// exposes every MCP tool through ONE proxy tool so the prompt catalog (and a
-// small model's context) stays small instead of ballooning with server schemas.
+// Package mcp is a minimal Model Context Protocol client. It connects to a
+// user-configured server over stdio (a local subprocess) or HTTP (a remote URL,
+// with auth headers), lists the tools it offers, and calls them. Deliberately
+// lean — the agent exposes every MCP tool through ONE proxy tool so the prompt
+// catalog (and a small model's context) stays small instead of ballooning with
+// per-server schemas.
 package mcp
 
 import (
-	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"os"
-	"os/exec"
 	"strings"
 	"sync"
 )
 
-// Server is a configured MCP server launched over stdio.
+// Server is a configured MCP server: stdio (Command) or HTTP (URL). Headers carry
+// auth (e.g. {"Authorization": "Bearer …"}) and apply to the HTTP transport.
 type Server struct {
-	Command string            `json:"command"`
+	Command string            `json:"command,omitempty"`
 	Args    []string          `json:"args,omitempty"`
 	Env     map[string]string `json:"env,omitempty"`
+	URL     string            `json:"url,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 // Tool is one tool advertised by a server.
@@ -32,16 +31,21 @@ type Tool struct {
 	InputSchema json.RawMessage `json:"inputSchema,omitempty"`
 }
 
+// transport is one server connection: a request/response RPC, fire-and-forget
+// notifications, and teardown. stdio and HTTP each implement it.
+type transport interface {
+	roundTrip(ctx context.Context, msg rpcMsg) (json.RawMessage, error)
+	notify(ctx context.Context, msg rpcMsg) error
+	close()
+}
+
 // Client is a live connection to one MCP server.
 type Client struct {
-	name    string
-	w       io.Writer
-	br      *bufio.Reader
-	closeFn func()
-	tools   []Tool
-
-	mu sync.Mutex // serializes request/response on the single stdio channel
-	id int
+	name  string
+	tr    transport
+	tools []Tool
+	idMu  sync.Mutex
+	id    int
 }
 
 type rpcMsg struct {
@@ -60,33 +64,23 @@ type rpcResp struct {
 	} `json:"error"`
 }
 
-// Connect launches the server over stdio and completes the handshake + tool list.
+// Connect opens the server (stdio if Command is set, else HTTP for URL) and
+// completes the handshake + tool list.
 func Connect(ctx context.Context, name string, s Server) (*Client, error) {
-	if strings.TrimSpace(s.Command) == "" {
-		return nil, fmt.Errorf("mcp %q: empty command", name)
+	var tr transport
+	var err error
+	switch {
+	case strings.TrimSpace(s.Command) != "":
+		tr, err = dialStdio(name, s)
+	case strings.TrimSpace(s.URL) != "":
+		tr, err = dialHTTP(name, s)
+	default:
+		return nil, fmt.Errorf("mcp %q: set either \"command\" (stdio) or \"url\" (http)", name)
 	}
-	cmd := exec.Command(s.Command, s.Args...)
-	cmd.Env = os.Environ()
-	for k, v := range s.Env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
-	cmd.Stderr = io.Discard
-	in, err := cmd.StdinPipe()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("mcp %q: %w", name, err)
 	}
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("mcp %q: start %s: %w", name, s.Command, err)
-	}
-	c := newClient(name, in, out, func() {
-		_ = in.Close()
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
+	c := &Client{name: name, tr: tr}
 	if err := c.handshake(ctx); err != nil {
 		c.Close()
 		return nil, fmt.Errorf("mcp %q: %w", name, err)
@@ -100,18 +94,13 @@ func Connect(ctx context.Context, name string, s Server) (*Client, error) {
 	return c, nil
 }
 
-// newClient wires a client to a raw transport (used directly by tests).
-func newClient(name string, w io.Writer, r io.Reader, closeFn func()) *Client {
-	return &Client{name: name, w: w, br: bufio.NewReaderSize(r, 1<<20), closeFn: closeFn}
-}
-
 // Tools returns the cached tool list from the handshake.
 func (c *Client) Tools() []Tool { return c.tools }
 
-// Close shuts the server down.
+// Close shuts the connection down.
 func (c *Client) Close() {
-	if c.closeFn != nil {
-		c.closeFn()
+	if c.tr != nil {
+		c.tr.close()
 	}
 }
 
@@ -123,7 +112,7 @@ func (c *Client) handshake(ctx context.Context) error {
 	}); err != nil {
 		return err
 	}
-	return c.write(rpcMsg{JSONRPC: "2.0", Method: "notifications/initialized"}) // no id → notification
+	return c.notify(ctx, "notifications/initialized")
 }
 
 func (c *Client) listTools(ctx context.Context) ([]Tool, error) {
@@ -174,57 +163,14 @@ func (c *Client) Call(ctx context.Context, tool string, args map[string]any) (st
 	return text, nil
 }
 
-// rpc sends one request and returns its result, skipping any interleaved
-// notifications. Serialized by the mutex; honors ctx cancellation/timeout.
 func (c *Client) rpc(ctx context.Context, method string, params any) (json.RawMessage, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.idMu.Lock()
 	c.id++
 	id := c.id
-	if err := c.write(rpcMsg{JSONRPC: "2.0", ID: &id, Method: method, Params: params}); err != nil {
-		return nil, err
-	}
-	type result struct {
-		raw json.RawMessage
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		for {
-			line, err := c.br.ReadBytes('\n')
-			if err != nil {
-				done <- result{nil, err}
-				return
-			}
-			line = bytes.TrimSpace(line)
-			if len(line) == 0 {
-				continue
-			}
-			var m rpcResp
-			if json.Unmarshal(line, &m) != nil || m.ID == nil || *m.ID != id {
-				continue // notification, log line, or a different id
-			}
-			if m.Error != nil {
-				done <- result{nil, fmt.Errorf("%s: %s", method, m.Error.Message)}
-				return
-			}
-			done <- result{m.Result, nil}
-			return
-		}
-	}()
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case r := <-done:
-		return r.raw, r.err
-	}
+	c.idMu.Unlock()
+	return c.tr.roundTrip(ctx, rpcMsg{JSONRPC: "2.0", ID: &id, Method: method, Params: params})
 }
 
-func (c *Client) write(v any) error {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return err
-	}
-	_, err = c.w.Write(append(b, '\n'))
-	return err
+func (c *Client) notify(ctx context.Context, method string) error {
+	return c.tr.notify(ctx, rpcMsg{JSONRPC: "2.0", Method: method})
 }

@@ -235,15 +235,18 @@ them to `~/.config/ipsupport-code/config.json`:
 
 ```jsonc
 "mcp_servers": {
-  "fs":  { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/some/dir"] },
-  "gh":  { "command": "github-mcp-server", "env": { "GITHUB_TOKEN": "…" } }
+  "fs":     { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/some/dir"] },
+  "gh":     { "command": "github-mcp-server", "env": { "GITHUB_TOKEN": "…" } },
+  "remote": { "url": "https://mcp.example.com/mcp", "headers": { "Authorization": "Bearer …" } }
 }
 ```
 
-`/mcp` lists the servers and their tools. The model uses the `mcp` tool —
-`list` to discover, `schema` to see a tool's inputs, `call` to run one. Servers
-launch lazily over stdio on first use; **every `mcp call` asks for approval**
-(it's external code). Sub-agents don't get MCP.
+Two transports: **stdio** (a local subprocess via `command`) and **HTTP** (a
+remote `url`, with `headers` for auth — e.g. `Authorization: Bearer`). `/mcp`
+lists the servers and their tools. The model uses the `mcp` tool — `list` to
+discover, `schema` to see a tool's inputs, `call` to run one. Servers connect
+lazily on first use; **every `mcp call` asks for approval** (it's external code).
+Sub-agents don't get MCP.
 
 ## Context & auto-compact
 

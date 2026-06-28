@@ -821,6 +821,9 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/mcp":
 		m.pushLines(strings.Split(m.app.mcpList(m.ctx), "\n"))
 		return m, nil
+	case "/reflect":
+		m.pushLines(m.app.reflectCommand(rest))
+		return m, nil
 	case "/ai":
 		m.pushLines(m.app.aiCommand(rest))
 		return m, m.detectWindowCmd() // re-detect the window off-thread after a switch
@@ -1354,6 +1357,7 @@ var commandList = []cmdInfo{
 	{"/cd", "set the working dir (relative paths + sub-agents resolve there)"},
 	{"/knowledge", "learned-lessons store: report · clear · purge <days> · retain <days>"},
 	{"/mcp", "list configured MCP servers and their tools"},
+	{"/reflect", "on|off — post-task lesson distillation (off if a small model loops there)"},
 	{"/shell", "drop to a shell in the workspace (exit to return)"},
 	{"/skills", "list/toggle/install on-demand instruction packs"},
 	{"/permissions", "relax approval for file / shell / sub-agent-spawn actions"},
@@ -1453,7 +1457,7 @@ func (m *tuiModel) argCandidates(name string) []string {
 		// ones (built-in or custom) with a key. Suggesting a keyless provider is a
 		// dead end — /ai would just reject it.
 		return m.app.configuredProviderNames()
-	case "/offline":
+	case "/offline", "/reflect":
 		return []string{"on", "off"}
 	case "/knowledge", "/kb":
 		return []string{"clear", "purge", "retain"}

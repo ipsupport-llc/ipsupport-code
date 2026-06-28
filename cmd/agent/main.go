@@ -798,6 +798,26 @@ func onOff(b bool) string {
 	return "off"
 }
 
+// reflectCommand toggles the post-task reflection (lesson distillation). Off is
+// the cure when a weak/looping model wastes the reflection pass.
+func (a *app) reflectCommand(arg string) []string {
+	switch strings.TrimSpace(arg) {
+	case "on", "yes", "true":
+		a.cfg.ReflectDisabled = false
+	case "off", "no", "false":
+		a.cfg.ReflectDisabled = true
+	case "":
+		return []string{"reflection is " + onOff(!a.cfg.ReflectDisabled) + " — /reflect on|off",
+			"  off = skip the post-task lesson pass (use it if a small model loops there)"}
+	default:
+		return []string{"usage: /reflect on|off"}
+	}
+	if err := config.SaveReflect(a.cfg.ReflectDisabled); err != nil {
+		return []string{"warning: not persisted: " + err.Error()}
+	}
+	return []string{"reflection → " + onOff(!a.cfg.ReflectDisabled)}
+}
+
 // mcpServerNames lists configured MCP server names, sorted.
 func (a *app) mcpServerNames() []string {
 	names := make([]string, 0, len(a.cfg.McpServers))
@@ -1487,6 +1507,9 @@ func today() string { return time.Now().Format("2006-01-02") }
 // reflectAndStore runs the post-task reflection and persists new lessons,
 // emitting a "lesson" event for each. Returns how many were new.
 func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
+	if a.cfg.ReflectDisabled { // /reflect off — skip the lesson-distillation pass
+		return 0
+	}
 	lessons, err := a.refl.Reflect(ctx, tr)
 	if err != nil {
 		slog.Warn("reflection failed", "err", err)
@@ -1664,6 +1687,10 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		}
 	case "/mcp":
 		fmt.Println(a.mcpList(ctx))
+	case "/reflect":
+		for _, l := range a.reflectCommand(rest) {
+			fmt.Println(l)
+		}
 	case "/ai":
 		for _, l := range a.aiCommand(rest) {
 			fmt.Println(l)
@@ -2292,6 +2319,7 @@ func helpText() string {
   /cd [dir]        set the working directory (relative paths + sub-agents use it)
   /knowledge       learned-lessons store: report · clear · purge <days> · retain <days>
   /mcp             list configured MCP servers and their tools (mcp_servers in config.json)
+  /reflect [on|off] post-task lesson distillation (turn off if a weak model loops there)
   /shell, /sh      drop to a shell in the workspace (exit to return)
   /skills          list/toggle/install on-demand instruction packs
   /agents          sub-agent profiles: /agents add|rm|exec (models the agent tool delegates to)

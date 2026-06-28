@@ -1,10 +1,42 @@
 package policy
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 )
+
+func TestResolveExpandsTilde(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	c := config.Default()
+	c.Workspace = home
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	e := eng(t, c)
+
+	got, err := e.Resolve("~/note.json") // must land in $HOME, not a literal "~" dir
+	if err != nil {
+		t.Fatalf("Resolve(~/note.json) errored: %v", err)
+	}
+	if strings.Contains(got, "~") || filepath.Base(got) != "note.json" {
+		t.Errorf("Resolve(~/note.json) = %q, want <home>/note.json", got)
+	}
+
+	// ~ must still respect the jail: from a sub-directory jail, ~ (the parent) escapes
+	sub := filepath.Join(home, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c2 := config.Default()
+	c2.Workspace = sub
+	c2.File = config.FilePolicy{Default: "allow", Jail: "."}
+	if _, err := eng(t, c2).Resolve("~/escape.json"); err == nil {
+		t.Error("~ should not escape a sub-directory jail")
+	}
+}
 
 func eng(t *testing.T, c config.Config) *Engine {
 	t.Helper()

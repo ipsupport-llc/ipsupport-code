@@ -30,7 +30,8 @@ var configRows = []cfgRow{
 	{key: "apikey"},
 	{header: "Behavior"},
 	{key: "mode"},
-	{key: "permissions"},
+	{key: "perm_files"},
+	{key: "perm_run"},
 	{key: "timeout"},
 	{header: "Sub-agents"},
 	{key: "agents"},
@@ -92,8 +93,10 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 			v = "⏸ plan"
 		}
 		return "mode", v, "enter: toggle"
-	case "permissions":
-		return "permissions", fmt.Sprintf("files %s · run %s", m.app.cfg.File.Default, m.app.cfg.Run.Default), "enter: cycle"
+	case "perm_files":
+		return "file writes", m.app.cfg.File.Default, "enter: ask/allow/deny"
+	case "perm_run":
+		return "shell run", m.app.cfg.Run.Default, "enter: ask/allow/deny"
 	case "timeout":
 		return "run timeout", runTimeoutLabel(m.app.cfg.Run.TimeoutSeconds), "enter: cycle"
 	case "agents":
@@ -123,8 +126,10 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		m.cycleProvider()
 	case "mode":
 		m.app.setMode(!m.app.planMode)
-	case "permissions":
-		m.cyclePermissions()
+	case "perm_files":
+		m.cyclePerm(&m.app.cfg.File.Default)
+	case "perm_run":
+		m.cyclePerm(&m.app.cfg.Run.Default)
 	case "timeout":
 		m.cycleTimeout()
 	case "color":
@@ -143,10 +148,8 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 			arg = "off"
 		}
 		m.app.agentsExec(arg)
-	case "agents": // build a profile: prefill, then provider → model list → name
-		m.state = stIdle
-		m.input.SetValue("/agents add ")
-		m.input.CursorEnd()
+	case "agents": // open the interactive profile manager (provider → model → name)
+		m.openAgents()
 	case "model": // needs the live model list — hand off to /model
 		m.state = stIdle
 		return m.runCommand("/model")
@@ -193,12 +196,10 @@ func (m *tuiModel) cycleProvider() {
 
 var permCycle = []string{"ask", "allow", "deny"}
 
-// cyclePermissions advances both the file and run defaults together through
+// cyclePerm advances one policy default (file OR run, independently) through
 // ask → allow → deny, persists the workspace policy, and re-wires.
-func (m *tuiModel) cyclePermissions() {
-	next := nextStr(m.app.cfg.File.Default, permCycle)
-	m.app.cfg.File.Default = next
-	m.app.cfg.Run.Default = next
+func (m *tuiModel) cyclePerm(field *string) {
+	*field = nextStr(*field, permCycle)
 	_ = config.SaveWorkspacePolicy(m.app.workspace, m.app.cfg.Run, m.app.cfg.File)
 	_ = m.app.wire()
 }

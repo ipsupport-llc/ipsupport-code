@@ -72,24 +72,29 @@ func Open(dir string, hc *http.Client) (*Store, error) {
 	return s, nil
 }
 
-// seedBuiltins copies the embedded skills into the directory once (guarded by a
-// marker), DISABLED by default, so there is something to enable out of the box
-// without bloating the prompt. It never clobbers a user file of the same name,
-// and removed built-ins stay removed (the marker prevents re-seeding).
+// seedBuiltins copies embedded skills into the directory, DISABLED by default, so
+// there's something to enable out of the box without bloating the prompt. Each
+// built-in is seeded at most once (tracked by name in .seeded), so a built-in the
+// user later removed stays removed — but a NEW built-in added in a later release
+// is still seeded on upgrade (the old design used a single marker and missed
+// those entirely). It never clobbers a user file of the same name.
 func (s *Store) seedBuiltins() {
-	marker := filepath.Join(s.dir, ".seeded")
-	if _, err := os.Stat(marker); err == nil {
-		return
-	}
+	seeded := s.loadSeeded()
 	entries, _ := builtinFS.ReadDir("builtin")
+	changed := false
 	for _, e := range entries {
+		name := strings.TrimSuffix(e.Name(), ".md")
+		if seeded[name] {
+			continue // already seeded once (even if the user later removed it)
+		}
+		seeded[name] = true
+		changed = true
+		if _, err := os.Stat(s.skillPath(name)); err == nil {
+			continue // a user file already owns this name
+		}
 		data, err := builtinFS.ReadFile("builtin/" + e.Name())
 		if err != nil {
 			continue
-		}
-		name := strings.TrimSuffix(e.Name(), ".md")
-		if _, err := os.Stat(s.skillPath(name)); err == nil {
-			continue // a user file already owns this name
 		}
 		if os.WriteFile(s.skillPath(name), data, 0o644) == nil {
 			if _, ok := s.state[name]; !ok {
@@ -97,8 +102,52 @@ func (s *Store) seedBuiltins() {
 			}
 		}
 	}
-	_ = s.saveState()
-	_ = os.WriteFile(marker, []byte("1"), 0o644)
+	if changed {
+		_ = s.saveState()
+		_ = s.saveSeeded(seeded)
+	}
+}
+
+func (s *Store) seededPath() string { return filepath.Join(s.dir, ".seeded") }
+
+// loadSeeded reads the set of built-in names already seeded. A fresh install has
+// no file (seed everything). The old format was a single "1" marker; migrate it
+// by treating every built-in that currently has a file as already seeded, so the
+// upgrade seeds only the genuinely new ones.
+func (s *Store) loadSeeded() map[string]bool {
+	set := map[string]bool{}
+	data, err := os.ReadFile(s.seededPath())
+	if err != nil {
+		return set
+	}
+	var names []string
+	if json.Unmarshal(data, &names) == nil {
+		for _, n := range names {
+			set[n] = true
+		}
+		return set
+	}
+	entries, _ := builtinFS.ReadDir("builtin") // old "1" marker → migrate
+	for _, e := range entries {
+		name := strings.TrimSuffix(e.Name(), ".md")
+		if _, err := os.Stat(s.skillPath(name)); err == nil {
+			set[name] = true
+		}
+	}
+	return set
+}
+
+func (s *Store) saveSeeded(set map[string]bool) error {
+	names := make([]string, 0, len(set))
+	for n := range set {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	data, err := json.Marshal(names)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.seededPath(), data, 0o644)
 }
 
 func (s *Store) statePath() string { return filepath.Join(s.dir, "state.json") }

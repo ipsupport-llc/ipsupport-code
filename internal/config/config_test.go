@@ -13,6 +13,42 @@ func isolate(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 }
 
+func TestSavePreservesProviders(t *testing.T) {
+	isolate(t)
+	if err := SaveProviders("openrouter", map[string]LLM{"openrouter": {APIKey: "secret"}}); err != nil {
+		t.Fatal(err)
+	}
+	// subsequent unrelated saves must keep the provider key
+	if err := SaveAgents(map[string]AgentProfile{"g": {Provider: "openrouter", Model: "m"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveSpawn(SpawnPolicy{Default: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Providers["openrouter"].APIKey; got != "secret" {
+		t.Errorf("provider key lost after later saves: %q (providers=%+v)", got, cfg.Providers)
+	}
+}
+
+func TestSaveRefusesToWipeCorruptConfig(t *testing.T) {
+	isolate(t)
+	if err := SaveProviders("openrouter", map[string]LLM{"openrouter": {APIKey: "secret"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(GlobalPath(), []byte("{ truncated"), 0o600); err != nil {
+		t.Fatal(err) // simulate an interrupted/half-written file
+	}
+	// the old code ignored the parse error and overwrote it, dropping providers;
+	// now it must abort.
+	if err := SaveSpawn(SpawnPolicy{Default: "allow"}); err == nil {
+		t.Error("saving over a corrupt config should error, not silently wipe it")
+	}
+}
+
 func TestLoadNoFileReturnsDefaults(t *testing.T) {
 	isolate(t)
 	dir := t.TempDir()

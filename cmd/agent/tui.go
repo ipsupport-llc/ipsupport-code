@@ -37,6 +37,7 @@ const (
 	stApprove
 	stConfig        // interactive /config settings panel
 	stChooseSession // startup: pick a saved session to restore / start new / delete
+	stAgents        // interactive sub-agent profile manager (add/edit/delete)
 )
 
 // chromeFixed: status line + top rule + bottom rule + hint line + 1 margin. The
@@ -80,6 +81,15 @@ type tuiModel struct {
 	inputLines    int        // current input box height in rows (grows with content)
 	busyMsg       string     // status label while running non-task work (update/compact/model); "" = a model task ("thinking")
 	subs          []*liveSub // sub-agents running right now, one live status line each
+
+	// sub-agent profile manager (stAgents): a list + a provider→model→name builder
+	agPhase     agentPhase
+	agCursor    int
+	agDraft     agentDraft
+	agModelsAll []string // models fetched for the chosen provider
+	agModelsErr string
+	agFilter    string // type-to-filter over the model list
+	agLoading   bool
 
 	// model-proposed, Tab-acceptable next-step suggestion (parsed from NEXT:)
 	suggestion string
@@ -481,6 +491,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case agentModelsMsg:
+		m.agLoading = false
+		m.agModelsAll, m.agModelsErr = msg.models, msg.err
+		m.agCursor = 0
+		return m, nil
+
 	case modelsMsg:
 		m.state = stIdle
 		if msg.setTo != "" { // resolved a /model arg to one model — switch (UI thread)
@@ -562,6 +578,8 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state = stIdle
 		}
 		return m, nil
+	case stAgents:
+		return m.agentsKey(k)
 
 	case stApprove:
 		// Answer the prompt, then (and only then) wait for the next queued
@@ -1034,6 +1052,8 @@ func (m *tuiModel) View() string {
 	switch {
 	case m.state == stChooseSession:
 		status = cDim.Render("welcome back — pick up a session, or start fresh")
+	case m.state == stAgents:
+		status = cDim.Render("sub-agent profiles — models the assistant can delegate to")
 	case m.state == stConfig:
 		status = cDim.Render("settings — changes apply and save as you make them")
 	case m.state == stApprove:
@@ -1084,6 +1104,8 @@ func (m *tuiModel) View() string {
 		bottom = m.modeLine() + cDim.Render("  · ↑ to answer the approval")
 	case m.state == stRunning:
 		bottom += cDim.Render("  · esc cancels")
+	case m.state == stAgents:
+		bottom = cDim.Render(m.agentsHint())
 	}
 
 	content := m.vp.View()
@@ -1092,6 +1114,8 @@ func (m *tuiModel) View() string {
 		content = m.renderConfigPanel()
 	case stChooseSession:
 		content = m.renderChooser()
+	case stAgents:
+		content = m.renderAgentsPanel()
 	}
 	frame := lipgloss.NewStyle().Foreground(m.accent)
 	parts := []string{content}

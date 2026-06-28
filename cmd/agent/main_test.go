@@ -18,6 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
@@ -531,6 +532,15 @@ func TestResolveProfileName(t *testing.T) {
 	a.cfg.Agents = map[string]config.AgentProfile{"only": {Provider: "local"}}
 	if got, ok := a.resolveProfileName("whatever-the-model-typed"); !ok || got != "only" {
 		t.Errorf("single-profile fallback = %q,%v want only,true", got, ok)
+	}
+}
+
+func TestReflectDisabledIsNoop(t *testing.T) {
+	a := &app{cfg: config.Default()}
+	a.cfg.ReflectDisabled = true
+	// must short-circuit before touching the (nil) reflector
+	if n := a.reflectAndStore(context.Background(), agent.Transcript{}); n != 0 {
+		t.Errorf("disabled reflection should be a no-op, got %d", n)
 	}
 }
 

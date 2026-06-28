@@ -108,6 +108,9 @@ type Config struct {
 	// makes anything that would reach the net fail fast with a clear message.
 	// Local model calls (e.g. LM Studio on localhost) are unaffected.
 	Offline bool `json:"offline,omitempty"`
+	// ReflectDisabled skips the post-task reflection pass (lesson distillation).
+	// Reflection is on by default; turn it off when a weak model loops there.
+	ReflectDisabled bool `json:"reflect_disabled,omitempty"`
 	// McpServers are MCP servers the `mcp` proxy tool can use: name → stdio launch
 	// spec. Empty = the mcp tool isn't offered.
 	McpServers map[string]mcp.Server `json:"mcp_servers,omitempty"`
@@ -325,6 +328,11 @@ func SaveSpawn(s SpawnPolicy) error { return mergeGlobalKeys(map[string]any{"spa
 
 // SaveOffline persists the offline-mode flag globally.
 func SaveOffline(off bool) error { return mergeGlobalKeys(map[string]any{"offline": off}) }
+
+// SaveReflect persists the reflection on/off flag globally.
+func SaveReflect(disabled bool) error {
+	return mergeGlobalKeys(map[string]any{"reflect_disabled": disabled})
+}
 
 // SaveKnowledgeRetention persists the lesson-retention window (days) globally.
 func SaveKnowledgeRetention(days int) error {

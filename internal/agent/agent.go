@@ -312,8 +312,10 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		// action) OR by repeating the exact same call(s) that already succeeded,
 		// making no progress (a reasoning model can spin here). Count both as
 		// unproductive: after several such turns give ONE forceful "rethink" nudge
-		// with an escape hatch to answer in words; if it's STILL stuck after that,
-		// stop and hand the user a one-tap steering suggestion.
+		// with an escape hatch to answer in words; if the very NEXT turn is still
+		// unproductive, stop. We do NOT reset the counter on the nudge — a degenerate
+		// model (esp. one that thinks for minutes per turn) shouldn't get a fresh full
+		// budget to keep flailing; only real progress (the else branch) earns that.
 		sig := callSig(assistant.ToolCalls)
 		repeating := sig != "" && sig == lastSig
 		lastSig = sig
@@ -322,7 +324,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 				if !nudged {
 					msgs = append(msgs, llm.User(stuckNudge))
 					a.emit("nudge", map[string]any{})
-					stuck, nudged = 0, true
+					nudged = true // keep stuck high: one more dud turn now stops it
 				} else {
 					const msg = "Stopped — it kept repeating the same tool calls without progress (or they kept failing) even after a nudge to rethink. Steer it (a different approach), or use a stronger model."
 					tr.Final, tr.Stopped = msg, true

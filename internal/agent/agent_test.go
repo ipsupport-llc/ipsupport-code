@@ -670,6 +670,34 @@ func TestRunGoalLoopStopsAtTTL(t *testing.T) {
 	}
 }
 
+// After the rethink nudge, a single further unproductive turn stops the run — the
+// counter isn't reset on the nudge, so a degenerate model (which may think for
+// minutes per turn) can't flail for another full budget before stopping.
+func TestStuckStopsOneTurnAfterNudge(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	bad := toolCallReply("c", "calc", `{"action":"","params":{}}`)
+	fake := &scriptLLM{replies: []llm.Message{bad, bad, bad, bad, bad, bad}}
+	rt := &recTracer{}
+	a := New(fake, reg, nil, rt, "", 30)
+
+	tr, _ := a.Run(context.Background(), "do x")
+	if !tr.Stopped || !strings.Contains(tr.Final, "Stopped") {
+		t.Fatalf("want a stuck-stop, got stopped=%v final=%q", tr.Stopped, tr.Final)
+	}
+	if tr.Steps != 4 { // 3 turns to the nudge, 1 more dud turn to stop
+		t.Errorf("steps = %d, want 4", tr.Steps)
+	}
+	nudges := 0
+	for _, k := range rt.kinds {
+		if k == "nudge" {
+			nudges++
+		}
+	}
+	if nudges != 1 {
+		t.Errorf("nudges = %d, want 1", nudges)
+	}
+}
+
 // An empty-action error must stay a single clean line — no full schema dump, no
 // learned hints piled on (that buries the example for a weak model).
 func TestEmptyActionErrorStaysTerse(t *testing.T) {

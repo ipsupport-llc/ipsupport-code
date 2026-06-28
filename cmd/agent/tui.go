@@ -94,6 +94,7 @@ type tuiModel struct {
 
 	rewindRows   []rewindRow // checkpoints offered by the /rewind picker (stRewind)
 	rewindCursor int
+	rewindPrev   []string // cached colored preview (diffs) of the selected step
 
 	// model-proposed, Tab-acceptable next-step suggestion (parsed from NEXT:)
 	suggestion string
@@ -603,10 +604,12 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "up", "k":
 			if len(m.rewindRows) > 0 {
 				m.rewindCursor = (m.rewindCursor - 1 + len(m.rewindRows)) % len(m.rewindRows)
+				m.refreshRewindPreview()
 			}
 		case "down", "j":
 			if len(m.rewindRows) > 0 {
 				m.rewindCursor = (m.rewindCursor + 1) % len(m.rewindRows)
+				m.refreshRewindPreview()
 			}
 		case "enter", "right", "l":
 			if m.rewindCursor < len(m.rewindRows) {
@@ -1627,7 +1630,46 @@ func (m *tuiModel) openRewind() {
 		return
 	}
 	m.rewindCursor = 0
+	m.refreshRewindPreview()
 	m.state = stRewind
+}
+
+// refreshRewindPreview rebuilds the cached, colored diff preview for the selected
+// step (computed on cursor move, not every frame). Total height is capped.
+func (m *tuiModel) refreshRewindPreview() {
+	m.rewindPrev = nil
+	if m.rewindCursor >= len(m.rewindRows) {
+		return
+	}
+	items, trimmed := m.app.rewindPreview(m.rewindRows[m.rewindCursor].idx)
+	budget := 22
+	for _, it := range items {
+		if budget <= 0 {
+			m.rewindPrev = append(m.rewindPrev, cDim.Render("    …(more files)"))
+			break
+		}
+		switch it.Kind {
+		case "delete":
+			m.rewindPrev = append(m.rewindPrev, cErr.Render("  ✖ delete "+it.Rel)+cDim.Render(" (created in this step)"))
+			budget--
+		case "toobig":
+			m.rewindPrev = append(m.rewindPrev, cDim.Render("  ~ "+it.Rel+" (too large — left as-is)"))
+			budget--
+		case "restore":
+			d := m.renderDiff(it.Rel, it.Diff)
+			if len(d) > budget {
+				d = append(d[:budget], cDim.Render("    …"))
+			}
+			m.rewindPrev = append(m.rewindPrev, d...)
+			budget -= len(d)
+		}
+	}
+	if trimmed > 0 {
+		m.rewindPrev = append(m.rewindPrev, cDim.Render(fmt.Sprintf("  conversation: trims %d message(s)", trimmed)))
+	}
+	if len(m.rewindPrev) == 0 {
+		m.rewindPrev = []string{cDim.Render("  (no changes to undo for this step)")}
+	}
 }
 
 // renderRewindPanel draws the boxed, navigable checkpoint list.
@@ -1638,7 +1680,11 @@ func (m *tuiModel) renderRewindPanel() string {
 		label := fmt.Sprintf("%-46s %d file(s)", oneLine(r.goal, 46), r.files)
 		lines = append(lines, agRow(accent, label, i == m.rewindCursor))
 	}
-	lines = append(lines, "", cDim.Render("  restores files + trims the conversation; shell/git/network are NOT undone"))
+	if len(m.rewindPrev) > 0 {
+		lines = append(lines, "", accent.Render("  ── what rewinding here changes ──"))
+		lines = append(lines, m.rewindPrev...)
+	}
+	lines = append(lines, "", cDim.Render("  shell/git/network are NOT undone"))
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(m.accent).Padding(0, 1)
 	return box.Render(strings.Join(lines, "\n"))
 }

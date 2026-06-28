@@ -292,6 +292,9 @@ edit at your own risk.)
   `~/.config/ipsupport-code/knowledge.json` (env-general tool pitfalls) and durable
   **facts** about the current project (build/test/run commands, where things live,
   conventions) into `<workspace>/.agent/facts.json` — folded into the prompt next run.
+  Each lesson tracks when it was last seen (bumped on recurrence); `/knowledge`
+  reports the store and `clear` / `purge <days>` / `retain <days>` prune stale ones
+  (`retain` auto-purges on startup) so the memory doesn't accrete junk forever.
 - **Code search.** The `file` tool's `search` action greps the workspace by regex
   (`file:line: match`), skipping VCS/dep/build dirs and binaries — no external `grep`.
 - **Session memory.** Remembers your goals and its answers across turns and across

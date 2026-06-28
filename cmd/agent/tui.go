@@ -815,6 +815,9 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/cd":
 		m.pushLines(m.app.cdCommand(rest))
 		return m, nil
+	case "/knowledge", "/kb":
+		m.pushLines(m.app.knowledgeCommand(rest))
+		return m, nil
 	case "/ai":
 		m.pushLines(m.app.aiCommand(rest))
 		return m, m.detectWindowCmd() // re-detect the window off-thread after a switch
@@ -1346,6 +1349,7 @@ var commandList = []cmdInfo{
 	{"/update", "self-update from GitHub (stable|nightly)"},
 	{"/offline", "on|off — work without internet (disables web + update checks)"},
 	{"/cd", "set the working dir (relative paths + sub-agents resolve there)"},
+	{"/knowledge", "learned-lessons store: report · clear · purge <days> · retain <days>"},
 	{"/shell", "drop to a shell in the workspace (exit to return)"},
 	{"/skills", "list/toggle/install on-demand instruction packs"},
 	{"/permissions", "relax approval for file / shell / sub-agent-spawn actions"},
@@ -1447,6 +1451,8 @@ func (m *tuiModel) argCandidates(name string) []string {
 		return m.app.configuredProviderNames()
 	case "/offline":
 		return []string{"on", "off"}
+	case "/knowledge", "/kb":
+		return []string{"clear", "purge", "retain"}
 	case "/usage":
 		return []string{"clear", "purge", "retain"}
 	case "/sessions":

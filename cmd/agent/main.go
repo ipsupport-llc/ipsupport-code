@@ -245,7 +245,8 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 
 	cleanup := func() {}
 	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader, approver: &stdinApprover{r: reader}}
-	a.applyUsageRetention() // honor usage_retention_days on startup
+	a.applyUsageRetention()     // honor usage_retention_days on startup
+	a.applyKnowledgeRetention() // honor knowledge_retention_days on startup
 	if ft, err := trace.NewFileTracer(cfg.TracePath, newRunID()); err != nil {
 		slog.Warn("trace disabled", "err", err)
 	} else {
@@ -1543,6 +1544,10 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		for _, l := range a.cdCommand(rest) {
 			fmt.Println(l)
 		}
+	case "/knowledge", "/kb":
+		for _, l := range a.knowledgeCommand(rest) {
+			fmt.Println(l)
+		}
 	case "/ai":
 		for _, l := range a.aiCommand(rest) {
 			fmt.Println(l)
@@ -2169,6 +2174,7 @@ func helpText() string {
   /update [chan]   self-update from GitHub (chan = stable|nightly, saved)
   /offline [on|off] work without internet — disables web + update checks
   /cd [dir]        set the working directory (relative paths + sub-agents use it)
+  /knowledge       learned-lessons store: report · clear · purge <days> · retain <days>
   /shell, /sh      drop to a shell in the workspace (exit to return)
   /skills          list/toggle/install on-demand instruction packs
   /agents          sub-agent profiles: /agents add|rm|exec (models the agent tool delegates to)
@@ -2328,6 +2334,91 @@ func (a *app) applyUsageRetention() {
 	if n := a.usage.Purge(cutoffDays(a.cfg.UsageRetentionDays)); n > 0 {
 		_ = a.usage.Save()
 	}
+}
+
+// applyKnowledgeRetention drops learned lessons older than the configured window
+// on startup. No-op when retention is off (0).
+func (a *app) applyKnowledgeRetention() {
+	if a.kb == nil || a.cfg.KnowledgeRetentionDays <= 0 {
+		return
+	}
+	if n := a.kb.Purge(a.cfg.KnowledgeRetentionDays); n > 0 {
+		_ = a.kb.Save()
+	}
+}
+
+// knowledgeCommand handles /knowledge: a report, or clear / purge <days> /
+// retain <days> to manage the learned-lessons store.
+func (a *app) knowledgeCommand(rest string) []string {
+	sub, arg := splitCommand(rest)
+	switch sub {
+	case "":
+		return a.knowledgeReport()
+	case "clear":
+		n := a.kb.Clear()
+		if err := a.kb.Save(); err != nil {
+			return []string{"error: " + err.Error()}
+		}
+		return []string{fmt.Sprintf("cleared %d learned lessons", n)}
+	case "purge":
+		days, err := strconv.Atoi(strings.TrimSpace(arg))
+		if err != nil || days < 0 {
+			return []string{"usage: /knowledge purge <days>  (drop lessons last seen over N days ago)"}
+		}
+		n := a.kb.Purge(days)
+		if err := a.kb.Save(); err != nil {
+			return []string{"error: " + err.Error()}
+		}
+		return []string{fmt.Sprintf("purged %d lessons older than %d days", n, days)}
+	case "retain":
+		days, err := strconv.Atoi(strings.TrimSpace(arg))
+		if err != nil || days < 0 {
+			return []string{"usage: /knowledge retain <days>  (0 = keep forever)"}
+		}
+		a.cfg.KnowledgeRetentionDays = days
+		if err := config.SaveKnowledgeRetention(days); err != nil {
+			return []string{"warning: not persisted: " + err.Error()}
+		}
+		n := a.kb.Purge(days)
+		_ = a.kb.Save()
+		msg := fmt.Sprintf("retention → %d days (auto-purge on startup)", days)
+		if days == 0 {
+			msg = "retention → off (lessons kept forever)"
+		}
+		if n > 0 {
+			msg += fmt.Sprintf("; dropped %d now", n)
+		}
+		return []string{msg}
+	default:
+		return []string{"usage: /knowledge [clear] [purge <days>] [retain <days>]"}
+	}
+}
+
+// knowledgeReport summarizes the lesson store: total, per-domain counts, retention.
+func (a *app) knowledgeReport() []string {
+	all := a.kb.All()
+	if len(all) == 0 {
+		return []string{"no learned lessons yet — they accrue from task reflections."}
+	}
+	byDomain := map[string]int{}
+	for _, p := range all {
+		byDomain[p.Domain]++
+	}
+	doms := make([]string, 0, len(byDomain))
+	for d := range byDomain {
+		doms = append(doms, d)
+	}
+	sort.Slice(doms, func(i, j int) bool { return byDomain[doms[i]] > byDomain[doms[j]] })
+	out := []string{fmt.Sprintf("learned lessons: %d", len(all))}
+	for _, d := range doms {
+		out = append(out, fmt.Sprintf("  %-10s %d", d, byDomain[d]))
+	}
+	ret := "off (kept forever)"
+	if a.cfg.KnowledgeRetentionDays > 0 {
+		ret = fmt.Sprintf("%d days", a.cfg.KnowledgeRetentionDays)
+	}
+	out = append(out, "retention: "+ret, "  /knowledge clear · purge <days> · retain <days>")
+	return out
 }
 
 // usageManage handles /usage subcommands. handled=false (for no/unknown args)

@@ -18,7 +18,7 @@ func TestCatalogTokenBudget(t *testing.T) {
 	kb, _ := knowledge.Open("")
 	reg := NewRegistry(
 		NewFile(pol, nil), NewRun(pol, nil, 0), NewGit(pol, nil),
-		NewWeb(nil), NewHelp(kb, nil), NewCalc(),
+		NewWeb(nil, false), NewHelp(kb, nil), NewCalc(),
 	)
 	b, _ := json.Marshal(reg.OpenAITools())
 	t.Logf("tool catalog: %d bytes (~%d tokens)", len(b), len(b)/4)

@@ -344,6 +344,9 @@ func (m *tuiModel) detectWindowCmd() tea.Cmd {
 
 // checkUpdate runs the startup freshness check off the UI thread.
 func (m *tuiModel) checkUpdate() tea.Cmd {
+	if m.app.cfg.Offline { // offline: don't reach GitHub at startup
+		return nil
+	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(m.ctx, 3*time.Second)
 		defer cancel()
@@ -801,7 +804,14 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/auto":
 		m.push(cDim.Render(m.app.setMode(false)))
 	case "/update":
+		if m.app.cfg.Offline {
+			m.push(cDim.Render("offline mode is on — /update needs the internet. Run /offline off first."))
+			return m, nil
+		}
 		return m, m.startUpdate(strings.TrimSpace(rest))
+	case "/offline":
+		m.pushLines(m.app.offlineCommand(rest))
+		return m, nil
 	case "/ai":
 		m.pushLines(m.app.aiCommand(rest))
 		return m, m.detectWindowCmd() // re-detect the window off-thread after a switch
@@ -1331,6 +1341,7 @@ var commandList = []cmdInfo{
 	{"/model", "list the provider's models, or pick one"},
 	{"/config", "interactive settings panel (↑↓ move · enter change · esc close)"},
 	{"/update", "self-update from GitHub (stable|nightly)"},
+	{"/offline", "on|off — work without internet (disables web + update checks)"},
 	{"/shell", "drop to a shell in the workspace (exit to return)"},
 	{"/skills", "list/toggle/install on-demand instruction packs"},
 	{"/permissions", "relax approval for file / shell / sub-agent-spawn actions"},
@@ -1430,6 +1441,8 @@ func (m *tuiModel) argCandidates(name string) []string {
 		// ones (built-in or custom) with a key. Suggesting a keyless provider is a
 		// dead end — /ai would just reject it.
 		return m.app.configuredProviderNames()
+	case "/offline":
+		return []string{"on", "off"}
 	case "/usage":
 		return []string{"clear", "purge", "retain"}
 	case "/sessions":

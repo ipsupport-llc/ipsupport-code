@@ -3,9 +3,74 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+
+	udiff "github.com/aymanbagabas/go-udiff"
 )
+
+// rewindPreviewItem is one change rewinding to a step would make.
+type rewindPreviewItem struct {
+	Rel  string // path relative to the workspace
+	Kind string // restore | delete | toobig
+	Diff string // unified diff (current → restored), for Kind == restore
+}
+
+// rewindPreview computes what rewinding to checkpoint idx would do: per affected
+// file the change (diff to restore / delete a created file / skip a too-big one)
+// and how many conversation messages get trimmed. Used to preview in the picker.
+func (a *app) rewindPreview(idx int) ([]rewindPreviewItem, int) {
+	a.ckptMu.Lock()
+	if idx < 0 || idx >= len(a.checkpoints) {
+		a.ckptMu.Unlock()
+		return nil, 0
+	}
+	seen := map[string]fileSnap{}
+	for i := idx; i < len(a.checkpoints); i++ {
+		for p, s := range a.checkpoints[i].files {
+			if _, ok := seen[p]; !ok {
+				seen[p] = s
+			}
+		}
+	}
+	histLen := a.checkpoints[idx].histLen
+	a.ckptMu.Unlock()
+
+	trimmed := a.ag.SessionLen() - histLen
+	if trimmed < 0 {
+		trimmed = 0
+	}
+	paths := make([]string, 0, len(seen))
+	for p := range seen {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+
+	var items []rewindPreviewItem
+	for _, p := range paths {
+		rel := p
+		if r, err := filepath.Rel(a.workspace, p); err == nil {
+			rel = r
+		}
+		s := seen[p]
+		switch {
+		case s.tooBig:
+			items = append(items, rewindPreviewItem{Rel: rel, Kind: "toobig"})
+		case !s.existed:
+			items = append(items, rewindPreviewItem{Rel: rel, Kind: "delete"})
+		default:
+			cur, _ := os.ReadFile(p)
+			if string(cur) == string(s.content) {
+				continue // unchanged since the checkpoint — nothing to restore
+			}
+			items = append(items, rewindPreviewItem{Rel: rel, Kind: "restore",
+				Diff: udiff.Unified(rel, rel, string(cur), string(s.content))})
+		}
+	}
+	return items, trimmed
+}
 
 // rewindCommand is the REPL/text path: bare lists checkpoints, /rewind <n> applies
 // the n-th (1 = most recent). The TUI uses an interactive picker instead.

@@ -583,6 +583,41 @@ func TestRewindRestoresFiles(t *testing.T) {
 	}
 }
 
+func TestRewindPreview(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.File = config.FilePolicy{Default: "allow", Jail: "."}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	abs, newAbs := filepath.Join(ws, "a.txt"), filepath.Join(ws, "b.txt")
+	os.WriteFile(abs, []byte("old\n"), 0o644)
+	a.beginCheckpoint("edit")
+	a.snapFile(abs)
+	os.WriteFile(abs, []byte("new\n"), 0o644)
+	a.snapFile(newAbs)
+	os.WriteFile(newAbs, []byte("created\n"), 0o644)
+	a.endCheckpoint()
+
+	items, _ := a.rewindPreview(0)
+	var restore, del bool
+	for _, it := range items {
+		if it.Rel == "a.txt" && it.Kind == "restore" && strings.Contains(it.Diff, "old") {
+			restore = true
+		}
+		if it.Rel == "b.txt" && it.Kind == "delete" {
+			del = true
+		}
+	}
+	if !restore || !del {
+		t.Errorf("preview = %+v; want a restore (a.txt) + a delete (b.txt)", items)
+	}
+}
+
 func TestCdCommand(t *testing.T) {
 	ws := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(ws, "proj", "sub"), 0o755); err != nil {

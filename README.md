@@ -203,10 +203,12 @@ for `/permissions run on`. The choice is saved to the workspace config.
 On-demand instruction packs — the user-extensible version of guides-on-demand.
 Only an **enabled** skill adds a single line to the system prompt; the model
 loads a skill's full instructions on demand, so the base prompt stays lean no
-matter how many you install. Seven curated skills ship in the binary
+matter how many you install. Eight curated skills ship in the binary
 (`test-first`, `debug-systematically`, `git-flow`, `research-first`,
-`minimal-code`, `review` — multi-model review via sub-agents — and `subagents`,
-how to delegate and fan work out), seeded **disabled** so you opt in.
+`minimal-code`, `review` — multi-model review via sub-agents — `subagents`, how to
+delegate and fan work out, and `plan`, a `.agent/plan.md` checklist so multi-step
+work resumes itself), seeded **disabled** so you opt in. Built-in skills refresh
+on upgrade unless you've edited them.
 
 ```
 /skills                       list installed skills (on/off)

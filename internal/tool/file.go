@@ -3,6 +3,7 @@ package tool
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	udiff "github.com/aymanbagabas/go-udiff"
+	"github.com/bmatcuk/doublestar/v4"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
@@ -30,15 +32,16 @@ func NewFile(p *policy.Engine, ap Approver) Tool {
 	f := &fileTool{pol: p, ap: ap}
 	return NewDomain(DomainSpec{
 		Name:    "file",
-		Summary: "Read, write, append, edit, list files/dirs in the workspace (paths relative, confined to it).",
+		Summary: "Read/write/append/edit/list/find/search files in the workspace (relative paths, jailed).",
 		NotHere: "NOT here — shell → run; web/fetch → web; math → calc.",
 		Actions: []Action{
-			{Name: "read", Params: []Param{Req("path", "str")}, Run: f.read},
-			{Name: "write", Mutates: true, Params: []Param{Req("path", "str"), Opt("content", "str", "")}, Note: "(overwrites; omit content for an empty file)", Run: f.write},
+			{Name: "read", Params: []Param{Req("path", "str"), Opt("offset", "int", "0"), Opt("limit", "int", "0")}, Note: "(offset/limit: line window, big files)", Run: f.read},
+			{Name: "write", Mutates: true, Params: []Param{Req("path", "str"), Opt("content", "str", "")}, Note: "(overwrites; omit content = empty file)", Run: f.write},
 			{Name: "append", Mutates: true, Params: []Param{Req("path", "str"), Req("content", "str")}, Run: f.appendFile},
-			{Name: "edit", Mutates: true, Params: []Param{Req("path", "str"), Req("find", "str"), Req("replace", "str")}, Note: "(replaces first match; prefer this for partial changes)", Run: f.edit},
+			{Name: "edit", Mutates: true, Params: []Param{Req("path", "str"), Opt("find", "str", ""), Opt("replace", "str", ""), Opt("replace_all", "bool", ""), Opt("edits", "str", "")}, Note: "(1st match; replace_all=all; or edits=JSON [{find,replace},…])", Run: f.edit},
 			{Name: "list", Params: []Param{Opt("path", "str", ".")}, Run: f.list},
-			{Name: "search", Params: []Param{Req("query", "str"), Opt("path", "str", ".")}, Note: "(regex; find matching lines across files — file:line: match)", Run: f.search},
+			{Name: "find", Params: []Param{Req("pattern", "str"), Opt("path", "str", ".")}, Note: "(glob names, e.g. **/*.go)", Run: f.find},
+			{Name: "search", Params: []Param{Req("query", "str"), Opt("path", "str", ".")}, Note: "(regex; file:line: match)", Run: f.search},
 			{Name: "mkdir", Mutates: true, Params: []Param{Req("path", "str")}, Run: f.mkdir},
 		},
 	})
@@ -57,7 +60,30 @@ func (f *fileTool) read(_ context.Context, a Args) Result {
 	if err != nil {
 		return Err("cannot read " + path + ": " + err.Error())
 	}
-	out, truncated := textutil.Clip(string(data), maxReadBytes)
+	content := string(data)
+	// Optional line window: read a slice of a big file instead of the whole thing,
+	// to keep the context lean (offset is 1-based; limit 0 = to the end).
+	if offset, limit := a.Int("offset", 0), a.Int("limit", 0); offset > 0 || limit > 0 {
+		lines := strings.Split(content, "\n")
+		start := offset - 1
+		if start < 0 {
+			start = 0
+		}
+		if start > len(lines) {
+			start = len(lines)
+		}
+		end := len(lines)
+		if limit > 0 && start+limit < end {
+			end = start + limit
+		}
+		hdr := fmt.Sprintf("(lines %d–%d of %d)\n", start+1, end, len(lines))
+		out, truncated := textutil.Clip(strings.Join(lines[start:end], "\n"), maxReadBytes)
+		if truncated {
+			out += "\n…[truncated]"
+		}
+		return Ok(hdr + out)
+	}
+	out, truncated := textutil.Clip(content, maxReadBytes)
 	if truncated {
 		out += fmt.Sprintf("\n…[truncated; %d bytes total]", len(data))
 	}
@@ -192,10 +218,27 @@ func (f *fileTool) writeFile(action string, a Args, appendMode bool) Result {
 	return res
 }
 
+type editPair struct {
+	Find    string `json:"find"`
+	Replace string `json:"replace"`
+}
+
 func (f *fileTool) edit(_ context.Context, a Args) Result {
 	path := a.Str("path")
-	find := a.Str("find")
-	replace := a.Str("replace")
+
+	// One {find,replace}, or several via edits=JSON array applied in order — a
+	// multi-edit in a single call saves round-trips (and re-sent context).
+	var pairs []editPair
+	if raw := strings.TrimSpace(a.Str("edits")); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &pairs); err != nil {
+			return Err("edit: 'edits' must be a JSON array of {find,replace}: " + err.Error())
+		}
+	} else {
+		pairs = []editPair{{Find: a.Str("find"), Replace: a.Str("replace")}}
+	}
+	if len(pairs) == 0 {
+		return Err("edit: nothing to do — give find/replace or a non-empty edits array")
+	}
 
 	d, err := f.pol.Write(path)
 	if err != nil {
@@ -218,16 +261,87 @@ func (f *fileTool) edit(_ context.Context, a Args) Result {
 		return Err("cannot read " + path + ": " + err.Error())
 	}
 	old := string(data)
-	if !strings.Contains(old, find) {
-		return Err("edit: the 'find' text is not present in " + path)
+
+	n := 1
+	if a.Bool("replace_all") {
+		n = -1 // strings.Replace: n<0 replaces every occurrence
 	}
-	updated := strings.Replace(old, find, replace, 1)
+	updated := old
+	for i, p := range pairs {
+		if p.Find == "" {
+			return Err(fmt.Sprintf("edit: empty 'find' in edit #%d", i+1))
+		}
+		if !strings.Contains(updated, p.Find) {
+			clip, _ := textutil.Clip(p.Find, 60)
+			return Err(fmt.Sprintf("edit: 'find' text not present in %s (edit #%d): %s", path, i+1, clip))
+		}
+		updated = strings.Replace(updated, p.Find, p.Replace, n)
+	}
+	if updated == old {
+		return Err("edit: no change made to " + path)
+	}
 	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
 		return Fail("file", "edit", "write to "+path+" failed", err)
 	}
 	diff := udiff.Unified(path, path, old, updated)
 	add, del := diffStat(diff)
 	return Result{Content: fmt.Sprintf("edited %s (+%d -%d)", path, add, del), Diff: diff}
+}
+
+// find globs filenames under the jail (paths only), skipping VCS/dep/build dirs
+// and symlinks — locate a file without listing whole trees or reading contents.
+func (f *fileTool) find(_ context.Context, a Args) Result {
+	pattern := a.Str("pattern")
+	root := a.Str("path")
+	if root == "" {
+		root = "."
+	}
+	if err := f.pol.Read(root); err != nil {
+		return Err(err.Error())
+	}
+	abs, err := f.pol.Resolve(root)
+	if err != nil {
+		return Err(err.Error())
+	}
+	const maxFind = 300
+	skipDir := map[string]bool{".git": true, "node_modules": true, "vendor": true, "dist": true, ".agent": true}
+	var out []string
+	stopped := false
+	_ = filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if p != abs && (skipDir[d.Name()] || strings.HasPrefix(d.Name(), ".")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		rel, _ := filepath.Rel(abs, p)
+		ok, _ := doublestar.Match(pattern, rel)
+		if !ok { // also match the bare name, so "*.go" works without a **/ prefix
+			ok, _ = doublestar.Match(pattern, d.Name())
+		}
+		if ok {
+			out = append(out, rel)
+			if len(out) >= maxFind {
+				stopped = true
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	if len(out) == 0 {
+		return Ok("(no files match " + pattern + ")")
+	}
+	sort.Strings(out)
+	if stopped {
+		out = append(out, fmt.Sprintf("… stopped at %d", maxFind))
+	}
+	return Ok(strings.Join(out, "\n"))
 }
 
 // diffStat counts added and removed lines in a unified diff.

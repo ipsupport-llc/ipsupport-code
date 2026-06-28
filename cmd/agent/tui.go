@@ -612,6 +612,11 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.queued = append(m.queued, line) // type-ahead: run after the task
 			m.syncViewport()                  // show it pinned above the input
 			return m, nil
+		case "tab":
+			if strings.HasPrefix(m.input.Value(), "/") {
+				m.completeCommand() // complete /commands while a task runs, too
+			}
+			return m, nil
 		case "up":
 			// Changed your mind about a queued message? With an empty input, Up
 			// pulls the last one back to edit (Enter re-queues it; clear to drop).
@@ -868,16 +873,22 @@ func (m *tuiModel) pushLines(lines []string) {
 // sit through "thinking" just to leave or peek. (To queue a follow-up task, just
 // type it — plain text is queued as type-ahead.)
 func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
-	cmd, _ := splitCommand(line)
+	cmd, rest := splitCommand(line)
 	switch cmd {
 	case "/exit", "/quit":
 		return m, tea.Quit
-	case "/status", "/usage", "/help", "/?", "/color":
-		return m.runCommand(line) // read-only — doesn't touch the running task
-	default:
-		m.push(cDim.Render("busy — " + cmd + " will run once the current task finishes"))
-		return m, nil
+	case "/status", "/help", "/?", "/color":
+		// Always safe: pure info, or /color which only recolors the frame.
+		return m.runCommand(line)
+	case "/usage", "/sessions", "/agents", "/agent", "/skills", "/permissions":
+		// The bare form is a read-only listing; a subcommand may mutate or re-wire
+		// the running stack, so defer those until the task finishes.
+		if strings.TrimSpace(rest) == "" {
+			return m.runCommand(cmd)
+		}
 	}
+	m.push(cDim.Render("busy — " + cmd + " will run once the current task finishes"))
+	return m, nil
 }
 
 // rename changes the display name and persists it to the user config.

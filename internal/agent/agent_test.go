@@ -529,6 +529,38 @@ func TestStuckNudgeRecovers(t *testing.T) {
 	}
 }
 
+// Progress between failure streaks earns a fresh nudge: a successful tool call
+// clears the "already nudged" latch, so a couple of stumbles after good work don't
+// insta-stop the run (the reported bug — a success didn't reset the error state).
+func TestProgressResetsNudge(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	bad := toolCallReply("c", "calc", `{"action":"","params":{}}`)
+	good := toolCallReply("c", "calc", `{"action":"calculate","params":{"expression":"1+1"}}`)
+	fake := &scriptLLM{replies: []llm.Message{
+		bad, bad, bad, // streak 1 → nudge #1
+		good,          // progress → clears the nudged latch
+		bad, bad, bad, // streak 2 → must nudge again, NOT insta-stop
+		good,
+		{Role: "assistant", Content: "done"},
+	}}
+	rt := &recTracer{}
+	a := New(fake, reg, nil, rt, "", 30)
+
+	tr, _ := a.Run(context.Background(), "do x")
+	if strings.Contains(tr.Final, "Stopped") {
+		t.Errorf("progress should reset the nudge latch, not stop: %q", tr.Final)
+	}
+	nudges := 0
+	for _, k := range rt.kinds {
+		if k == "nudge" {
+			nudges++
+		}
+	}
+	if nudges < 2 {
+		t.Errorf("expected ≥2 nudges (one per streak, after a progress reset), got %d", nudges)
+	}
+}
+
 // An empty-action error must stay a single clean line — no full schema dump, no
 // learned hints piled on (that buries the example for a weak model).
 func TestEmptyActionErrorStaysTerse(t *testing.T) {

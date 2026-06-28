@@ -6,7 +6,8 @@ when: a task has several steps, or the user says "continue" / "you didn't finish
 For anything with more than a couple of steps, keep a checklist on disk and work it
 to completion — so both you and the user can see what's done and what isn't.
 
-1. At the start, write the plan to `.agent/plan.md` with the file tool — a short
+1. At the start, write the plan to `.agent/plan.md` with `file write` (it creates
+   the `.agent/` directory for you — don't shell out to mkdir/touch). A short
    markdown checklist, one line per real step:
    ```
    - [ ] add the endpoint

@@ -30,6 +30,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/reflect"
 	"github.com/ipsupport-llc/ipsupport-code/internal/selfupdate"
@@ -209,6 +210,8 @@ type app struct {
 	subReg          *tool.Registry // tools for sub-agents (no `agent` tool → no recursion)
 	spawnMu         sync.Mutex     // serializes spawn-approval prompts during parallel fan-out
 	spawnSeq        atomic.Int64   // unique id per sub-agent spawn (for grouping its UI events)
+	mcpMu           sync.Mutex     // guards the lazy MCP client cache
+	mcpClients      map[string]*mcp.Client
 	refl            *reflect.Reflector
 	instrSrc        string   // project instructions file in effect, "" if none
 	promptSrc       string   // "built-in" or the system.md override path
@@ -243,15 +246,15 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 		usageStore, _ = usage.Open("")
 	}
 
-	cleanup := func() {}
 	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader, approver: &stdinApprover{r: reader}}
-	a.applyUsageRetention()     // honor usage_retention_days on startup
-	a.applyKnowledgeRetention() // honor knowledge_retention_days on startup
+	cleanup := func() { a.closeMCP() } // shut down any launched MCP servers on exit
+	a.applyUsageRetention()            // honor usage_retention_days on startup
+	a.applyKnowledgeRetention()        // honor knowledge_retention_days on startup
 	if ft, err := trace.NewFileTracer(cfg.TracePath, newRunID()); err != nil {
 		slog.Warn("trace disabled", "err", err)
 	} else {
 		a.fileTracer = ft
-		cleanup = func() { _ = ft.Close() }
+		cleanup = func() { a.closeMCP(); _ = ft.Close() }
 	}
 	a.loadFacts() // learned project facts → folded into the prompt by wire()
 	if err := a.wire(); err != nil {
@@ -795,6 +798,112 @@ func onOff(b bool) string {
 	return "off"
 }
 
+// mcpServerNames lists configured MCP server names, sorted.
+func (a *app) mcpServerNames() []string {
+	names := make([]string, 0, len(a.cfg.McpServers))
+	for n := range a.cfg.McpServers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// mcpClient returns a connected client for a server, launching + caching it on
+// first use (lazy — servers aren't spawned until something needs them).
+func (a *app) mcpClient(ctx context.Context, name string) (*mcp.Client, error) {
+	a.mcpMu.Lock()
+	defer a.mcpMu.Unlock()
+	if c, ok := a.mcpClients[name]; ok {
+		return c, nil
+	}
+	srv, ok := a.cfg.McpServers[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown MCP server %q (configured: %s)", name, strings.Join(a.mcpServerNames(), ", "))
+	}
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	c, err := mcp.Connect(cctx, name, srv)
+	if err != nil {
+		return nil, err
+	}
+	if a.mcpClients == nil {
+		a.mcpClients = map[string]*mcp.Client{}
+	}
+	a.mcpClients[name] = c
+	return c, nil
+}
+
+// closeMCP shuts down every launched MCP server (called on exit).
+func (a *app) closeMCP() {
+	a.mcpMu.Lock()
+	defer a.mcpMu.Unlock()
+	for _, c := range a.mcpClients {
+		c.Close()
+	}
+	a.mcpClients = nil
+}
+
+// mcpList is the catalog the `mcp` tool's list action returns.
+func (a *app) mcpList(ctx context.Context) string {
+	if len(a.cfg.McpServers) == 0 {
+		return "no MCP servers configured — add them under \"mcp_servers\" in config.json"
+	}
+	var b strings.Builder
+	for _, name := range a.mcpServerNames() {
+		c, err := a.mcpClient(ctx, name)
+		if err != nil {
+			fmt.Fprintf(&b, "%s: (unavailable: %s)\n", name, oneLine(err.Error(), 70))
+			continue
+		}
+		fmt.Fprintf(&b, "%s:\n", name)
+		for _, t := range c.Tools() {
+			fmt.Fprintf(&b, "  %s — %s\n", t.Name, oneLine(t.Description, 70))
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// mcpSchema returns one tool's input schema (for the tool's schema action).
+func (a *app) mcpSchema(ctx context.Context, server, tool string) string {
+	c, err := a.mcpClient(ctx, server)
+	if err != nil {
+		return "error: " + err.Error()
+	}
+	for _, t := range c.Tools() {
+		if t.Name == tool {
+			if len(t.InputSchema) == 0 {
+				return "(no input schema)"
+			}
+			return string(t.InputSchema)
+		}
+	}
+	return fmt.Sprintf("no tool %q on %q", tool, server)
+}
+
+// mcpCall runs an MCP tool, asking approval first (it's external code that can do
+// anything). The approval prompt is serialized like sub-agent spawns.
+func (a *app) mcpCall(ctx context.Context, server, tool string, args map[string]any) (string, error) {
+	c, err := a.mcpClient(ctx, server)
+	if err != nil {
+		return "", err
+	}
+	detail := server + "." + tool
+	if len(args) > 0 {
+		if b, e := json.Marshal(args); e == nil {
+			detail += " " + oneLine(string(b), 60)
+		}
+	}
+	a.spawnMu.Lock()
+	approved := a.approver.Approve("mcp call", detail)
+	a.spawnMu.Unlock()
+	if !approved {
+		return "", fmt.Errorf("mcp call denied by user")
+	}
+	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	return c.Call(cctx, tool, args)
+}
+
 // maybeDetectWindowSync detects the window inline for the REPL/one-shot paths;
 // the TUI skips this and re-detects off the UI thread (detectWindowCmd) so a slow
 // provider can't freeze the screen.
@@ -891,6 +1000,11 @@ func (a *app) wire() error {
 	// delegate to; with no profiles configured, the tool is hidden entirely.
 	if a.hasSubagentTargets() {
 		tools = append(tools, tool.NewAgent(a.spawnAgent))
+	}
+	// One proxy tool fronts every configured MCP server, so the catalog grows by a
+	// single tool — not by every server's schemas. Only when servers are set.
+	if len(a.cfg.McpServers) > 0 {
+		tools = append(tools, tool.NewMCP(a.mcpList, a.mcpCall, a.mcpSchema))
 	}
 	reg = tool.NewRegistry(tools...)
 	a.tracer = trace.Multi(a.fileTracer, a.uiTracer)
@@ -1548,6 +1662,8 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		for _, l := range a.knowledgeCommand(rest) {
 			fmt.Println(l)
 		}
+	case "/mcp":
+		fmt.Println(a.mcpList(ctx))
 	case "/ai":
 		for _, l := range a.aiCommand(rest) {
 			fmt.Println(l)
@@ -2175,6 +2291,7 @@ func helpText() string {
   /offline [on|off] work without internet — disables web + update checks
   /cd [dir]        set the working directory (relative paths + sub-agents use it)
   /knowledge       learned-lessons store: report · clear · purge <days> · retain <days>
+  /mcp             list configured MCP servers and their tools (mcp_servers in config.json)
   /shell, /sh      drop to a shell in the workspace (exit to return)
   /skills          list/toggle/install on-demand instruction packs
   /agents          sub-agent profiles: /agents add|rm|exec (models the agent tool delegates to)

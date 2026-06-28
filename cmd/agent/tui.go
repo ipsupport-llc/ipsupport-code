@@ -818,6 +818,9 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/knowledge", "/kb":
 		m.pushLines(m.app.knowledgeCommand(rest))
 		return m, nil
+	case "/mcp":
+		m.pushLines(strings.Split(m.app.mcpList(m.ctx), "\n"))
+		return m, nil
 	case "/ai":
 		m.pushLines(m.app.aiCommand(rest))
 		return m, m.detectWindowCmd() // re-detect the window off-thread after a switch
@@ -1350,6 +1353,7 @@ var commandList = []cmdInfo{
 	{"/offline", "on|off — work without internet (disables web + update checks)"},
 	{"/cd", "set the working dir (relative paths + sub-agents resolve there)"},
 	{"/knowledge", "learned-lessons store: report · clear · purge <days> · retain <days>"},
+	{"/mcp", "list configured MCP servers and their tools"},
 	{"/shell", "drop to a shell in the workspace (exit to return)"},
 	{"/skills", "list/toggle/install on-demand instruction packs"},
 	{"/permissions", "relax approval for file / shell / sub-agent-spawn actions"},

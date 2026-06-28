@@ -226,6 +226,25 @@ on upgrade unless you've edited them.
 /skills remove <name>
 ```
 
+## MCP servers
+
+Connect [Model Context Protocol](https://modelcontextprotocol.io) servers and the
+agent gains their tools — but through **one** proxy tool, not by dumping every
+server's schema into the prompt (which would swamp a small model's context). Add
+them to `~/.config/ipsupport-code/config.json`:
+
+```jsonc
+"mcp_servers": {
+  "fs":  { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/some/dir"] },
+  "gh":  { "command": "github-mcp-server", "env": { "GITHUB_TOKEN": "…" } }
+}
+```
+
+`/mcp` lists the servers and their tools. The model uses the `mcp` tool —
+`list` to discover, `schema` to see a tool's inputs, `call` to run one. Servers
+launch lazily over stdio on first use; **every `mcp call` asks for approval**
+(it's external code). Sub-agents don't get MCP.
+
 ## Context & auto-compact
 
 The status bar shows `ctx 4.1k/8k` — the size of the last prompt vs. the model's

@@ -594,6 +594,82 @@ func TestProgressResetsNudge(t *testing.T) {
 	}
 }
 
+func calcCall() llm.Message {
+	return toolCallReply("c", "calc", `{"action":"calculate","params":{"expression":"1+1"}}`)
+}
+
+// The goal loop re-feeds the goal when the judge says it isn't met, then accepts it
+// once the judge says DONE. Returns counts the re-feeds; GoalMet records the verdict.
+func TestRunGoalLoopRefeedsUntilJudgeSaysDone(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(), // act
+		{Role: "assistant", Content: "did part 1"},           // finalize #1
+		{Role: "assistant", Content: "MORE: still need pt2"}, // judge: not met → re-feed
+		calcCall(),                               // act again
+		{Role: "assistant", Content: "all done"}, // finalize #2
+		{Role: "assistant", Content: "DONE"},     // judge: met
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3)
+
+	tr, err := a.Run(context.Background(), "do part 1 and part 2")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if tr.Final != "all done" {
+		t.Errorf("final = %q, want %q", tr.Final, "all done")
+	}
+	if tr.Returns != 1 {
+		t.Errorf("returns = %d, want 1", tr.Returns)
+	}
+	if !tr.GoalMet {
+		t.Error("GoalMet = false, want true (judge said DONE)")
+	}
+}
+
+// A tool-less answer never triggers the judge (nothing was done to verify): the loop
+// is gated on real progress, so a plain reply finalizes in one Chat call.
+func TestRunGoalLoopSkipsToollessAnswer(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "just an answer"}}}
+	a := New(fake, reg, nil, nil, "", 10)
+	a.SetGoalLoop(3)
+
+	tr, _ := a.Run(context.Background(), "hi")
+	if tr.Returns != 0 {
+		t.Errorf("returns = %d, want 0 (no judge for a tool-less answer)", tr.Returns)
+	}
+	if fake.i != 1 {
+		t.Errorf("Chat calls = %d, want 1 (the judge must not run)", fake.i)
+	}
+}
+
+// When the judge never accepts, the loop stops at the TTL: the last finalize is taken
+// as-is (no further judge call) and GoalMet stays false.
+func TestRunGoalLoopStopsAtTTL(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	more := llm.Message{Role: "assistant", Content: "MORE: nope"}
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(), {Role: "assistant", Content: "f1"}, more, // re-feed 1
+		calcCall(), {Role: "assistant", Content: "f2"}, more, // re-feed 2
+		calcCall(), {Role: "assistant", Content: "f3"}, // returns==TTL → accept, no judge
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(2)
+
+	tr, _ := a.Run(context.Background(), "loop")
+	if tr.Returns != 2 {
+		t.Errorf("returns = %d, want 2 (TTL)", tr.Returns)
+	}
+	if tr.GoalMet {
+		t.Error("GoalMet = true, want false (TTL exhausted, never judged done)")
+	}
+	if tr.Final != "f3" {
+		t.Errorf("final = %q, want f3", tr.Final)
+	}
+}
+
 // An empty-action error must stay a single clean line — no full schema dump, no
 // learned hints piled on (that buries the example for a weak model).
 func TestEmptyActionErrorStaysTerse(t *testing.T) {

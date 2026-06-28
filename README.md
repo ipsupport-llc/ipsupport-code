@@ -281,6 +281,26 @@ how a turn ended (finished, esc, a loop, an error). Shell commands, git, and
 network calls **can't** be undone — only files and the chat. (REPL: `/rewind`
 lists, `/rewind <n>` applies.) Snapshots live for the session.
 
+## Goals
+
+A **goal** is a multi-turn objective — not a single turn. `/goal <text>` sets one
+and starts pursuing it: the agent works, and when it thinks it's finished a
+**judge** (a separate model call) decides whether the goal is *actually* met. If
+it isn't, the goal is **re-fed** to the agent — kept in focus, with the gap the
+judge named — and it keeps going. This repeats up to a **TTL** (`/goal ttl <n>`,
+default 6 re-feeds) before it gives up, on top of the usual esc / stuck / runaway
+guards and a hard step cap.
+
+The goal is a first-class, persisted object: it lives in `.agent/goal.json`, so it
+survives a restart. `/goal` shows the standing goal and its status; `/goal go`
+resumes it; `/goal clear` drops it; `/goal off` disables the loop (a goal then runs
+as a single pass). Plain tasks (anything you type that isn't a goal) run as one
+pass with no judge overhead — only an explicit goal gets the loop.
+
+The judge defaults to done on any unparseable reply, so a confused model can't trap
+the agent in the loop. The whole thing is gated on real progress: a turn that calls
+no tools is never judged or re-fed.
+
 ## Context & auto-compact
 
 The status bar shows `ctx 4.1k/8k` — the size of the last prompt vs. the model's
@@ -296,6 +316,7 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | command | what |
 |---|---|
 | `/plan`, `/auto` | plan mode (propose only) vs auto mode (execute) — also shift+tab |
+| `/goal <text>` | set & pursue a multi-turn goal (judge re-feeds until met); `go` · `clear` · `ttl <n>` · `off` |
 | `/skills` | list / toggle / install on-demand instruction packs |
 | `/permissions` | relax approval for non-destructive file/shell actions |
 | `/status` | config, knowledge base, and trace paths |

@@ -183,6 +183,9 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: lipgloss.Color("13"), inputLines: 1}
 	act := a.activeLLM()
 	m.history = bannerLines(name, version, act.Model, a.workspace, act.ContextWindow, m.accent)
+	if a.goal.Status == "active" && a.goal.Text != "" {
+		m.history = append(m.history, cDim.Render("◎ standing goal: "+oneLine(a.goal.Text, 60)+"  — /goal go to resume"))
+	}
 	switch {
 	case a.sessionRestored: // -session restored it already
 		m.history = append(m.history, m.sessionRecap()...)
@@ -855,6 +858,14 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/reflect":
 		m.pushLines(m.app.reflectCommand(rest))
 		return m, nil
+	case "/goal":
+		if text, ok := m.app.launchGoalText(rest); ok {
+			m.app.setGoal(text)
+			m.push(cYou.Render("❯ ") + text)
+			return m, m.runTask(text)
+		}
+		m.pushLines(m.app.goalCommand(rest))
+		return m, nil
 	case "/reasoning":
 		m.pushLines(m.app.reasoningCommand(rest))
 		return m, nil
@@ -1399,6 +1410,7 @@ var commandList = []cmdInfo{
 	{"/mcp", "list configured MCP servers and their tools"},
 	{"/rewind", "pick a step to roll back to (restores files + trims the chat)"},
 	{"/reflect", "on|off|<profile> — post-task learning; run it on a stronger model"},
+	{"/goal", "<n>|off — re-feed the goal and keep going until the plan is done"},
 	{"/reasoning", "off|minimal|low|medium|high — trim a thinking model's reasoning"},
 	{"/shell", "drop to a shell in the workspace (exit to return)"},
 	{"/skills", "list/toggle/install on-demand instruction packs"},
@@ -1503,6 +1515,8 @@ func (m *tuiModel) argCandidates(name string) []string {
 		return []string{"on", "off"}
 	case "/reflect":
 		return append([]string{"on", "off", "self"}, agentProfileNames(m.app.cfg)...)
+	case "/goal":
+		return []string{"go", "clear", "ttl", "off", "on"}
 	case "/reasoning":
 		return []string{"off", "minimal", "low", "medium", "high", "reflect"}
 	case "/knowledge", "/kb":
@@ -1803,6 +1817,16 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		}
 	case "nudge":
 		return []string{cToolCall.Render("  ↻ that's not working — asking it to rethink")}
+	case "continue":
+		line := fmt.Sprintf("  ↻ goal not met yet — pushing on (%d/%d)", toInt(e.fields["return"]), toInt(e.fields["of"]))
+		if miss, _ := e.fields["missing"].(string); strings.TrimSpace(miss) != "" {
+			line += ": " + oneLine(miss, 60)
+		}
+		return []string{cToolCall.Render(line)}
+	case "judge":
+		if done, _ := e.fields["done"].(bool); done {
+			return []string{cOk.Render("  ✓ judge: goal met")}
+		}
 	case "lesson":
 		d, _ := e.fields["domain"].(string)
 		f, _ := e.fields["proven_fix"].(string)

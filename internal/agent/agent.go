@@ -25,6 +25,8 @@ type Transcript struct {
 	Steps     int
 	Cancelled bool // the user cancelled (esc) specifically
 	Stopped   bool // ended before a clean answer (cancel / runaway / stuck / maxSteps / mid-run error) → no reflection
+	Returns   int  // goal re-feeds the judge triggered this run
+	GoalMet   bool // a goal-loop ran and the judge confirmed the goal was met
 }
 
 // Agent holds the wiring for a run. The knowledge base and tracer may be nil.
@@ -43,6 +45,10 @@ type Agent struct {
 	maxHistory int
 	planMode   bool
 	label      string // non-empty for a sub-agent; tags its events so the UI can group them
+
+	// Goal pursuit: when the model finalizes but a judge (judgeGoal) decides the
+	// goal isn't met, it's re-fed the goal and continues, up to maxReturns (a TTL).
+	maxReturns int
 }
 
 // New builds an Agent. maxSteps <= 0 defaults to 12.
@@ -62,6 +68,13 @@ func (a *Agent) Reset() { a.history = nil }
 // SetSystem swaps the base system prompt (e.g. after learning new project facts),
 // so the next run uses it without a full re-wire.
 func (a *Agent) SetSystem(s string) { a.system = s }
+
+// SetGoalLoop configures goal pursuit: when the model finalizes, a judge decides
+// whether the goal is met; if not, re-feed the goal and keep going, up to
+// maxReturns times (a TTL). 0 disables it — one run, the model's finish stands.
+func (a *Agent) SetGoalLoop(maxReturns int) {
+	a.maxReturns = maxReturns
+}
 
 // SetLabel tags this agent as a sub-agent: the label is attached to every event
 // it emits (as the "agent" field) so the UI can group a sub-agent's progress on
@@ -201,9 +214,12 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 
 	var tr Transcript
 	stuck, nudged := 0, false
-	lastSig := ""          // signature of the previous turn's tool calls (loop detection)
-	acted := false         // did the model call any tool this run?
-	refusalNudged := false // already pushed back on a "can't edit / here are the files" dodge?
+	lastSig := ""             // signature of the previous turn's tool calls (loop detection)
+	acted := false            // did the model call any tool this run?
+	actedSinceReturn := false // acted since the last goal re-feed (don't burn a return on no progress)
+	returns := 0              // goal re-feeds so far (TTL = a.maxReturns)
+	goalMet := false          // the judge confirmed the goal was met
+	refusalNudged := false    // already pushed back on a "can't edit / here are the files" dodge?
 	for step := 0; step < a.maxSteps; step++ {
 		tr.Steps = step + 1
 
@@ -248,6 +264,23 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 				refusalNudged = true
 				continue
 			}
+			// Goal pursuit: the model thinks it's finished — but is the GOAL actually
+			// met? A judge (a separate model call) decides. If it isn't, re-feed the
+			// goal plus what's missing (keeping the objective in focus, not buried) and
+			// keep going — up to maxReturns (a TTL). Only after real progress, so a
+			// model that just re-finalizes can't burn the budget.
+			if !a.planMode && a.maxReturns > 0 && returns < a.maxReturns && actedSinceReturn && acted {
+				done, missing := a.judgeGoal(ctx, goal, clean)
+				if !done {
+					returns++
+					actedSinceReturn = false
+					msgs = append(msgs, llm.User(goalReturn(goal, missing)))
+					a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing})
+					continue
+				}
+				goalMet = true
+				a.emit("judge", map[string]any{"done": true})
+			}
 			if strings.TrimSpace(clean) == "" {
 				// Blank final turn. If the model already did work via tools, say it
 				// finished (the changes/output are above); otherwise it produced
@@ -261,6 +294,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 			}
 			tr.Final = clean
 			tr.Messages = msgs
+			tr.Returns, tr.GoalMet = returns, goalMet
 			a.emit("final", map[string]any{"text": clean, "suggest": suggest})
 			a.remember(goal, clean)
 			return tr, nil
@@ -270,6 +304,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		// the tool calls it's about to make.
 		a.emit("assistant", map[string]any{"content": assistant.Content, "tool_calls": len(assistant.ToolCalls)})
 		acted = true
+		actedSinceReturn = true
 		results, nErr := a.runToolCalls(ctx, assistant.ToolCalls)
 		msgs = append(msgs, results...)
 
@@ -403,6 +438,63 @@ const stuckSuggest = "take a different approach — outline the steps first"
 // task — pasting file contents or claiming it can't touch the filesystem —
 // instead of using its tools.
 const refusalNudge = `You changed nothing — you only described changes or pasted file contents. You are NOT a plain chat model here: you are an agent with working tools in THIS session — file (write/edit/append), run, git — that modify real files on disk, and the user has authorized them. Do not paste file contents, and never say you lack file access (it is false). Make every change now by calling the file tool (write or edit) for each file, then run anything relevant and report the real result.`
+
+// goalReturn re-states the goal when the judge finds it unmet, keeping the
+// objective in focus (recency) instead of letting it sink under the transcript,
+// and naming the gap so the model finishes the remaining work with tools.
+func goalReturn(goal, missing string) string {
+	s := "The GOAL is NOT complete yet — keep going. Do the remaining work now with tools (don't stop early, don't just describe it), and only finish once it's actually done."
+	if strings.TrimSpace(missing) != "" {
+		s += "\n\nStill missing: " + strings.TrimSpace(missing)
+	}
+	return s + "\n\nGOAL: " + goal
+}
+
+// judgeGoal asks the model, in a fresh side call (no tools), whether the goal is
+// actually met given the work just finished. It returns done plus a one-line gap
+// to feed back when it isn't. On any error or unparseable reply it defaults to
+// done=true — a judge that can't decide must not trap the agent in the loop.
+func (a *Agent) judgeGoal(ctx context.Context, goal, result string) (bool, string) {
+	reply, err := a.llm.Chat(ctx, []llm.Message{
+		llm.System(judgeSystem),
+		llm.User("GOAL:\n" + goal + "\n\nWHAT THE AGENT DID / ITS FINAL ANSWER:\n" + clip(result, 2000)),
+	}, nil)
+	if err != nil {
+		slog.Debug("goal judge failed", "err", err)
+		return true, ""
+	}
+	line := strings.TrimSpace(reply.Content)
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = strings.TrimSpace(line[:i]) // first line only — small models ramble
+	}
+	upper := strings.ToUpper(line)
+	if rest, ok := cutVerdict(upper, line, "MORE"); ok {
+		return false, rest
+	}
+	if _, ok := cutVerdict(upper, line, "DONE"); ok {
+		return true, ""
+	}
+	slog.Debug("goal judge unparseable", "reply", clip(line, 120))
+	return true, "" // can't tell → don't trap the loop
+}
+
+// cutVerdict matches a "DONE"/"MORE[: gap]" verdict at the start of the judge's
+// line (case-insensitive) and returns the trailing gap text.
+func cutVerdict(upper, orig, word string) (string, bool) {
+	if !strings.HasPrefix(upper, word) {
+		return "", false
+	}
+	rest := strings.TrimSpace(orig[len(word):])
+	rest = strings.TrimLeft(rest, ":-—. ")
+	return rest, true
+}
+
+// judgeSystem instructs the side-call judge. Tight on purpose: a small local model
+// must answer in one parseable line.
+const judgeSystem = `You are a strict acceptance checker. Given a GOAL and what an agent did, decide if the goal is FULLY met. Reply with ONE line, nothing else:
+- "DONE" if the goal is fully and verifiably accomplished.
+- "MORE: <what is still missing, in a few words>" if anything is incomplete, untested, or only described instead of done.
+Be skeptical: describing a change instead of making it, or leaving it untested, is NOT done.`
 
 // looksLikeRefusal reports whether a no-tool-call reply is a chat model dodging
 // the work — pasting file/code in a fence, or claiming it can't reach the

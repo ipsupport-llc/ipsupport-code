@@ -455,6 +455,22 @@ func TestSpawnAgentLocalRuns(t *testing.T) {
 	}
 }
 
+func TestCommandWhileBusy(t *testing.T) {
+	m := &tuiModel{width: 80, input: textarea.New(),
+		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	// a bare, read-only command runs immediately while busy (no deferral notice)
+	m.commandWhileBusy("/help")
+	if strings.Contains(strings.Join(m.history, "\n"), "will run once") {
+		t.Error("/help should run while busy, not defer")
+	}
+	// a mutating subcommand is deferred until the task finishes
+	m.history = nil
+	m.commandWhileBusy("/sessions delete foo")
+	if !strings.Contains(strings.Join(m.history, "\n"), "will run once") {
+		t.Errorf("/sessions <arg> should defer while busy, got %q", m.history)
+	}
+}
+
 func TestSpawnAgentConcurrent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)

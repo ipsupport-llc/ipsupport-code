@@ -412,7 +412,12 @@ func TestSpawnAgentPaidNeedsApproval(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
 	cfg.Providers = map[string]config.LLM{"openrouter": {APIKey: "x", Model: "m"}}
-	cfg.Agents = map[string]config.AgentProfile{"rev": {Provider: "openrouter", Model: "m"}}
+	// two profiles so a totally-unmatched name is genuinely unknown (with one
+	// profile, tolerant matching resolves anything to it — tested separately)
+	cfg.Agents = map[string]config.AgentProfile{
+		"rev":   {Provider: "openrouter", Model: "m"},
+		"other": {Provider: "openrouter", Model: "m2"},
+	}
 	kb, _ := knowledge.Open("")
 	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
 		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(false)}
@@ -423,8 +428,8 @@ func TestSpawnAgentPaidNeedsApproval(t *testing.T) {
 	if _, err := a.spawnAgent(context.Background(), "rev", "do x", ""); err == nil || !strings.Contains(err.Error(), "denied") {
 		t.Errorf("spawn should be denied by the approver, got %v", err)
 	}
-	// unknown profile errors before any spawn
-	if _, err := a.spawnAgent(context.Background(), "nope", "do x", ""); err == nil || !strings.Contains(err.Error(), "unknown profile") {
+	// a name matching no profile errors before any spawn
+	if _, err := a.spawnAgent(context.Background(), "zzz-nothing-like-it", "do x", ""); err == nil || !strings.Contains(err.Error(), "unknown profile") {
 		t.Errorf("unknown profile = %v, want an error", err)
 	}
 }
@@ -497,6 +502,35 @@ func TestAgentsPanelBuild(t *testing.T) {
 	}
 	if m.agPhase != agList {
 		t.Errorf("after save, phase %v, want agList", m.agPhase)
+	}
+}
+
+func TestResolveProfileName(t *testing.T) {
+	a := &app{cfg: config.Default()}
+	a.cfg.Agents = map[string]config.AgentProfile{
+		"openrouter-nemotron-3-ultra": {Provider: "openrouter"},
+		"grok":                        {Provider: "openrouter"},
+	}
+	cases := []struct {
+		in, want string
+		ok       bool
+	}{
+		{"grok", "grok", true}, // exact
+		{"GROK", "grok", true}, // case-insensitive
+		{"openrouter-nemoton-3-ultra", "openrouter-nemotron-3-ultra", true}, // typo (edit distance 1)
+		{"nemotron", "openrouter-nemotron-3-ultra", true},                   // unique substring
+		{"totally-different-xyz", "", false},                                // no near match
+	}
+	for _, c := range cases {
+		got, ok := a.resolveProfileName(c.in)
+		if ok != c.ok || (ok && got != c.want) {
+			t.Errorf("resolveProfileName(%q) = %q,%v want %q,%v", c.in, got, ok, c.want, c.ok)
+		}
+	}
+	// with a single profile, any name resolves to it
+	a.cfg.Agents = map[string]config.AgentProfile{"only": {Provider: "local"}}
+	if got, ok := a.resolveProfileName("whatever-the-model-typed"); !ok || got != "only" {
+		t.Errorf("single-profile fallback = %q,%v want only,true", got, ok)
 	}
 }
 

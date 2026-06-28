@@ -294,10 +294,12 @@ func (a *app) spawnAgent(ctx context.Context, profile, task, dir string) (string
 	if profile == "" {
 		return "", fmt.Errorf("profile is required — configured: %s", a.profilesOrHint())
 	}
-	p, ok := a.cfg.Agents[profile]
+	resolved, ok := a.resolveProfileName(profile)
 	if !ok {
 		return "", fmt.Errorf("unknown profile %q — configured: %s", profile, a.profilesOrHint())
 	}
+	profile = resolved
+	p := a.cfg.Agents[profile]
 	provider := p.Provider
 	if provider == "" {
 		provider = "local"
@@ -378,6 +380,72 @@ func (a *app) spawnAgent(ctx context.Context, profile, task, dir string) (string
 		return "", err
 	}
 	return tr.Final, nil
+}
+
+// resolveProfileName matches the model's (often fumbled) profile argument to a
+// configured profile, tolerantly — small models mistype long names. Order: exact
+// (case-insensitive) → the only profile if there's just one → a unique
+// case-insensitive substring → the nearest by edit distance (if unambiguous).
+// Returns false only when it's genuinely ambiguous or there are no profiles.
+func (a *app) resolveProfileName(name string) (string, bool) {
+	names := agentProfileNames(a.cfg)
+	if len(names) == 0 {
+		return "", false
+	}
+	for _, n := range names { // exact, case-insensitive
+		if strings.EqualFold(n, name) {
+			return n, true
+		}
+	}
+	if len(names) == 1 { // only one target — whatever it typed, it means this one
+		return names[0], true
+	}
+	lc := strings.ToLower(strings.TrimSpace(name))
+	var subs []string
+	for _, n := range names {
+		ln := strings.ToLower(n)
+		if strings.Contains(ln, lc) || strings.Contains(lc, ln) {
+			subs = append(subs, n)
+		}
+	}
+	if len(subs) == 1 {
+		return subs[0], true
+	}
+	best, bestDist, ties := "", 1<<30, 0
+	for _, n := range names {
+		if d := levenshtein(strings.ToLower(n), lc); d < bestDist {
+			best, bestDist, ties = n, d, 1
+		} else if d == bestDist {
+			ties++
+		}
+	}
+	if ties == 1 && bestDist <= 3 { // a single clear near-match
+		return best, true
+	}
+	return "", false
+}
+
+// levenshtein is the edit distance between two strings (small inputs: profile
+// names), for tolerant matching.
+func levenshtein(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	prev := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		cur := make([]int, len(rb)+1)
+		cur[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			cur[j] = min(cur[j-1]+1, prev[j]+1, prev[j-1]+cost)
+		}
+		prev = cur
+	}
+	return prev[len(rb)]
 }
 
 // profilesOrHint lists configured profile names, or a hint to make one.

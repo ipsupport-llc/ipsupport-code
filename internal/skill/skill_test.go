@@ -4,9 +4,51 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestSeedNewBuiltinOnUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	// simulate an old install: the legacy single "1" marker + one built-in file
+	// already present, but not the newer ones.
+	if err := os.WriteFile(filepath.Join(dir, ".seeded"), []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "review.md"), []byte("---\nname: review\n---\nbody"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir, nil) // upgrade: should seed built-ins added since
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.Get("subagents"); !ok {
+		t.Error("a new built-in must be seeded on upgrade from the legacy marker")
+	}
+}
+
+func TestRemovedBuiltinStaysRemoved(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir, nil) // fresh install seeds every built-in
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s.Get("subagents"); !ok {
+		t.Fatal("subagents should be seeded on a fresh install")
+	}
+	if err := s.Remove("subagents"); err != nil {
+		t.Fatal(err)
+	}
+	s2, err := Open(dir, nil) // re-open must NOT resurrect it
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := s2.Get("subagents"); ok {
+		t.Error("a removed built-in must not be re-seeded")
+	}
+}
 
 func TestBuiltinsSeededDisabled(t *testing.T) {
 	s, err := Open(t.TempDir(), nil)

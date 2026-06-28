@@ -9,6 +9,7 @@ package config
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -247,35 +248,33 @@ func SaveGlobal(name string, l LLM) error {
 // config (<workspace>/.agent/config.json) so /permissions changes survive a
 // restart. Any other keys already in that file are preserved.
 func SaveWorkspacePolicy(workspace string, run RunPolicy, file FilePolicy) error {
-	path := filepath.Join(workspace, ".agent", "config.json")
-	raw := map[string]json.RawMessage{}
-	if data, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(data, &raw)
-	}
-	for key, val := range map[string]any{"run": run, "file": file} {
-		b, err := json.Marshal(val)
-		if err != nil {
-			return err
-		}
-		raw[key] = b
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(raw, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
+	return mergeJSONFile(filepath.Join(workspace, ".agent", "config.json"), 0o644,
+		map[string]any{"run": run, "file": file})
 }
 
 // mergeGlobalKeys writes the given top-level keys into the user config,
 // preserving everything else already there. The file is 0600 — it can hold API
 // keys.
 func mergeGlobalKeys(kv map[string]any) error {
+	return mergeJSONFile(GlobalPath(), 0o600, kv)
+}
+
+// mergeJSONFile sets the given top-level keys in a JSON object file, preserving
+// every other key. Two safety properties matter because this file holds API keys
+// and provider presets:
+//   - If the existing file can't be parsed, ABORT (don't write). The old code
+//     ignored the parse error and wrote back only the new key, silently wiping
+//     providers/keys — and one truncated write then cascaded into total loss.
+//   - Write atomically (temp + rename) so an interrupted save can never leave a
+//     half-written, unparseable file behind.
+func mergeJSONFile(path string, perm os.FileMode, kv map[string]any) error {
 	raw := map[string]json.RawMessage{}
-	if data, err := os.ReadFile(GlobalPath()); err == nil {
-		_ = json.Unmarshal(data, &raw)
+	if data, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("refusing to save: %s is not valid JSON (%v) — fix or remove it so your saved settings aren't lost", path, err)
+		}
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
 	}
 	for k, v := range kv {
 		b, err := json.Marshal(v)
@@ -284,14 +283,18 @@ func mergeGlobalKeys(kv map[string]any) error {
 		}
 		raw[k] = b
 	}
-	if err := os.MkdirAll(configHome(), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(GlobalPath(), data, 0o600)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path) // atomic on the same filesystem
 }
 
 // SaveChannel persists the update channel (stable|nightly).

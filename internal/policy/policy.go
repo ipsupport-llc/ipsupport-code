@@ -7,6 +7,7 @@ package policy
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -171,15 +172,18 @@ func (e *Engine) Read(path string) error {
 
 // Resolve returns the absolute, symlink-resolved path for a (possibly relative)
 // input and errors if it escapes the jail. Relative paths resolve against the
-// jail root (or the workspace when no jail is set).
+// jail root (or the workspace when no jail is set). A leading ~ is expanded to
+// the home dir FIRST — otherwise "~/x" is treated as a relative path and joined
+// under the workspace, silently creating a literal "~" directory. The jail check
+// still runs after expansion, so ~ can't be used to escape it.
 func (e *Engine) Resolve(path string) (string, error) {
-	abs := path
+	abs := expandTilde(path)
 	if !filepath.IsAbs(abs) {
 		base := e.jailRoot
 		if base == "" {
 			base = e.workspace
 		}
-		abs = filepath.Join(base, path)
+		abs = filepath.Join(base, abs)
 	}
 	abs = resolveSymlinks(filepath.Clean(abs))
 
@@ -190,6 +194,18 @@ func (e *Engine) Resolve(path string) (string, error) {
 		return abs, nil
 	}
 	return abs, fmt.Errorf("path %q escapes the workspace jail %q", path, e.jailRoot)
+}
+
+// expandTilde turns a leading ~ or ~/ into the user's home directory, matching
+// shell behavior so the model's "~/file" lands in $HOME instead of a literal "~"
+// directory under the workspace.
+func expandTilde(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	return p
 }
 
 // resolveSymlinks follows symlinks in abs. For a not-yet-existing path it

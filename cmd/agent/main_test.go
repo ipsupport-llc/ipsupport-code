@@ -455,6 +455,51 @@ func TestSpawnAgentLocalRuns(t *testing.T) {
 	}
 }
 
+func TestAgentsPanelBuild(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveAgents writes the global config
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	m := &tuiModel{app: a}
+	key := func(t tea.KeyType) tea.KeyMsg { return tea.KeyMsg{Type: t} }
+	rune1 := func(r rune) tea.KeyMsg { return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}} }
+
+	m.openAgents()
+	if m.state != stAgents {
+		t.Fatalf("openAgents → state %v, want stAgents", m.state)
+	}
+	m.agentsKey(key(tea.KeyEnter)) // on "add new" → pick provider
+	if m.agPhase != agPickProvider {
+		t.Fatalf("phase %v, want agPickProvider", m.agPhase)
+	}
+	m.agentsKey(key(tea.KeyEnter)) // pick provider (local) → pick model (async)
+	if m.agPhase != agPickModel {
+		t.Fatalf("phase %v, want agPickModel", m.agPhase)
+	}
+	// simulate the async fetch landing
+	m.agLoading, m.agModelsAll = false, []string{"qwen2.5", "llama3"}
+	m.agentsKey(key(tea.KeyEnter)) // pick the first model → name
+	if m.agPhase != agName || m.agDraft.model != "qwen2.5" {
+		t.Fatalf("phase %v model %q, want agName/qwen2.5", m.agPhase, m.agDraft.model)
+	}
+	for _, r := range "rev" { // type a name
+		m.agentsKey(rune1(r))
+	}
+	m.agentsKey(key(tea.KeyEnter)) // save
+	if p, ok := a.cfg.Agents["rev"]; !ok || p.Model != "qwen2.5" {
+		t.Errorf("profile not saved correctly: %+v", a.cfg.Agents)
+	}
+	if m.agPhase != agList {
+		t.Errorf("after save, phase %v, want agList", m.agPhase)
+	}
+}
+
 func TestCommandWhileBusy(t *testing.T) {
 	m := &tuiModel{width: 80, input: textarea.New(),
 		app: &app{cfg: config.Default(), workspace: t.TempDir()}}

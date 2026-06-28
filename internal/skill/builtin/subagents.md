@@ -12,10 +12,14 @@ session for one of the user's configured profiles. Use it deliberately:
    <provider> [model]. Don't invent a profile name.
 2. Call it, e.g.:
    {"action": "run", "params": {"profile": "grok", "task": "<task>", "dir": "~/proj"}}
+   - ALWAYS pass `dir` = the working directory of the SPECIFIC project you're
+     working on (e.g. the repo root). The sub-agent is jailed to that directory.
+     If you omit it the sub-agent inherits the session's workspace, which may be a
+     home directory or an unrelated folder — never turn a sub-agent loose on a
+     whole home dir. If you don't know the project's path, find it first (file
+     list / pwd) and pass it.
    - task MUST be self-contained: the sub-agent cannot see this conversation, so
-     put every file path, the scope, and what to produce into it.
-   - dir is optional — it points the sub-agent at another project (defaults to the
-     current workspace). The sub-agent is jailed to that directory.
+     put every file path (relative to `dir`), the scope, and what to produce into it.
 3. To use several models (a cross-model review, or a tie-breaker), issue several
    agent calls IN ONE turn with different profiles — they run in parallel, each on
    its own status line. Keep the scope concrete (a few files), since each

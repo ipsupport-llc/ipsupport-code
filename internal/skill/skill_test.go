@@ -29,6 +29,45 @@ func TestSeedNewBuiltinOnUpgrade(t *testing.T) {
 	}
 }
 
+func TestRefreshUnmodifiedBuiltinOnUpgrade(t *testing.T) {
+	dir := t.TempDir()
+	old := []byte("---\nname: subagents\n---\nOLD built-in content")
+	if err := os.WriteFile(filepath.Join(dir, "subagents.md"), old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// .seeded says we wrote exactly `old` → the user hasn't edited it
+	seeded := `{"subagents":"` + hashBytes(old) + `"}`
+	if err := os.WriteFile(filepath.Join(dir, ".seeded"), []byte(seeded), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sk, _ := s.Get("subagents"); strings.Contains(sk.Body, "OLD built-in content") {
+		t.Error("an unmodified built-in should be refreshed to the embedded content on upgrade")
+	}
+}
+
+func TestUserEditedBuiltinKept(t *testing.T) {
+	dir := t.TempDir()
+	edited := []byte("---\nname: subagents\n---\nMY OWN EDITS")
+	if err := os.WriteFile(filepath.Join(dir, "subagents.md"), edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// .seeded records a different hash → on-disk differs → treated as user-edited
+	if err := os.WriteFile(filepath.Join(dir, ".seeded"), []byte(`{"subagents":"deadbeef"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sk, _ := s.Get("subagents"); !strings.Contains(sk.Body, "MY OWN EDITS") {
+		t.Error("a user-edited built-in must be kept, not overwritten on upgrade")
+	}
+}
+
 func TestRemovedBuiltinStaysRemoved(t *testing.T) {
 	dir := t.TempDir()
 	s, err := Open(dir, nil) // fresh install seeds every built-in

@@ -35,14 +35,23 @@ const (
 	userAgent     = "ipsupport-code/0.1 (+https://github.com/ipsupport-llc/ipsupport-code)"
 )
 
-type webTool struct{ hc *http.Client }
+type webTool struct {
+	hc      *http.Client
+	offline bool
+}
 
-// NewWeb returns the web tool. A nil client uses http.DefaultClient.
-func NewWeb(hc *http.Client) Tool {
+// offlineMsg is returned by every web action while offline mode is on, so the
+// model gets a clear "temporary, no internet" signal instead of a confusing
+// network timeout.
+const offlineMsg = "offline mode is ON — the web is disabled right now (no internet). This is temporary: run /offline off when you're back online."
+
+// NewWeb returns the web tool. A nil client uses http.DefaultClient. When offline
+// is true, every action refuses with offlineMsg instead of touching the network.
+func NewWeb(hc *http.Client, offline bool) Tool {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
-	w := &webTool{hc: hc}
+	w := &webTool{hc: hc, offline: offline}
 	return NewDomain(DomainSpec{
 		Name:    "web",
 		Summary: "Reach the live web: search, read a page as Markdown, or query StackExchange Q&A.",
@@ -56,7 +65,18 @@ func NewWeb(hc *http.Client) Tool {
 	})
 }
 
+// offlineBlocked reports an offline refusal for a web action; ok=true means stop.
+func (w *webTool) offlineBlocked() (Result, bool) {
+	if w.offline {
+		return Err(offlineMsg), true
+	}
+	return Result{}, false
+}
+
 func (w *webTool) search(ctx context.Context, a Args) Result {
+	if r, off := w.offlineBlocked(); off {
+		return r
+	}
 	q := a.Str("query")
 	limit := a.Int("limit", 8)
 	if limit < 1 {
@@ -97,6 +117,9 @@ func (w *webTool) search(ctx context.Context, a Args) Result {
 }
 
 func (w *webTool) fetch(ctx context.Context, a Args) Result {
+	if r, off := w.offlineBlocked(); off {
+		return r
+	}
 	raw := a.Str("url")
 	pu, err := url.Parse(raw)
 	if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") {
@@ -131,6 +154,9 @@ func (w *webTool) fetch(ctx context.Context, a Args) Result {
 }
 
 func (w *webTool) stackexchange(ctx context.Context, a Args) Result {
+	if r, off := w.offlineBlocked(); off {
+		return r
+	}
 	q := a.Str("query")
 	site := a.Str("site")
 	if site == "" {

@@ -146,6 +146,10 @@ channel (`stable` by default — set `"channel": "nightly"` in
 `~/.config/ipsupport-code/config.json`, or switch with `update nightly`). Local
 dev builds are never nagged.
 
+**Offline?** `/offline on` cuts all internet egress — the web tool refuses with a
+clear "no internet" message and the startup update check is skipped. Your local
+model (LM Studio on localhost) keeps working. `/offline off` re-enables it.
+
 ## Quick start
 
 1. In LM Studio, load a **tool-calling** model (e.g. `qwen2.5-7b-instruct`) and

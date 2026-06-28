@@ -98,9 +98,13 @@ type Config struct {
 	Agents map[string]AgentProfile `json:"agents,omitempty"`
 	// Spawn gates the `agent` tool: approval mode before a sub-agent runs, and
 	// whether sub-agents may run shell commands.
-	Spawn      SpawnPolicy `json:"spawn"`
-	SkillsPath string      `json:"skills_path,omitempty"`
-	Workspace  string      `json:"-"` // resolved absolute workspace root
+	Spawn SpawnPolicy `json:"spawn"`
+	// Offline disables all internet egress (web tool, startup update check) and
+	// makes anything that would reach the net fail fast with a clear message.
+	// Local model calls (e.g. LM Studio on localhost) are unaffected.
+	Offline    bool   `json:"offline,omitempty"`
+	SkillsPath string `json:"skills_path,omitempty"`
+	Workspace  string `json:"-"` // resolved absolute workspace root
 }
 
 // ProviderTemplates are built-in OpenAI-compatible providers: base URL (and a
@@ -310,6 +314,9 @@ func SaveUsageRetention(days int) error {
 // presets (which may include API keys — the file is written 0600).
 // SaveSpawn persists the sub-agent spawn policy (approval mode + exec) globally.
 func SaveSpawn(s SpawnPolicy) error { return mergeGlobalKeys(map[string]any{"spawn": s}) }
+
+// SaveOffline persists the offline-mode flag globally.
+func SaveOffline(off bool) error { return mergeGlobalKeys(map[string]any{"offline": off}) }
 
 // SaveAgents persists the sub-agent profile map globally.
 func SaveAgents(agents map[string]AgentProfile) error {

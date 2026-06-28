@@ -22,7 +22,7 @@ func TestWebSearch(t *testing.T) {
 	ddgSearchURL = srv.URL
 	defer func() { ddgSearchURL = old }()
 
-	r := NewWeb(srv.Client()).Call(context.Background(), "search", map[string]any{"query": "golang"})
+	r := NewWeb(srv.Client(), false).Call(context.Background(), "search", map[string]any{"query": "golang"})
 	if r.IsError {
 		t.Fatalf("search error: %s", r.Content)
 	}
@@ -44,7 +44,7 @@ func TestWebFetch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	r := NewWeb(srv.Client()).Call(context.Background(), "fetch", map[string]any{"url": srv.URL})
+	r := NewWeb(srv.Client(), false).Call(context.Background(), "fetch", map[string]any{"url": srv.URL})
 	if r.IsError {
 		t.Fatalf("fetch error: %s", r.Content)
 	}
@@ -59,7 +59,7 @@ func TestWebFetch(t *testing.T) {
 func TestWebFetchBlocksPrivate(t *testing.T) {
 	// SSRF guard ON (default): fetching loopback/metadata must be refused.
 	for _, u := range []string{"http://127.0.0.1:80/", "http://localhost:8080/x", "http://169.254.169.254/latest/meta-data/"} {
-		r := NewWeb(http.DefaultClient).Call(context.Background(), "fetch", map[string]any{"url": u})
+		r := NewWeb(http.DefaultClient, false).Call(context.Background(), "fetch", map[string]any{"url": u})
 		if !r.IsError || !strings.Contains(r.Content, "SSRF") {
 			t.Errorf("fetch(%q) = %+v, want an SSRF refusal", u, r)
 		}
@@ -77,11 +77,25 @@ func TestWebStackExchange(t *testing.T) {
 	stackExURL = srv.URL
 	defer func() { stackExURL = old }()
 
-	r := NewWeb(srv.Client()).Call(context.Background(), "stackexchange", map[string]any{"query": "defer"})
+	r := NewWeb(srv.Client(), false).Call(context.Background(), "stackexchange", map[string]any{"query": "defer"})
 	if r.IsError {
 		t.Fatalf("stackexchange error: %s", r.Content)
 	}
 	if !strings.Contains(r.Content, "How to defer in Go?") || !strings.Contains(r.Content, "stackoverflow.com/q/1") {
 		t.Errorf("stackexchange content = %q", r.Content)
+	}
+}
+
+func TestWebOfflineRefuses(t *testing.T) {
+	w := NewWeb(http.DefaultClient, true) // offline
+	for _, act := range []string{"search", "fetch", "stackexchange"} {
+		params := map[string]any{"query": "x"}
+		if act == "fetch" {
+			params = map[string]any{"url": "http://example.com"}
+		}
+		r := w.Call(context.Background(), act, params)
+		if !r.IsError || !strings.Contains(r.Content, "offline") {
+			t.Errorf("%s while offline = %+v, want an offline refusal", act, r)
+		}
 	}
 }

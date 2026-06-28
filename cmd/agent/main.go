@@ -168,6 +168,9 @@ func (a *app) startupNotice(ctx context.Context) string {
 // freshnessNotice returns a one-line "newer build available" message, or "" when
 // up to date, on a local (dev) build, or if the check fails. Best-effort.
 func (a *app) freshnessNotice(ctx context.Context) string {
+	if a.cfg.Offline { // offline mode: never reach GitHub to check for updates
+		return ""
+	}
 	// Only released binaries have a clean version ("v0.1.0" / "nightly-…"); a local
 	// build is "dev" or a git-describe ("v0.1.0-20-g<sha>", "-dirty") — skip those
 	// so a developer build doesn't nag about being "outdated".
@@ -482,7 +485,7 @@ func (a *app) buildSubReg(pol *policy.Engine) *tool.Registry {
 	if a.cfg.Spawn.Exec {
 		tools = append(tools, tool.NewRun(pol, a.approver, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second))
 	}
-	tools = append(tools, tool.NewGit(pol, a.approver), tool.NewWeb(http.DefaultClient), tool.NewCalc())
+	tools = append(tools, tool.NewGit(pol, a.approver), tool.NewWeb(http.DefaultClient, a.cfg.Offline), tool.NewCalc())
 	if a.skills != nil && a.skills.HasEnabled() {
 		tools = append(tools, tool.NewSkill(a.skills))
 	}
@@ -725,6 +728,39 @@ func oneLine(s string, max int) string {
 // providerModel is the "provider · model" label shown in the status line.
 func (a *app) providerModel() string { return a.providerName() + " · " + a.activeLLM().Model }
 
+// offlineCommand toggles offline mode (no internet egress) and persists it. The
+// web tool refuses, startup/`/update` skip GitHub — local model calls still work.
+func (a *app) offlineCommand(arg string) []string {
+	switch strings.TrimSpace(arg) {
+	case "on", "yes", "true":
+		a.cfg.Offline = true
+	case "off", "no", "false":
+		a.cfg.Offline = false
+	case "":
+		return []string{"offline mode is " + onOff(a.cfg.Offline) + " — /offline on|off",
+			"  on = no internet: web tool + update checks off (your local model still works)"}
+	default:
+		return []string{"usage: /offline on|off"}
+	}
+	if err := config.SaveOffline(a.cfg.Offline); err != nil {
+		return []string{"warning: not persisted: " + err.Error()}
+	}
+	if err := a.wire(); err != nil { // rebuild the web tool with the new flag
+		return []string{"error: " + err.Error()}
+	}
+	if a.cfg.Offline {
+		return []string{"offline mode → on (web + update checks disabled; local model still works)"}
+	}
+	return []string{"offline mode → off (internet re-enabled)"}
+}
+
+func onOff(b bool) string {
+	if b {
+		return "on"
+	}
+	return "off"
+}
+
 // maybeDetectWindowSync detects the window inline for the REPL/one-shot paths;
 // the TUI skips this and re-detects off the UI thread (detectWindowCmd) so a slow
 // provider can't freeze the screen.
@@ -802,7 +838,7 @@ func (a *app) wire() error {
 		tool.NewFile(pol, a.approver),
 		tool.NewRun(pol, a.approver, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second),
 		tool.NewGit(pol, a.approver),
-		tool.NewWeb(http.DefaultClient),
+		tool.NewWeb(http.DefaultClient, a.cfg.Offline),
 		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),
 		tool.NewCalc(),
 	}
@@ -1458,7 +1494,15 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	case "/auto":
 		fmt.Println(a.setMode(false))
 	case "/update":
-		runUpdate(strings.Fields(rest))
+		if a.cfg.Offline {
+			fmt.Println("offline mode is on — /update needs the internet. Run /offline off first.")
+		} else {
+			runUpdate(strings.Fields(rest))
+		}
+	case "/offline":
+		for _, l := range a.offlineCommand(rest) {
+			fmt.Println(l)
+		}
 	case "/ai":
 		for _, l := range a.aiCommand(rest) {
 			fmt.Println(l)
@@ -2083,6 +2127,7 @@ func helpText() string {
   /model [name]    list the provider's models, or pick one
   /config          control panel: all settings + how to change them
   /update [chan]   self-update from GitHub (chan = stable|nightly, saved)
+  /offline [on|off] work without internet — disables web + update checks
   /shell, /sh      drop to a shell in the workspace (exit to return)
   /skills          list/toggle/install on-demand instruction packs
   /agents          sub-agent profiles: /agents add|rm|exec (models the agent tool delegates to)

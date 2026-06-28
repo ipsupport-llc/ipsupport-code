@@ -588,7 +588,7 @@ func TestEmptyActionErrorStaysTerse(t *testing.T) {
 }
 
 func TestRunWrongToolHint(t *testing.T) {
-	reg := tool.NewRegistry(tool.NewCalc(), tool.NewWeb(nil))
+	reg := tool.NewRegistry(tool.NewCalc(), tool.NewWeb(nil, false))
 	fake := &scriptLLM{replies: []llm.Message{
 		toolCallReply("c1", "calc", `{"action":"search","params":{"query":"x"}}`),
 		{Role: "assistant", Content: "ok"},

@@ -296,7 +296,7 @@ func bannerLines(name, ver, model, cwd string, window int, accent lipgloss.Color
 		BorderForeground(accent).
 		Padding(0, 2).
 		Render(body)
-	hint := cDim.Render("type a task, or /help · alt+enter newline · ctrl-l clear · ctrl-c quit")
+	hint := cDim.Render("type a task, or /help · alt+enter newline · ctrl-u clear input · ctrl-l clear screen · ctrl-c quit")
 	return append(strings.Split(box, "\n"), "", hint)
 }
 
@@ -523,6 +523,15 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.history = m.history[:0]
 		if m.ready {
 			m.vp.SetContent("")
+		}
+		return m, nil
+	case "ctrl+u":
+		// Nuke the whole input — fast recovery from a bad clipboard paste. (In the
+		// profile builder's name step it clears that field instead.)
+		if m.state == stAgents && m.agPhase == agName {
+			m.agDraft.name = ""
+		} else {
+			m.input.SetValue("")
 		}
 		return m, nil
 	case "shift+tab":
@@ -1284,6 +1293,27 @@ func (m *tuiModel) renderContent() string {
 	return strings.Join(out, "\n")
 }
 
+// keyHelp documents the keyboard shortcuts for /help.
+var keyHelp = [][2]string{
+	{"Enter", "send (empty Enter drops to a shell)"},
+	{"alt+enter", "newline in the input (also ctrl+j)"},
+	{"Tab", "complete a /command, or accept the NEXT suggestion"},
+	{"shift+tab", "toggle plan ⇄ auto mode"},
+	{"↑", "answer a pending approval, or edit the last queued line"},
+	{"ctrl+u", "clear the input (fast undo of a bad paste)"},
+	{"ctrl+l", "clear the screen"},
+	{"esc", "cancel the running task, or back out of a panel"},
+	{"ctrl+c", "quit"},
+}
+
+// subagentHelp is the short sub-agent primer for /help.
+var subagentHelp = []string{
+	"Define profiles in /config → Sub-agents (provider → model → name).",
+	"Then ask, e.g. \"review internal/tool across grok and claude, then merge\".",
+	"The assistant fans out in parallel; point one at another repo with a dir.",
+	"/agents add|rm|exec · /permissions agents on relaxes the per-spawn prompt.",
+}
+
 // commandList is the single source for Tab completion and the /help display.
 type cmdInfo struct{ name, desc string }
 
@@ -1446,11 +1476,19 @@ func (m *tuiModel) accentBold() lipgloss.Style {
 
 func (m *tuiModel) renderHelp() []string {
 	cmd := m.accentBold()
-	out := []string{cmd.Render("  commands") + cDim.Render("   (Tab completes)")}
+	out := []string{cmd.Render("  commands") + cDim.Render("   (Tab completes, even while busy)")}
 	for _, c := range commandList {
 		out = append(out, "  "+cmd.Render(fmt.Sprintf("%-9s", c.name))+"  "+cDim.Render(c.desc))
 	}
 	out = append(out, cDim.Render("  anything else is run as a task"))
+	out = append(out, "", cmd.Render("  keys"))
+	for _, k := range keyHelp {
+		out = append(out, "  "+cmd.Render(fmt.Sprintf("%-10s", k[0]))+"  "+cDim.Render(k[1]))
+	}
+	out = append(out, "", cmd.Render("  sub-agents"))
+	for _, l := range subagentHelp {
+		out = append(out, "  "+cDim.Render(l))
+	}
 	return out
 }
 

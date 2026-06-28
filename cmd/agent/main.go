@@ -205,6 +205,7 @@ type app struct {
 	client          *llm.OpenAIClient
 	ag              *agent.Agent
 	pol             *policy.Engine // host policy/jail; sub-agents in a dir get their own
+	workdir         string         // absolute session working dir (set by /cd); "" = workspace
 	subReg          *tool.Registry // tools for sub-agents (no `agent` tool → no recursion)
 	spawnMu         sync.Mutex     // serializes spawn-approval prompts during parallel fan-out
 	spawnSeq        atomic.Int64   // unique id per sub-agent spawn (for grouping its UI events)
@@ -329,7 +330,7 @@ func (a *app) spawnAgent(ctx context.Context, profile, task, dir string) (string
 	// Resolve the working directory (default: the session workspace). The path may
 	// point anywhere — ~ is expanded, relatives resolve against the session — but
 	// the sub-agent gets its OWN jail rooted there, so it still can't escape it.
-	subReg, subWorkspace := a.subReg, a.workspace
+	subReg, subWorkspace := a.subReg, a.effectiveDir()
 	if d := strings.TrimSpace(dir); d != "" {
 		root, err := a.resolveSpawnDir(d)
 		if err != nil {
@@ -471,7 +472,7 @@ func (a *app) resolveSpawnDir(dir string) (string, error) {
 		dir = filepath.Join(home, strings.TrimPrefix(dir, "~"))
 	}
 	if !filepath.IsAbs(dir) {
-		dir = filepath.Join(a.workspace, dir)
+		dir = filepath.Join(a.effectiveDir(), dir)
 	}
 	return filepath.Clean(dir), nil
 }
@@ -728,6 +729,38 @@ func oneLine(s string, max int) string {
 // providerModel is the "provider · model" label shown in the status line.
 func (a *app) providerModel() string { return a.providerName() + " · " + a.activeLLM().Model }
 
+// effectiveDir is the session's current working directory: the /cd target, or the
+// workspace root if none was set.
+func (a *app) effectiveDir() string {
+	if a.workdir != "" {
+		return a.workdir
+	}
+	return a.workspace
+}
+
+// cdCommand sets the session working directory (the base for relative file/run/git
+// paths and the default for sub-agents), confined to the workspace jail. So you
+// point it at your project once instead of repeating the path everywhere.
+func (a *app) cdCommand(arg string) []string {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return []string{"working directory: " + a.effectiveDir(), "  /cd <dir> to change it (within the workspace jail)"}
+	}
+	abs, err := a.pol.Resolve(arg) // expands ~, resolves, enforces the jail
+	if err != nil {
+		return []string{"cd: " + err.Error()}
+	}
+	if fi, e := os.Stat(abs); e != nil || !fi.IsDir() {
+		return []string{"cd: not a directory: " + arg}
+	}
+	if _, err := a.pol.SetWorkdir(arg); err != nil {
+		return []string{"cd: " + err.Error()}
+	}
+	a.workdir = abs
+	a.ag.SetSystem(a.systemPrompt()) // let the model see the new working dir
+	return []string{"working directory → " + abs}
+}
+
 // offlineCommand toggles offline mode (no internet egress) and persists it. The
 // web tool refuses, startup/`/update` skip GitHub — local model calls still work.
 func (a *app) offlineCommand(arg string) []string {
@@ -833,6 +866,9 @@ func (a *app) wire() error {
 		return fmt.Errorf("policy: %w", err)
 	}
 	a.pol = pol // host jail; a sub-agent pointed at a dir gets its own
+	if a.workdir != "" {
+		_, _ = a.pol.SetWorkdir(a.workdir) // re-apply /cd across a re-wire (best-effort)
+	}
 	var reg *tool.Registry
 	tools := []tool.Tool{
 		tool.NewFile(pol, a.approver),
@@ -1274,8 +1310,8 @@ func (a *app) systemPrompt() string {
 	}
 	a.promptSrc = psrc
 	out := base + fmt.Sprintf(
-		"\n\nEnvironment: you are running on %s; the workspace is %s. Use commands that exist on this OS — on darwin prefer vm_stat/top/sw_vers over Linux-only tools like free.",
-		runtime.GOOS, a.workspace)
+		"\n\nEnvironment: you are running on %s; your working directory is %s. Relative paths resolve there. Use commands that exist on this OS — on darwin prefer vm_stat/top/sw_vers over Linux-only tools like free.",
+		runtime.GOOS, a.effectiveDir())
 	if text != "" {
 		out += "\n\n## Project instructions (from " + src + ") — follow these:\n" + text
 	}
@@ -1501,6 +1537,10 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		}
 	case "/offline":
 		for _, l := range a.offlineCommand(rest) {
+			fmt.Println(l)
+		}
+	case "/cd":
+		for _, l := range a.cdCommand(rest) {
 			fmt.Println(l)
 		}
 	case "/ai":
@@ -2128,6 +2168,7 @@ func helpText() string {
   /config          control panel: all settings + how to change them
   /update [chan]   self-update from GitHub (chan = stable|nightly, saved)
   /offline [on|off] work without internet — disables web + update checks
+  /cd [dir]        set the working directory (relative paths + sub-agents use it)
   /shell, /sh      drop to a shell in the workspace (exit to return)
   /skills          list/toggle/install on-demand instruction packs
   /agents          sub-agent profiles: /agents add|rm|exec (models the agent tool delegates to)

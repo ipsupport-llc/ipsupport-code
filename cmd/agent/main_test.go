@@ -534,6 +534,45 @@ func TestResolveProfileName(t *testing.T) {
 	}
 }
 
+func TestCdCommand(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, "proj", "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.File = config.FilePolicy{Default: "allow", Jail: "."}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if out := strings.Join(a.cdCommand("proj"), " "); !strings.Contains(out, "proj") {
+		t.Fatalf("cd proj = %q", out)
+	}
+	if filepath.Base(a.effectiveDir()) != "proj" {
+		t.Errorf("effectiveDir = %q, want …/proj", a.effectiveDir())
+	}
+	if abs, err := a.pol.Resolve("note.txt"); err != nil || filepath.Base(filepath.Dir(abs)) != "proj" {
+		t.Errorf("Resolve(note.txt) = %q,%v, want under proj", abs, err)
+	}
+	// the workdir survives a re-wire (e.g. a /permissions or /offline toggle)
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Base(a.pol.Workdir()) != "proj" {
+		t.Errorf("workdir lost after re-wire: %q", a.pol.Workdir())
+	}
+	// a missing dir and an out-of-jail target both error
+	if out := strings.Join(a.cdCommand("proj/nope"), " "); !strings.Contains(out, "cd:") {
+		t.Errorf("cd to a missing dir should error: %q", out)
+	}
+	if out := strings.Join(a.cdCommand("../.."), " "); !strings.Contains(out, "cd:") {
+		t.Errorf("cd outside the jail should error: %q", out)
+	}
+}
+
 func TestCustomProvider(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

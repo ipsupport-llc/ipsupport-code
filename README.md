@@ -146,6 +146,11 @@ channel (`stable` by default — set `"channel": "nightly"` in
 `~/.config/ipsupport-code/config.json`, or switch with `update nightly`). Local
 dev builds are never nagged.
 
+**Working directory.** Launched from a parent dir (or `~`)? `/cd <subdir>` points
+the session at your project — relative file/run/git paths resolve there, and
+sub-agents inherit it as their default `dir`, so you set the path once instead of
+repeating it. It stays inside the workspace jail.
+
 **Offline?** `/offline on` cuts all internet egress — the web tool refuses with a
 clear "no internet" message and the startup update check is skipped. Your local
 model (LM Studio on localhost) keeps working. `/offline off` re-enables it.

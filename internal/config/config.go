@@ -99,6 +99,12 @@ type Config struct {
 	// KnowledgeRetentionDays auto-drops learned lessons last seen over N days ago
 	// on startup. 0 keeps them forever.
 	KnowledgeRetentionDays int `json:"knowledge_retention_days,omitempty"`
+	// GoalMaxReturns is the TTL for goal pursuit: if the model finalizes but the
+	// goal isn't done (a plan still has open items), it's re-fed the goal and tries
+	// again, up to this many returns. 0 disables (one run). Default 6.
+	GoalMaxReturns int `json:"goal_max_returns,omitempty"`
+	// GoalMaxSteps is the hard step backstop for one goal pursuit. Default 80.
+	GoalMaxSteps int `json:"goal_max_steps,omitempty"`
 	// Prices overrides the built-in per-model price estimates for /usage cost:
 	// model-id substring → [input, output] USD per 1M tokens.
 	Prices map[string][2]float64 `json:"prices,omitempty"`
@@ -223,7 +229,9 @@ func Default() Config {
 			AllowWrite: []string{},
 			DenyWrite:  append([]string{}, fileDenyFloor...),
 		},
-		Spawn: SpawnPolicy{Default: "ask", Exec: false},
+		Spawn:          SpawnPolicy{Default: "ask", Exec: false},
+		GoalMaxReturns: 6,
+		GoalMaxSteps:   80,
 	}
 }
 
@@ -356,6 +364,11 @@ func SaveReasoning(m map[string]json.RawMessage) error {
 // SaveKnowledgeRetention persists the lesson-retention window (days) globally.
 func SaveKnowledgeRetention(days int) error {
 	return mergeGlobalKeys(map[string]any{"knowledge_retention_days": days})
+}
+
+// SaveGoalMaxReturns persists the goal-pursuit return TTL globally.
+func SaveGoalMaxReturns(n int) error {
+	return mergeGlobalKeys(map[string]any{"goal_max_returns": n})
 }
 
 // SaveAgents persists the sub-agent profile map globally.

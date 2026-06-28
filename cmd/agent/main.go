@@ -219,6 +219,7 @@ type app struct {
 	promptSrc       string        // "built-in" or the system.md override path
 	facts           []string      // durable project facts learned over time (per workspace)
 	planMode        bool          // plan (propose) vs auto (execute); survives re-wire
+	goal            goalState     // standing goal pursued by the judge loop (per workspace)
 	windowDetected  bool          // got the real loaded context window (vs a default/guess)
 	sessionRestored bool          // a saved session was restored at startup (TUI renders a recap)
 	tui             bool          // running the TUI (detect the context window off-thread, not inline)
@@ -259,6 +260,7 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 		cleanup = func() { a.closeMCP(); _ = ft.Close() }
 	}
 	a.loadFacts() // learned project facts → folded into the prompt by wire()
+	a.loadGoal()  // standing goal (if any) → resumable across restarts
 	if err := a.wire(); err != nil {
 		return nil, nil, err
 	}
@@ -833,6 +835,165 @@ func (a *app) reflectUsing() string {
 	return "current model"
 }
 
+// goalState is the standing goal — an explicit, persisted objective the agent
+// pursues across the judge-driven loop. Stored at <workspace>/.agent/goal.json so
+// it survives a restart and can be resumed.
+type goalState struct {
+	Text   string `json:"text"`
+	Status string `json:"status"` // active | done | incomplete
+}
+
+func (a *app) goalPath() string { return filepath.Join(a.workspace, ".agent", "goal.json") }
+
+// loadGoal reads the persisted goal (best-effort; a missing/garbled file = none).
+func (a *app) loadGoal() {
+	data, err := os.ReadFile(a.goalPath())
+	if err != nil {
+		return
+	}
+	var g goalState
+	if json.Unmarshal(data, &g) == nil {
+		a.goal = g
+	}
+}
+
+func (a *app) saveGoal() error {
+	if err := os.MkdirAll(filepath.Dir(a.goalPath()), 0o755); err != nil {
+		return err
+	}
+	data, _ := json.MarshalIndent(a.goal, "", "  ")
+	return os.WriteFile(a.goalPath(), data, 0o644)
+}
+
+// launchGoalText reports the goal to set-and-pursue, or ("", false) when the
+// argument is a sub-command (blank / status / clear / a TTL knob) instead.
+func (a *app) launchGoalText(rest string) (string, bool) {
+	rest = strings.TrimSpace(rest)
+	if rest == "" {
+		return "", false
+	}
+	switch strings.Fields(rest)[0] {
+	case "go", "resume": // resume the standing goal
+		return a.goal.Text, a.goal.Text != ""
+	case "clear", "drop", "done", "ttl", "off", "on":
+		return "", false
+	}
+	return rest, true
+}
+
+// setGoal records a new standing goal (active) and persists it.
+func (a *app) setGoal(text string) {
+	a.goal = goalState{Text: strings.TrimSpace(text), Status: "active"}
+	if err := a.saveGoal(); err != nil {
+		slog.Warn("goal not persisted", "err", err)
+	}
+}
+
+// finishGoal updates the standing goal's status from a finished run, but only when
+// that run was actually pursuing it (same text, still active).
+func (a *app) finishGoal(goal string, tr agent.Transcript) {
+	if a.goal.Status != "active" || strings.TrimSpace(goal) != a.goal.Text {
+		return
+	}
+	if tr.GoalMet && !tr.Stopped {
+		a.goal.Status = "done"
+	} else {
+		a.goal.Status = "incomplete"
+	}
+	if err := a.saveGoal(); err != nil {
+		slog.Warn("goal status not persisted", "err", err)
+	}
+}
+
+// goalCommand handles the non-launching forms: show status, clear the goal, or set
+// the return TTL. Setting a new goal to pursue goes through the run path instead.
+func (a *app) goalCommand(arg string) []string {
+	fields := strings.Fields(strings.TrimSpace(arg))
+	verb := ""
+	if len(fields) > 0 {
+		verb = fields[0]
+	}
+	switch verb {
+	case "clear", "drop", "done":
+		had := a.goal.Text
+		a.goal = goalState{}
+		os.Remove(a.goalPath())
+		if had == "" {
+			return []string{"no standing goal to clear"}
+		}
+		return []string{"goal cleared"}
+	case "ttl", "off", "on":
+		return a.goalTTL(verb, fields)
+	default:
+		return a.goalStatus()
+	}
+}
+
+// goalTTL sets the return budget: /goal ttl <n>, /goal off (0), /goal on (default).
+func (a *app) goalTTL(verb string, fields []string) []string {
+	n := a.cfg.GoalMaxReturns
+	switch verb {
+	case "off":
+		n = 0
+	case "on":
+		n = config.Default().GoalMaxReturns
+	case "ttl":
+		if len(fields) < 2 {
+			return []string{"usage: /goal ttl <n>  (re-feed budget; 0 = off)"}
+		}
+		v, err := strconv.Atoi(fields[1])
+		if err != nil || v < 0 {
+			return []string{"usage: /goal ttl <n>  (a non-negative count)"}
+		}
+		n = v
+	}
+	a.cfg.GoalMaxReturns = n // applied per goal run via goalTTLFor
+	if err := config.SaveGoalMaxReturns(n); err != nil {
+		return []string{"warning: not persisted: " + err.Error()}
+	}
+	if n == 0 {
+		return []string{"goal loop → off (one run; the model decides when it's done)"}
+	}
+	return []string{fmt.Sprintf("goal loop → up to %d re-feed(s) before giving up", n)}
+}
+
+func (a *app) goalStatus() []string {
+	ttl := fmt.Sprintf("TTL %d re-feed(s)", a.cfg.GoalMaxReturns)
+	if a.cfg.GoalMaxReturns == 0 {
+		ttl = "loop off"
+	}
+	if a.goal.Text == "" {
+		return []string{
+			"no standing goal · " + ttl,
+			"  /goal <text> sets one and pursues it · a judge re-feeds it until met · /goal ttl <n>",
+		}
+	}
+	out := []string{
+		fmt.Sprintf("goal [%s]: %s", a.goal.Status, a.goal.Text),
+		"  " + ttl + " · /goal go to resume · /goal clear to drop · /goal ttl <n>",
+	}
+	return out
+}
+
+// goalTTLFor returns the judge re-feed budget for a run: the configured TTL only
+// when the run is pursuing the active standing goal, else 0 (a plain task is one
+// run, no judge overhead).
+func (a *app) goalTTLFor(goal string) int {
+	if a.goal.Status == "active" && strings.TrimSpace(goal) == a.goal.Text {
+		return a.cfg.GoalMaxReturns
+	}
+	return 0
+}
+
+// goalSteps is the hard step backstop for one goal pursuit, falling back to the
+// model's own per-task cap if it isn't configured.
+func (a *app) goalSteps() int {
+	if a.cfg.GoalMaxSteps > 0 {
+		return a.cfg.GoalMaxSteps
+	}
+	return a.activeLLM().MaxSteps
+}
+
 // reasoningParams resolves the merge-params for (provider, model). scope ""
 // checks "<provider>/<model>" then "<provider>"; scope "reflect" checks the
 // reflect-prefixed keys first (a separate setting for the learning pass), then
@@ -1176,7 +1337,7 @@ func (a *app) wire() error {
 	if a.ag != nil {
 		prior = a.ag.History()
 	}
-	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.activeLLM().MaxSteps)
+	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.goalSteps())
 	a.ag.SetHistory(prior)
 	a.ag.SetPlanMode(a.planMode) // carry the mode into the rebuilt agent
 	return nil
@@ -1719,6 +1880,7 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 func (a *app) runOne(ctx context.Context, goal string) {
 	a.beginCheckpoint(goal)
 	defer a.endCheckpoint()
+	a.ag.SetGoalLoop(a.goalTTLFor(goal)) // judge-loop only when pursuing an explicit goal
 	tr, err := a.ag.Run(ctx, goal)
 	if err != nil {
 		slog.Error("run failed", "err", err)
@@ -1726,6 +1888,7 @@ func (a *app) runOne(ctx context.Context, goal string) {
 		return
 	}
 	a.recordRun(tr)
+	a.finishGoal(goal, tr)
 	if strings.TrimSpace(tr.Final) != "" {
 		fmt.Println(tr.Final)
 	} else {
@@ -1752,12 +1915,14 @@ func (a *app) runOne(ctx context.Context, goal string) {
 func (a *app) runTaskStreaming(ctx context.Context, goal string) {
 	a.beginCheckpoint(goal)
 	defer a.endCheckpoint()
+	a.ag.SetGoalLoop(a.goalTTLFor(goal)) // judge-loop only when pursuing an explicit goal
 	tr, err := a.ag.Run(ctx, goal)
 	if err != nil {
 		a.emit("error", map[string]any{"text": err.Error()})
 		return
 	}
 	a.recordRun(tr)
+	a.finishGoal(goal, tr)
 	if !tr.Stopped { // reflect only on a clean finish, not on any premature stop
 		a.reflectAndStore(ctx, tr)
 	}
@@ -1881,6 +2046,15 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	case "/reflect":
 		for _, l := range a.reflectCommand(rest) {
 			fmt.Println(l)
+		}
+	case "/goal":
+		if text, ok := a.launchGoalText(rest); ok {
+			a.setGoal(text)
+			a.runOne(ctx, text)
+		} else {
+			for _, l := range a.goalCommand(rest) {
+				fmt.Println(l)
+			}
 		}
 	case "/reasoning":
 		for _, l := range a.reasoningCommand(rest) {
@@ -2557,6 +2731,7 @@ func (a *app) statusText() string {
   prompt       %s
   instructions %s
   session      %d messages
+  goal         %s
   knowledge    %s (%d lessons)
   trace        %s
 `,
@@ -2564,7 +2739,20 @@ func (a *app) statusText() string {
 		act.BaseURL, act.Model, act.MaxSteps,
 		a.cfg.Workspace, a.cfg.File.Jail, a.cfg.Run.Default, a.cfg.File.Default,
 		promptOrDefault(a.promptSrc), instr, a.ag.SessionLen(),
+		a.goalStatusLine(),
 		a.cfg.KBPath, len(a.kb.All()), a.cfg.TracePath)
+}
+
+// goalStatusLine is the one-line goal summary shown in /status.
+func (a *app) goalStatusLine() string {
+	ttl := fmt.Sprintf("TTL %d", a.cfg.GoalMaxReturns)
+	if a.cfg.GoalMaxReturns == 0 {
+		ttl = "loop off"
+	}
+	if a.goal.Text == "" {
+		return "(none) · " + ttl
+	}
+	return fmt.Sprintf("%s [%s] · %s", oneLine(a.goal.Text, 50), a.goal.Status, ttl)
 }
 
 // promptOrDefault labels the system-prompt source for /status.

@@ -233,6 +233,88 @@ func TestSessionSurvivesTUILaunch(t *testing.T) {
 	}
 }
 
+func TestGoalSetPersistAndLoad(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{workspace: ws, cfg: config.Default()}
+	a.setGoal("  ship the feature  ")
+	if a.goal.Text != "ship the feature" || a.goal.Status != "active" {
+		t.Fatalf("setGoal stored %+v", a.goal)
+	}
+
+	// A fresh app over the same workspace recovers the standing goal.
+	b := &app{workspace: ws, cfg: config.Default()}
+	b.loadGoal()
+	if b.goal.Text != "ship the feature" || b.goal.Status != "active" {
+		t.Fatalf("loadGoal recovered %+v", b.goal)
+	}
+}
+
+func TestGoalTTLForOnlyAppliesToActiveGoal(t *testing.T) {
+	a := &app{workspace: t.TempDir(), cfg: config.Default()} // GoalMaxReturns=6
+	// No goal set → a plain task gets no judge loop.
+	if got := a.goalTTLFor("anything"); got != 0 {
+		t.Errorf("plain task TTL = %d, want 0", got)
+	}
+	a.goal = goalState{Text: "the goal", Status: "active"}
+	if got := a.goalTTLFor("the goal"); got != 6 {
+		t.Errorf("active goal TTL = %d, want 6", got)
+	}
+	if got := a.goalTTLFor("a different task"); got != 0 {
+		t.Errorf("off-goal task TTL = %d, want 0", got)
+	}
+	a.goal.Status = "done"
+	if got := a.goalTTLFor("the goal"); got != 0 {
+		t.Errorf("finished goal TTL = %d, want 0", got)
+	}
+}
+
+func TestLaunchGoalTextDistinguishesSubcommands(t *testing.T) {
+	a := &app{workspace: t.TempDir(), cfg: config.Default()}
+	for _, sub := range []string{"", "clear", "ttl 5", "off", "on", "go"} {
+		if _, ok := a.launchGoalText(sub); ok {
+			t.Errorf("%q wrongly treated as a goal to launch", sub)
+		}
+	}
+	if text, ok := a.launchGoalText("build the thing"); !ok || text != "build the thing" {
+		t.Errorf("launchGoalText(goal) = %q,%v", text, ok)
+	}
+	// /goal go resumes the standing goal's text.
+	a.goal = goalState{Text: "standing goal", Status: "incomplete"}
+	if text, ok := a.launchGoalText("go"); !ok || text != "standing goal" {
+		t.Errorf("/goal go = %q,%v, want the standing goal", text, ok)
+	}
+}
+
+func TestFinishGoalStatusFromTranscript(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a := &app{workspace: ws, cfg: config.Default()}
+
+	a.setGoal("do it")
+	a.finishGoal("do it", agent.Transcript{GoalMet: true})
+	if a.goal.Status != "done" {
+		t.Errorf("met goal status = %q, want done", a.goal.Status)
+	}
+
+	a.setGoal("do it")
+	a.finishGoal("do it", agent.Transcript{GoalMet: false})
+	if a.goal.Status != "incomplete" {
+		t.Errorf("unmet goal status = %q, want incomplete", a.goal.Status)
+	}
+
+	// A run that isn't the standing goal must not touch its status.
+	a.setGoal("do it")
+	a.finishGoal("some other task", agent.Transcript{GoalMet: true})
+	if a.goal.Status != "active" {
+		t.Errorf("off-goal run changed status to %q, want active", a.goal.Status)
+	}
+}
+
 func TestSlugName(t *testing.T) {
 	cases := map[string]string{"Alice Bot": "alice-bot", "  ": "ipsupport-code", "C++/Helper!": "c-helper", "": "ipsupport-code"}
 	for in, want := range cases {

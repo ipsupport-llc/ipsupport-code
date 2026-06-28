@@ -148,6 +148,64 @@ func TestFileEditFindMissing(t *testing.T) {
 	}
 }
 
+func TestFileReadWindow(t *testing.T) {
+	tl := fileToolFor(t, t.TempDir(), "allow", yes())
+	ctx := context.Background()
+	tl.Call(ctx, "write", map[string]any{"path": "f.txt", "content": "l1\nl2\nl3\nl4\nl5"})
+	r := tl.Call(ctx, "read", map[string]any{"path": "f.txt", "offset": 2, "limit": 2})
+	if r.IsError || !strings.Contains(r.Content, "l2\nl3") {
+		t.Errorf("windowed read = %q, want l2,l3", r.Content)
+	}
+	if strings.Contains(r.Content, "l5") {
+		t.Errorf("window should not include l5: %q", r.Content)
+	}
+	if !strings.Contains(r.Content, "lines 2") || !strings.Contains(r.Content, "of 5") {
+		t.Errorf("missing range header: %q", r.Content)
+	}
+}
+
+func TestFileFind(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+	tl.Call(ctx, "write", map[string]any{"path": "a.go", "content": "x"})
+	tl.Call(ctx, "write", map[string]any{"path": "sub/b.go", "content": "x"})
+	tl.Call(ctx, "write", map[string]any{"path": "c.txt", "content": "x"})
+	r := tl.Call(ctx, "find", map[string]any{"pattern": "**/*.go"})
+	if r.IsError || !strings.Contains(r.Content, "a.go") || !strings.Contains(r.Content, "sub/b.go") {
+		t.Errorf("find **/*.go = %q", r.Content)
+	}
+	if strings.Contains(r.Content, "c.txt") {
+		t.Errorf("find should not match c.txt: %q", r.Content)
+	}
+}
+
+func TestFileMultiEdit(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+	tl.Call(ctx, "write", map[string]any{"path": "f.txt", "content": "alpha beta gamma"})
+	r := tl.Call(ctx, "edit", map[string]any{"path": "f.txt",
+		"edits": `[{"find":"alpha","replace":"A"},{"find":"gamma","replace":"G"}]`})
+	if r.IsError {
+		t.Fatalf("multi-edit: %s", r.Content)
+	}
+	if data, _ := os.ReadFile(filepath.Join(dir, "f.txt")); string(data) != "A beta G" {
+		t.Errorf("multi-edit result = %q, want 'A beta G'", data)
+	}
+}
+
+func TestFileEditReplaceAll(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+	tl.Call(ctx, "write", map[string]any{"path": "f.txt", "content": "x x x"})
+	tl.Call(ctx, "edit", map[string]any{"path": "f.txt", "find": "x", "replace": "y", "replace_all": true})
+	if data, _ := os.ReadFile(filepath.Join(dir, "f.txt")); string(data) != "y y y" {
+		t.Errorf("replace_all = %q, want 'y y y'", data)
+	}
+}
+
 func TestFileOverwriteSetsDiff(t *testing.T) {
 	dir := t.TempDir()
 	tl := fileToolFor(t, dir, "allow", yes())

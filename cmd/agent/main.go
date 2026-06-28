@@ -533,7 +533,7 @@ func (a *app) subagentTargetsPrompt() string {
 	}
 	return "\n\n## Sub-agents you can delegate to (the agent tool)\n" +
 		"Profiles (call agent with profile=<name>): " + strings.Join(parts, ", ") + "\n" +
-		"ALWAYS pass dir=<the specific project's directory> (the repo root) — without it a sub-agent inherits this session's workspace, which may be a home dir. Fan a task out across several profiles in one turn — they run in parallel — then merge their findings into one answer."
+		"ALWAYS pass dir=<the specific project's directory> (the repo root) — without it a sub-agent inherits this session's workspace, which may be a home dir. Fan a task out across several profiles in one turn — they run in parallel — then merge their findings. To keep your own context lean, delegate a big exploration to a sub-agent and take back just its summary."
 }
 
 // agentsCommand manages sub-agent profiles: list, add (listing the provider's

@@ -29,6 +29,11 @@ session for one of the user's configured profiles. Use it deliberately:
    flagged X at file:line; claude flagged Y; both agree on Z". Don't just paste
    each sub-agent's reply back.
 
+Keep your OWN context lean: instead of reading dozens of files into this
+conversation, delegate a big exploration to a sub-agent and have it return a short
+summary ("map the auth flow in <dir>, list the files and what each does"). You pay
+its context, not yours — then act on the summary.
+
 Notes: a sub-agent reads and writes files and uses git, but only runs shell
 commands if the user enabled it (/agents exec on). Each spawn asks for approval
 unless the user relaxed it (/permissions agents on). For a review with no edits,

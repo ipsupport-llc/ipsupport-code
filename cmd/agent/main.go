@@ -1726,8 +1726,10 @@ func (a *app) runOne(ctx context.Context, goal string) {
 	} else {
 		fmt.Println("(no final answer — step budget exhausted)")
 	}
-	if learned := a.reflectAndStore(ctx, tr); learned > 0 {
-		fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
+	if !tr.Cancelled {
+		if learned := a.reflectAndStore(ctx, tr); learned > 0 {
+			fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
+		}
 	}
 	a.recordUsage()
 	a.saveSession()
@@ -1749,9 +1751,11 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string) {
 		return
 	}
 	a.recordRun(tr)
-	a.reflectAndStore(ctx, tr)
+	if !tr.Cancelled { // don't reflect on a run the user interrupted
+		a.reflectAndStore(ctx, tr)
+	}
 	a.recordUsage()
-	a.saveSession()
+	a.saveSession() // persist the partial work so a follow-up can continue
 }
 
 func (a *app) repl(ctx context.Context) {

@@ -20,9 +20,10 @@ import (
 
 // Transcript is the full record of one task run.
 type Transcript struct {
-	Messages []llm.Message
-	Final    string
-	Steps    int
+	Messages  []llm.Message
+	Final     string
+	Steps     int
+	Cancelled bool // the user cancelled (esc) mid-run; partial work is kept
 }
 
 // Agent holds the wiring for a run. The knowledge base and tracer may be nil.
@@ -118,6 +119,27 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 
 // remember appends the goal and its final answer to the session, trimming to the
 // most recent maxHistory messages.
+// cancelledSummary notes what the run did before the user cancelled, so the next
+// turn (e.g. "continue") has context — the edits/output are already on disk/screen.
+func cancelledSummary(msgs []llm.Message) string {
+	var did []string
+	for _, m := range msgs {
+		if m.Role == "assistant" {
+			for _, tc := range m.ToolCalls {
+				did = append(did, tc.Name)
+			}
+		}
+	}
+	if len(did) == 0 {
+		return "(cancelled — nothing was done yet.)"
+	}
+	if len(did) > 8 {
+		did = did[len(did)-8:]
+	}
+	return "(cancelled by you mid-task. Work so far used: " + strings.Join(did, ", ") +
+		". Those changes/outputs are kept — say 'continue' or what to do next.)"
+}
+
 func (a *Agent) remember(goal, final string) {
 	a.history = append(a.history, llm.User(goal), llm.Message{Role: "assistant", Content: final})
 	if a.maxHistory > 0 && len(a.history) > a.maxHistory {
@@ -182,6 +204,18 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		assistant, err := a.llm.Chat(ctx, msgs, tools)
 		if err != nil {
 			tr.Messages = msgs
+			// The user cancelled (esc): don't throw away the work. Keep the partial
+			// transcript, remember what was done so a follow-up can continue, and end
+			// cleanly (not as an error).
+			if ctx.Err() != nil {
+				tr.Cancelled = true
+				tr.Final = cancelledSummary(msgs)
+				a.emit("final", map[string]any{"text": tr.Final})
+				if acted {
+					a.remember(goal, tr.Final)
+				}
+				return tr, nil
+			}
 			return tr, fmt.Errorf("llm chat (step %d): %w", step+1, err)
 		}
 		// At IPS_LOG=debug this shows exactly what the model returned each turn —

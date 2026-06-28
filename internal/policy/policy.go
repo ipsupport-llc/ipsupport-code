@@ -47,6 +47,7 @@ type Engine struct {
 	deny       []*regexp.Regexp // unanchored
 	workspace  string           // absolute
 	jailRoot   string           // absolute, symlink-resolved; "" disables the jail
+	workdir    string           // absolute base for relative paths (set by /cd); within the jail
 }
 
 // New builds an Engine from a Config, resolving the jail root (relative to the
@@ -70,7 +71,34 @@ func New(c config.Config) (*Engine, error) {
 		}
 		e.jailRoot = jail
 	}
+	e.workdir = e.base() // default the relative-path base to the jail root / workspace
 	return e, nil
+}
+
+// base is where relative paths resolve from: the session workdir (set by /cd) if
+// any, otherwise the jail root, otherwise the workspace.
+func (e *Engine) base() string {
+	if e.workdir != "" {
+		return e.workdir
+	}
+	if e.jailRoot != "" {
+		return e.jailRoot
+	}
+	return e.workspace
+}
+
+// Workdir reports the current relative-path base.
+func (e *Engine) Workdir() string { return e.base() }
+
+// SetWorkdir points relative paths at dir (must resolve inside the jail). dir may
+// be absolute or relative to the current base; ~ should be expanded by the caller.
+func (e *Engine) SetWorkdir(dir string) (string, error) {
+	abs, err := e.Resolve(dir) // resolves + enforces the jail
+	if err != nil {
+		return "", err
+	}
+	e.workdir = abs
+	return abs, nil
 }
 
 // shellOps splits a command on the operators that chain one command into the
@@ -179,11 +207,7 @@ func (e *Engine) Read(path string) error {
 func (e *Engine) Resolve(path string) (string, error) {
 	abs := expandTilde(path)
 	if !filepath.IsAbs(abs) {
-		base := e.jailRoot
-		if base == "" {
-			base = e.workspace
-		}
-		abs = filepath.Join(base, abs)
+		abs = filepath.Join(e.base(), abs)
 	}
 	abs = resolveSymlinks(filepath.Clean(abs))
 

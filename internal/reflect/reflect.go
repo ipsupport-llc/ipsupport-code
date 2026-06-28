@@ -23,8 +23,13 @@ type ReflectionError struct{ Err error }
 func (e *ReflectionError) Error() string { return "reflection: " + e.Err.Error() }
 func (e *ReflectionError) Unwrap() error { return e.Err }
 
-// Reflector distills lessons from a transcript using a Chatter.
-type Reflector struct{ LLM llm.Chatter }
+// Reflector distills lessons from a transcript using a Chatter. Lite uses a
+// simpler, facts-only prompt — for a small local model that loops on the full
+// two-part ask.
+type Reflector struct {
+	LLM  llm.Chatter
+	Lite bool
+}
 
 // New constructs a Reflector.
 func New(l llm.Chatter) *Reflector { return &Reflector{LLM: l} }
@@ -46,6 +51,10 @@ const reflectPrompt = `You review a finished run by a tool-using agent and extra
 
 Use [] for an empty list. Return ONLY the JSON object.`
 
+// reflectPromptLite is the small-model variant: facts only (the more useful
+// half), terse, to avoid the looping a weak model does on the full two-part ask.
+const reflectPromptLite = `From the finished agent run below, list a few short, durable facts about THIS project worth remembering next time — build/test/run commands, where files live, conventions. Reply with ONLY this JSON, nothing else: {"facts": ["...", "..."]}. Use {"facts": []} if there's nothing solid. Do not explain.`
+
 // Reflect distills lessons from t. A turn with no tool use (a plain chat) has
 // nothing to learn, so it skips the model call — no point making a small model
 // reason over an empty run.
@@ -57,8 +66,12 @@ func (r *Reflector) Reflect(ctx context.Context, t agent.Transcript) (Lessons, e
 	if strings.TrimSpace(summary) == "" {
 		return Lessons{}, nil
 	}
+	prompt := reflectPrompt
+	if r.Lite {
+		prompt = reflectPromptLite
+	}
 	reply, err := r.LLM.Chat(ctx, []llm.Message{
-		llm.System(reflectPrompt),
+		llm.System(prompt),
 		llm.User(summary),
 	}, nil)
 	if err != nil {

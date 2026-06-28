@@ -98,6 +98,35 @@ func TestReflectNoJSONIsEmpty(t *testing.T) {
 	}
 }
 
+type promptCapture struct{ system string }
+
+func (p *promptCapture) Chat(_ context.Context, msgs []llm.Message, _ []map[string]any) (llm.Message, error) {
+	for _, m := range msgs {
+		if m.Role == "system" {
+			p.system = m.Content
+		}
+	}
+	return llm.Message{Role: "assistant", Content: `{"facts":["x"]}`}, nil
+}
+
+func TestReflectLiteUsesFactsOnlyPrompt(t *testing.T) {
+	full, lite := &promptCapture{}, &promptCapture{}
+	New(full).Reflect(context.Background(), sampleTranscript())
+	r := New(lite)
+	r.Lite = true
+	r.Reflect(context.Background(), sampleTranscript())
+
+	if !strings.Contains(full.system, "pitfalls") {
+		t.Error("the full prompt should ask for pitfalls")
+	}
+	if strings.Contains(lite.system, "pitfalls") {
+		t.Error("the lite prompt must NOT ask for pitfalls (facts only)")
+	}
+	if !strings.Contains(lite.system, "facts") {
+		t.Error("the lite prompt should ask for facts")
+	}
+}
+
 type recordingLLM struct{ called bool }
 
 func (r *recordingLLM) Chat(_ context.Context, _ []llm.Message, _ []map[string]any) (llm.Message, error) {

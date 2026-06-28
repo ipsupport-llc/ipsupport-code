@@ -400,6 +400,8 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.push(m.renderEvent(e)...)
 		case e.kind == "subagent_done": // finished — close the line, log the outcome
 			m.push(m.subDone(e)...)
+		case e.kind == "reflecting": // task is done; now distilling lessons
+			m.busyMsg = "✓ task done — distilling lessons (learning)"
 		case e.fields["agent"] != nil: // a sub-agent's own step — update its line only
 			m.subUpdate(e)
 		default:
@@ -823,6 +825,9 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/reflect":
 		m.pushLines(m.app.reflectCommand(rest))
+		return m, nil
+	case "/reasoning":
+		m.pushLines(m.app.reasoningCommand(rest))
 		return m, nil
 	case "/ai":
 		m.pushLines(m.app.aiCommand(rest))
@@ -1357,7 +1362,8 @@ var commandList = []cmdInfo{
 	{"/cd", "set the working dir (relative paths + sub-agents resolve there)"},
 	{"/knowledge", "learned-lessons store: report · clear · purge <days> · retain <days>"},
 	{"/mcp", "list configured MCP servers and their tools"},
-	{"/reflect", "on|off — post-task lesson distillation (off if a small model loops there)"},
+	{"/reflect", "on|off|<profile> — post-task learning; run it on a stronger model"},
+	{"/reasoning", "off|minimal|low|medium|high — trim a thinking model's reasoning"},
 	{"/shell", "drop to a shell in the workspace (exit to return)"},
 	{"/skills", "list/toggle/install on-demand instruction packs"},
 	{"/permissions", "relax approval for file / shell / sub-agent-spawn actions"},
@@ -1457,8 +1463,12 @@ func (m *tuiModel) argCandidates(name string) []string {
 		// ones (built-in or custom) with a key. Suggesting a keyless provider is a
 		// dead end — /ai would just reject it.
 		return m.app.configuredProviderNames()
-	case "/offline", "/reflect":
+	case "/offline":
 		return []string{"on", "off"}
+	case "/reflect":
+		return append([]string{"on", "off", "self"}, agentProfileNames(m.app.cfg)...)
+	case "/reasoning":
+		return []string{"off", "minimal", "low", "medium", "high", "reflect"}
 	case "/knowledge", "/kb":
 		return []string{"clear", "purge", "retain"}
 	case "/usage":

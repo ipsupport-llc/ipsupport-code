@@ -248,6 +248,29 @@ discover, `schema` to see a tool's inputs, `call` to run one. Servers connect
 lazily on first use; **every `mcp call` asks for approval** (it's external code).
 Sub-agents don't get MCP.
 
+## When a local model misbehaves
+
+Small/“thinking” local models can loop in their own reasoning or over-think. The
+levers, in order:
+
+- **`/reasoning low`** (or `minimal`/`off`) — trims the model's reasoning. There's
+  no universal API for this, so it's **per-model** and stored in its provider's own
+  shape (`reasoning_effort` for OpenAI, `reasoning:{effort}` for OpenRouter,
+  `chat_template_kwargs:{enable_thinking}` for Qwen/LM Studio). `/reasoning low` on
+  the current model writes the right shape for known providers; for others set it
+  raw in `config.json` under `reasoning` (keyed by `<provider>` or
+  `<provider>/<model>`).
+- **A runaway turn is auto-stopped.** A single turn generating far past the context
+  window (looping) aborts with a clear message instead of streaming for minutes.
+  Press **esc** to cancel anything sooner.
+- **`/reflect off`** — skip the post-task learning pass if it's where a weak model
+  loops (the status shows *“task done — distilling lessons”* so you can tell the
+  task itself already finished). Or **`/reflect <profile>`** to run learning on a
+  stronger model, and **`/reasoning reflect low`** to give the learning pass its
+  own (leaner) reasoning setting.
+- **`/skills on plan`** — for long multi-step work, the model keeps a checklist so
+  it resumes instead of drifting.
+
 ## Context & auto-compact
 
 The status bar shows `ctx 4.1k/8k` — the size of the last prompt vs. the model's

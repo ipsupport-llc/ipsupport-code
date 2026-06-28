@@ -271,6 +271,16 @@ levers, in order:
 - **`/skills on plan`** — for long multi-step work, the model keeps a checklist so
   it resumes instead of drifting.
 
+## Rewind
+
+`/rewind` opens a list of the session's steps — pick one (↑↓, enter) to roll back
+to **before** it ran: every file that step (or its sub-agents) changed is restored
+to its prior content, files it created are removed, and the conversation is trimmed
+back. Checkpoints are taken at the start of each turn, so you can rewind no matter
+how a turn ended (finished, esc, a loop, an error). Shell commands, git, and
+network calls **can't** be undone — only files and the chat. (REPL: `/rewind`
+lists, `/rewind <n>` applies.) Snapshots live for the session.
+
 ## Context & auto-compact
 
 The status bar shows `ctx 4.1k/8k` — the size of the last prompt vs. the model's

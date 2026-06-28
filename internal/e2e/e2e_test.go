@@ -140,7 +140,7 @@ func buildStack(t *testing.T, url, ws string, kb *knowledge.KB) (*agent.Agent, *
 	ap := allowApprover{}
 	var reg *tool.Registry
 	reg = tool.NewRegistry(
-		tool.NewFile(pol, ap),
+		tool.NewFile(pol, ap, nil),
 		tool.NewRun(pol, ap, 0),
 		tool.NewGit(pol, ap),
 		tool.NewWeb(http.DefaultClient, false),

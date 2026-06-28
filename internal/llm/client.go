@@ -69,6 +69,12 @@ type OpenAIClient struct {
 	// forever. Set once at construction; tests shorten it before use.
 	idle time.Duration
 
+	// maxRespTk caps the tokens one turn may generate before we abort it. A turn
+	// producing far more than the context window has stopped making progress —
+	// usually a reasoning model looping in its own monologue — and would otherwise
+	// stream for many minutes. Derived from the context window at construction.
+	maxRespTk int
+
 	mu           sync.Mutex
 	promptTk     int
 	complTk      int
@@ -80,13 +86,25 @@ type OpenAIClient struct {
 // minutes; the idle watchdog in send() is what guards against a true hang.
 func NewOpenAIClient(c config.LLM) *OpenAIClient {
 	return &OpenAIClient{
-		baseURL: strings.TrimRight(c.BaseURL, "/"),
-		model:   c.Model,
-		apiKey:  c.APIKey,
-		temp:    c.Temperature,
-		hc:      &http.Client{},
-		idle:    90 * time.Second,
+		baseURL:   strings.TrimRight(c.BaseURL, "/"),
+		model:     c.Model,
+		apiKey:    c.APIKey,
+		temp:      c.Temperature,
+		hc:        &http.Client{},
+		idle:      90 * time.Second,
+		maxRespTk: maxResponseTokens(c.ContextWindow),
 	}
+}
+
+// maxResponseTokens is the per-turn generation cap: a generous 32k floor, or 4×
+// the context window when that's larger (big-context models may legitimately
+// write more). A turn beyond this is looping, not working.
+func maxResponseTokens(ctxWindow int) int {
+	cap := 32768
+	if n := 4 * ctxWindow; n > cap {
+		cap = n
+	}
+	return cap
 }
 
 // startIdleWatchdog cancels the request if neither the response nor any stream
@@ -255,11 +273,11 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bo
 		return Message{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, oneLine(string(data))), false
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		m, err := c.parseStream(resp.Body, tick)
+		m, err := c.parseStream(resp.Body, tick, c.maxRespTk)
 		if err != nil && stalled() {
 			return Message{}, fmt.Errorf("llm stream stalled (no data for %s)", c.idle), true
 		}
-		return m, err, false
+		return m, err, false // runaway / parse errors are not retriable
 	}
 	m, err := c.parseJSON(resp.Body) // server ignored stream (e.g. a test fake)
 	return m, err, false
@@ -274,7 +292,7 @@ func oneLine(s string) string {
 // the live completion-token counter as deltas arrive so the UI updates in real
 // time (LM Studio sends roughly one token per chunk). The final usage chunk
 // reconciles the estimate with the real count.
-func (c *OpenAIClient) parseStream(r io.Reader, tick func()) (Message, error) {
+func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	var content strings.Builder
@@ -283,6 +301,9 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func()) (Message, error) {
 	reqCompl := 0
 	for sc.Scan() {
 		tick() // data arrived — push the idle deadline back
+		if maxTk > 0 && reqCompl > maxTk {
+			return Message{}, fmt.Errorf("the model generated over %d tokens in one turn without finishing — it's looping in its own reasoning, not making progress. Try a stronger model, give it more context, or rephrase the task", maxTk)
+		}
 		line := strings.TrimSpace(sc.Text())
 		if !strings.HasPrefix(line, "data:") {
 			continue

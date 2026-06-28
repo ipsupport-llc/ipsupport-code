@@ -681,14 +681,27 @@ func (a *app) providerConn(provider string) (config.LLM, string) {
 	return rp, ""
 }
 
-// configuredProviderNames is local plus external providers that have a key.
+// configuredProviderNames is local plus every external provider with a key —
+// built-in templates and user-added custom providers alike.
 func (a *app) configuredProviderNames() []string {
 	out := []string{"local"}
-	for _, n := range config.KnownProviders() {
+	seen := map[string]bool{"local": true}
+	add := func(n string) {
+		if seen[n] {
+			return
+		}
 		if l, ok := config.ResolveProvider(a.cfg, n); ok && l.APIKey != "" {
 			out = append(out, n)
+			seen[n] = true
 		}
 	}
+	for _, n := range config.KnownProviders() {
+		add(n)
+	}
+	for n := range a.cfg.Providers { // custom providers added with /ai add
+		add(n)
+	}
+	sort.Strings(out[1:]) // local stays first
 	return out
 }
 
@@ -1528,11 +1541,47 @@ func (a *app) aiCommand(rest string) []string {
 		return a.providerList()
 	}
 	sub, arg := splitCommand(rest)
-	if sub == "key" {
+	switch sub {
+	case "key":
 		name, tok := splitCommand(arg)
 		return a.setProviderKey(name, tok)
+	case "add":
+		return a.addProvider(arg)
 	}
 	return a.setProvider(sub)
+}
+
+// addProvider registers a custom OpenAI-compatible provider (any base URL), so
+// you're not limited to the built-in templates: /ai add <name> <base_url> [model],
+// then /ai key <name> <token>, then /ai <name>.
+func (a *app) addProvider(arg string) []string {
+	f := strings.Fields(arg)
+	if len(f) < 2 {
+		return []string{"usage: /ai add <name> <base_url> [model]", "  e.g. /ai add mylab http://localhost:8080/v1 llama-3.1-8b"}
+	}
+	name, url := f[0], f[1]
+	if name == "local" {
+		return []string{`"local" is reserved — it's your LM Studio endpoint (/config to change it)`}
+	}
+	if _, ok := config.ProviderTemplates[name]; ok {
+		return []string{fmt.Sprintf("%q is a built-in provider — just /ai key %s <token>", name, name)}
+	}
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+		return []string{"base_url must start with http:// or https://"}
+	}
+	if a.cfg.Providers == nil {
+		a.cfg.Providers = map[string]config.LLM{}
+	}
+	p := a.cfg.Providers[name]
+	p.BaseURL = strings.TrimRight(url, "/")
+	if len(f) >= 3 {
+		p.Model = f[2]
+	}
+	a.cfg.Providers[name] = p
+	if err := config.SaveProviders(a.cfg.Provider, a.cfg.Providers); err != nil {
+		return []string{"error: " + err.Error()}
+	}
+	return []string{fmt.Sprintf("added %q → %s — next: /ai key %s <token>, then /ai %s", name, p.BaseURL, name, name)}
 }
 
 func (a *app) providerList() []string {
@@ -1545,15 +1594,29 @@ func (a *app) providerList() []string {
 		out = append(out, fmt.Sprintf("  %s%-11s %s  %s", mark, name, base, note))
 	}
 	row("local", a.cfg.LLM.BaseURL, "(LM Studio)")
-	for _, n := range config.KnownProviders() {
+	seen := map[string]bool{}
+	names := append([]string{}, config.KnownProviders()...)
+	for _, n := range names {
+		seen[n] = true
+	}
+	for n := range a.cfg.Providers { // custom providers (added via /ai add)
+		if !seen[n] {
+			names = append(names, n)
+		}
+	}
+	sort.Strings(names)
+	for _, n := range names {
 		l, _ := config.ResolveProvider(a.cfg, n)
 		note := "no key"
 		if l.APIKey != "" {
 			note = "key set"
 		}
+		if _, tmpl := config.ProviderTemplates[n]; !tmpl {
+			note += " · custom"
+		}
 		row(n, l.BaseURL, note)
 	}
-	return append(out, "  /ai <name> switch · /ai key <name> <token> · /model pick model")
+	return append(out, "  /ai <name> switch · /ai add <name> <url> · /ai key <name> <token>")
 }
 
 func (a *app) setProvider(name string) []string {
@@ -1580,8 +1643,10 @@ func (a *app) setProvider(name string) []string {
 }
 
 func (a *app) setProviderKey(name, token string) []string {
-	if _, ok := config.ProviderTemplates[name]; !ok {
-		return []string{fmt.Sprintf("unknown provider %q — keys are for: %s", name, strings.Join(config.KnownProviders(), ", "))}
+	_, isTmpl := config.ProviderTemplates[name]
+	_, isCustom := a.cfg.Providers[name]
+	if !isTmpl && !isCustom {
+		return []string{fmt.Sprintf("unknown provider %q — add it first: /ai add %s <base_url>  (built-ins: %s)", name, name, strings.Join(config.KnownProviders(), ", "))}
 	}
 	if strings.TrimSpace(token) == "" {
 		return []string{"usage: /ai key " + name + " <token>"}
@@ -2014,7 +2079,7 @@ func helpText() string {
   /clear           wipe this session's context (same session)
   /compact         summarize the session so far to free up context
   /plan, /auto     plan mode (propose only) vs auto mode (execute)
-  /ai [name]       switch AI provider (local|openai|grok|groq|openrouter); /ai key <name> <tok>
+  /ai [name]       switch AI provider; /ai key <name> <tok>; /ai add <name> <url> [model] (custom)
   /model [name]    list the provider's models, or pick one
   /config          control panel: all settings + how to change them
   /update [chan]   self-update from GitHub (chan = stable|nightly, saved)

@@ -529,6 +529,39 @@ func TestStuckNudgeRecovers(t *testing.T) {
 	}
 }
 
+type cancelLLM struct {
+	calls  int
+	cancel context.CancelFunc
+}
+
+func (c *cancelLLM) Chat(ctx context.Context, _ []llm.Message, _ []map[string]any) (llm.Message, error) {
+	c.calls++
+	if c.calls == 1 {
+		c.cancel() // simulate the user pressing esc after the first action
+		return toolCallReply("c", "calc", `{"action":"calculate","params":{"expression":"1+1"}}`), nil
+	}
+	return llm.Message{}, ctx.Err()
+}
+
+// Cancelling (esc) mid-run keeps the partial work: the run ends cleanly (no error),
+// is marked Cancelled, and is remembered so a follow-up can continue.
+func TestRunCancelKeepsProgress(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	ctx, cancel := context.WithCancel(context.Background())
+	a := New(&cancelLLM{cancel: cancel}, reg, nil, nil, "", 10)
+
+	tr, err := a.Run(ctx, "do the thing")
+	if err != nil {
+		t.Fatalf("a cancel should end cleanly, got error: %v", err)
+	}
+	if !tr.Cancelled {
+		t.Error("transcript should be marked Cancelled")
+	}
+	if a.SessionLen() == 0 {
+		t.Error("a cancelled run with work done should be remembered so it can continue")
+	}
+}
+
 // Progress between failure streaks earns a fresh nudge: a successful tool call
 // clears the "already nudged" latch, so a couple of stumbles after good work don't
 // insta-stop the run (the reported bug — a success didn't reset the error state).

@@ -28,7 +28,7 @@ func fileToolFor(t *testing.T, dir, def string, ap Approver) Tool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewFile(e, ap)
+	return NewFile(e, ap, nil)
 }
 
 func TestFileWriteThenRead(t *testing.T) {

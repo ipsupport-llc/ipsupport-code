@@ -21,15 +21,20 @@ import (
 
 const maxReadBytes = 200_000
 
+// Snapshotter is called with the absolute path of a file about to be modified,
+// BEFORE the change, so a checkpoint can capture its prior content (for /rewind).
+type Snapshotter func(absPath string)
+
 type fileTool struct {
-	pol *policy.Engine
-	ap  Approver
+	pol  *policy.Engine
+	ap   Approver
+	snap Snapshotter
 }
 
 // NewFile returns the file tool, gated by the policy engine and (for "ask"
-// decisions) the approver.
-func NewFile(p *policy.Engine, ap Approver) Tool {
-	f := &fileTool{pol: p, ap: ap}
+// decisions) the approver. snap (may be nil) is notified before each file change.
+func NewFile(p *policy.Engine, ap Approver, snap Snapshotter) Tool {
+	f := &fileTool{pol: p, ap: ap, snap: snap}
 	return NewDomain(DomainSpec{
 		Name:    "file",
 		Summary: "Read/write/append/edit/list/find/search files in the workspace (relative paths, jailed).",
@@ -183,6 +188,7 @@ func (f *fileTool) writeFile(action string, a Args, appendMode bool) Result {
 	if err != nil {
 		return Err(err.Error())
 	}
+	f.snapshot(abs) // checkpoint the prior content before we change it
 	var old string
 	if !appendMode {
 		if data, e := os.ReadFile(abs); e == nil {
@@ -256,6 +262,7 @@ func (f *fileTool) edit(_ context.Context, a Args) Result {
 	if err != nil {
 		return Err(err.Error())
 	}
+	f.snapshot(abs) // checkpoint the prior content before we change it
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		return Err("cannot read " + path + ": " + err.Error())
@@ -342,6 +349,12 @@ func (f *fileTool) find(_ context.Context, a Args) Result {
 		out = append(out, fmt.Sprintf("… stopped at %d", maxFind))
 	}
 	return Ok(strings.Join(out, "\n"))
+}
+
+func (f *fileTool) snapshot(abs string) {
+	if f.snap != nil {
+		f.snap(abs)
+	}
 }
 
 // diffStat counts added and removed lines in a unified diff.

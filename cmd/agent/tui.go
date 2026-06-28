@@ -38,6 +38,7 @@ const (
 	stConfig        // interactive /config settings panel
 	stChooseSession // startup: pick a saved session to restore / start new / delete
 	stAgents        // interactive sub-agent profile manager (add/edit/delete)
+	stRewind        // pick a checkpoint to rewind to
 )
 
 // chromeFixed: status line + top rule + bottom rule + hint line + 1 margin. The
@@ -90,6 +91,9 @@ type tuiModel struct {
 	agModelsErr string
 	agFilter    string // type-to-filter over the model list
 	agLoading   bool
+
+	rewindRows   []rewindRow // checkpoints offered by the /rewind picker (stRewind)
+	rewindCursor int
 
 	// model-proposed, Tab-acceptable next-step suggestion (parsed from NEXT:)
 	suggestion string
@@ -594,6 +598,25 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case stAgents:
 		return m.agentsKey(k)
+	case stRewind:
+		switch k.String() {
+		case "up", "k":
+			if len(m.rewindRows) > 0 {
+				m.rewindCursor = (m.rewindCursor - 1 + len(m.rewindRows)) % len(m.rewindRows)
+			}
+		case "down", "j":
+			if len(m.rewindRows) > 0 {
+				m.rewindCursor = (m.rewindCursor + 1) % len(m.rewindRows)
+			}
+		case "enter", "right", "l":
+			if m.rewindCursor < len(m.rewindRows) {
+				m.pushLines(m.app.applyRewind(m.rewindRows[m.rewindCursor].idx))
+			}
+			m.state = stIdle
+		case "esc", "q":
+			m.state = stIdle
+		}
+		return m, nil
 
 	case stApprove:
 		// Answer the prompt, then (and only then) wait for the next queued
@@ -822,6 +845,9 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/mcp":
 		m.pushLines(strings.Split(m.app.mcpList(m.ctx), "\n"))
+		return m, nil
+	case "/rewind":
+		m.openRewind()
 		return m, nil
 	case "/reflect":
 		m.pushLines(m.app.reflectCommand(rest))
@@ -1090,6 +1116,8 @@ func (m *tuiModel) View() string {
 		status = cDim.Render("welcome back — pick up a session, or start fresh")
 	case m.state == stAgents:
 		status = cDim.Render("sub-agent profiles — models the assistant can delegate to")
+	case m.state == stRewind:
+		status = cDim.Render("rewind — ↑↓ pick a step, enter to return there, esc to cancel")
 	case m.state == stConfig:
 		status = cDim.Render("settings — changes apply and save as you make them")
 	case m.state == stApprove:
@@ -1142,6 +1170,8 @@ func (m *tuiModel) View() string {
 		bottom += cDim.Render("  · esc cancels")
 	case m.state == stAgents:
 		bottom = cDim.Render(m.agentsHint())
+	case m.state == stRewind:
+		bottom = cDim.Render("  ↑↓ move · enter rewind here · esc cancel")
 	}
 
 	content := m.vp.View()
@@ -1152,6 +1182,8 @@ func (m *tuiModel) View() string {
 		content = m.renderChooser()
 	case stAgents:
 		content = m.renderAgentsPanel()
+	case stRewind:
+		content = m.renderRewindPanel()
 	}
 	frame := lipgloss.NewStyle().Foreground(m.accent)
 	parts := []string{content}
@@ -1362,6 +1394,7 @@ var commandList = []cmdInfo{
 	{"/cd", "set the working dir (relative paths + sub-agents resolve there)"},
 	{"/knowledge", "learned-lessons store: report · clear · purge <days> · retain <days>"},
 	{"/mcp", "list configured MCP servers and their tools"},
+	{"/rewind", "pick a step to roll back to (restores files + trims the chat)"},
 	{"/reflect", "on|off|<profile> — post-task learning; run it on a stronger model"},
 	{"/reasoning", "off|minimal|low|medium|high — trim a thinking model's reasoning"},
 	{"/shell", "drop to a shell in the workspace (exit to return)"},
@@ -1586,6 +1619,30 @@ func (m *tuiModel) renderUsage() []string {
 }
 
 // renderEvent renders one streamed agent event into styled history lines.
+// openRewind enters the checkpoint picker (or says there's nothing to rewind).
+func (m *tuiModel) openRewind() {
+	m.rewindRows = m.app.rewindRows()
+	if len(m.rewindRows) == 0 {
+		m.push(cDim.Render("nothing to rewind — no turns yet this session"))
+		return
+	}
+	m.rewindCursor = 0
+	m.state = stRewind
+}
+
+// renderRewindPanel draws the boxed, navigable checkpoint list.
+func (m *tuiModel) renderRewindPanel() string {
+	accent := lipgloss.NewStyle().Foreground(m.accent)
+	lines := []string{accent.Bold(true).Render("rewind — pick a step to return to (before it ran)")}
+	for i, r := range m.rewindRows {
+		label := fmt.Sprintf("%-46s %d file(s)", oneLine(r.goal, 46), r.files)
+		lines = append(lines, agRow(accent, label, i == m.rewindCursor))
+	}
+	lines = append(lines, "", cDim.Render("  restores files + trims the conversation; shell/git/network are NOT undone"))
+	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(m.accent).Padding(0, 1)
+	return box.Render(strings.Join(lines, "\n"))
+}
+
 // subStart opens a live status line for a freshly spawned sub-agent.
 func (m *tuiModel) subStart(e uiEvent) {
 	id, _ := e.fields["agent"].(string)

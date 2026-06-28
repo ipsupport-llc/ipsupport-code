@@ -212,14 +212,17 @@ type app struct {
 	spawnSeq        atomic.Int64   // unique id per sub-agent spawn (for grouping its UI events)
 	mcpMu           sync.Mutex     // guards the lazy MCP client cache
 	mcpClients      map[string]*mcp.Client
-	instrSrc        string   // project instructions file in effect, "" if none
-	promptSrc       string   // "built-in" or the system.md override path
-	facts           []string // durable project facts learned over time (per workspace)
-	planMode        bool     // plan (propose) vs auto (execute); survives re-wire
-	windowDetected  bool     // got the real loaded context window (vs a default/guess)
-	sessionRestored bool     // a saved session was restored at startup (TUI renders a recap)
-	tui             bool     // running the TUI (detect the context window off-thread, not inline)
-	startNew        bool     // -new: skip the startup chooser, begin a fresh session
+	ckptMu          sync.Mutex    // guards checkpoints / the in-progress one
+	checkpoints     []*checkpoint // per-turn file+history snapshots for /rewind (session lifetime)
+	curCkpt         *checkpoint   // the checkpoint being filled during the running turn
+	instrSrc        string        // project instructions file in effect, "" if none
+	promptSrc       string        // "built-in" or the system.md override path
+	facts           []string      // durable project facts learned over time (per workspace)
+	planMode        bool          // plan (propose) vs auto (execute); survives re-wire
+	windowDetected  bool          // got the real loaded context window (vs a default/guess)
+	sessionRestored bool          // a saved session was restored at startup (TUI renders a recap)
+	tui             bool          // running the TUI (detect the context window off-thread, not inline)
+	startNew        bool          // -new: skip the startup chooser, begin a fresh session
 
 	tasks, steps, toolCalls int
 	lastPrompt, lastCompl   int // client usage snapshot for per-task ledger deltas
@@ -485,7 +488,7 @@ func (a *app) resolveSpawnDir(dir string) (string, error) {
 // helper they don't need). The run (shell) tool is included only when spawn.exec
 // is on — the sharpest capability to hand an autonomous sub-agent.
 func (a *app) buildSubReg(pol *policy.Engine) *tool.Registry {
-	tools := []tool.Tool{tool.NewFile(pol, a.approver)}
+	tools := []tool.Tool{tool.NewFile(pol, a.approver, a.snapFile)}
 	if a.cfg.Spawn.Exec {
 		tools = append(tools, tool.NewRun(pol, a.approver, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second))
 	}
@@ -1127,7 +1130,7 @@ func (a *app) wire() error {
 	}
 	var reg *tool.Registry
 	tools := []tool.Tool{
-		tool.NewFile(pol, a.approver),
+		tool.NewFile(pol, a.approver, a.snapFile),
 		tool.NewRun(pol, a.approver, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second),
 		tool.NewGit(pol, a.approver),
 		tool.NewWeb(http.DefaultClient, a.cfg.Offline),
@@ -1714,6 +1717,8 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 
 // runOne is the plain (printing) path used in one-shot and piped modes.
 func (a *app) runOne(ctx context.Context, goal string) {
+	a.beginCheckpoint(goal)
+	defer a.endCheckpoint()
 	tr, err := a.ag.Run(ctx, goal)
 	if err != nil {
 		slog.Error("run failed", "err", err)
@@ -1745,6 +1750,8 @@ func (a *app) runOne(ctx context.Context, goal string) {
 // runTaskStreaming is the TUI path: no printing — progress reaches the screen via
 // the UI tracer. Errors surface as an "error" event.
 func (a *app) runTaskStreaming(ctx context.Context, goal string) {
+	a.beginCheckpoint(goal)
+	defer a.endCheckpoint()
 	tr, err := a.ag.Run(ctx, goal)
 	if err != nil {
 		a.emit("error", map[string]any{"text": err.Error()})
@@ -1867,6 +1874,10 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		}
 	case "/mcp":
 		fmt.Println(a.mcpList(ctx))
+	case "/rewind":
+		for _, l := range a.rewindCommand(rest) {
+			fmt.Println(l)
+		}
 	case "/reflect":
 		for _, l := range a.reflectCommand(rest) {
 			fmt.Println(l)
@@ -2503,6 +2514,7 @@ func helpText() string {
   /cd [dir]        set the working directory (relative paths + sub-agents use it)
   /knowledge       learned-lessons store: report · clear · purge <days> · retain <days>
   /mcp             list configured MCP servers and their tools (mcp_servers in config.json)
+  /rewind [n]      roll back to a previous step (restores files + trims the chat)
   /reflect [on|off|<profile>] post-task learning; run it on a stronger model
   /reasoning [off|low|…] trim a thinking model's reasoning (minimal|low|medium|high)
   /shell, /sh      drop to a shell in the workspace (exit to return)

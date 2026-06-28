@@ -544,6 +544,45 @@ func TestReflectDisabledIsNoop(t *testing.T) {
 	}
 }
 
+func TestRewindRestoresFiles(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.File = config.FilePolicy{Default: "allow", Jail: "."}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(ws, "a.txt")
+	newAbs := filepath.Join(ws, "b.txt")
+	os.WriteFile(abs, []byte("original"), 0o644)
+
+	a.beginCheckpoint("edit stuff")
+	a.snapFile(abs) // the file tool calls this before each change; mimic it here
+	os.WriteFile(abs, []byte("changed"), 0o644)
+	a.snapFile(newAbs)
+	os.WriteFile(newAbs, []byte("brand new"), 0o644)
+	a.endCheckpoint()
+
+	rows := a.rewindRows()
+	if len(rows) != 1 {
+		t.Fatalf("rewindRows = %d, want 1", len(rows))
+	}
+	a.applyRewind(rows[0].idx)
+
+	if d, _ := os.ReadFile(abs); string(d) != "original" {
+		t.Errorf("a.txt = %q, want restored to 'original'", d)
+	}
+	if _, err := os.Stat(newAbs); !os.IsNotExist(err) {
+		t.Error("a file created in the rewound turn should be removed")
+	}
+	if len(a.checkpoints) != 0 {
+		t.Errorf("checkpoints should be trimmed to before the target, got %d", len(a.checkpoints))
+	}
+}
+
 func TestCdCommand(t *testing.T) {
 	ws := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(ws, "proj", "sub"), 0o755); err != nil {

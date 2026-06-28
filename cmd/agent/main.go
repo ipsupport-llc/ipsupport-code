@@ -1726,7 +1726,7 @@ func (a *app) runOne(ctx context.Context, goal string) {
 	} else {
 		fmt.Println("(no final answer — step budget exhausted)")
 	}
-	if !tr.Cancelled {
+	if !tr.Stopped {
 		if learned := a.reflectAndStore(ctx, tr); learned > 0 {
 			fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
 		}
@@ -1751,7 +1751,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string) {
 		return
 	}
 	a.recordRun(tr)
-	if !tr.Cancelled { // don't reflect on a run the user interrupted
+	if !tr.Stopped { // reflect only on a clean finish, not on any premature stop
 		a.reflectAndStore(ctx, tr)
 	}
 	a.recordUsage()

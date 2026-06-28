@@ -23,7 +23,8 @@ type Transcript struct {
 	Messages  []llm.Message
 	Final     string
 	Steps     int
-	Cancelled bool // the user cancelled (esc) mid-run; partial work is kept
+	Cancelled bool // the user cancelled (esc) specifically
+	Stopped   bool // ended before a clean answer (cancel / runaway / stuck / maxSteps / mid-run error) → no reflection
 }
 
 // Agent holds the wiring for a run. The knowledge base and tracer may be nil.
@@ -119,9 +120,10 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 
 // remember appends the goal and its final answer to the session, trimming to the
 // most recent maxHistory messages.
-// cancelledSummary notes what the run did before the user cancelled, so the next
-// turn (e.g. "continue") has context — the edits/output are already on disk/screen.
-func cancelledSummary(msgs []llm.Message) string {
+// stopNote describes a run that stopped before a clean answer, so the next turn
+// ("continue") has context — the edits/output are already on disk/screen. Covers
+// the user's cancel and any mid-run failure (runaway cap, transport error).
+func stopNote(msgs []llm.Message, cancelled bool, err error) string {
 	var did []string
 	for _, m := range msgs {
 		if m.Role == "assistant" {
@@ -130,13 +132,17 @@ func cancelledSummary(msgs []llm.Message) string {
 			}
 		}
 	}
+	reason := "cancelled by you mid-task"
+	if !cancelled && err != nil {
+		reason = "stopped early — " + clip(err.Error(), 140)
+	}
 	if len(did) == 0 {
-		return "(cancelled — nothing was done yet.)"
+		return "(" + reason + ".)"
 	}
 	if len(did) > 8 {
 		did = did[len(did)-8:]
 	}
-	return "(cancelled by you mid-task. Work so far used: " + strings.Join(did, ", ") +
+	return "(" + reason + ". Work so far used: " + strings.Join(did, ", ") +
 		". Those changes/outputs are kept — say 'continue' or what to do next.)"
 }
 
@@ -204,12 +210,14 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		assistant, err := a.llm.Chat(ctx, msgs, tools)
 		if err != nil {
 			tr.Messages = msgs
-			// The user cancelled (esc): don't throw away the work. Keep the partial
-			// transcript, remember what was done so a follow-up can continue, and end
-			// cleanly (not as an error).
-			if ctx.Err() != nil {
-				tr.Cancelled = true
-				tr.Final = cancelledSummary(msgs)
+			cancelled := ctx.Err() != nil
+			// Any stop that leaves work behind — the user's esc, the runaway cap, a
+			// mid-run transport error — keeps the partial work and remembers it so a
+			// follow-up can continue, ending cleanly instead of throwing the chain
+			// away. Only a stop with nothing done yet surfaces as a hard error.
+			if cancelled || acted {
+				tr.Cancelled, tr.Stopped = cancelled, true
+				tr.Final = stopNote(msgs, cancelled, err)
 				a.emit("final", map[string]any{"text": tr.Final})
 				if acted {
 					a.remember(goal, tr.Final)
@@ -282,7 +290,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 					stuck, nudged = 0, true
 				} else {
 					const msg = "Stopped — it kept repeating the same tool calls without progress (or they kept failing) even after a nudge to rethink. Steer it (a different approach), or use a stronger model."
-					tr.Final = msg
+					tr.Final, tr.Stopped = msg, true
 					tr.Messages = msgs
 					a.emit("final", map[string]any{"text": msg, "suggest": stuckSuggest, "exhausted": true})
 					a.remember(goal, msg)
@@ -299,6 +307,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	}
 
 	tr.Messages = msgs
+	tr.Stopped = true // ran out of steps before a clean answer
 	clean, suggest := splitSuggestion(lastAssistantContent(msgs))
 	tr.Final = clean
 	a.emit("final", map[string]any{"text": clean, "suggest": suggest, "exhausted": true})

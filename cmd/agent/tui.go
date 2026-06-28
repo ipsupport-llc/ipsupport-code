@@ -1327,7 +1327,7 @@ var commandList = []cmdInfo{
 	{"/compact", "summarize the session so far to free up context"},
 	{"/plan", "plan mode — propose a plan, change nothing"},
 	{"/auto", "auto mode — execute the task (default)"},
-	{"/ai", "switch AI provider (local|openai|grok|…); /ai key <name> <tok>"},
+	{"/ai", "switch/add AI provider; /ai key <name> <tok>; /ai add <name> <url> (custom)"},
 	{"/model", "list the provider's models, or pick one"},
 	{"/config", "interactive settings panel (↑↓ move · enter change · esc close)"},
 	{"/update", "self-update from GitHub (stable|nightly)"},
@@ -1426,16 +1426,10 @@ func (m *tuiModel) applyCompletion(prefix, partial string, cands []string) {
 func (m *tuiModel) argCandidates(name string) []string {
 	switch name {
 	case "/ai":
-		// Only offer providers you can actually switch to: local plus the
-		// external ones with a key configured (preset or env). Suggesting a
-		// keyless provider is a dead end — /ai would just reject it.
-		cands := []string{"local"}
-		for _, n := range config.KnownProviders() {
-			if l, ok := config.ResolveProvider(m.app.cfg, n); ok && l.APIKey != "" {
-				cands = append(cands, n)
-			}
-		}
-		return cands
+		// Only offer providers you can actually switch to: local plus the external
+		// ones (built-in or custom) with a key. Suggesting a keyless provider is a
+		// dead end — /ai would just reject it.
+		return m.app.configuredProviderNames()
 	case "/usage":
 		return []string{"clear", "purge", "retain"}
 	case "/sessions":

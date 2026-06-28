@@ -534,6 +534,40 @@ func TestResolveProfileName(t *testing.T) {
 	}
 }
 
+func TestCustomProvider(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+
+	a.addProvider("mylab http://localhost:8080/v1 llama-3")
+	if a.cfg.Providers["mylab"].BaseURL != "http://localhost:8080/v1" {
+		t.Fatalf("custom provider not stored: %+v", a.cfg.Providers["mylab"])
+	}
+	// a key can be set for a custom provider (was rejected before)
+	if out := strings.Join(a.setProviderKey("mylab", "sk-x"), " "); !strings.Contains(out, "saved") {
+		t.Errorf("setProviderKey(custom) = %q, want saved", out)
+	}
+	if l, ok := config.ResolveProvider(a.cfg, "mylab"); !ok || l.APIKey != "sk-x" || l.Model != "llama-3" {
+		t.Errorf("ResolveProvider(mylab) = %+v,%v", l, ok)
+	}
+	found := false
+	for _, n := range a.configuredProviderNames() {
+		if n == "mylab" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("custom provider missing from configuredProviderNames: %v", a.configuredProviderNames())
+	}
+	// a name that was never added is still rejected, with the add hint
+	if out := strings.Join(a.setProviderKey("ghost", "x"), " "); !strings.Contains(out, "/ai add") {
+		t.Errorf("unknown provider key = %q, want the add hint", out)
+	}
+}
+
 func TestCtrlUClearsInput(t *testing.T) {
 	m := &tuiModel{input: textarea.New()}
 	m.input.SetValue("oops, pasted clipboard garbage")

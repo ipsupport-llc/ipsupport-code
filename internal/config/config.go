@@ -90,6 +90,9 @@ type Config struct {
 	// UsageRetentionDays auto-drops usage-ledger entries older than N days on
 	// startup. 0 keeps history forever.
 	UsageRetentionDays int `json:"usage_retention_days,omitempty"`
+	// KnowledgeRetentionDays auto-drops learned lessons last seen over N days ago
+	// on startup. 0 keeps them forever.
+	KnowledgeRetentionDays int `json:"knowledge_retention_days,omitempty"`
 	// Prices overrides the built-in per-model price estimates for /usage cost:
 	// model-id substring → [input, output] USD per 1M tokens.
 	Prices map[string][2]float64 `json:"prices,omitempty"`
@@ -317,6 +320,11 @@ func SaveSpawn(s SpawnPolicy) error { return mergeGlobalKeys(map[string]any{"spa
 
 // SaveOffline persists the offline-mode flag globally.
 func SaveOffline(off bool) error { return mergeGlobalKeys(map[string]any{"offline": off}) }
+
+// SaveKnowledgeRetention persists the lesson-retention window (days) globally.
+func SaveKnowledgeRetention(days int) error {
+	return mergeGlobalKeys(map[string]any{"knowledge_retention_days": days})
+}
 
 // SaveAgents persists the sub-agent profile map globally.
 func SaveAgents(agents map[string]AgentProfile) error {

@@ -3,7 +3,27 @@ package knowledge
 import (
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestPurgeByAgeAndRecurrence(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	kb := &KB{now: func() time.Time { return base }}
+	kb.Add(Pitfall{Domain: "file", ErrorPattern: "old", ProvenFix: "x"})
+
+	kb.now = func() time.Time { return base.AddDate(0, 0, 100) } // 100 days later
+	kb.Add(Pitfall{Domain: "file", ErrorPattern: "new", ProvenFix: "y"})
+
+	// purge lessons last seen >30 days ago: "old" (day 0) goes, "new" (day 100) stays
+	if n := kb.Purge(30); n != 1 || kb.Count() != 1 {
+		t.Errorf("Purge(30) dropped %d, count %d; want 1 dropped, 1 kept", n, kb.Count())
+	}
+	// a recurrence bumps LastSeen, keeping the lesson fresh
+	kb.Add(Pitfall{Domain: "file", ErrorPattern: "new", ProvenFix: "y"}) // dup → bump
+	if n := kb.Purge(1); n != 0 {
+		t.Errorf("a just-seen lesson should survive Purge(1), dropped %d", n)
+	}
+}
 
 func TestAddDedupe(t *testing.T) {
 	kb := &KB{}

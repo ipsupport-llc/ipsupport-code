@@ -9,8 +9,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 )
+
+const dateFmt = "2006-01-02"
 
 // KnowledgeError wraps a host-level failure of the knowledge store (read, parse,
 // or write). Model-recoverable conditions never surface as this type.
@@ -29,11 +32,12 @@ func (e *KnowledgeError) Unwrap() error { return e.Err }
 type KB struct {
 	path     string
 	pitfalls []Pitfall
+	now      func() time.Time // overridable clock for tests
 }
 
 // Open loads the store at path. A missing file is an empty store, not an error.
 func Open(path string) (*KB, error) {
-	kb := &KB{path: path}
+	kb := &KB{path: path, now: time.Now}
 	data, err := os.ReadFile(path)
 	switch {
 	case err == nil:
@@ -45,17 +49,37 @@ func Open(path string) (*KB, error) {
 	default:
 		return kb, &KnowledgeError{Op: "read", Path: path, Err: err}
 	}
+	// Back-fill timestamps on pre-dated entries so age-based pruning has a baseline
+	// (they start aging from now). Persisted on the next Save.
+	today := kb.today()
+	for i := range kb.pitfalls {
+		if kb.pitfalls[i].LastSeen == "" {
+			kb.pitfalls[i].LastSeen = today
+		}
+		if kb.pitfalls[i].Added == "" {
+			kb.pitfalls[i].Added = today
+		}
+	}
 	return kb, nil
+}
+
+func (k *KB) today() string {
+	if k.now == nil {
+		k.now = time.Now
+	}
+	return k.now().Format(dateFmt)
 }
 
 // Add inserts a pitfall, de-duplicating on (domain, normalized error pattern).
 // A duplicate bumps Hits and back-fills any empty fields; returns true only when
 // a genuinely new lesson was stored.
 func (k *KB) Add(p Pitfall) bool {
+	today := k.today()
 	key := dedupeKey(p)
 	for i := range k.pitfalls {
 		if dedupeKey(k.pitfalls[i]) == key {
 			k.pitfalls[i].Hits++
+			k.pitfalls[i].LastSeen = today // recurred → keep it fresh
 			if k.pitfalls[i].ProvenFix == "" {
 				k.pitfalls[i].ProvenFix = p.ProvenFix
 			}
@@ -68,9 +92,42 @@ func (k *KB) Add(p Pitfall) bool {
 	if p.Hits == 0 {
 		p.Hits = 1
 	}
+	p.Added, p.LastSeen = today, today
 	k.pitfalls = append(k.pitfalls, p)
 	return true
 }
+
+// Purge drops lessons last seen more than maxAgeDays ago (by LastSeen), returning
+// how many were removed. maxAgeDays <= 0 is a no-op. Undated entries are kept
+// (Open back-fills them, so they age from first load).
+func (k *KB) Purge(maxAgeDays int) int {
+	if maxAgeDays <= 0 {
+		return 0
+	}
+	cutoff := k.now().AddDate(0, 0, -maxAgeDays)
+	kept := k.pitfalls[:0]
+	dropped := 0
+	for _, p := range k.pitfalls {
+		t, err := time.Parse(dateFmt, p.LastSeen)
+		if err == nil && t.Before(cutoff) {
+			dropped++
+			continue
+		}
+		kept = append(kept, p)
+	}
+	k.pitfalls = kept
+	return dropped
+}
+
+// Clear removes every lesson, returning how many were dropped.
+func (k *KB) Clear() int {
+	n := len(k.pitfalls)
+	k.pitfalls = nil
+	return n
+}
+
+// Count reports how many lessons are stored.
+func (k *KB) Count() int { return len(k.pitfalls) }
 
 // Query returns pitfalls for a domain. With a non-empty errText it keeps only
 // keyword-overlapping lessons, ranked by overlap then Hits. With an empty

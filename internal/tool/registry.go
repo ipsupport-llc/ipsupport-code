@@ -71,8 +71,10 @@ func (r *Registry) Dispatch(ctx context.Context, name, action string, params map
 		if len(acts) == 0 {
 			return Err(name + ": this tool has no actions")
 		}
-		return Err(fmt.Sprintf(`%s: no action given. Call it like {"action":%q,"params":{...}} — actions: %s`,
-			name, acts[0], strings.Join(acts, ", ")))
+		// Lead with the full action list (so a model that meant "edit" isn't nudged
+		// toward the first action), then a shape example.
+		return Err(fmt.Sprintf(`%s: no action given — set "action" to one of: %s. Shape: {"action":"<one of those>","params":{...}}`,
+			name, strings.Join(acts, ", ")))
 	}
 	if !contains(t.Actions(), action) {
 		if owners := otherOwners(r.actionToTool[action], name); len(owners) > 0 {

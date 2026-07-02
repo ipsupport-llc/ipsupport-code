@@ -40,6 +40,7 @@ const (
 	stAgents        // interactive sub-agent profile manager (add/edit/delete)
 	stRewind        // pick a checkpoint to rewind to
 	stPlanReview    // a plan-mode task just proposed a plan: accept (→auto+execute) or keep planning
+	stHistSearch    // Ctrl+R incremental reverse-search over the prompt history
 )
 
 // chromeFixed: status line + top rule + bottom rule + hint line + 1 margin. The
@@ -73,6 +74,8 @@ type tuiModel struct {
 	taskDoneAway  bool     // a task finished while a modal panel was open over it; finalize on panel close
 	planTask      bool     // the running task started in plan mode → offer accept-plan when it finishes
 	taskCancelled bool     // the running task was cancelled by esc → don't offer accept-plan
+	searchQuery   string   // Ctrl+R reverse-search query (stHistSearch)
+	searchIdx     int      // index into app.promptHist of the current match; -1 = none
 	pending       *approvalReq
 	approveChoice bool          // selected Yes(true)/No(false) while answering an approval
 	cfgCursor     int           // selected row in the /config panel (stConfig)
@@ -556,6 +559,13 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch k.String() {
 	case "ctrl+c":
 		return m, tea.Quit
+	case "ctrl+r": // reverse-search the prompt history (from the idle prompt)
+		if m.state == stIdle && len(m.app.promptHist) > 0 {
+			m.state = stHistSearch
+			m.searchQuery = ""
+			m.searchIdx = m.searchFrom(len(m.app.promptHist) - 1)
+		}
+		return m, nil
 	case "ctrl+l":
 		m.history = m.history[:0]
 		if m.ready {
@@ -657,6 +667,36 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state = stIdle
 		case "esc", "q":
 			m.state = stIdle
+		}
+		return m, nil
+
+	case stHistSearch:
+		switch k.String() {
+		case "ctrl+r": // step to an older match
+			if m.searchIdx > 0 {
+				if i := m.searchFrom(m.searchIdx - 1); i >= 0 {
+					m.searchIdx = i
+				}
+			}
+		case "enter": // use the match: drop it into the input
+			if m.searchIdx >= 0 {
+				m.input.SetValue(m.app.promptHist[m.searchIdx])
+				m.input.CursorEnd()
+			}
+			m.state = stIdle
+			m.histIdx = len(m.app.promptHist)
+		case "esc", "ctrl+g":
+			m.state = stIdle
+		case "backspace":
+			if r := []rune(m.searchQuery); len(r) > 0 {
+				m.searchQuery = string(r[:len(r)-1])
+				m.searchIdx = m.searchFrom(len(m.app.promptHist) - 1)
+			}
+		default:
+			if len(k.String()) == 1 { // narrow the search
+				m.searchQuery += k.String()
+				m.searchIdx = m.searchFrom(len(m.app.promptHist) - 1)
+			}
 		}
 		return m, nil
 
@@ -881,6 +921,22 @@ func (m *tuiModel) recordInput(line string) {
 
 // browsing reports whether the input is currently showing a recalled history line.
 func (m *tuiModel) browsing() bool { return m.histIdx < len(m.hist()) }
+
+// searchFrom returns the highest index ≤ start whose prompt contains the current
+// search query (case-insensitive), or -1 — the reverse-search step.
+func (m *tuiModel) searchFrom(start int) int {
+	h := m.app.promptHist
+	if start >= len(h) {
+		start = len(h) - 1
+	}
+	q := strings.ToLower(m.searchQuery)
+	for i := start; i >= 0; i-- {
+		if strings.Contains(strings.ToLower(h[i]), q) {
+			return i
+		}
+	}
+	return -1
+}
 
 // historyPrev recalls an older submitted line into the input (↑).
 func (m *tuiModel) historyPrev() {
@@ -1352,6 +1408,13 @@ func (m *tuiModel) View() string {
 		status = cDim.Render("settings — changes apply and save as you make them")
 	case m.state == stPlanReview:
 		status = m.accentBold().Render("▸ plan ready") + cDim.Render(" — enter: do it (switch to auto & execute) · esc: keep planning")
+	case m.state == stHistSearch:
+		match := cDim.Render("(no match)")
+		if m.searchIdx >= 0 {
+			match = cBot.Render("→ " + oneLine(m.app.promptHist[m.searchIdx], 56))
+		}
+		status = cToolCall.Render("(reverse-search) ") + m.accentBold().Render("`"+m.searchQuery+"`") + "  " + match +
+			cDim.Render("  · ctrl+r older · enter use · esc cancel")
 	case m.state == stApprove:
 		status = m.approvePrompt()
 	case m.pending != nil:
@@ -1588,6 +1651,7 @@ func (m *tuiModel) renderContent() string {
 var keyHelp = [][2]string{
 	{"Enter", "send (or queue while a task runs)"},
 	{"↑ / ↓", "recall & edit previous messages; ↑ also opens a pending approval / the last queued line"},
+	{"ctrl+r", "reverse-search the prompt history (type to narrow · ctrl+r older · enter use)"},
 	{"y / n / a", "on an approval: approve · deny · allow all of that kind this session"},
 	{"alt+enter", "newline in the input (also ctrl+j)"},
 	{"Tab", "complete a /command, or accept the NEXT suggestion"},

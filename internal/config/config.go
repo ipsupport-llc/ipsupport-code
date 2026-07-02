@@ -50,9 +50,18 @@ func (l LLM) LMStudio() bool { return l.Type == "lmstudio" }
 // and model to run the sub-agent on. The task always comes from the delegating
 // assistant; Prompt is an optional, persistent role note for that model.
 type AgentProfile struct {
-	Provider string `json:"provider"`
+	Provider string `json:"provider,omitempty"`
 	Model    string `json:"model,omitempty"`
 	Prompt   string `json:"prompt,omitempty"`
+
+	// External CLI agent fields (Kind "external"): run Command with Args in the
+	// target dir as an autonomous local coding agent (codex, claude, aider…).
+	// {task} in an arg is replaced by the task text (appended if no placeholder).
+	// An empty Kind is a normal LLM profile, so old configs keep working.
+	Kind    string   `json:"kind,omitempty"`
+	Command string   `json:"command,omitempty"`
+	Args    []string `json:"args,omitempty"`
+	Timeout int      `json:"timeout,omitempty"` // seconds per launch; 0 = default (15 min)
 }
 
 // SpawnPolicy gates the `agent` tool. Default is the approval mode before a

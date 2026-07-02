@@ -14,6 +14,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
@@ -628,6 +629,90 @@ func TestAtFileCompletion(t *testing.T) {
 	m.completeAtFile()
 	if m.input.Value() != "look at @src/main.go " {
 		t.Errorf("completeAtFile → %q, want 'look at @src/main.go '", m.input.Value())
+	}
+}
+
+func TestExpandTaskArgs(t *testing.T) {
+	// {{task}} must be replaced before {task} (it contains it) — no stray braces.
+	got := expandTaskArgs([]string{"exec", "{{task}}", "--x={task}"}, "fix it")
+	want := []string{"exec", "fix it", "--x=fix it"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("arg %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	// no placeholder anywhere → the task is appended
+	got = expandTaskArgs([]string{"-p"}, "do x")
+	if len(got) != 2 || got[1] != "do x" {
+		t.Errorf("append fallback = %v, want [-p, do x]", got)
+	}
+	if got = expandTaskArgs(nil, "solo"); len(got) != 1 || got[0] != "solo" {
+		t.Errorf("nil args = %v, want [solo]", got)
+	}
+}
+
+// The external-agent approval must be its OWN category: an allow-session granted
+// for ordinary sub-agent spawns must not silently cover unsandboxed CLI agents.
+func TestExternalApprovalCategorySeparate(t *testing.T) {
+	if approvalCategory("external agent") == approvalCategory("spawn agent") {
+		t.Fatal("external agents must not share the spawn approval bucket")
+	}
+	a := &app{}
+	a.allowSession("spawn agent") // user pressed 'a' on a normal spawn
+	if a.sessionAllowed(approvalCategory("external agent")) {
+		t.Error("allow-session for spawns leaked to external agents")
+	}
+}
+
+func TestTailClip(t *testing.T) {
+	if got := tailClip("short", 100); got != "short" {
+		t.Errorf("under cap = %q", got)
+	}
+	long := strings.Repeat("щ", 100) // 2-byte runes — the cut lands mid-rune
+	got := tailClip(long, 51)
+	if !utf8.ValidString(got) {
+		t.Errorf("tailClip split a rune: %q", got)
+	}
+	if !strings.HasPrefix(got, "…") {
+		t.Errorf("clipped tail should mark truncation: %q", got)
+	}
+}
+
+func TestSpawnExternalAgent(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.Agents = map[string]config.AgentProfile{
+		"echo":  {Kind: "external", Command: "echo", Args: []string{"ok:", "{task}"}},
+		"sleep": {Kind: "external", Command: "sleep", Timeout: 1},
+	}
+	a := &app{cfg: cfg, workspace: ws, approver: fixedApprover(true)}
+
+	// dispatch goes through spawnAgent's Kind branch (no LLM provider needed)
+	out, err := a.spawnAgent(context.Background(), "echo", "do the thing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "ok: do the thing") {
+		t.Errorf("output = %q, want the echoed task", out)
+	}
+
+	// denial refuses the launch — external agents ask even when spawns are relaxed
+	a.cfg.Spawn.Default = "allow"
+	a.approver = fixedApprover(false)
+	if _, err := a.spawnAgent(context.Background(), "echo", "x", ""); err == nil || !strings.Contains(err.Error(), "denied") {
+		t.Errorf("denied external agent = %v, want an error", err)
+	}
+
+	// a hung (interactive) CLI is killed at its timeout
+	a.approver = fixedApprover(true)
+	start := time.Now()
+	_, err = a.spawnAgent(context.Background(), "sleep", "5", "")
+	if err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Errorf("timeout = %v, want timed out", err)
+	}
+	if time.Since(start) > 4*time.Second {
+		t.Error("timeout did not kill the process promptly")
 	}
 }
 

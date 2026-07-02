@@ -326,6 +326,9 @@ func (a *app) spawnAgent(ctx context.Context, profile, task, dir string) (string
 	}
 	profile = resolved
 	p := a.cfg.Agents[profile]
+	if p.Kind == "external" { // a local CLI agent, not one of our LLM sub-agents
+		return a.spawnExternalAgent(ctx, profile, p, task, dir)
+	}
 	provider := p.Provider
 	if provider == "" {
 		provider = "local"
@@ -549,17 +552,27 @@ func (a *app) subagentTargetsPrompt() string {
 		return ""
 	}
 	parts := make([]string, 0, len(names))
+	external := false
 	for _, n := range names {
 		p := a.cfg.Agents[n]
+		if p.Kind == "external" {
+			external = true
+			parts = append(parts, fmt.Sprintf("%s→external·%s", n, p.Command))
+			continue
+		}
 		m := p.Model
 		if m == "" {
 			m = "default"
 		}
 		parts = append(parts, fmt.Sprintf("%s→%s·%s", n, p.Provider, m))
 	}
-	return "\n\n## Sub-agents you can delegate to (the agent tool)\n" +
+	prompt := "\n\n## Sub-agents you can delegate to (the agent tool)\n" +
 		"Profiles (call agent with profile=<name>): " + strings.Join(parts, ", ") + "\n" +
 		"ALWAYS pass dir=<the specific project's directory> (the repo root) — without it a sub-agent inherits this session's workspace, which may be a home dir. Fan a task out across several profiles in one turn — they run in parallel — then merge their findings. To keep your own context lean, delegate a big exploration to a sub-agent and take back just its summary."
+	if external {
+		prompt += "\nexternal·<command> profiles are autonomous local CLI coding agents (not our models): give them one complete, self-contained task; they edit files themselves and you get back their output tail plus a change summary."
+	}
+	return prompt
 }
 
 // agentsCommand manages sub-agent profiles: list, add (listing the provider's
@@ -572,12 +585,46 @@ func (a *app) agentsCommand(ctx context.Context, rest string) []string {
 		return a.agentsLines()
 	case "add", "set":
 		return a.agentsAdd(ctx, arg)
+	case "add-tool", "add-external":
+		return a.agentsAddExternal(arg)
 	case "rm", "remove", "del", "delete":
 		return a.agentsRemove(arg)
 	case "exec":
 		return a.agentsExec(arg)
 	default:
-		return []string{"usage: /agents [add <name> <provider> [model]] [rm <name>] [exec on|off]"}
+		return []string{"usage: /agents [add <name> <provider> [model]] [add-tool <name> <command> [args…]] [rm <name>] [exec on|off]"}
+	}
+}
+
+// agentsAddExternal registers a locally installed CLI coding agent (codex, claude,
+// aider…) as an external sub-agent profile. It runs OUTSIDE our sandbox — its own
+// tools and permissions, edits invisible to /rewind — so every launch asks its own
+// approval (the "external agent" category, separate from ordinary spawns).
+func (a *app) agentsAddExternal(arg string) []string {
+	fields := strings.Fields(arg)
+	if len(fields) < 2 {
+		return []string{
+			"usage: /agents add-tool <name> <command> [args…]   — {task} marks where the task goes (appended if omitted)",
+			"  e.g. /agents add-tool codex codex exec {task}",
+			"       /agents add-tool claude claude -p {task}",
+			"use the CLI's non-interactive mode (exec / -p / --message …) or it will hang until the timeout",
+		}
+	}
+	name, command, args := fields[0], fields[1], fields[2:]
+	if _, err := exec.LookPath(command); err != nil {
+		return []string{fmt.Sprintf("%q not found in PATH — install it first, or give a full path", command)}
+	}
+	if a.cfg.Agents == nil {
+		a.cfg.Agents = map[string]config.AgentProfile{}
+	}
+	a.cfg.Agents[name] = config.AgentProfile{Kind: "external", Command: command, Args: args}
+	if err := config.SaveAgents(a.cfg.Agents); err != nil {
+		return []string{"warning: not persisted: " + err.Error()}
+	}
+	_ = a.wire() // the agent tool appears / the roster updates
+	return []string{
+		fmt.Sprintf("external profile %q → %s — saved", name, strings.Join(append([]string{command}, expandTaskArgs(args, "{task}")...), " ")),
+		"runs outside the sandbox (own tools & permissions, /rewind can't see its edits) — every launch asks",
 	}
 }
 
@@ -597,6 +644,10 @@ func (a *app) agentsLines() []string {
 	out := []string{fmt.Sprintf("sub-agent profiles (spawn: %s · shell exec: %s):", a.cfg.Spawn.Default, exec)}
 	for _, n := range agentProfileNames(a.cfg) {
 		p := a.cfg.Agents[n]
+		if p.Kind == "external" {
+			out = append(out, fmt.Sprintf("  %-14s external · %s", n, oneLine(strings.Join(append([]string{p.Command}, p.Args...), " "), 50)))
+			continue
+		}
 		model := p.Model
 		if model == "" {
 			model = "(provider default)"
@@ -607,7 +658,7 @@ func (a *app) agentsLines() []string {
 		}
 		out = append(out, line)
 	}
-	out = append(out, "  /agents add <name> <provider> [model] · /agents rm <name> · /agents exec on|off")
+	out = append(out, "  /agents add <name> <provider> [model] · add-tool <name> <command> [args…] · rm <name> · exec on|off")
 	return out
 }
 
@@ -2956,7 +3007,7 @@ func helpText() string {
   /reasoning [off|low|…] trim a thinking model's reasoning (minimal|low|medium|high)
   /shell, /sh      drop to a shell in the workspace (exit to return)
   /skills          list/toggle/install on-demand instruction packs
-  /agents          sub-agent profiles: /agents add|rm|exec (models the agent tool delegates to)
+  /agents          sub-agent profiles: add (LLM) · add-tool (external CLI: codex/claude/…) · rm · exec
   /permissions     relax approval for file / shell / sub-agent-spawn actions
   /color [name]    change the TUI frame color (cycles if no name)
   /rename <name>   rename the agent (saved in settings)
@@ -3395,6 +3446,8 @@ func categoryLabel(cat string) string {
 		return "git actions"
 	case "spawn":
 		return "sub-agent spawns"
+	case "external agent":
+		return "external CLI agents"
 	case "mcp":
 		return "MCP calls"
 	}

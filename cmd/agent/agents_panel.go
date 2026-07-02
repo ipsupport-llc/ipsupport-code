@@ -291,6 +291,9 @@ func (m *tuiModel) renderAgentsPanel() string {
 		for i, n := range names {
 			p := m.app.cfg.Agents[n]
 			label := fmt.Sprintf("%-14s %s · %s", n, p.Provider, p.Model)
+			if p.Kind == "external" { // a local CLI agent added via /agents add-tool
+				label = fmt.Sprintf("%-14s external · %s", n, p.Command)
+			}
 			lines = append(lines, agRow(accent, label, i == m.agCursor))
 		}
 		lines = append(lines, agRow(accent, "+ add new", m.agCursor >= len(names)))

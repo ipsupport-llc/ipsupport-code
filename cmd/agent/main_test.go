@@ -532,6 +532,40 @@ func TestPlanReviewHandshake(t *testing.T) {
 	}
 }
 
+func TestReverseSearch(t *testing.T) {
+	app := &app{promptHist: []string{"fix the parser", "add tests", "fix the ci build", "write docs"}}
+	m := &tuiModel{input: textarea.New(), app: app}
+
+	m.searchQuery = "fix"
+	if got := m.searchFrom(len(app.promptHist) - 1); got != 2 {
+		t.Errorf("newest 'fix' = idx %d, want 2", got)
+	}
+	if got := m.searchFrom(1); got != 0 {
+		t.Errorf("older 'fix' from idx 1 = %d, want 0", got)
+	}
+	m.searchQuery = "zzz"
+	if got := m.searchFrom(3); got != -1 {
+		t.Errorf("no match = %d, want -1", got)
+	}
+
+	// full flow: ctrl+r → type → enter drops the match into the input
+	m2 := &tuiModel{state: stIdle, input: textarea.New(), app: app}
+	m2.handleKey(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if m2.state != stHistSearch {
+		t.Fatalf("ctrl+r → %v, want stHistSearch", m2.state)
+	}
+	for _, r := range "docs" {
+		m2.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	if m2.searchIdx != 3 {
+		t.Errorf("search 'docs' → idx %d, want 3", m2.searchIdx)
+	}
+	m2.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m2.state != stIdle || m2.input.Value() != "write docs" {
+		t.Errorf("enter → state=%v input=%q, want idle + 'write docs'", m2.state, m2.input.Value())
+	}
+}
+
 func TestBudgetGuard(t *testing.T) {
 	a := &app{cfg: config.Default()}
 	a.sessionCostUSD = 100

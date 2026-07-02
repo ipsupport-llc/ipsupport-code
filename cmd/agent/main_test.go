@@ -567,6 +567,36 @@ func TestReverseSearch(t *testing.T) {
 	}
 }
 
+func TestGoalResumeOffer(t *testing.T) {
+	m := &tuiModel{state: stIdle, input: textarea.New(), accent: lipgloss.Color("13"),
+		bridge: newBridge(), ctx: context.Background(), app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	m.app.windowDetected = true
+	m.app.client = llm.NewOpenAIClient(config.LLM{})
+	m.app.ag = agent.New(m.app.client, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
+
+	m.offerGoalResume() // no goal → nothing offered
+	if m.state != stIdle {
+		t.Errorf("no goal → %v, want stIdle", m.state)
+	}
+
+	m.app.goal = goalState{Text: "ship it", Status: "incomplete"}
+	m.offerGoalResume()
+	if m.state != stGoalResume {
+		t.Fatalf("unfinished goal → %v, want stGoalResume", m.state)
+	}
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc}) // not now
+	if m.state != stIdle || m.app.goal.Text != "ship it" {
+		t.Errorf("esc → state=%v goal=%q; want idle + goal kept", m.state, m.app.goal.Text)
+	}
+
+	m.offerGoalResume()
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) // resume
+	if m.state != stRunning || m.app.goal.Status != "active" {
+		t.Errorf("resume → state=%v status=%q; want running + active", m.state, m.app.goal.Status)
+	}
+}
+
 func TestAtFileCompletion(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {

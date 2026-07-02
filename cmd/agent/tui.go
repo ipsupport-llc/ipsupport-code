@@ -41,6 +41,7 @@ const (
 	stRewind        // pick a checkpoint to rewind to
 	stPlanReview    // a plan-mode task just proposed a plan: accept (→auto+execute) or keep planning
 	stHistSearch    // Ctrl+R incremental reverse-search over the prompt history
+	stGoalResume    // startup: an unfinished standing goal — offer to resume it
 )
 
 // chromeFixed: status line + top rule + bottom rule + hint line + 1 margin. The
@@ -206,7 +207,27 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 			m.state = stChooseSession
 		}
 	}
+	if m.state == stIdle {
+		m.offerGoalResume() // an unfinished goal? offer to pick it back up
+	}
 	return m, nil
+}
+
+// goalPending reports whether there's a standing goal worth resuming.
+func (m *tuiModel) goalPending() bool {
+	g := m.app.goal
+	return g.Text != "" && (g.Status == "active" || g.Status == "incomplete")
+}
+
+// offerGoalResume, when a standing goal is unfinished, prompts to resume it instead
+// of dropping straight to an empty prompt.
+func (m *tuiModel) offerGoalResume() {
+	if !m.goalPending() {
+		return
+	}
+	m.state = stGoalResume
+	m.push(m.accentBold().Render("  ◎ resume goal: ") + oneLine(m.app.goal.Text, 60) +
+		cDim.Render("  — enter: resume · esc: not now"))
 }
 
 // sessionRecap renders the tail of a restored session as log lines, so the screen
@@ -251,6 +272,7 @@ func (m *tuiModel) chooseActivate() (tea.Model, tea.Cmd) {
 		m.app.ag.Reset()
 		m.app.ag.SetSystem(m.app.systemPrompt())
 		m.push(cDim.Render("  — new session: " + m.app.cfg.Name + " —"))
+		m.offerGoalResume()
 		return m, nil
 	}
 	name := m.chooseRows[m.chooseCursor].name
@@ -261,6 +283,7 @@ func (m *tuiModel) chooseActivate() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.push(m.sessionRecap()...)
+	m.offerGoalResume()
 	return m, nil
 }
 
@@ -697,6 +720,19 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.searchQuery += k.String()
 				m.searchIdx = m.searchFrom(len(m.app.promptHist) - 1)
 			}
+		}
+		return m, nil
+
+	case stGoalResume:
+		switch k.String() {
+		case "enter", "y": // resume the standing goal
+			text := m.app.goal.Text
+			m.app.setGoal(text) // re-activate + persist
+			m.push(cYou.Render("❯ ") + text)
+			return m, m.runTask(text)
+		case "esc", "n": // not now — drop to the prompt (goal stays; /goal go later)
+			m.state = stIdle
+			return m, m.input.Focus()
 		}
 		return m, nil
 
@@ -1410,6 +1446,8 @@ func (m *tuiModel) View() string {
 		status = cDim.Render("settings — changes apply and save as you make them")
 	case m.state == stPlanReview:
 		status = m.accentBold().Render("▸ plan ready") + cDim.Render(" — enter: do it (switch to auto & execute) · esc: keep planning")
+	case m.state == stGoalResume:
+		status = m.accentBold().Render("◎ resume goal") + cDim.Render(" — enter: resume · esc: not now")
 	case m.state == stHistSearch:
 		match := cDim.Render("(no match)")
 		if m.searchIdx >= 0 {

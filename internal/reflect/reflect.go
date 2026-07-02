@@ -124,6 +124,14 @@ func oneLine(s string) string {
 	return s
 }
 
+// validDomain is the set of tool names a lesson can be keyed on — the KB only
+// surfaces a pitfall when its domain equals the failing tool's name, so a lesson
+// with any other domain (e.g. "shell", "general") is stored but never retrieved.
+var validDomain = map[string]bool{
+	"file": true, "run": true, "git": true, "web": true,
+	"calc": true, "agent": true, "mcp": true, "skill": true,
+}
+
 func parseLessons(content string) Lessons {
 	for _, candidate := range jsonObjectCandidates(content) {
 		var raw struct {
@@ -140,11 +148,15 @@ func parseLessons(content string) Lessons {
 		}
 		var out Lessons
 		for _, p := range raw.Pitfalls {
-			if strings.TrimSpace(p.Domain) == "" || strings.TrimSpace(p.ProvenFix) == "" {
+			domain := strings.ToLower(strings.TrimSpace(p.Domain))
+			if domain == "" || strings.TrimSpace(p.ProvenFix) == "" {
 				continue
 			}
+			if !validDomain[domain] {
+				continue // a domain the KB can never match on is dead weight that still ages toward pruning
+			}
 			out.Pitfalls = append(out.Pitfalls, knowledge.Pitfall{
-				Domain: p.Domain, ErrorPattern: p.ErrorPattern, Context: p.Context, ProvenFix: p.ProvenFix,
+				Domain: domain, ErrorPattern: p.ErrorPattern, Context: p.Context, ProvenFix: p.ProvenFix,
 			})
 		}
 		for _, f := range raw.Facts {

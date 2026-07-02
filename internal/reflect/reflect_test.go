@@ -49,6 +49,22 @@ func TestReflectParsesLessons(t *testing.T) {
 	}
 }
 
+// A pitfall whose domain isn't a real tool name can never be matched by the KB, so
+// it's dropped; a valid one is kept (and its domain lower-cased).
+func TestReflectDropsUnknownDomain(t *testing.T) {
+	reply := `{"pitfalls":[` +
+		`{"domain":"shell","error_pattern":"x","context":"c","proven_fix":"do y"},` +
+		`{"domain":"File","error_pattern":"z","context":"c","proven_fix":"keep z"}` +
+		`],"facts":[]}`
+	l, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if len(l.Pitfalls) != 1 || l.Pitfalls[0].Domain != "file" || l.Pitfalls[0].ProvenFix != "keep z" {
+		t.Errorf("pitfalls = %+v, want only the valid file lesson (domain lower-cased)", l.Pitfalls)
+	}
+}
+
 func TestReflectParsesObjectAfterBraceProse(t *testing.T) {
 	// Prose contains a braced phrase that isn't JSON before the real object.
 	reply := "The lessons {for this run} are below:\n" +

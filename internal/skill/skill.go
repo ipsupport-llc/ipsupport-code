@@ -350,6 +350,7 @@ func (s *Store) installGit(ctx context.Context, repo string) ([]string, error) {
 		files = append(files, m...)
 	}
 	var names []string
+	seen := map[string]bool{}
 	for _, p := range files {
 		if strings.EqualFold(filepath.Base(p), "readme.md") {
 			continue
@@ -359,6 +360,10 @@ func (s *Store) installGit(ctx context.Context, repo string) ([]string, error) {
 			continue
 		}
 		name := skillName(string(data), p)
+		if seen[name] { // two files sanitize to the same slug — don't silently overwrite
+			continue
+		}
+		seen[name] = true
 		if err := s.write(name, string(data), repo); err != nil {
 			return names, err
 		}

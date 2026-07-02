@@ -27,6 +27,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
+	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
@@ -209,6 +210,8 @@ type app struct {
 	sessionMu    sync.Mutex
 	sessionAllow map[string]bool
 
+	promptHist []string // submitted inputs (tasks + /commands), oldest→newest, persisted per workspace for ↑ recall across restarts
+
 	client          *llm.OpenAIClient
 	ag              *agent.Agent
 	pol             *policy.Engine // host policy/jail; sub-agents in a dir get their own
@@ -266,8 +269,9 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 		a.fileTracer = ft
 		cleanup = func() { a.closeMCP(); _ = ft.Close() }
 	}
-	a.loadFacts() // learned project facts → folded into the prompt by wire()
-	a.loadGoal()  // standing goal (if any) → resumable across restarts
+	a.loadFacts()      // learned project facts → folded into the prompt by wire()
+	a.loadGoal()       // standing goal (if any) → resumable across restarts
+	a.loadPromptHist() // ↑ recall spans past runs (persisted per workspace)
 	if err := a.wire(); err != nil {
 		return nil, nil, err
 	}
@@ -992,6 +996,64 @@ func (a *app) goalTTLFor(goal string) int {
 		return a.cfg.GoalMaxReturns
 	}
 	return 0
+}
+
+const maxPromptHist = 200
+
+func (a *app) promptHistPath() string { return filepath.Join(a.workspace, ".agent", "history") }
+
+// loadPromptHist reads the persisted input history (best-effort).
+func (a *app) loadPromptHist() {
+	data, err := os.ReadFile(a.promptHistPath())
+	if err != nil {
+		return
+	}
+	var h []string
+	if json.Unmarshal(data, &h) == nil {
+		a.promptHist = h
+	}
+}
+
+// addPromptHist appends a submitted line (skipping a consecutive duplicate), caps
+// the ring, and persists it so ↑ recall survives a restart.
+func (a *app) addPromptHist(line string) {
+	if n := len(a.promptHist); n > 0 && a.promptHist[n-1] == line {
+		return
+	}
+	a.promptHist = append(a.promptHist, line)
+	if len(a.promptHist) > maxPromptHist {
+		a.promptHist = a.promptHist[len(a.promptHist)-maxPromptHist:]
+	}
+	data, _ := json.Marshal(a.promptHist)
+	if err := atomicfile.Write(a.promptHistPath(), data, 0o644); err != nil {
+		slog.Warn("prompt history not saved", "err", err)
+	}
+}
+
+// historyCommand lists recent prompts (newest first), optionally filtered by a
+// substring — a way to dig through what you've asked across sessions.
+func (a *app) historyCommand(arg string) []string {
+	filter := strings.ToLower(strings.TrimSpace(arg))
+	var out []string
+	const show = 30
+	for i := len(a.promptHist) - 1; i >= 0 && len(out) < show; i-- {
+		p := a.promptHist[i]
+		if filter != "" && !strings.Contains(strings.ToLower(p), filter) {
+			continue
+		}
+		out = append(out, "  "+oneLine(p, 100))
+	}
+	if len(out) == 0 {
+		if filter != "" {
+			return []string{"no prompts match " + arg}
+		}
+		return []string{"no prompt history yet"}
+	}
+	head := fmt.Sprintf("prompt history (newest first, %d shown) — ↑/↓ recalls into the input:", len(out))
+	if filter != "" {
+		head = fmt.Sprintf("prompts matching %q (newest first):", arg)
+	}
+	return append([]string{head}, out...)
 }
 
 // goalSteps is the hard step backstop for one goal pursuit, falling back to the
@@ -1956,9 +2018,11 @@ func (a *app) repl(ctx context.Context) {
 			return
 		}
 		line = strings.TrimSpace(line)
-		switch {
-		case line == "":
+		if line == "" {
 			continue
+		}
+		a.addPromptHist(line) // persist for /history + the TUI's ↑ recall
+		switch {
 		case line == "!":
 			a.runShell(ctx)
 		case strings.HasPrefix(line, "!"):
@@ -2068,6 +2132,10 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 			for _, l := range a.goalCommand(rest) {
 				fmt.Println(l)
 			}
+		}
+	case "/history":
+		for _, l := range a.historyCommand(rest) {
+			fmt.Println(l)
 		}
 	case "/reasoning":
 		for _, l := range a.reasoningCommand(rest) {
@@ -2716,6 +2784,7 @@ func helpText() string {
   /color [name]    change the TUI frame color (cycles if no name)
   /rename <name>   rename the agent (saved in settings)
   /sessions        list / switch / delete saved sessions (per agent name)
+  /history [text]  recent prompts across sessions (↑/↓ recalls in the TUI); filter by text
   /loop <ival> <task>  re-run a task on an interval (e.g. /loop 5m <task>, /loop 30s x10 <task>; esc stops)
   /help            this list
   /exit, /quit     leave

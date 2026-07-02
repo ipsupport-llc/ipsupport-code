@@ -344,17 +344,18 @@ func TestKeylessCustomProviderIsUsable(t *testing.T) {
 	}
 }
 
-func TestInputHistoryRecall(t *testing.T) {
-	m := &tuiModel{input: textarea.New()}
+func TestInputHistoryRecallAndPersist(t *testing.T) {
+	ws := t.TempDir()
+	m := &tuiModel{input: textarea.New(), app: &app{cfg: config.Default(), workspace: ws}}
 	m.recordInput("first")
 	m.recordInput("second")
 	m.recordInput("second") // a consecutive duplicate is not stored twice
-	if len(m.inputHist) != 2 {
-		t.Fatalf("inputHist = %v, want [first second]", m.inputHist)
+	if len(m.app.promptHist) != 2 {
+		t.Fatalf("promptHist = %v, want [first second]", m.app.promptHist)
 	}
 
 	m.input.SetValue("draft-in-progress")
-	m.histIdx = len(m.inputHist) // not browsing
+	m.histIdx = len(m.app.promptHist) // not browsing
 	m.historyPrev()
 	if m.input.Value() != "second" {
 		t.Errorf("↑ once = %q, want second", m.input.Value())
@@ -374,6 +375,13 @@ func TestInputHistoryRecall(t *testing.T) {
 	m.historyNext() // back past the newest restores the stashed draft
 	if m.input.Value() != "draft-in-progress" {
 		t.Errorf("↓ past newest = %q, want the stashed draft", m.input.Value())
+	}
+
+	// A fresh app over the same workspace recovers the history (survives restart).
+	b := &app{cfg: config.Default(), workspace: ws}
+	b.loadPromptHist()
+	if len(b.promptHist) != 2 || b.promptHist[1] != "second" {
+		t.Errorf("persisted history = %v, want [first second]", b.promptHist)
 	}
 }
 

@@ -61,6 +61,65 @@ func TestFileWriteEmpty(t *testing.T) {
 	}
 }
 
+// The edit action must accept every shape a weak model reaches for: a native JSON
+// array, a stringified array, a single object, and top-level find/replace. The
+// live failure was a native array being fmt.Sprint'd into Go syntax and rejected.
+func TestFileEditAcceptsAllShapes(t *testing.T) {
+	ctx := context.Background()
+	seed := "alpha beta gamma\n"
+
+	cases := []struct {
+		name  string
+		edits map[string]any // the params minus path
+		want  string
+	}{
+		{"top-level find/replace", map[string]any{"find": "alpha", "replace": "A"}, "A beta gamma\n"},
+		{"stringified array", map[string]any{"edits": `[{"find":"alpha","replace":"A"},{"find":"gamma","replace":"G"}]`}, "A beta G\n"},
+		{"native array", map[string]any{"edits": []any{
+			map[string]any{"find": "alpha", "replace": "A"},
+			map[string]any{"find": "gamma", "replace": "G"},
+		}}, "A beta G\n"},
+		{"single object", map[string]any{"edits": map[string]any{"find": "beta", "replace": "B"}}, "alpha B gamma\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tl := fileToolFor(t, dir, "allow", yes())
+			if w := tl.Call(ctx, "write", map[string]any{"path": "f.txt", "content": seed}); w.IsError {
+				t.Fatal(w.Content)
+			}
+			params := map[string]any{"path": "f.txt"}
+			for k, v := range tc.edits {
+				params[k] = v
+			}
+			if r := tl.Call(ctx, "edit", params); r.IsError {
+				t.Fatalf("edit (%s) errored: %s", tc.name, r.Content)
+			}
+			got, _ := os.ReadFile(filepath.Join(dir, "f.txt"))
+			if string(got) != tc.want {
+				t.Errorf("result = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// An edit call with only {path} must fail early with a clear message — before the
+// approval prompt / snapshot / read — not a late "empty find in edit #1".
+func TestFileEditMissingFindFailsEarly(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+	tl.Call(ctx, "write", map[string]any{"path": "f.txt", "content": "x"})
+
+	r := tl.Call(ctx, "edit", map[string]any{"path": "f.txt"})
+	if !r.IsError {
+		t.Fatal("edit with no find/replace should error")
+	}
+	if !strings.Contains(r.Content, "find") || !strings.Contains(r.Content, "replace") {
+		t.Errorf("error should name find+replace, got: %s", r.Content)
+	}
+}
+
 func TestFileSearch(t *testing.T) {
 	dir := t.TempDir()
 	tl := fileToolFor(t, dir, "allow", yes())

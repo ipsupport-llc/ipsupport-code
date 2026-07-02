@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -229,21 +230,72 @@ type editPair struct {
 	Replace string `json:"replace"`
 }
 
+// editPairs pulls the edit list from an edit call, accepting every shape a weak
+// model reaches for: a native JSON array (the model did the right thing), a
+// stringified JSON array, a single {find,replace} object, or top-level
+// find/replace. Returns a clear error only when nothing usable was given.
+func editPairs(a Args) ([]editPair, error) {
+	const usage = "edit needs {find, replace} (or edits=[{find,replace},…]), plus {path}"
+	switch v := a.m["edits"].(type) {
+	case nil: // no edits key → single top-level find/replace
+		if strings.TrimSpace(a.Str("find")) == "" && strings.TrimSpace(a.Str("replace")) == "" {
+			return nil, errors.New(usage)
+		}
+		return []editPair{{Find: a.Str("find"), Replace: a.Str("replace")}}, nil
+	case string: // stringified JSON array (or empty → fall back to find/replace)
+		if strings.TrimSpace(v) == "" {
+			return editPairs(Args{m: withoutKey(a.m, "edits")})
+		}
+		var pairs []editPair
+		if err := json.Unmarshal([]byte(v), &pairs); err != nil {
+			return nil, errors.New("edit: 'edits' must be a JSON array of {find,replace}: " + err.Error())
+		}
+		if len(pairs) == 0 {
+			return nil, errors.New(usage)
+		}
+		return pairs, nil
+	default: // a native array, or a single object — round-trip through JSON
+		blob, err := json.Marshal(v)
+		if err != nil {
+			return nil, errors.New(usage)
+		}
+		var pairs []editPair
+		if json.Unmarshal(blob, &pairs) == nil && len(pairs) > 0 {
+			return pairs, nil
+		}
+		var one editPair
+		if json.Unmarshal(blob, &one) == nil && (one.Find != "" || one.Replace != "") {
+			return []editPair{one}, nil
+		}
+		return nil, errors.New("edit: 'edits' must be a JSON array of {find,replace} — " + usage)
+	}
+}
+
+// withoutKey returns a shallow copy of m with key removed (so an empty "edits"
+// string falls back to the top-level find/replace path).
+func withoutKey(m map[string]any, key string) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		if k != key {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 func (f *fileTool) edit(_ context.Context, a Args) Result {
 	path := a.Str("path")
 
-	// One {find,replace}, or several via edits=JSON array applied in order — a
-	// multi-edit in a single call saves round-trips (and re-sent context).
-	var pairs []editPair
-	if raw := strings.TrimSpace(a.Str("edits")); raw != "" {
-		if err := json.Unmarshal([]byte(raw), &pairs); err != nil {
-			return Err("edit: 'edits' must be a JSON array of {find,replace}: " + err.Error())
-		}
-	} else {
-		pairs = []editPair{{Find: a.Str("find"), Replace: a.Str("replace")}}
+	pairs, err := editPairs(a)
+	if err != nil {
+		return Err(err.Error())
 	}
-	if len(pairs) == 0 {
-		return Err("edit: nothing to do — give find/replace or a non-empty edits array")
+	// Validate the edits up front — before policy prompt, snapshot, and read — so a
+	// weak model gets one clean, early error instead of a late one after the churn.
+	for i, p := range pairs {
+		if p.Find == "" {
+			return Err(fmt.Sprintf("edit: empty 'find' in edit #%d — give the exact text to replace (with {path})", i+1))
+		}
 	}
 
 	d, err := f.pol.Write(path)
@@ -275,9 +327,6 @@ func (f *fileTool) edit(_ context.Context, a Args) Result {
 	}
 	updated := old
 	for i, p := range pairs {
-		if p.Find == "" {
-			return Err(fmt.Sprintf("edit: empty 'find' in edit #%d", i+1))
-		}
 		if !strings.Contains(updated, p.Find) {
 			clip, _ := textutil.Clip(p.Find, 60)
 			return Err(fmt.Sprintf("edit: 'find' text not present in %s (edit #%d): %s", path, i+1, clip))

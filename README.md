@@ -217,7 +217,13 @@ bottom of the screen.
 - **auto** (default) — the agent executes the task with tools.
 - **plan** — read-only: it investigates and proposes a numbered plan, and every
   state-changing tool call is **blocked at the engine**, so it can't touch
-  anything until you switch back to auto.
+  anything until you accept.
+
+When a plan-mode task finishes with a plan, you get a one-key **handshake**:
+**enter** to accept — switches to auto and immediately executes the plan — or
+**esc** to keep planning (stay in plan mode; type to refine). Toggling the mode
+**mid-task** applies at the next turn, never mid-run (the running agent reads the
+mode live).
 
 ## Permissions
 

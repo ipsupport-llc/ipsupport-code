@@ -39,6 +39,7 @@ const (
 	stChooseSession // startup: pick a saved session to restore / start new / delete
 	stAgents        // interactive sub-agent profile manager (add/edit/delete)
 	stRewind        // pick a checkpoint to rewind to
+	stPlanReview    // a plan-mode task just proposed a plan: accept (→auto+execute) or keep planning
 )
 
 // chromeFixed: status line + top rule + bottom rule + hint line + 1 margin. The
@@ -70,6 +71,8 @@ type tuiModel struct {
 	histDraft     string   // in-progress input saved when history browsing begins
 	pendingMode   *bool    // plan(true)/auto(false) requested via shift+tab mid-task; applied on task done
 	taskDoneAway  bool     // a task finished while a modal panel was open over it; finalize on panel close
+	planTask      bool     // the running task started in plan mode → offer accept-plan when it finishes
+	taskCancelled bool     // the running task was cancelled by esc → don't offer accept-plan
 	pending       *approvalReq
 	approveChoice bool          // selected Yes(true)/No(false) while answering an approval
 	cfgCursor     int           // selected row in the /config panel (stConfig)
@@ -453,6 +456,14 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.taskDoneAway = true
 			return m, detect
 		}
+		if m.planTask && !m.taskCancelled && len(m.queued) == 0 {
+			// A plan-mode task just proposed a plan — offer the accept→execute handshake.
+			m.planTask = false
+			m.state = stPlanReview
+			m.push(m.accentBold().Render("  ▸ plan ready — ") + cDim.Render("enter: do it (switch to auto & execute) · esc: keep planning (type to refine)"))
+			return m, detect
+		}
+		m.planTask = false
 		m.state = stIdle
 		if len(m.queued) > 0 { // drain the next pending message(s): tasks + /commands
 			model, cmd := m.drainQueue()
@@ -649,6 +660,18 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case stPlanReview:
+		switch k.String() {
+		case "enter", "y", "a": // accept: switch to auto and execute the proposed plan
+			m.app.setMode(false)
+			m.push(cYou.Render("❯ ") + "execute the plan")
+			return m, m.runTask("Execute the plan you just proposed above, step by step. If a detail is unclear, make a reasonable call and proceed.")
+		case "esc", "n", "q": // keep planning — stay in plan mode; type to refine or shift+tab to auto
+			m.state = stIdle
+			return m, m.input.Focus()
+		}
+		return m, nil
+
 	case stApprove:
 		// Answer the prompt, then (and only then) wait for the next queued
 		// approval — keeps exactly one reader, so none get overwritten.
@@ -695,7 +718,8 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if m.cancel != nil {
 				m.cancel()
 			}
-			m.bridge.Abort() // deny any in-flight approvals so no tool goroutine hangs
+			m.taskCancelled = true // a cancelled plan run shouldn't pop the accept-plan prompt
+			m.bridge.Abort()       // deny any in-flight approvals so no tool goroutine hangs
 			m.push(cDim.Render("  …cancelling"))
 			if m.pending != nil {
 				// The shown approval consumed the single reader; re-arm one so the
@@ -1263,7 +1287,9 @@ func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
 	m.startTok = c // count completion (generated) tokens for this task
 	m.suggestion = ""
 	m.input.Placeholder = defaultPlaceholder
-	m.bridge.arm() // fresh abort signal so a previous cancel doesn't deny this task's approvals
+	m.bridge.arm()              // fresh abort signal so a previous cancel doesn't deny this task's approvals
+	m.planTask = m.app.planMode // remember so we can offer accept-plan when it finishes
+	m.taskCancelled = false
 	tctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel
 	return tctx, cancel
@@ -1321,6 +1347,8 @@ func (m *tuiModel) View() string {
 		status = cDim.Render("rewind — ↑↓ pick a step, enter to return there, esc to cancel")
 	case m.state == stConfig:
 		status = cDim.Render("settings — changes apply and save as you make them")
+	case m.state == stPlanReview:
+		status = m.accentBold().Render("▸ plan ready") + cDim.Render(" — enter: do it (switch to auto & execute) · esc: keep planning")
 	case m.state == stApprove:
 		status = m.approvePrompt()
 	case m.pending != nil:

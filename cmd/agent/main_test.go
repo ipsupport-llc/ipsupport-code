@@ -191,7 +191,7 @@ func TestRenderDiff(t *testing.T) {
 	if !strings.Contains(out, "Update(a.txt)") {
 		t.Error("missing header Update(a.txt)")
 	}
-	if !strings.Contains(out, "Added 1 line, removed 1 line") {
+	if !strings.Contains(out, "1 line added, 1 line removed") {
 		t.Errorf("summary not as expected in:\n%s", out)
 	}
 	if !strings.Contains(out, bgGreen) || !strings.Contains(out, bgRed) {

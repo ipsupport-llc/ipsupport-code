@@ -245,8 +245,10 @@ func (m *tuiModel) renderConfigPanel() string {
 			continue
 		}
 		label, value, hint := m.configRowView(r.key)
-		labelCol := fmt.Sprintf("%-12s", label)
-		valCol := fmt.Sprintf("%-22s", value)
+		// Pad by DISPLAY width (values carry wide/ambiguous glyphs like ⏵⏵ / ● / ▮),
+		// so the hint column lines up cleanly instead of ragged.
+		labelCol := padVis(label, 15)
+		valCol := padVis(value, 22)
 		if r.key == cur {
 			lines = append(lines, accent.Render(" ▸ ")+accent.Bold(true).Render(labelCol+" "+valCol)+" "+cDim.Render(hint))
 		} else {
@@ -254,7 +256,7 @@ func (m *tuiModel) renderConfigPanel() string {
 		}
 	}
 	lines = append(lines, "", cDim.Render("  ↑↓ move · enter change · esc close"))
-	lines = append(lines, cDim.Render("  ~/.config/ipsupport-code/config.json (chmod 600)"))
+	lines = append(lines, cDim.Render("  saved to ~/.config/ipsupport-code/config.json (kept private)"))
 
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(m.accent).Padding(0, 1)
 	return box.Render(strings.Join(lines, "\n"))
@@ -270,6 +272,15 @@ func runTimeoutLabel(sec int) string {
 
 // colorLabel maps the current accent color code back to its name (or the raw
 // code if it isn't one of the named colors).
+// padVis right-pads s to a target DISPLAY width (rune/ANSI-aware via lipgloss.Width),
+// so columns whose values carry wide or styled glyphs still align.
+func padVis(s string, w int) string {
+	if pad := w - lipgloss.Width(s); pad > 0 {
+		return s + strings.Repeat(" ", pad)
+	}
+	return s
+}
+
 func colorLabel(c lipgloss.Color) string {
 	code := string(c)
 	for name, v := range colorNames {

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -1056,6 +1057,35 @@ func (a *app) historyCommand(arg string) []string {
 		head = fmt.Sprintf("prompts matching %q (newest first):", arg)
 	}
 	return append([]string{head}, out...)
+}
+
+// completePath returns the longest-common-prefix completion and the matching
+// workspace files (relative to the path base the model resolves against) for an
+// @file prefix — powers Tab-completion of @path references in the input.
+func (a *app) completePath(prefix string) (string, []string) {
+	base := a.pol.Workdir()
+	skip := map[string]bool{".git": true, "node_modules": true, "vendor": true, "dist": true, ".agent": true}
+	var matches []string
+	_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if p != base && (skip[d.Name()] || strings.HasPrefix(d.Name(), ".")) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if rel, e := filepath.Rel(base, p); e == nil && strings.HasPrefix(rel, prefix) {
+			matches = append(matches, rel)
+			if len(matches) >= 200 {
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	sort.Strings(matches)
+	return longestCommonPrefix(matches), matches
 }
 
 // goalSteps is the hard step backstop for one goal pursuit, falling back to the

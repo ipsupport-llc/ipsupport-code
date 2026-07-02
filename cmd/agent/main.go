@@ -55,7 +55,7 @@ func main() {
 		sessionName string
 	)
 	flag.StringVar(&workspace, "C", ".", "workspace directory")
-	flag.BoolVar(&doInit, "init", false, "re-run first-time setup (server URL, model)")
+	flag.BoolVar(&doInit, "init", false, "re-run first-time setup (server URL, API key, model)")
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.BoolVar(&dumpPrompt, "dump-prompt", false, "print the built-in system prompt and exit (e.g. > .agent/system.md to start editing)")
 	flag.BoolVar(&newSession, "new", false, "start a fresh session (don't restore the saved one)")
@@ -3052,20 +3052,45 @@ func maybeInit(reader *bufio.Reader, force bool) {
 	if cur, err := config.Load("."); err == nil {
 		def = cur
 	}
-	fmt.Println("Setup — configure your model connection (press Enter to keep current).")
+	fmt.Println("Setup — connect your model (press Enter to keep the current value).")
+	fmt.Println("  In LM Studio: load a tool-calling model and start the local server (Developer tab).")
+	url := ask(reader, "Server URL", def.LLM.BaseURL)
+	key := ask(reader, "API key (blank for LM Studio)", def.LLM.APIKey)
+
+	// Best-effort probe: show what's loaded there so the model name isn't a blind
+	// guess, and so we can confirm the connection at the end. (max_steps and the
+	// context window are left at defaults — the latter is auto-detected on launch.)
+	probeCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	models, probeErr := llm.ListModels(probeCtx, url, key, http.DefaultClient)
+	cancel()
+	if probeErr == nil && len(models) > 0 {
+		shown := models
+		if len(shown) > 6 {
+			shown = shown[:6]
+		}
+		fmt.Printf("  ✓ reached %s — models: %s\n", url, strings.Join(shown, ", "))
+	}
+
 	l := config.LLM{
-		BaseURL:       ask(reader, "LM Studio server URL", def.LLM.BaseURL),
+		BaseURL:       url,
 		Model:         ask(reader, "Model name", def.LLM.Model),
+		APIKey:        key,
 		Temperature:   def.LLM.Temperature,
-		MaxSteps:      atoiOr(ask(reader, "Max steps per task", strconv.Itoa(def.LLM.MaxSteps)), def.LLM.MaxSteps),
-		ContextWindow: atoiOr(ask(reader, "Context window in tokens (0 = no auto-compact)", strconv.Itoa(def.LLM.ContextWindow)), def.LLM.ContextWindow),
-		APIKey:        ask(reader, "API key (blank for LM Studio)", def.LLM.APIKey),
+		MaxSteps:      def.LLM.MaxSteps,
+		ContextWindow: def.LLM.ContextWindow,
 	}
 	if err := config.SaveGlobal(def.Name, l); err != nil { // preserve any custom name
 		slog.Warn("could not save config", "err", err)
 		return
 	}
-	fmt.Printf("Saved to %s\n\n", config.GlobalPath())
+	fmt.Printf("Saved to %s\n", config.GlobalPath())
+	if probeErr != nil {
+		fmt.Printf("  ⚠ couldn't reach %s yet — start LM Studio's local server (Developer tab); it'll connect on your first task.\n", url)
+	} else {
+		fmt.Printf("  ✓ connected — using %s\n", l.Model)
+	}
+	fmt.Println("Setup done — type a task to begin, or /help for commands.")
+	fmt.Println()
 }
 
 func ask(r *bufio.Reader, label, def string) string {
@@ -3085,13 +3110,6 @@ func ask(r *bufio.Reader, label, def string) string {
 }
 
 func isTTY() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
-
-func atoiOr(s string, def int) int {
-	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
-		return n
-	}
-	return def
-}
 
 // stdinApprover prompts the operator on stderr for a policy "ask" decision. The
 // mutex serializes prompts so concurrent tool-call approvals never read the

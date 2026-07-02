@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 
@@ -233,6 +234,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 			// away. Only a stop with nothing done yet surfaces as a hard error.
 			if cancelled || acted {
 				tr.Cancelled, tr.Stopped = cancelled, true
+				tr.Returns = returns
 				tr.Final = stopNote(msgs, cancelled, err)
 				a.emit("final", map[string]any{"text": tr.Final})
 				if acted {
@@ -270,16 +272,20 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 			// keep going — up to maxReturns (a TTL). Only after real progress, so a
 			// model that just re-finalizes can't burn the budget.
 			if !a.planMode && a.maxReturns > 0 && returns < a.maxReturns && actedSinceReturn && acted {
-				done, missing := a.judgeGoal(ctx, goal, clean)
-				if !done {
+				verdict, missing := a.judgeGoal(ctx, goal, clean)
+				switch verdict {
+				case judgeMore:
 					returns++
 					actedSinceReturn = false
 					msgs = append(msgs, llm.User(goalReturn(goal, missing)))
 					a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing})
 					continue
+				case judgeDone:
+					goalMet = true // only an explicit DONE marks the goal verifiably met
+					a.emit("judge", map[string]any{"done": true})
 				}
-				goalMet = true
-				a.emit("judge", map[string]any{"done": true})
+				// judgeUnclear → accept this final (don't trap the loop), but leave
+				// goalMet false: an unverifiable judge is NOT a confirmed success.
 			}
 			if strings.TrimSpace(clean) == "" {
 				// Blank final turn. If the model already did work via tools, say it
@@ -328,6 +334,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 				} else {
 					const msg = "Stopped — it kept repeating the same tool calls without progress (or they kept failing) even after a nudge to rethink. Steer it (a different approach), or use a stronger model."
 					tr.Final, tr.Stopped = msg, true
+					tr.Returns = returns
 					tr.Messages = msgs
 					a.emit("final", map[string]any{"text": msg, "suggest": stuckSuggest, "exhausted": true})
 					a.remember(goal, msg)
@@ -345,6 +352,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 
 	tr.Messages = msgs
 	tr.Stopped = true // ran out of steps before a clean answer
+	tr.Returns = returns
 	clean, suggest := splitSuggestion(lastAssistantContent(msgs))
 	tr.Final = clean
 	a.emit("final", map[string]any{"text": clean, "suggest": suggest, "exhausted": true})
@@ -452,43 +460,56 @@ func goalReturn(goal, missing string) string {
 	return s + "\n\nGOAL: " + goal
 }
 
+// judgeVerdict is the acceptance-checker's answer: the goal is met, needs more, or
+// the reply couldn't be read as either.
+type judgeVerdict int
+
+const (
+	judgeUnclear judgeVerdict = iota // couldn't parse a verdict — accept but don't claim success
+	judgeDone                        // explicitly met
+	judgeMore                        // explicitly incomplete
+)
+
 // judgeGoal asks the model, in a fresh side call (no tools), whether the goal is
-// actually met given the work just finished. It returns done plus a one-line gap
-// to feed back when it isn't. On any error or unparseable reply it defaults to
-// done=true — a judge that can't decide must not trap the agent in the loop.
-func (a *Agent) judgeGoal(ctx context.Context, goal, result string) (bool, string) {
+// actually met given the work just finished. Returns a tri-state so the caller can
+// treat "can't tell" differently from "confirmed done": on a transport error or an
+// unparseable reply it returns judgeUnclear — accept the final to avoid trapping
+// the loop, but do NOT record the goal as verifiably met.
+func (a *Agent) judgeGoal(ctx context.Context, goal, result string) (judgeVerdict, string) {
 	reply, err := a.llm.Chat(ctx, []llm.Message{
 		llm.System(judgeSystem),
 		llm.User("GOAL:\n" + goal + "\n\nWHAT THE AGENT DID / ITS FINAL ANSWER:\n" + clip(result, 2000)),
 	}, nil)
 	if err != nil {
 		slog.Debug("goal judge failed", "err", err)
-		return true, ""
+		return judgeUnclear, ""
 	}
-	line := strings.TrimSpace(reply.Content)
-	if i := strings.IndexByte(line, '\n'); i >= 0 {
-		line = strings.TrimSpace(line[:i]) // first line only — small models ramble
-	}
-	upper := strings.ToUpper(line)
-	if rest, ok := cutVerdict(upper, line, "MORE"); ok {
-		return false, rest
-	}
-	if _, ok := cutVerdict(upper, line, "DONE"); ok {
-		return true, ""
-	}
-	slog.Debug("goal judge unparseable", "reply", clip(line, 120))
-	return true, "" // can't tell → don't trap the loop
+	return parseVerdict(reply.Content)
 }
 
-// cutVerdict matches a "DONE"/"MORE[: gap]" verdict at the start of the judge's
-// line (case-insensitive) and returns the trailing gap text.
-func cutVerdict(upper, orig, word string) (string, bool) {
-	if !strings.HasPrefix(upper, word) {
-		return "", false
+var (
+	moreToken = regexp.MustCompile(`(?i)\bMORE\b`) // \b avoids matching "MOREOVER"
+	doneToken = regexp.MustCompile(`(?i)\bDONE\b`)
+)
+
+// parseVerdict reads the judge's whole reply (not just the first line) and biases
+// skeptical: any boundary-delimited MORE means not-done (with the gap that follows
+// it); only a MORE-free reply mentioning DONE counts as met. This keeps a rambling
+// weak judge from either false-accepting or matching "MOREOVER".
+func parseVerdict(s string) (judgeVerdict, string) {
+	if loc := moreToken.FindStringIndex(s); loc != nil {
+		gap := strings.TrimLeft(strings.TrimSpace(s[loc[1]:]), ":-—. \t")
+		if i := strings.IndexByte(gap, '\n'); i >= 0 {
+			gap = strings.TrimSpace(gap[:i])
+		}
+		clipped, _ := textutil.Clip(gap, 160)
+		return judgeMore, clipped
 	}
-	rest := strings.TrimSpace(orig[len(word):])
-	rest = strings.TrimLeft(rest, ":-—. ")
-	return rest, true
+	if doneToken.MatchString(s) {
+		return judgeDone, ""
+	}
+	slog.Debug("goal judge unparseable", "reply", clip(strings.TrimSpace(s), 120))
+	return judgeUnclear, ""
 }
 
 // judgeSystem instructs the side-call judge. Tight on purpose: a small local model

@@ -670,6 +670,52 @@ func TestRunGoalLoopStopsAtTTL(t *testing.T) {
 	}
 }
 
+// The judge must NOT rubber-stamp an unparseable reply as a met goal: it accepts
+// the final (so it doesn't trap the loop) but leaves GoalMet false.
+func TestRunGoalLoopUnclearJudgeDoesNotMarkMet(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "I think that's everything"}, // finalize
+		{Role: "assistant", Content: "hmm, hard to say really"},   // judge: no DONE/MORE token
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3)
+
+	tr, _ := a.Run(context.Background(), "do the thing")
+	if tr.GoalMet {
+		t.Error("GoalMet = true on an unparseable judge verdict, want false")
+	}
+	if tr.Returns != 0 {
+		t.Errorf("returns = %d, want 0 (unclear verdict accepts, doesn't re-feed)", tr.Returns)
+	}
+	if tr.Final != "I think that's everything" {
+		t.Errorf("final = %q", tr.Final)
+	}
+}
+
+func TestParseVerdict(t *testing.T) {
+	cases := []struct {
+		in       string
+		want     judgeVerdict
+		wantMiss string
+	}{
+		{"DONE", judgeDone, ""},
+		{"The task is DONE.", judgeDone, ""},
+		{"MORE: add the tests", judgeMore, "add the tests"},
+		{"The plan needs MORE work: no tests yet", judgeMore, "work: no tests yet"},
+		{"MOREOVER, it looks done", judgeDone, ""}, // MOREOVER must not match MORE
+		{"yeah looks fine to me", judgeUnclear, ""},
+		{"", judgeUnclear, ""},
+	}
+	for _, tc := range cases {
+		got, miss := parseVerdict(tc.in)
+		if got != tc.want || miss != tc.wantMiss {
+			t.Errorf("parseVerdict(%q) = (%d,%q), want (%d,%q)", tc.in, got, miss, tc.want, tc.wantMiss)
+		}
+	}
+}
+
 // After the rethink nudge, a single further unproductive turn stops the run — the
 // counter isn't reset on the nudge, so a degenerate model (which may think for
 // minutes per turn) can't flail for another full budget before stopping.

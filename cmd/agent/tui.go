@@ -548,7 +548,10 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "shift+tab":
-		if m.state == stRunning { // don't flip plan/auto mid-task — the running agent reads it
+		// Only toggle plan/auto from the idle prompt: mid-task the running agent reads
+		// the mode live (flipping it races + splits the run), and inside a modal panel
+		// (config/sessions/agents/rewind) it's an unrelated stray toggle.
+		if m.state != stIdle {
 			return m, nil
 		}
 		m.app.setMode(!m.app.planMode) // cycle plan/auto; the bottom indicator updates

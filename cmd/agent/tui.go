@@ -65,7 +65,10 @@ type tuiModel struct {
 
 	state         uiState
 	history       []string
-	queued        []string // type-ahead while a task runs
+	queued        []string // pending user messages (tasks + /commands), drained in order
+	inputHist     []string // submitted inputs, newest last, for ↑/↓ recall
+	histIdx       int      // history browse cursor; == len(inputHist) means "not browsing"
+	histDraft     string   // in-progress input saved when history browsing begins
 	pending       *approvalReq
 	approveChoice bool          // selected Yes(true)/No(false) while answering an approval
 	cfgCursor     int           // selected row in the /config panel (stConfig)
@@ -430,7 +433,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (finish your message). The user presses ↑ to switch to answering. Do NOT
 		// fetch the next approval yet — that would overwrite m.pending and orphan
 		// this one's reply channel (a hang when the model batches calls).
-		m.push(cToolCall.Render("  ⚠ approve "+req.kind+": ") + req.detail + cDim.Render("  — press ↑ to answer"))
+		m.push(cToolCall.Render("  ⚠ approve "+req.kind+": ") + req.detail + cDim.Render("  — y approve · n deny · ↑ for Yes/No · or keep typing"))
 		return m, nil
 
 	case taskDoneMsg:
@@ -438,12 +441,9 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancel = nil
 		m.retry = nil
 		detect := m.detectWindowCmd() // model is loaded now — confirm the real window
-		if len(m.queued) > 0 {        // run the next type-ahead
-			next := m.queued[0]
-			m.queued = m.queued[1:]
-			m.syncViewport() // it left the pinned queue
-			m.push(cYou.Render("❯ ") + next)
-			return m, tea.Batch(detect, m.runTask(next))
+		if len(m.queued) > 0 {        // drain the next pending message(s): tasks + /commands
+			model, cmd := m.drainQueue()
+			return model, tea.Batch(detect, cmd)
 		}
 		if m.app.shouldAutoCompact() { // context near the limit — fold it down
 			return m, tea.Batch(detect, m.startCompact(true))
@@ -648,6 +648,16 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case stRunning:
 		switch k.String() {
+		case "y", "Y", "n", "N":
+			// Answer a pending approval directly — but only with an empty input, so
+			// typing a word starting with y/n mid-sentence still just types.
+			if m.pending != nil && strings.TrimSpace(m.input.Value()) == "" {
+				m.resolveApproval(k.String() == "y" || k.String() == "Y")
+				return m, m.waitApproval()
+			}
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(k)
+			return m, cmd
 		case "esc":
 			if m.cancel != nil {
 				m.cancel()
@@ -667,7 +677,8 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.input.SetValue("")
-			if strings.HasPrefix(line, "/") {
+			m.recordInput(line)
+			if isCommandLine(line) {
 				return m.commandWhileBusy(line)
 			}
 			m.queued = append(m.queued, line) // type-ahead: run after the task
@@ -707,6 +718,7 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil // empty Enter is a no-op (shell is `!` or /shell)
 			}
 			m.input.SetValue("")
+			m.recordInput(line)
 			return m.submit(line)
 		case "tab":
 			switch {
@@ -719,7 +731,25 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.input.Placeholder = defaultPlaceholder
 			}
 			return m, nil
-		case "up", "down", "pgup", "pgdown", "home", "end":
+		case "up":
+			// Recall a previous message when the input is empty or already browsing
+			// history; otherwise scroll the log. PgUp/wheel always scroll.
+			if m.browsing() || strings.TrimSpace(m.input.Value()) == "" {
+				m.historyPrev()
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(k)
+			return m, cmd
+		case "down":
+			if m.browsing() {
+				m.historyNext()
+				return m, nil
+			}
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(k)
+			return m, cmd
+		case "pgup", "pgdown", "home", "end":
 			var cmd tea.Cmd
 			m.vp, cmd = m.vp.Update(k)
 			return m, cmd
@@ -742,6 +772,81 @@ func (m *tuiModel) resolveApproval(ok bool) {
 		verdict = cOk.Render("allowed")
 	}
 	m.push(cDim.Render("  → ") + verdict)
+}
+
+const maxInputHist = 100
+
+// recordInput adds a submitted line to the ↑/↓ recall history (skipping a
+// consecutive duplicate) and resets the browse cursor.
+func (m *tuiModel) recordInput(line string) {
+	if n := len(m.inputHist); n == 0 || m.inputHist[n-1] != line {
+		m.inputHist = append(m.inputHist, line)
+		if len(m.inputHist) > maxInputHist {
+			m.inputHist = m.inputHist[len(m.inputHist)-maxInputHist:]
+		}
+	}
+	m.histIdx = len(m.inputHist)
+	m.histDraft = ""
+}
+
+// browsing reports whether the input is currently showing a recalled history line.
+func (m *tuiModel) browsing() bool { return m.histIdx < len(m.inputHist) }
+
+// historyPrev recalls an older submitted line into the input (↑).
+func (m *tuiModel) historyPrev() {
+	if len(m.inputHist) == 0 {
+		return
+	}
+	if m.histIdx == len(m.inputHist) {
+		m.histDraft = m.input.Value() // stash the in-progress line to restore on the way back
+	}
+	if m.histIdx > 0 {
+		m.histIdx--
+	}
+	m.input.SetValue(m.inputHist[m.histIdx])
+	m.input.CursorEnd()
+}
+
+// historyNext walks back toward the newest line, restoring the draft past the end (↓).
+func (m *tuiModel) historyNext() {
+	if m.histIdx >= len(m.inputHist) {
+		return
+	}
+	m.histIdx++
+	if m.histIdx == len(m.inputHist) {
+		m.input.SetValue(m.histDraft)
+	} else {
+		m.input.SetValue(m.inputHist[m.histIdx])
+	}
+	m.input.CursorEnd()
+}
+
+// drainQueue runs the next pending messages: it executes queued /commands in place
+// (continuing to the next) and stops on the first task (going to running) or when a
+// command opens a panel / goes async. Called when a task finishes.
+func (m *tuiModel) drainQueue() (tea.Model, tea.Cmd) {
+	for len(m.queued) > 0 {
+		next := m.queued[0]
+		m.queued = m.queued[1:]
+		m.syncViewport() // it left the pinned queue
+		m.push(cYou.Render("❯ ") + next)
+		if isCommandLine(next) {
+			model, cmd := m.runCommand(next)
+			m = model.(*tuiModel)
+			if cmd != nil || m.state != stIdle { // started a task / opened a panel / went async
+				return m, cmd
+			}
+			continue // synchronous command done → drain the next
+		}
+		return m, m.runTask(next)
+	}
+	return m, m.input.Focus()
+}
+
+// isCommandLine reports whether a queued message is a slash-command or bang-shell,
+// not a task to run through the agent.
+func isCommandLine(s string) bool {
+	return strings.HasPrefix(s, "/") || strings.HasPrefix(s, "!")
 }
 
 func (m *tuiModel) submit(line string) (tea.Model, tea.Cmd) {
@@ -981,7 +1086,10 @@ func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
 			return m.runCommand(cmd)
 		}
 	}
-	m.push(cDim.Render("busy — " + cmd + " will run once the current task finishes"))
+	// Defer it into the queue (drained in order when the task finishes) — don't drop it.
+	m.queued = append(m.queued, line)
+	m.syncViewport()
+	m.push(cDim.Render("queued — " + cmd + " runs when the current task finishes"))
 	return m, nil
 }
 
@@ -1137,8 +1245,8 @@ func (m *tuiModel) View() string {
 	case m.state == stApprove:
 		status = m.approvePrompt()
 	case m.pending != nil:
-		// An approval is waiting but you can keep typing; ↑ switches to answering.
-		status = cToolCall.Render("⚠ approval needed") + cDim.Render(" — press ↑ to answer")
+		// An approval is waiting but you can keep typing; y/n answers it (↑ opens Yes/No).
+		status = cToolCall.Render("⚠ approval needed") + cDim.Render(" — y approve · n deny · ↑ Yes/No · or keep typing")
 	case m.state == stRunning:
 		if m.retry != nil {
 			remain := time.Until(m.retry.until).Truncate(100 * time.Millisecond)
@@ -1368,7 +1476,9 @@ func (m *tuiModel) renderContent() string {
 
 // keyHelp documents the keyboard shortcuts for /help.
 var keyHelp = [][2]string{
-	{"Enter", "send the message"},
+	{"Enter", "send (or queue while a task runs)"},
+	{"↑ / ↓", "recall / edit previous messages (empty input); PgUp/PgDn scroll"},
+	{"y / n", "answer an approval prompt (empty input)"},
 	{"alt+enter", "newline in the input (also ctrl+j)"},
 	{"Tab", "complete a /command, or accept the NEXT suggestion"},
 	{"shift+tab", "toggle plan ⇄ auto mode"},

@@ -349,9 +349,18 @@ The input is multi-line: paste a whole block (e.g. a YAML snippet) and it keeps
 its line breaks, the box grows and word-wraps instead of scrolling on one line,
 and **alt+enter** (or **ctrl+j**) inserts a newline by hand. **Enter** submits.
 
-While a task runs the input stays live: Enter **queues** a follow-up (pinned
-above the input until it runs), **↑** pulls the last queued message back to edit
-or drop, and **esc** cancels.
+**History.** With an empty input, **↑ / ↓** recall previous messages to re-run or
+fix a typo (PgUp/PgDn and the mouse wheel still scroll the log).
+
+Everything you type is a **message queue**. While a task runs the input stays
+live: Enter **queues** the next message — a task *or* a `/command` — pinned above
+the input and drained in order when the task finishes (deferred commands are no
+longer dropped). **↑** on an empty input pulls the last queued message back to
+edit or drop, and **esc** cancels.
+
+**Approvals.** When the agent asks to approve a file write or shell command, just
+press **y** (approve) or **n** (deny) — you can keep typing your next message
+meanwhile, and **↑** still opens the explicit Yes/No prompt.
 
 **Shell.** `/shell` (or `!`) drops you into an
 interactive shell in the workspace — do things by hand, exit to return. `!cmd`

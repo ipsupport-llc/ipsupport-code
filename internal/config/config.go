@@ -167,6 +167,16 @@ func KnownProviders() []string {
 	return names
 }
 
+// IsCustomProvider reports whether name is a user-defined provider (present in the
+// config's providers map) rather than a built-in template. A custom provider is
+// self-describing (the user supplied base_url) and may be keyless — e.g. a local
+// Ollama/vLLM/second-LM-Studio endpoint — so the UI shouldn't demand an API key.
+func IsCustomProvider(cfg Config, name string) bool {
+	_, hasPreset := cfg.Providers[name]
+	_, hasTmpl := ProviderTemplates[name]
+	return hasPreset && !hasTmpl
+}
+
 // ResolveProvider returns the connection for an external provider name, merging
 // a user preset over the built-in template and falling back to the env var for
 // the key. Not for "local" (that's cfg.LLM). false if the name is unknown.

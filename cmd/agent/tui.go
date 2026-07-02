@@ -1785,7 +1785,6 @@ func (m *tuiModel) renderUsage() []string {
 	return out
 }
 
-// renderEvent renders one streamed agent event into styled history lines.
 // openRewind enters the checkpoint picker (or says there's nothing to rewind).
 func (m *tuiModel) openRewind() {
 	m.rewindRows = m.app.rewindRows()
@@ -1928,6 +1927,7 @@ func (m *tuiModel) renderSubs() string {
 	return strings.Join(lines, "\n")
 }
 
+// renderEvent renders one streamed agent event into styled history lines.
 func (m *tuiModel) renderEvent(e uiEvent) []string {
 	switch e.kind {
 	case "assistant":
@@ -1999,8 +1999,8 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		return []string{cToolCall.Render("  ⇉ spawned "+head) + cDim.Render("  "+task)}
 	case "loop":
 		label := fmt.Sprintf("↻ loop %d", toInt(e.fields["i"]))
-		if max := toInt(e.fields["max"]); max > 0 {
-			label += fmt.Sprintf("/%d", max)
+		if total := toInt(e.fields["max"]); total > 0 {
+			label += fmt.Sprintf("/%d", total)
 		}
 		if every, _ := e.fields["every"].(string); every != "" {
 			label += " · every " + every

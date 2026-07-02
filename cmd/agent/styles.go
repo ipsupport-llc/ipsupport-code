@@ -2,9 +2,10 @@ package main
 
 import "github.com/charmbracelet/lipgloss"
 
-// Palette uses ANSI 16-color codes so it adapts to the user's terminal theme.
+// Palette mostly uses ANSI 16-color codes so it adapts to the user's terminal
+// theme; the diff styles (below, and the raw-ANSI rows in tui.go) use fixed
+// 256-color codes so added/removed backgrounds render consistently.
 var (
-	cTitle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("13"))
 	cYou      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("14"))
 	cBot      = lipgloss.NewStyle().Foreground(lipgloss.Color("15"))
 	cToolCall = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))

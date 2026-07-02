@@ -168,7 +168,7 @@ var cmdWrappers = map[string]bool{
 // in "nice -n 5" or "timeout 5s"), so wrapper-flag values are skipped when looking
 // through to the wrapped command. No real command is a bare number.
 func looksLikeArgValue(s string) bool {
-	s = strings.TrimRight(s, "smhdSMHDkKmMgGbB") // strip a trailing duration/size unit
+	s = strings.TrimRight(s, "smhdkgbSMHDKGB") // strip a trailing duration/size unit
 	if s == "" {
 		return false
 	}

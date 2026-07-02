@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+
+	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
 // httpTransport speaks the MCP "streamable HTTP" transport: each JSON-RPC message
@@ -130,8 +132,8 @@ func readSSE(r io.Reader, id *int) (*rpcResp, error) {
 
 func oneLine(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > 150 {
-		s = s[:150] + "…"
+	if clipped, truncated := textutil.Clip(s, 150); truncated { // rune-safe, unlike a raw byte slice
+		s = clipped + "…"
 	}
 	return s
 }

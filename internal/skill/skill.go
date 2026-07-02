@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
@@ -175,7 +176,7 @@ func (s *Store) saveSeeded(m map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(s.seededPath(), data)
+	return atomicfile.Write(s.seededPath(), data, 0o644)
 }
 
 func (s *Store) statePath() string { return filepath.Join(s.dir, "state.json") }
@@ -188,27 +189,7 @@ func (s *Store) saveState() error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(s.statePath(), data)
-}
-
-// writeFileAtomic writes via a temp file + rename so a crash can't leave a
-// truncated/half-written file in place.
-func writeFileAtomic(path string, data []byte) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return atomicfile.Write(s.statePath(), data, 0o644)
 }
 
 // List returns every installed skill (enabled and disabled), sorted by name. A
@@ -489,8 +470,4 @@ func parse(fallbackName, text string) Skill {
 	return sk
 }
 
-func oneLine(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	out, _ := textutil.Clip(s, 200)
-	return out
-}
+func oneLine(s string) string { return textutil.OneLine(s, 200) }

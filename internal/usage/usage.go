@@ -8,9 +8,10 @@ import (
 	"errors"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
+
+	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 )
 
 // Entry is one (day, provider, model) bucket of token counts.
@@ -83,24 +84,7 @@ func (s *Store) Save() error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(s.path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".usage-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, s.path)
+	return atomicfile.Write(s.path, data, 0o644)
 }
 
 // Total is an aggregated row for display.

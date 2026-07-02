@@ -6,12 +6,13 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 )
 
 const dateFmt = "2006-01-02"
@@ -197,30 +198,11 @@ func (k *KB) Query(domain, errText string, limit int) []Pitfall {
 func (k *KB) Save() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	dir := filepath.Dir(k.path)
-	if dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return &KnowledgeError{Op: "mkdir", Path: dir, Err: err}
-		}
-	}
 	data, err := json.MarshalIndent(k.pitfalls, "", "  ")
 	if err != nil {
 		return &KnowledgeError{Op: "marshal", Path: k.path, Err: err}
 	}
-	tmp, err := os.CreateTemp(dir, ".kb-*.tmp")
-	if err != nil {
-		return &KnowledgeError{Op: "write", Path: k.path, Err: err}
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op once the rename succeeds
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return &KnowledgeError{Op: "write", Path: k.path, Err: err}
-	}
-	if err := tmp.Close(); err != nil {
-		return &KnowledgeError{Op: "write", Path: k.path, Err: err}
-	}
-	if err := os.Rename(tmpName, k.path); err != nil {
+	if err := atomicfile.Write(k.path, data, 0o644); err != nil {
 		return &KnowledgeError{Op: "write", Path: k.path, Err: err}
 	}
 	return nil

@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+
+	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
 // oneLineList collapses a (possibly JSON/HTML) error body to a short single line.
-func oneLineList(s string) string {
-	return truncate(strings.Join(strings.Fields(s), " "), 200)
-}
+func oneLineList(s string) string { return textutil.OneLine(s, 200) }
 
 // ListModels returns the model IDs an OpenAI-compatible server advertises at
 // /v1/models (sorted). Works for LM Studio, OpenAI, xAI, Groq, OpenRouter, etc.

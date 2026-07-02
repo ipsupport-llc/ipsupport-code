@@ -302,9 +302,7 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bo
 }
 
 // oneLine collapses a (possibly HTML) error body to a short single line.
-func oneLine(s string) string {
-	return truncate(strings.Join(strings.Fields(s), " "), 150)
-}
+func oneLine(s string) string { return textutil.OneLine(s, 150) }
 
 // parseStream reads an SSE stream, accumulating content and tool calls, and ticks
 // the live completion-token counter as deltas arrive so the UI updates in real
@@ -525,9 +523,4 @@ func validArgs(s string) string {
 		return s
 	}
 	return "{}"
-}
-
-func truncate(s string, n int) string {
-	out, _ := textutil.Clip(s, n)
-	return out
 }

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
 )
 
@@ -334,37 +335,11 @@ func mergeJSONFile(path string, perm os.FileMode, kv map[string]any) error {
 		}
 		raw[k] = b
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
 	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := writeFileSync(tmp, data, perm); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path) // atomic on the same filesystem
-}
-
-// writeFileSync writes and fsyncs the file before returning, so a crash right after
-// the rename can't leave a zero-length config (WriteFile alone doesn't flush).
-func writeFileSync(path string, data []byte, perm os.FileMode) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	return f.Close()
+	return atomicfile.Write(path, data, perm)
 }
 
 // SaveChannel persists the update channel (stable|nightly).

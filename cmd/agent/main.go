@@ -1088,6 +1088,49 @@ func (a *app) completePath(prefix string) (string, []string) {
 	return longestCommonPrefix(matches), matches
 }
 
+// gitOut runs a read-only git command in dir and returns its stdout.
+func gitOut(dir string, args ...string) (string, error) {
+	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+	return string(out), err
+}
+
+func mustGit(dir string, args ...string) string { s, _ := gitOut(dir, args...); return s }
+
+// diffCommand shows the uncommitted working-tree changes in the current dir — a
+// quick "what did the agent change" review without leaving the TUI. The caller
+// colorizes the lines. Caps very large diffs so the log doesn't flood.
+func (a *app) diffCommand() []string {
+	dir := a.effectiveDir()
+	if out, err := gitOut(dir, "rev-parse", "--is-inside-work-tree"); err != nil || strings.TrimSpace(out) != "true" {
+		return []string{"/diff needs a git repo here — nothing to compare against"}
+	}
+	stat := strings.TrimSpace(mustGit(dir, "diff", "--stat"))
+	patch := strings.TrimRight(mustGit(dir, "diff"), "\n")
+	untracked := strings.TrimSpace(mustGit(dir, "ls-files", "--others", "--exclude-standard"))
+	if stat == "" && untracked == "" {
+		return []string{"no uncommitted changes"}
+	}
+	var out []string
+	if stat != "" {
+		out = append(out, strings.Split(stat, "\n")...)
+	}
+	if patch != "" {
+		out = append(out, "")
+		out = append(out, strings.Split(patch, "\n")...)
+	}
+	if untracked != "" {
+		out = append(out, "", "untracked (new) files:")
+		for _, f := range strings.Split(untracked, "\n") {
+			out = append(out, "  + "+f)
+		}
+	}
+	const maxLines = 400
+	if len(out) > maxLines {
+		out = append(out[:maxLines], fmt.Sprintf("… (%d more lines — run `git diff` for the rest)", len(out)-maxLines))
+	}
+	return out
+}
+
 // goalSteps is the hard step backstop for one goal pursuit, falling back to the
 // model's own per-task cap if it isn't configured.
 func (a *app) goalSteps() int {
@@ -2265,6 +2308,10 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		for _, l := range a.budgetCommand(rest) {
 			fmt.Println(l)
 		}
+	case "/diff":
+		for _, l := range a.diffCommand() {
+			fmt.Println(l)
+		}
 	case "/reasoning":
 		for _, l := range a.reasoningCommand(rest) {
 			fmt.Println(l)
@@ -2889,6 +2936,7 @@ func helpText() string {
   /status          show config, knowledge base, and trace paths
   /usage           session counters + token usage
   /budget [usd]    cap estimated spend per run (refuses new tasks once hit; off to disable)
+  /diff            show uncommitted changes in the workspace (what the agent changed)
   /login           (re)configure the server URL / model / key, then reload
   /new [name]      start a NEW session (the old one stays in /sessions)
   /clear           wipe this session's context (same session)

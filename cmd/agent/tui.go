@@ -1165,6 +1165,11 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/budget":
 		m.pushLines(m.app.budgetCommand(rest))
 		return m, nil
+	case "/diff":
+		for _, l := range m.app.diffCommand() {
+			m.push(colorizeDiff(l))
+		}
+		return m, nil
 	case "/reasoning":
 		m.pushLines(m.app.reasoningCommand(rest))
 		return m, nil
@@ -1482,6 +1487,9 @@ func (m *tuiModel) View() string {
 				detail = fmt.Sprintf("%s · ↑%s tok", elapsed, humanK(gen))
 			}
 			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" %s · thinking… (%s)", m.app.providerModel(), detail))
+			if meter := m.ctxMeter(); meter != "" { // watch the window fill during a long task
+				status += cDim.Render(" · ") + meter
+			}
 		}
 	default:
 		// ctx = size of the last prompt vs the window (auto-compacts as it fills);
@@ -1491,8 +1499,12 @@ func (m *tuiModel) View() string {
 		if act.ContextWindow > 0 {
 			ctxStr += "/" + humanK(act.ContextWindow)
 		}
-		status = cDim.Render(fmt.Sprintf("%s · %s · ctx %s · ↑%s · ready",
-			m.app.providerModel(), filepath.Base(m.app.effectiveDir()), ctxStr, humanK(c)))
+		meter := ""
+		if s := m.ctxMeter(); s != "" {
+			meter = cDim.Render(" · ") + s
+		}
+		status = cDim.Render(fmt.Sprintf("%s · %s · ctx %s", m.app.providerModel(), filepath.Base(m.app.effectiveDir()), ctxStr)) +
+			meter + cDim.Render(fmt.Sprintf(" · ↑%s · ready", humanK(c)))
 	}
 
 	bottom := m.modeLine()
@@ -1718,6 +1730,7 @@ var commandList = []cmdInfo{
 	{"/status", "config, knowledge base, trace paths"},
 	{"/usage", "token history (day/week/month, by model); clear · purge <days> · retain <days>"},
 	{"/budget", "<usd>|off — cap estimated spend per run; refuses new tasks once hit"},
+	{"/diff", "show uncommitted changes in the workspace (what the agent changed)"},
 	{"/login", "(re)configure server URL / model / key, then reload"},
 	{"/new", "start a NEW session (old stays in /sessions); /new <name> to name it"},
 	{"/clear", "wipe this session's context + the screen (same session)"},
@@ -2414,6 +2427,44 @@ func outputLines(content, marker string, style lipgloss.Style) []string {
 		out = append(out, cDim.Render("    …"))
 	}
 	return out
+}
+
+// ctxMeter renders the current context fill as a colored percentage — dim under
+// half, warn as it approaches the auto-compact threshold, red once it will compact.
+// Empty when there's no window or nothing sent yet.
+func (m *tuiModel) ctxMeter() string {
+	win := m.app.activeLLM().ContextWindow
+	used := m.app.client.Context()
+	if win <= 0 || used <= 0 {
+		return ""
+	}
+	s := fmt.Sprintf("ctx %d%%", used*100/win)
+	switch {
+	case float64(used) >= float64(win)*autoCompactRatio:
+		return cErr.Render(s + "⚠") // at/over the auto-compact threshold
+	case used*100/win >= 50:
+		return cToolCall.Render(s)
+	default:
+		return cDim.Render(s)
+	}
+}
+
+// colorizeDiff tints one unified-diff line: added green, removed red, hunk headers
+// accented, file headers dim — leaving stat/plain lines as-is.
+func colorizeDiff(line string) string {
+	switch {
+	case strings.HasPrefix(line, "diff --git"), strings.HasPrefix(line, "index "),
+		strings.HasPrefix(line, "+++"), strings.HasPrefix(line, "---"):
+		return cDim.Render(line)
+	case strings.HasPrefix(line, "@@"):
+		return cToolCall.Render(line)
+	case strings.HasPrefix(line, "+"):
+		return cOk.Render(line)
+	case strings.HasPrefix(line, "-"):
+		return cErr.Render(line)
+	default:
+		return line
+	}
 }
 
 func humanK(n int) string {

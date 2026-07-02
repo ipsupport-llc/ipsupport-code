@@ -9,15 +9,23 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sync"
 )
 
 // stdioTransport speaks newline-delimited JSON-RPC to a subprocess over its
-// stdin/stdout. One request/response at a time (serialized by the caller's id
-// loop); interleaved notifications from the server are skipped.
+// stdin/stdout. A single long-lived reader loop dispatches each response to the
+// waiter registered for its id, so a cancelled/timed-out call just unregisters its
+// waiter — it never leaves a goroutine blocked on the shared reader (which would
+// then race the next call and corrupt the stream).
 type stdioTransport struct {
 	w       io.Writer
 	br      *bufio.Reader
 	closeFn func()
+
+	mu      sync.Mutex
+	waiters map[int]chan rpcResp
+	done    chan struct{} // closed when the reader loop exits (EOF/error)
+	readErr error
 }
 
 func dialStdio(name string, s Server) (transport, error) {
@@ -46,7 +54,45 @@ func dialStdio(name string, s Server) (transport, error) {
 }
 
 func newStdio(w io.Writer, r io.Reader, closeFn func()) *stdioTransport {
-	return &stdioTransport{w: w, br: bufio.NewReaderSize(r, 1<<20), closeFn: closeFn}
+	t := &stdioTransport{
+		w: w, br: bufio.NewReaderSize(r, 1<<20), closeFn: closeFn,
+		waiters: map[int]chan rpcResp{},
+		done:    make(chan struct{}),
+	}
+	go t.readLoop()
+	return t
+}
+
+// readLoop reads responses for the transport's whole lifetime and hands each to
+// the waiter for its id. Runs until the stream errors/EOFs (e.g. close() kills the
+// process), then wakes any remaining waiters via done.
+func (t *stdioTransport) readLoop() {
+	defer close(t.done)
+	for {
+		line, err := t.br.ReadBytes('\n')
+		if err != nil {
+			t.mu.Lock()
+			t.readErr = err
+			t.mu.Unlock()
+			return
+		}
+		if line = bytes.TrimSpace(line); len(line) == 0 {
+			continue
+		}
+		var m rpcResp
+		if json.Unmarshal(line, &m) != nil || m.ID == nil {
+			continue // notification, log line, or unparseable
+		}
+		t.mu.Lock()
+		ch, ok := t.waiters[*m.ID]
+		if ok {
+			delete(t.waiters, *m.ID)
+		}
+		t.mu.Unlock()
+		if ok {
+			ch <- m // ch is buffered(1) → never blocks the reader
+		}
+	}
 }
 
 func (t *stdioTransport) close() {
@@ -60,42 +106,42 @@ func (t *stdioTransport) notify(_ context.Context, msg rpcMsg) error {
 }
 
 func (t *stdioTransport) roundTrip(ctx context.Context, msg rpcMsg) (json.RawMessage, error) {
+	if msg.ID == nil {
+		return nil, fmt.Errorf("roundTrip requires a request id")
+	}
+	id := *msg.ID
+	ch := make(chan rpcResp, 1)
+	t.mu.Lock()
+	t.waiters[id] = ch
+	t.mu.Unlock()
+	unregister := func() {
+		t.mu.Lock()
+		delete(t.waiters, id)
+		t.mu.Unlock()
+	}
+
 	if err := t.write(msg); err != nil {
+		unregister()
 		return nil, err
 	}
-	type result struct {
-		raw json.RawMessage
-		err error
-	}
-	done := make(chan result, 1)
-	go func() {
-		for {
-			line, err := t.br.ReadBytes('\n')
-			if err != nil {
-				done <- result{nil, err}
-				return
-			}
-			line = bytes.TrimSpace(line)
-			if len(line) == 0 {
-				continue
-			}
-			var m rpcResp
-			if json.Unmarshal(line, &m) != nil || m.ID == nil || msg.ID == nil || *m.ID != *msg.ID {
-				continue // notification, log line, or a different id
-			}
-			if m.Error != nil {
-				done <- result{nil, fmt.Errorf("%s: %s", msg.Method, m.Error.Message)}
-				return
-			}
-			done <- result{m.Result, nil}
-			return
-		}
-	}()
 	select {
 	case <-ctx.Done():
+		unregister()
 		return nil, ctx.Err()
-	case r := <-done:
-		return r.raw, r.err
+	case <-t.done:
+		unregister()
+		t.mu.Lock()
+		err := t.readErr
+		t.mu.Unlock()
+		if err == nil {
+			err = io.EOF
+		}
+		return nil, fmt.Errorf("%s: transport closed: %w", msg.Method, err)
+	case m := <-ch:
+		if m.Error != nil {
+			return nil, fmt.Errorf("%s: %s", msg.Method, m.Error.Message)
+		}
+		return m.Result, nil
 	}
 }
 

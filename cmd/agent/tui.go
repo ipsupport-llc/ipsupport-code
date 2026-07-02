@@ -66,8 +66,7 @@ type tuiModel struct {
 	state         uiState
 	history       []string
 	queued        []string // pending user messages (tasks + /commands), drained in order
-	inputHist     []string // submitted inputs, newest last, for ↑/↓ recall
-	histIdx       int      // history browse cursor; == len(inputHist) means "not browsing"
+	histIdx       int      // recall cursor into app.promptHist; == len means "not browsing"
 	histDraft     string   // in-progress input saved when history browsing begins
 	pendingMode   *bool    // plan(true)/auto(false) requested via shift+tab mid-task; applied on task done
 	taskDoneAway  bool     // a task finished while a modal panel was open over it; finalize on panel close
@@ -186,6 +185,7 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 		name = "ipsupport-code"
 	}
 	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: lipgloss.Color("13"), inputLines: 1}
+	m.histIdx = len(a.promptHist) // start "not browsing": first ↑ recalls the most recent prompt
 	act := a.activeLLM()
 	m.history = bannerLines(name, version, a.providerName(), act.Model, a.workspace, act.ContextWindow, m.accent)
 	if a.goal.Status == "active" && a.goal.Text != "" {
@@ -843,49 +843,49 @@ func (m *tuiModel) approveSession() {
 	m.push(cDim.Render("  → ") + cOk.Render("allowed") + cDim.Render(" · won't ask about "+cat+" again this session"))
 }
 
-const maxInputHist = 100
+// hist is the recall ring — the app's per-workspace prompt history, persisted so ↑
+// reaches prompts from earlier runs.
+func (m *tuiModel) hist() []string { return m.app.promptHist }
 
-// recordInput adds a submitted line to the ↑/↓ recall history (skipping a
-// consecutive duplicate) and resets the browse cursor.
+// recordInput persists a submitted line to the prompt history and resets the
+// browse cursor to "not browsing".
 func (m *tuiModel) recordInput(line string) {
-	if n := len(m.inputHist); n == 0 || m.inputHist[n-1] != line {
-		m.inputHist = append(m.inputHist, line)
-		if len(m.inputHist) > maxInputHist {
-			m.inputHist = m.inputHist[len(m.inputHist)-maxInputHist:]
-		}
-	}
-	m.histIdx = len(m.inputHist)
+	m.app.addPromptHist(line)
+	m.histIdx = len(m.app.promptHist)
 	m.histDraft = ""
 }
 
 // browsing reports whether the input is currently showing a recalled history line.
-func (m *tuiModel) browsing() bool { return m.histIdx < len(m.inputHist) }
+func (m *tuiModel) browsing() bool { return m.histIdx < len(m.hist()) }
 
 // historyPrev recalls an older submitted line into the input (↑).
 func (m *tuiModel) historyPrev() {
-	if len(m.inputHist) == 0 {
+	h := m.hist()
+	if len(h) == 0 {
 		return
 	}
-	if m.histIdx == len(m.inputHist) {
+	if m.histIdx >= len(h) {
+		m.histIdx = len(h)
 		m.histDraft = m.input.Value() // stash the in-progress line to restore on the way back
 	}
 	if m.histIdx > 0 {
 		m.histIdx--
 	}
-	m.input.SetValue(m.inputHist[m.histIdx])
+	m.input.SetValue(h[m.histIdx])
 	m.input.CursorEnd()
 }
 
 // historyNext walks back toward the newest line, restoring the draft past the end (↓).
 func (m *tuiModel) historyNext() {
-	if m.histIdx >= len(m.inputHist) {
+	h := m.hist()
+	if m.histIdx >= len(h) {
 		return
 	}
 	m.histIdx++
-	if m.histIdx == len(m.inputHist) {
+	if m.histIdx == len(h) {
 		m.input.SetValue(m.histDraft)
 	} else {
-		m.input.SetValue(m.inputHist[m.histIdx])
+		m.input.SetValue(h[m.histIdx])
 	}
 	m.input.CursorEnd()
 }
@@ -1040,6 +1040,9 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 			return m, m.runTask(text)
 		}
 		m.pushLines(m.app.goalCommand(rest))
+		return m, nil
+	case "/history":
+		m.pushLines(m.app.historyCommand(rest))
 		return m, nil
 	case "/reasoning":
 		m.pushLines(m.app.reasoningCommand(rest))
@@ -1603,6 +1606,7 @@ var commandList = []cmdInfo{
 	{"/color", "change the frame color (cycles if no name)"},
 	{"/rename", "rename the agent (saved in settings)"},
 	{"/sessions", "list / switch / delete saved sessions (per agent name)"},
+	{"/history", "recent prompts (↑/↓ recalls them into the input); /history <text> to filter"},
 	{"/agents", "manage sub-agent profiles: /agents add|rm|exec (models the agent tool delegates to)"},
 	{"/loop", "re-run a task on an interval: /loop 5m <task> (esc to stop)"},
 	{"/exit", "leave"},

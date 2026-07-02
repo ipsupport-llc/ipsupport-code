@@ -367,7 +367,9 @@ its line breaks, the box grows and word-wraps instead of scrolling on one line,
 and **alt+enter** (or **ctrl+j**) inserts a newline by hand. **Enter** submits.
 
 **History.** With an empty input, **↑ / ↓** recall previous messages to re-run or
-fix a typo (PgUp/PgDn and the mouse wheel still scroll the log).
+fix a typo — the first **↑** jumps to your last prompt. History is **persisted per
+workspace** (`.agent/history`), so recall spans past runs; `/history` lists recent
+prompts and `/history <text>` filters them. (PgUp/PgDn and the wheel scroll the log.)
 
 Everything you type is a **message queue**. While a task runs the input stays
 live: Enter **queues** the next message — a task *or* a `/command` — pinned above

@@ -1154,29 +1154,72 @@ func (a *app) reasoningCommand(arg string) []string {
 	default:
 		return []string{"usage: /reasoning off|minimal|low|medium|high"}
 	}
-	shape, known := reasoningShape(provider, arg)
-	if !known {
+	shape, ok := a.applyReasoning(key, provider, arg)
+	if !ok {
 		return []string{
 			fmt.Sprintf("don't know %s's reasoning param — set it raw in config.json under", provider),
 			fmt.Sprintf("  \"reasoning\": { %q: { …provider's params… } }", key),
 		}
 	}
+	if shape == nil {
+		return []string{fmt.Sprintf("reasoning → default for %s · %s (cleared)", provider, model)}
+	}
+	return []string{fmt.Sprintf("reasoning → %s for %s · %s  %s", arg, provider, model, string(shape))}
+}
+
+// reasoningLevels is the cycle order shared by /reasoning and the /config row.
+var reasoningLevels = []string{"off", "minimal", "low", "medium", "high"}
+
+// applyReasoning sets (or clears, for a portable "off") the reasoning override at
+// key to provider's shape for level, persists it, and re-wires. ok=false means the
+// provider has no known portable shape (set it raw in config.json instead).
+func (a *app) applyReasoning(key, provider, level string) (json.RawMessage, bool) {
+	shape, known := reasoningShape(provider, level)
+	if !known {
+		return nil, false
+	}
 	if a.cfg.Reasoning == nil {
 		a.cfg.Reasoning = map[string]json.RawMessage{}
 	}
-	if shape == nil { // "off" with no portable param → clear the override (server default)
+	if shape == nil { // "off" with no portable value → clear the override (server default)
 		delete(a.cfg.Reasoning, key)
 	} else {
 		a.cfg.Reasoning[key] = shape
 	}
 	if err := config.SaveReasoning(a.cfg.Reasoning); err != nil {
-		return []string{"warning: not persisted: " + err.Error()}
+		slog.Warn("reasoning not persisted", "err", err)
 	}
 	_ = a.wire() // rebuild the client so the change takes effect
-	if shape == nil {
-		return []string{fmt.Sprintf("reasoning → default for %s · %s (cleared)", provider, model)}
+	return shape, true
+}
+
+// reasoningLevel reverse-maps the stored raw param back to a level name for display
+// ("default" if none is set, "custom" if it doesn't match a known level).
+func (a *app) reasoningLevel(provider, model string) string {
+	raw, ok := a.cfg.Reasoning[provider+"/"+model]
+	if !ok {
+		raw, ok = a.cfg.Reasoning[provider] // provider default
 	}
-	return []string{fmt.Sprintf("reasoning → %s for %s · %s  %s", arg, provider, model, string(shape))}
+	if !ok {
+		return "default"
+	}
+	for _, lvl := range reasoningLevels {
+		if shape, known := reasoningShape(provider, lvl); known && shape != nil && string(shape) == string(raw) {
+			return lvl
+		}
+	}
+	return "custom"
+}
+
+// nextReasoning returns the next level in the cycle after cur (wrapping); a
+// non-level (default/custom) starts the cycle at its head.
+func nextReasoning(cur string) string {
+	for i, l := range reasoningLevels {
+		if l == cur {
+			return reasoningLevels[(i+1)%len(reasoningLevels)]
+		}
+	}
+	return reasoningLevels[0]
 }
 
 // mcpServerNames lists configured MCP server names, sorted.

@@ -532,6 +532,33 @@ func TestPlanReviewHandshake(t *testing.T) {
 	}
 }
 
+func TestReasoningLevelAndCycle(t *testing.T) {
+	a := &app{cfg: config.Default()}
+	a.cfg.Reasoning = map[string]json.RawMessage{}
+
+	if got := a.reasoningLevel("openai", "gpt-4o"); got != "default" {
+		t.Errorf("no override → %q, want default", got)
+	}
+	a.cfg.Reasoning["openai/gpt-4o"] = json.RawMessage(`{"reasoning_effort":"low"}`)
+	if got := a.reasoningLevel("openai", "gpt-4o"); got != "low" {
+		t.Errorf("low shape → %q, want low", got)
+	}
+	a.cfg.Reasoning["openai/gpt-4o"] = json.RawMessage(`{"weird":1}`)
+	if got := a.reasoningLevel("openai", "gpt-4o"); got != "custom" {
+		t.Errorf("unknown shape → %q, want custom", got)
+	}
+
+	if got := nextReasoning("off"); got != "minimal" {
+		t.Errorf("off → %q, want minimal", got)
+	}
+	if got := nextReasoning("high"); got != "off" {
+		t.Errorf("high → %q, want off (wrap)", got)
+	}
+	if got := nextReasoning("default"); got != "off" {
+		t.Errorf("default → %q, want off (cycle head)", got)
+	}
+}
+
 func TestApprovalCategory(t *testing.T) {
 	for kind, want := range map[string]string{
 		"write": "file", "edit": "file", "append": "file", "mkdir": "file",

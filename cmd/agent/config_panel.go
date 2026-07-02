@@ -29,6 +29,7 @@ var configRows = []cfgRow{
 	{key: "addprovider"},
 	{key: "model"},
 	{key: "apikey"},
+	{key: "reasoning"},
 	{header: "Behavior"},
 	{key: "mode"},
 	{key: "perm_files"},
@@ -108,6 +109,8 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 			v = "● set"
 		}
 		return "api key", v, "enter: add/set a provider key"
+	case "reasoning":
+		return "reasoning", m.app.reasoningLevel(m.app.providerName(), act.Model), "enter: cycle off→high (trims a thinking model)"
 	case "mode":
 		v := "⏵⏵ auto"
 		if m.app.planMode {
@@ -175,6 +178,12 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		m.app.agentsExec(arg)
 	case "agents": // open the interactive profile manager (provider → model → name)
 		m.openAgents()
+	case "reasoning": // cycle the active model's reasoning effort off→high
+		provider, model := m.app.providerName(), m.app.activeLLM().Model
+		next := nextReasoning(m.app.reasoningLevel(provider, model))
+		if _, ok := m.app.applyReasoning(provider+"/"+model, provider, next); !ok {
+			m.push(cDim.Render("  " + provider + " reasoning must be set raw in config.json (key " + provider + "/" + model + ")"))
+		}
 	case "model": // needs the live model list — hand off to /model
 		m.state = stIdle
 		return m.runCommand("/model")

@@ -388,6 +388,35 @@ func TestIsCommandLine(t *testing.T) {
 	}
 }
 
+// shift+tab during a task doesn't flip the mode live (that races the running
+// agent) — it queues the switch and applies it when the task finishes.
+func TestDeferredModeSwitchWhileRunning(t *testing.T) {
+	m := &tuiModel{state: stRunning, input: textarea.New(), app: &app{cfg: config.Default()}}
+	m.app.planMode = false // start in auto
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.pendingMode == nil || !*m.pendingMode {
+		t.Fatalf("shift+tab while running should queue plan mode, pending=%v", m.pendingMode)
+	}
+	if m.app.planMode {
+		t.Error("mode must NOT flip live while a task runs")
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) // toggles the queued target back
+	if *m.pendingMode {
+		t.Error("second shift+tab should flip the queued target back to auto")
+	}
+
+	plan := true
+	m.pendingMode = &plan
+	m.applyPendingMode()
+	if !m.app.planMode {
+		t.Error("applyPendingMode should have switched to plan")
+	}
+	if m.pendingMode != nil {
+		t.Error("pending mode should be cleared after applying")
+	}
+}
+
 func TestSlugName(t *testing.T) {
 	cases := map[string]string{"Alice Bot": "alice-bot", "  ": "ipsupport-code", "C++/Helper!": "c-helper", "": "ipsupport-code"}
 	for in, want := range cases {

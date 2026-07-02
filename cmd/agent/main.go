@@ -1862,7 +1862,10 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 			a.emit("lesson", map[string]any{"domain": p.Domain, "proven_fix": p.ProvenFix})
 		}
 	}
-	if learned > 0 {
+	// Persist whenever any lesson was processed, not only on a brand-new one: a
+	// duplicate still bumps Hits/LastSeen, and dropping that means a recurring
+	// lesson can silently age out and be purged.
+	if len(lessons.Pitfalls) > 0 {
 		if err := a.kb.Save(); err != nil {
 			slog.Warn("knowledge save failed", "err", err)
 		}

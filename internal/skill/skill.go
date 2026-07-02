@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -68,7 +69,12 @@ func Open(dir string, hc *http.Client) (*Store, error) {
 		return nil, err
 	}
 	if data, err := os.ReadFile(s.statePath()); err == nil {
-		_ = json.Unmarshal(data, &s.state)
+		if err := json.Unmarshal(data, &s.state); err != nil {
+			// Don't silently reset every skill's enabled/source to defaults on a
+			// corrupt file — surface it so it can be looked at. saveState only
+			// overwrites on the next explicit change.
+			slog.Warn("skill state file is corrupt; using defaults until it's changed", "path", s.statePath(), "err", err)
+		}
 	}
 	s.seedBuiltins()
 	return s, nil
@@ -169,7 +175,7 @@ func (s *Store) saveSeeded(m map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.seededPath(), data, 0o644)
+	return writeFileAtomic(s.seededPath(), data)
 }
 
 func (s *Store) statePath() string { return filepath.Join(s.dir, "state.json") }
@@ -182,7 +188,27 @@ func (s *Store) saveState() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(s.statePath(), data, 0o644)
+	return writeFileAtomic(s.statePath(), data)
+}
+
+// writeFileAtomic writes via a temp file + rename so a crash can't leave a
+// truncated/half-written file in place.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // List returns every installed skill (enabled and disabled), sorted by name. A

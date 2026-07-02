@@ -1,10 +1,36 @@
 package knowledge
 
 import (
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
+
+// The KB is shared by the main agent and parallel sub-agents; concurrent
+// Add/Query/Save must be race-free (run with -race). Also asserts the atomic Save
+// round-trips.
+func TestConcurrentAccessIsRaceFree(t *testing.T) {
+	kb, err := Open(filepath.Join(t.TempDir(), "k.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			kb.Add(Pitfall{Domain: "file", ErrorPattern: fmt.Sprintf("e%d", n), ProvenFix: "x"})
+			kb.Query("file", "e", 5)
+			_ = kb.Save()
+		}(i)
+	}
+	wg.Wait()
+	if kb.Count() != 20 {
+		t.Errorf("count = %d, want 20", kb.Count())
+	}
+}
 
 func TestPurgeByAgeAndRecurrence(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

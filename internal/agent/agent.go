@@ -733,6 +733,16 @@ func parseArgs(raw string) (string, map[string]any) {
 				action = a
 			}
 			delete(inner, "action")
+			// Fold in top-level siblings too (e.g. a top-level "path" beside a
+			// stringified params), matching the map case — else they're lost.
+			for k, v := range m {
+				if k == "action" || k == "params" {
+					continue
+				}
+				if _, exists := inner[k]; !exists {
+					inner[k] = v
+				}
+			}
 			return action, inner
 		}
 	}

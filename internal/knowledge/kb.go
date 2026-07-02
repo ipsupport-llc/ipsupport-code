@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -28,8 +29,11 @@ func (e *KnowledgeError) Error() string {
 }
 func (e *KnowledgeError) Unwrap() error { return e.Err }
 
-// KB is an in-memory view of the pitfall store plus its backing file path.
+// KB is an in-memory view of the pitfall store plus its backing file path. The
+// same *KB is shared by the main agent and parallel sub-agents (which record
+// lessons and Query from concurrent tool calls), so it guards its state with mu.
 type KB struct {
+	mu       sync.Mutex
 	path     string
 	pitfalls []Pitfall
 	now      func() time.Time // overridable clock for tests
@@ -74,6 +78,8 @@ func (k *KB) today() string {
 // A duplicate bumps Hits and back-fills any empty fields; returns true only when
 // a genuinely new lesson was stored.
 func (k *KB) Add(p Pitfall) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	today := k.today()
 	key := dedupeKey(p)
 	for i := range k.pitfalls {
@@ -104,6 +110,8 @@ func (k *KB) Purge(maxAgeDays int) int {
 	if maxAgeDays <= 0 {
 		return 0
 	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	cutoff := k.now().AddDate(0, 0, -maxAgeDays)
 	kept := k.pitfalls[:0]
 	dropped := 0
@@ -121,19 +129,27 @@ func (k *KB) Purge(maxAgeDays int) int {
 
 // Clear removes every lesson, returning how many were dropped.
 func (k *KB) Clear() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	n := len(k.pitfalls)
 	k.pitfalls = nil
 	return n
 }
 
 // Count reports how many lessons are stored.
-func (k *KB) Count() int { return len(k.pitfalls) }
+func (k *KB) Count() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return len(k.pitfalls)
+}
 
 // Query returns pitfalls for a domain. With a non-empty errText it keeps only
 // keyword-overlapping lessons, ranked by overlap then Hits. With an empty
 // errText it returns every lesson in the domain ranked by Hits (used by the
 // help tool). limit <= 0 means no cap.
 func (k *KB) Query(domain, errText string, limit int) []Pitfall {
+	k.mu.Lock()
+	defer k.mu.Unlock()
 	type scored struct {
 		p Pitfall
 		s int
@@ -175,9 +191,14 @@ func (k *KB) Query(domain, errText string, limit int) []Pitfall {
 	return res
 }
 
-// Save writes the store to disk as pretty JSON, creating the parent directory.
+// Save writes the store to disk as pretty JSON, creating the parent directory. The
+// write is atomic (temp + rename) so a crash mid-write can't truncate the lessons
+// file — this is the agent's persistent memory.
 func (k *KB) Save() error {
-	if dir := filepath.Dir(k.path); dir != "" {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	dir := filepath.Dir(k.path)
+	if dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return &KnowledgeError{Op: "mkdir", Path: dir, Err: err}
 		}
@@ -186,14 +207,31 @@ func (k *KB) Save() error {
 	if err != nil {
 		return &KnowledgeError{Op: "marshal", Path: k.path, Err: err}
 	}
-	if err := os.WriteFile(k.path, data, 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, ".kb-*.tmp")
+	if err != nil {
+		return &KnowledgeError{Op: "write", Path: k.path, Err: err}
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename succeeds
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return &KnowledgeError{Op: "write", Path: k.path, Err: err}
+	}
+	if err := tmp.Close(); err != nil {
+		return &KnowledgeError{Op: "write", Path: k.path, Err: err}
+	}
+	if err := os.Rename(tmpName, k.path); err != nil {
 		return &KnowledgeError{Op: "write", Path: k.path, Err: err}
 	}
 	return nil
 }
 
 // All returns a copy of the stored pitfalls.
-func (k *KB) All() []Pitfall { return append([]Pitfall(nil), k.pitfalls...) }
+func (k *KB) All() []Pitfall {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]Pitfall(nil), k.pitfalls...)
+}
 
 func dedupeKey(p Pitfall) string { return p.Domain + "\x00" + norm(p.ErrorPattern) }
 

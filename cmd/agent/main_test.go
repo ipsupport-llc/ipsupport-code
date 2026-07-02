@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -627,6 +628,47 @@ func TestAtFileCompletion(t *testing.T) {
 	m.completeAtFile()
 	if m.input.Value() != "look at @src/main.go " {
 		t.Errorf("completeAtFile → %q, want 'look at @src/main.go '", m.input.Value())
+	}
+}
+
+func TestDiffCommand(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		if err := exec.Command("git", append([]string{"-C", dir}, args...)...).Run(); err != nil {
+			t.Skipf("git unavailable: %v", err)
+		}
+	}
+	git("init")
+	git("config", "user.email", "a@b.c")
+	git("config", "user.name", "t")
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\n"), 0o644)
+	git("add", "-A")
+	git("commit", "-m", "init")
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("two\n"), 0o644) // modified
+	os.WriteFile(filepath.Join(dir, "b.txt"), []byte("new\n"), 0o644) // untracked
+
+	a := &app{cfg: config.Default(), workspace: dir}
+	out := strings.Join(a.diffCommand(), "\n")
+	for _, want := range []string{"a.txt", "+two", "b.txt"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("/diff missing %q in:\n%s", want, out)
+		}
+	}
+	// a non-repo dir → a clear message, not a crash
+	a2 := &app{cfg: config.Default(), workspace: t.TempDir()}
+	if !strings.Contains(strings.Join(a2.diffCommand(), " "), "git repo") {
+		t.Errorf("/diff in a non-repo should say it needs a git repo")
+	}
+}
+
+func TestColorizeDiff(t *testing.T) {
+	if colorizeDiff("context line") != "context line" {
+		t.Error("plain lines should pass through unchanged")
+	}
+	for _, s := range []string{"+added", "-removed", "@@ hunk @@"} {
+		if !strings.Contains(colorizeDiff(s), strings.TrimLeft(s, "+-@ ")) {
+			t.Errorf("colorizeDiff(%q) dropped its text", s)
+		}
 	}
 }
 

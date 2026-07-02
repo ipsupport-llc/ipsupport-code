@@ -734,11 +734,7 @@ func agentProfileNames(cfg config.Config) []string {
 }
 
 // oneLine clips s to a single short line for prompts/labels.
-func oneLine(s string, max int) string {
-	s = strings.Join(strings.Fields(s), " ")
-	out, _ := textutil.Clip(s, max)
-	return out
-}
+func oneLine(s string, max int) string { return textutil.OneLine(s, max) }
 
 // providerModel is the "provider · model" label shown in the status line.
 func (a *app) providerModel() string { return a.providerName() + " · " + a.activeLLM().Model }

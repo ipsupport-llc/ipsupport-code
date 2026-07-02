@@ -5,6 +5,18 @@ import (
 	"unicode/utf8"
 )
 
+func TestOneLine(t *testing.T) {
+	if got := OneLine("  a\n\tb   c  ", 100); got != "a b c" {
+		t.Errorf("collapse = %q, want 'a b c'", got)
+	}
+	if got := OneLine("abcdef", 3); got != "abc" {
+		t.Errorf("clip = %q, want abc", got)
+	}
+	if got := OneLine("é", 1); got != "" { // must not split the 2-byte rune
+		t.Errorf("rune-safe clip = %q, want empty", got)
+	}
+}
+
 func TestClipRuneSafe(t *testing.T) {
 	s := "héllo" // 'é' is 2 bytes → cutting at byte 2 would split it
 	got, truncated := Clip(s, 2)

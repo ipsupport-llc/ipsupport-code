@@ -20,6 +20,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 )
 
 // Repo is the GitHub "owner/name" releases are pulled from.
@@ -185,23 +187,9 @@ func replaceExecutable(bin []byte) (string, error) {
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(exe), ".ipsupport-code-update-*")
-	if err != nil {
-		return "", fmt.Errorf("can't write next to %s: %w", exe, err)
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op once the rename succeeds
-	if _, err := tmp.Write(bin); err != nil {
-		tmp.Close()
-		return "", err
-	}
-	if err := tmp.Close(); err != nil {
-		return "", err
-	}
-	if err := os.Chmod(tmpName, 0o755); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmpName, exe); err != nil {
+	// Atomic temp+rename over the running exe (safe on Unix — the live process keeps
+	// the old inode until it exits); executable perms.
+	if err := atomicfile.Write(exe, bin, 0o755); err != nil {
 		return "", fmt.Errorf("can't replace %s: %w", exe, err)
 	}
 	return exe, nil

@@ -12,6 +12,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	md "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/PuerkitoBio/goquery"
@@ -49,7 +51,7 @@ const offlineMsg = "offline mode is ON — the web is disabled right now (no int
 // is true, every action refuses with offlineMsg instead of touching the network.
 func NewWeb(hc *http.Client, offline bool) Tool {
 	if hc == nil {
-		hc = http.DefaultClient
+		hc = &http.Client{Timeout: 30 * time.Second} // a hostile/slow server must not hang fetch forever
 	}
 	w := &webTool{hc: hc, offline: offline}
 	return NewDomain(DomainSpec{
@@ -237,7 +239,7 @@ func (w *webTool) get(ctx context.Context, urlStr string) (string, error) {
 // fetchGet is get for model-supplied URLs: it re-checks every redirect hop so a
 // public URL can't bounce to a private/loopback/link-local address (SSRF).
 func (w *webTool) fetchGet(ctx context.Context, urlStr string) (string, error) {
-	client := *w.hc // copy: don't mutate the shared client's CheckRedirect
+	client := *w.hc // copy: don't mutate the shared client's CheckRedirect/Transport
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if !webAllowPrivate && privateHost(req.URL.Host) {
 			return fmt.Errorf("redirect to a private address blocked: %s", req.URL.Host)
@@ -246,6 +248,13 @@ func (w *webTool) fetchGet(ctx context.Context, urlStr string) (string, error) {
 			return fmt.Errorf("stopped after 10 redirects")
 		}
 		return nil
+	}
+	// The privateHost pre-check resolves DNS separately from the dialer, so a hostile
+	// name can pass the check and rebind to a private/metadata IP at connect time.
+	// Validate the ACTUAL connected address in the dialer to close that gap (and it
+	// covers redirects too). Disabled under webAllowPrivate (tests hit loopback).
+	if !webAllowPrivate {
+		client.Transport = ssrfGuardedTransport(w.hc.Transport)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, urlStr, nil)
 	if err != nil {
@@ -296,6 +305,31 @@ func privateHost(host string) bool {
 func blockedIP(ip net.IP) bool {
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
 		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+}
+
+// ssrfGuardedTransport clones the base transport and validates the concrete IP the
+// dialer actually connects to (post-DNS-resolution), so a name that resolved public
+// at check time but rebinds to a private/metadata address is refused at connect.
+func ssrfGuardedTransport(base http.RoundTripper) http.RoundTripper {
+	tr, ok := base.(*http.Transport)
+	if !ok || tr == nil {
+		tr, _ = http.DefaultTransport.(*http.Transport)
+	}
+	clone := tr.Clone()
+	clone.DialContext = (&net.Dialer{
+		Timeout: 30 * time.Second,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				host = address
+			}
+			if ip := net.ParseIP(host); ip != nil && blockedIP(ip) {
+				return fmt.Errorf("SSRF guard: refusing to connect to %s", host)
+			}
+			return nil
+		},
+	}).DialContext
+	return clone
 }
 
 // decodeDDG unwraps DuckDuckGo's redirect href (…/l/?uddg=<encoded url>).

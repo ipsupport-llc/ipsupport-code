@@ -99,10 +99,11 @@ func Apply(ctx context.Context, rel Release, hc *http.Client) (string, error) {
 	}
 	if rel.SumsURL != "" {
 		sums, err := get(ctx, hc, rel.SumsURL)
-		if err == nil {
-			if err := verifyChecksum(data, string(sums), rel.AssetName); err != nil {
-				return "", err
-			}
+		if err != nil {
+			return "", fmt.Errorf("fetch checksums: %w", err) // never install an unverified binary
+		}
+		if err := verifyChecksum(data, string(sums), rel.AssetName); err != nil {
+			return "", err
 		}
 	}
 	bin, err := extractBinary(data, "ipsupport-code")
@@ -148,6 +149,10 @@ func verifyChecksum(data []byte, sums, name string) error {
 	return nil
 }
 
+// maxBinaryBytes caps the decompressed binary read so a malformed/hostile archive
+// can't expand into an OOM (the compressed download is already capped at 100 MiB).
+const maxBinaryBytes = 300 << 20
+
 func extractBinary(gzData []byte, name string) ([]byte, error) {
 	gz, err := gzip.NewReader(bytes.NewReader(gzData))
 	if err != nil {
@@ -163,7 +168,7 @@ func extractBinary(gzData []byte, name string) ([]byte, error) {
 			return nil, err
 		}
 		if filepath.Base(h.Name) == name {
-			return io.ReadAll(tr)
+			return io.ReadAll(io.LimitReader(tr, maxBinaryBytes)) // cap the decompressed read (gzip-bomb guard)
 		}
 	}
 	return nil, fmt.Errorf("%q not found in the archive", name)

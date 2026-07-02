@@ -143,6 +143,11 @@ func (e *Engine) allowsAll(cmd string, segs []string) bool {
 		if s = strings.TrimSpace(s); s == "" {
 			continue
 		}
+		// Redirection/backgrounding (>, >>, <, &) can write outside the file jail or
+		// detach a process — an allow glob can't see the target, so never auto-allow it.
+		if strings.ContainsAny(s, "<>&") {
+			return false
+		}
 		if !anyMatch(e.allow, s) {
 			return false
 		}
@@ -151,15 +156,43 @@ func (e *Engine) allowsAll(cmd string, segs []string) bool {
 	return matchedAny
 }
 
-// dangerousSegment is the argv-aware hard floor: base executables unsafe whatever
-// the flags, and rm with a recursive flag (reordering-proof, unlike a glob). It is
-// denied even under an allow glob, and can't be turned off by config.
-func dangerousSegment(seg string) bool {
-	fields := strings.Fields(seg)
-	if len(fields) == 0 {
+// cmdWrappers run another command given as their trailing argv (after their own
+// flags / VAR=val assignments), so the hard floor must look THROUGH them — e.g.
+// "xargs rm -rf" or "env FOO=1 rm -rf" would otherwise present base "xargs"/"env".
+var cmdWrappers = map[string]bool{
+	"xargs": true, "nohup": true, "nice": true, "ionice": true,
+	"stdbuf": true, "env": true, "setsid": true, "time": true, "timeout": true,
+}
+
+// looksLikeArgValue reports whether a token is a bare number/duration (e.g. the "5"
+// in "nice -n 5" or "timeout 5s"), so wrapper-flag values are skipped when looking
+// through to the wrapped command. No real command is a bare number.
+func looksLikeArgValue(s string) bool {
+	s = strings.TrimRight(s, "smhdSMHDkKmMgGbB") // strip a trailing duration/size unit
+	if s == "" {
 		return false
 	}
-	switch filepath.Base(fields[0]) {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// dangerousSegment is the argv-aware hard floor: base executables unsafe whatever
+// the flags, and rm with a recursive flag (reordering-proof, unlike a glob). It is
+// denied even under an allow glob, and can't be turned off by config. Best-effort:
+// it sees through common wrappers but not a full nested shell (sh -c "…"); the
+// ask-default is the real backstop when allow-globs aren't set.
+func dangerousSegment(seg string) bool { return dangerousArgv(strings.Fields(seg), 0) }
+
+func dangerousArgv(fields []string, depth int) bool {
+	if len(fields) == 0 || depth > 4 {
+		return false
+	}
+	base := filepath.Base(fields[0])
+	switch base {
 	case "sudo", "doas", "mkfs", "dd", "shutdown", "reboot", "halt", "poweroff", "init":
 		return true
 	case "rm":
@@ -171,6 +204,13 @@ func dangerousSegment(seg string) bool {
 				return true // -r, -R, -rf, -fr, -Rf, ...
 			}
 		}
+	}
+	if cmdWrappers[base] {
+		rest := fields[1:] // skip the wrapper's flags, VAR=val assignments, and flag values
+		for len(rest) > 0 && (strings.HasPrefix(rest[0], "-") || strings.Contains(rest[0], "=") || looksLikeArgValue(rest[0])) {
+			rest = rest[1:]
+		}
+		return dangerousArgv(rest, depth+1)
 	}
 	return false
 }

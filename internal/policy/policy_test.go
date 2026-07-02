@@ -119,6 +119,48 @@ func TestRunArgvFloorResistsEvasion(t *testing.T) {
 	}
 }
 
+// The hard floor sees through common command wrappers, so an rm -rf can't hide
+// behind xargs/env/nohup/nice.
+func TestRunArgvFloorSeesThroughWrappers(t *testing.T) {
+	c := config.Default()
+	c.Run = config.RunPolicy{Default: "allow"}
+	e := eng(t, c)
+	for _, cmd := range []string{
+		"xargs rm -Rf",             // wrapper, reordered flags
+		"xargs -0 rm -rf /home",    // wrapper with its own flag
+		"env FOO=bar rm -rf /home", // wrapper with a VAR=val assignment
+		"nohup rm -r /home",
+		"nice -n 5 rm -rf x",
+		"find . | xargs rm -Rf", // buried after a pipe
+	} {
+		if got := e.Run(cmd); got != Deny {
+			t.Errorf("Run(%q) = %v, want Deny (floor through wrapper)", cmd, got)
+		}
+	}
+}
+
+// An allow glob must not auto-run shell redirection/backgrounding — it writes
+// outside the file jail's view.
+func TestRunAllowRejectsRedirection(t *testing.T) {
+	c := config.Default()
+	c.Run = config.RunPolicy{Default: "ask", Allow: []string{"echo*", "cat*"}}
+	e := eng(t, c)
+	for _, cmd := range []string{
+		"echo pwned > ~/.bashrc",
+		"echo x >> /etc/hosts",
+		"cat secret < /etc/passwd",
+		"echo x &",
+	} {
+		if got := e.Run(cmd); got == Allow {
+			t.Errorf("Run(%q) = Allow, want NOT auto-allowed (redirection)", cmd)
+		}
+	}
+	// a plain allowed echo still auto-allows
+	if got := e.Run("echo hello"); got != Allow {
+		t.Errorf("Run(echo hello) = %v, want Allow", got)
+	}
+}
+
 func TestRunDenyMatchesAnywhereAndIgnoresExtraSpaces(t *testing.T) {
 	c := config.Default()
 	c.Run = config.RunPolicy{Default: "allow", Deny: []string{"rm -rf*", "sudo*"}}

@@ -120,6 +120,30 @@ func TestFileEditMissingFindFailsEarly(t *testing.T) {
 	}
 }
 
+// read and search must not surface secret files (.env / *secret*) — otherwise the
+// model could slurp credentials and exfiltrate them via the web tool.
+func TestFileReadAndSearchSkipSecrets(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+	tl.Call(ctx, "write", map[string]any{"path": "app.go", "content": "TOKEN_MARKER = env"})
+	os.WriteFile(filepath.Join(dir, ".env"), []byte("TOKEN_MARKER=supersecret\n"), 0o644)
+
+	if r := tl.Call(ctx, "read", map[string]any{"path": ".env"}); !r.IsError {
+		t.Errorf("read(.env) should be blocked, got: %q", r.Content)
+	}
+	r := tl.Call(ctx, "search", map[string]any{"query": "TOKEN_MARKER"})
+	if r.IsError {
+		t.Fatalf("search: %s", r.Content)
+	}
+	if strings.Contains(r.Content, ".env") || strings.Contains(r.Content, "supersecret") {
+		t.Errorf("search surfaced a secret file:\n%s", r.Content)
+	}
+	if !strings.Contains(r.Content, "app.go") {
+		t.Errorf("search should still find the normal file:\n%s", r.Content)
+	}
+}
+
 func TestFileSearch(t *testing.T) {
 	dir := t.TempDir()
 	tl := fileToolFor(t, dir, "allow", yes())

@@ -32,6 +32,10 @@ type LLM struct {
 	// ContextWindow is the model's context size in tokens; auto-compact triggers
 	// as the prompt approaches it. 0 disables auto-compact.
 	ContextWindow int `json:"context_window,omitempty"`
+	// IdleTimeoutSeconds bounds how long a request waits with NO response/stream
+	// data before it's aborted and retried. 0 uses the default (90s). Raise it for a
+	// hosted reasoning model that can think silently (no streamed deltas) for longer.
+	IdleTimeoutSeconds int `json:"idle_timeout_seconds,omitempty"`
 	// Extra is resolved per request (NOT persisted here): extra top-level body
 	// params merged into the chat request — used for per-model reasoning controls
 	// (see Config.Reasoning), whose shape varies by provider.

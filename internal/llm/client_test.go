@@ -247,6 +247,57 @@ func TestIdleWatchdogStaysAliveWithTicks(t *testing.T) {
 	}
 }
 
+// A stalled attempt's live per-delta token estimate must be rolled back before the
+// retry re-counts it — otherwise the failed attempt's tokens are double-counted.
+func TestChatRollsBackTokensOnStallRetry(t *testing.T) {
+	var mu sync.Mutex
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		hits++
+		first := hits == 1
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl, _ := w.(http.Flusher)
+		if fl != nil {
+			fl.Flush()
+		}
+		if first { // stream 3 deltas (bumps the estimate), then go silent → stall
+			for i := 0; i < 3; i++ {
+				io.WriteString(w, `data: {"choices":[{"delta":{"content":"x"}}]}`+"\n\n")
+			}
+			if fl != nil {
+				fl.Flush()
+			}
+			time.Sleep(300 * time.Millisecond)
+			return
+		}
+		io.WriteString(w, `data: {"choices":[{"delta":{"content":"done"}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":10,"completion_tokens":5}}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+	cl.idle = 40 * time.Millisecond
+	if _, err := cl.Chat(context.Background(), []Message{User("hi")}, nil); err != nil {
+		t.Fatalf("Chat should recover after the stall: %v", err)
+	}
+	if _, compl := cl.Usage(); compl != 5 {
+		t.Errorf("completion tokens = %d, want 5 (the stalled attempt's estimate must be rolled back, not added)", compl)
+	}
+}
+
+// A per-model idle_timeout_seconds overrides the 90s default.
+func TestIdleTimeoutConfigurable(t *testing.T) {
+	if c := NewOpenAIClient(config.LLM{IdleTimeoutSeconds: 5}); c.idle != 5*time.Second {
+		t.Errorf("idle = %v, want 5s from config", c.idle)
+	}
+	if c := NewOpenAIClient(config.LLM{}); c.idle != 90*time.Second {
+		t.Errorf("idle = %v, want the 90s default", c.idle)
+	}
+}
+
 // A stalled stream (headers, then silence) must fail fast and be retriable, not
 // hang — the "no ping, waits forever" bug.
 func TestChatStalledStreamRetriable(t *testing.T) {

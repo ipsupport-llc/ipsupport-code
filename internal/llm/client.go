@@ -86,6 +86,10 @@ type OpenAIClient struct {
 // http client has no total timeout on purpose — a long generation can run for
 // minutes; the idle watchdog in send() is what guards against a true hang.
 func NewOpenAIClient(c config.LLM) *OpenAIClient {
+	idle := 90 * time.Second
+	if c.IdleTimeoutSeconds > 0 {
+		idle = time.Duration(c.IdleTimeoutSeconds) * time.Second
+	}
 	return &OpenAIClient{
 		baseURL:   strings.TrimRight(c.BaseURL, "/"),
 		model:     c.Model,
@@ -93,7 +97,7 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 		temp:      c.Temperature,
 		extra:     c.Extra,
 		hc:        &http.Client{},
-		idle:      90 * time.Second,
+		idle:      idle,
 		maxRespTk: maxResponseTokens(c.ContextWindow),
 	}
 }
@@ -203,6 +207,10 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	const maxAttempts = 5
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Snapshot the live completion count so a stalled attempt's un-reconciled
+		// per-delta estimate can be rolled back before the retry re-counts it
+		// (otherwise the failed attempt's tokens are double-counted).
+		base := c.completionCount()
 		msg, err, retriable := c.send(ctx, buf)
 		if err == nil {
 			return msg, nil
@@ -211,6 +219,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 		if !retriable || ctx.Err() != nil || attempt == maxAttempts {
 			break
 		}
+		c.setCompletionCount(base) // undo the failed attempt's live estimate
 		wait := backoff(attempt)
 		if c.OnRetry != nil {
 			c.OnRetry(attempt, wait, err.Error())
@@ -310,6 +319,11 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 	reqCompl := 0
 	for sc.Scan() {
 		tick() // data arrived — push the idle deadline back
+		// reqCompl counts stream deltas, not true tokens (there's no per-chunk token
+		// count mid-stream). LM Studio sends ~1 token/chunk so the cap is accurate
+		// there; a server that batches many tokens per chunk trips it late. It's a
+		// runaway backstop, not a billing meter — the usage chunk reconciles the real
+		// count — so an approximate trigger point is acceptable.
 		if maxTk > 0 && reqCompl > maxTk {
 			return Message{}, fmt.Errorf("the model generated over %d tokens in one turn without finishing — it's looping in its own reasoning, not making progress. Try a stronger model, give it more context, or rephrase the task", maxTk)
 		}
@@ -413,6 +427,20 @@ func (c *OpenAIClient) parseJSON(r io.Reader) (Message, error) {
 func (c *OpenAIClient) bumpToken() {
 	c.mu.Lock()
 	c.complTk++
+	c.mu.Unlock()
+}
+
+// completionCount / setCompletionCount snapshot and restore the running completion
+// tally, so the retry loop can undo a stalled attempt's un-reconciled estimate.
+func (c *OpenAIClient) completionCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.complTk
+}
+
+func (c *OpenAIClient) setCompletionCount(n int) {
+	c.mu.Lock()
+	c.complTk = n
 	c.mu.Unlock()
 }
 

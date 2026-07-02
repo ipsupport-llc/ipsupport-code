@@ -232,11 +232,26 @@ func (e *Engine) Write(path string) (Decision, error) {
 	return parseDefault(e.file.Default), nil
 }
 
-// Read enforces the jail for a read; reads are not glob-gated.
+// secretReadFloor blocks reading obvious credential files, so the agent can't
+// slurp a .env / *secret* file and exfiltrate it (e.g. via the web tool). Reads
+// are otherwise jail-checked only. Can't be turned off by config.
+var secretReadFloor = []string{"**/*secret*", "**/.env", "**/.env.*"}
+
+// Read enforces the jail for a read and refuses obvious secrets (credential files).
 func (e *Engine) Read(path string) error {
-	_, err := e.Resolve(path)
-	return err
+	abs, err := e.Resolve(path)
+	if err != nil {
+		return err
+	}
+	if e.IsSecret(abs) {
+		return fmt.Errorf("reading %s is blocked (it looks like a secrets/credentials file)", path)
+	}
+	return nil
 }
+
+// IsSecret reports whether an absolute path matches the secret-read floor, so the
+// search/find walkers can skip it (not just the direct read path).
+func (e *Engine) IsSecret(abs string) bool { return fileMatch(secretReadFloor, e.rel(abs)) }
 
 // Resolve returns the absolute, symlink-resolved path for a (possibly relative)
 // input and errors if it escapes the jail. Relative paths resolve against the

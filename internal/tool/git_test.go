@@ -77,6 +77,24 @@ func TestGitInit(t *testing.T) {
 	}
 }
 
+// A leading-dash ref must be rejected on show/branch/checkout so it can't be read
+// as a git flag (e.g. show "-O…" or checkout "-f").
+func TestGitRejectsLeadingDashRef(t *testing.T) {
+	dir := initRepo(t)
+	tl := gitToolFor(t, dir, yes())
+	ctx := context.Background()
+	for _, tc := range []struct{ action, key, val string }{
+		{"show", "ref", "-O/etc/passwd"},
+		{"checkout", "ref", "-f"},
+		{"branch", "name", "-D"},
+	} {
+		r := tl.Call(ctx, tc.action, map[string]any{tc.key: tc.val})
+		if !r.IsError || !strings.Contains(r.Content, "leading dash") {
+			t.Errorf("%s(%s=%q) = %+v, want a leading-dash rejection", tc.action, tc.key, tc.val, r)
+		}
+	}
+}
+
 func TestGitMutatingDeniedByUser(t *testing.T) {
 	dir := initRepo(t)
 	tl := gitToolFor(t, dir, no())

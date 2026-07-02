@@ -71,6 +71,9 @@ func (g *gitTool) show(ctx context.Context, a Args) Result {
 	if ref == "" {
 		ref = "HEAD"
 	}
+	if strings.HasPrefix(ref, "-") { // a leading dash would be read as a git flag
+		return Err("invalid ref (leading dash): " + ref)
+	}
 	return g.run(ctx, "show", false, "show", "--stat", ref)
 }
 

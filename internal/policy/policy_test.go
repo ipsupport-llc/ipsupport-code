@@ -204,6 +204,25 @@ func TestWriteGlobsAndJail(t *testing.T) {
 	}
 }
 
+func TestReadBlocksSecrets(t *testing.T) {
+	dir := t.TempDir()
+	c := config.Default()
+	c.Workspace = dir
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	e := eng(t, c)
+
+	for _, p := range []string{".env", ".env.local", "config/db_secret.txt", "app_secrets.yaml"} {
+		if err := e.Read(p); err == nil {
+			t.Errorf("Read(%q) should be blocked as a secret", p)
+		}
+	}
+	for _, p := range []string{"main.go", "README.md", "docs/guide.txt"} {
+		if err := e.Read(p); err != nil {
+			t.Errorf("Read(%q) should be allowed, got %v", p, err)
+		}
+	}
+}
+
 func TestJailDisabled(t *testing.T) {
 	dir := t.TempDir()
 	c := config.Default()

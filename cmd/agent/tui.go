@@ -69,6 +69,7 @@ type tuiModel struct {
 	inputHist     []string // submitted inputs, newest last, for ↑/↓ recall
 	histIdx       int      // history browse cursor; == len(inputHist) means "not browsing"
 	histDraft     string   // in-progress input saved when history browsing begins
+	pendingMode   *bool    // plan(true)/auto(false) requested via shift+tab mid-task; applied on task done
 	pending       *approvalReq
 	approveChoice bool          // selected Yes(true)/No(false) while answering an approval
 	cfgCursor     int           // selected row in the /config panel (stConfig)
@@ -440,6 +441,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stIdle
 		m.cancel = nil
 		m.retry = nil
+		m.applyPendingMode()          // a shift+tab during the task takes effect now, before the next one
 		detect := m.detectWindowCmd() // model is loaded now — confirm the real window
 		if len(m.queued) > 0 {        // drain the next pending message(s): tasks + /commands
 			model, cmd := m.drainQueue()
@@ -548,13 +550,22 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "shift+tab":
-		// Only toggle plan/auto from the idle prompt: mid-task the running agent reads
-		// the mode live (flipping it races + splits the run), and inside a modal panel
-		// (config/sessions/agents/rewind) it's an unrelated stray toggle.
-		if m.state != stIdle {
-			return m, nil
+		switch m.state {
+		case stIdle:
+			m.app.setMode(!m.app.planMode) // cycle plan/auto; the bottom indicator updates
+			m.pendingMode = nil
+		case stRunning:
+			// Can't flip live — the running agent reads the mode (flipping races +
+			// splits the run). Remember it and apply when this task finishes.
+			cur := m.app.planMode
+			if m.pendingMode != nil {
+				cur = *m.pendingMode
+			}
+			next := !cur
+			m.pendingMode = &next
+			m.push(cDim.Render("  ⇄ " + modeName(next) + " — applies on the next task"))
 		}
-		m.app.setMode(!m.app.planMode) // cycle plan/auto; the bottom indicator updates
+		// In a modal panel (config/sessions/agents/rewind) shift+tab is inert.
 		return m, nil
 	}
 
@@ -760,6 +771,28 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(k)
 		return m, cmd
+	}
+}
+
+// modeName labels a plan/auto boolean for the mid-task mode-switch hint.
+func modeName(plan bool) string {
+	if plan {
+		return "plan mode"
+	}
+	return "auto mode"
+}
+
+// applyPendingMode applies a plan/auto switch requested (via shift+tab) while a
+// task was running — deferred so it never flips the mode mid-run. No-op if none
+// pending or it already matches the current mode.
+func (m *tuiModel) applyPendingMode() {
+	if m.pendingMode == nil {
+		return
+	}
+	want := *m.pendingMode
+	m.pendingMode = nil
+	if want != m.app.planMode {
+		m.push(cDim.Render("  " + m.app.setMode(want)))
 	}
 }
 
@@ -1484,7 +1517,7 @@ var keyHelp = [][2]string{
 	{"y / n", "answer an approval prompt (empty input)"},
 	{"alt+enter", "newline in the input (also ctrl+j)"},
 	{"Tab", "complete a /command, or accept the NEXT suggestion"},
-	{"shift+tab", "toggle plan ⇄ auto mode"},
+	{"shift+tab", "toggle plan ⇄ auto (mid-task: applies on the next task)"},
 	{"↑", "answer a pending approval, or edit the last queued line"},
 	{"ctrl+u", "clear the input (fast undo of a bad paste)"},
 	{"ctrl+l", "clear the screen"},

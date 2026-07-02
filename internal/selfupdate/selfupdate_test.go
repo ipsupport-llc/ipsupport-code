@@ -11,8 +11,26 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
+
+// Apply must never install a binary it couldn't verify: if the checksums file
+// can't be fetched, it errors out instead of silently skipping verification. The
+// asset here is deliberately not a valid archive, so even a regression can't reach
+// replaceExecutable (which would clobber the test binary).
+func TestApplyRefusesWhenChecksumsUnavailable(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/asset", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "not-an-archive") })
+	mux.HandleFunc("/sums", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) })
+
+	rel := Release{Version: "v9", AssetName: "a.tar.gz", AssetURL: srv.URL + "/asset", SumsURL: srv.URL + "/sums"}
+	if _, err := Apply(context.Background(), rel, srv.Client()); err == nil || !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("Apply err = %v, want a checksum-fetch failure (never install unverified)", err)
+	}
+}
 
 func makeTarGz(t *testing.T, name string, data []byte) []byte {
 	t.Helper()

@@ -532,6 +532,23 @@ func TestPlanReviewHandshake(t *testing.T) {
 	}
 }
 
+func TestBudgetGuard(t *testing.T) {
+	a := &app{cfg: config.Default()}
+	a.sessionCostUSD = 100
+	if a.budgetExceeded() {
+		t.Error("budget off (0) → never exceeded")
+	}
+	a.cfg.SessionBudgetUSD = 5
+	a.sessionCostUSD = 4.99
+	if a.budgetExceeded() {
+		t.Error("under the cap → not exceeded")
+	}
+	a.sessionCostUSD = 5.0
+	if !a.budgetExceeded() {
+		t.Error("at the cap → exceeded")
+	}
+}
+
 func TestReasoningLevelAndCycle(t *testing.T) {
 	a := &app{cfg: config.Default()}
 	a.cfg.Reasoning = map[string]json.RawMessage{}

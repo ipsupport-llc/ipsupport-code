@@ -110,6 +110,10 @@ type Config struct {
 	GoalMaxReturns int `json:"goal_max_returns,omitempty"`
 	// GoalMaxSteps is the hard step backstop for one goal pursuit. Default 80.
 	GoalMaxSteps int `json:"goal_max_steps,omitempty"`
+	// SessionBudgetUSD caps estimated spend for one run of the process: once this
+	// session's estimated cost reaches it, new tasks are refused until it's raised.
+	// 0 disables the guard.
+	SessionBudgetUSD float64 `json:"session_budget_usd,omitempty"`
 	// Prices overrides the built-in per-model price estimates for /usage cost:
 	// model-id substring → [input, output] USD per 1M tokens.
 	Prices map[string][2]float64 `json:"prices,omitempty"`
@@ -375,6 +379,11 @@ func SaveKnowledgeRetention(days int) error {
 // SaveGoalMaxReturns persists the goal-pursuit return TTL globally.
 func SaveGoalMaxReturns(n int) error {
 	return mergeGlobalKeys(map[string]any{"goal_max_returns": n})
+}
+
+// SaveSessionBudget persists the per-session spend cap (USD) globally.
+func SaveSessionBudget(usd float64) error {
+	return mergeGlobalKeys(map[string]any{"session_budget_usd": usd})
 }
 
 // SaveAgents persists the sub-agent profile map globally.

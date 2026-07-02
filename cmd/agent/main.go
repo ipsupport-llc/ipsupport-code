@@ -212,6 +212,8 @@ type app struct {
 
 	promptHist []string // submitted inputs (tasks + /commands), oldest→newest, persisted per workspace for ↑ recall across restarts
 
+	sessionCostUSD float64 // estimated spend this process run, for the SessionBudgetUSD guard
+
 	client          *llm.OpenAIClient
 	ag              *agent.Agent
 	pol             *policy.Engine // host policy/jail; sub-agents in a dir get their own
@@ -1901,9 +1903,50 @@ func (a *app) recordUsage() {
 		return
 	}
 	a.usage.Add(today(), a.providerName(), a.activeLLM().Model, dp, dc)
+	a.sessionCostUSD += usage.CostUSD(a.activeLLM().Model, dp, dc, a.priceOverrides()) // for the budget guard
 	if err := a.usage.Save(); err != nil {
 		slog.Warn("usage ledger save failed", "err", err)
 	}
+}
+
+// budgetExceeded reports whether this session's estimated spend has hit the cap.
+func (a *app) budgetExceeded() bool {
+	return a.cfg.SessionBudgetUSD > 0 && a.sessionCostUSD >= a.cfg.SessionBudgetUSD
+}
+
+// budgetMsg is the refusal shown when a task would run over the session budget.
+func (a *app) budgetMsg() string {
+	return fmt.Sprintf("budget reached — spent ~$%.2f of the $%.2f session cap. Raise it with /budget <n>, or /budget off.",
+		a.sessionCostUSD, a.cfg.SessionBudgetUSD)
+}
+
+// budgetCommand shows or sets the per-session spend cap (USD).
+func (a *app) budgetCommand(arg string) []string {
+	arg = strings.TrimSpace(arg)
+	switch arg {
+	case "":
+		if a.cfg.SessionBudgetUSD <= 0 {
+			return []string{fmt.Sprintf("no session budget · spent ~$%.2f this run", a.sessionCostUSD),
+				"  /budget <usd> caps spend per run · /budget off disables"}
+		}
+		return []string{fmt.Sprintf("session budget: $%.2f · spent ~$%.2f this run", a.cfg.SessionBudgetUSD, a.sessionCostUSD),
+			"  /budget <usd> to change · /budget off to disable"}
+	case "off", "no", "0":
+		a.cfg.SessionBudgetUSD = 0
+	default:
+		v, err := strconv.ParseFloat(strings.TrimPrefix(arg, "$"), 64)
+		if err != nil || v < 0 {
+			return []string{"usage: /budget <usd>  (e.g. /budget 5), or /budget off"}
+		}
+		a.cfg.SessionBudgetUSD = v
+	}
+	if err := config.SaveSessionBudget(a.cfg.SessionBudgetUSD); err != nil {
+		return []string{"warning: not persisted: " + err.Error()}
+	}
+	if a.cfg.SessionBudgetUSD == 0 {
+		return []string{"session budget → off"}
+	}
+	return []string{fmt.Sprintf("session budget → $%.2f (spent ~$%.2f so far this run)", a.cfg.SessionBudgetUSD, a.sessionCostUSD)}
 }
 
 func today() string { return time.Now().Format("2006-01-02") }
@@ -1996,6 +2039,10 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 
 // runOne is the plain (printing) path used in one-shot and piped modes.
 func (a *app) runOne(ctx context.Context, goal string) {
+	if a.budgetExceeded() {
+		fmt.Println(a.budgetMsg())
+		return
+	}
 	a.beginCheckpoint(goal)
 	defer a.endCheckpoint()
 	a.ag.SetGoalLoop(a.goalTTLFor(goal)) // judge-loop only when pursuing an explicit goal
@@ -2031,6 +2078,10 @@ func (a *app) runOne(ctx context.Context, goal string) {
 // runTaskStreaming is the TUI path: no printing — progress reaches the screen via
 // the UI tracer. Errors surface as an "error" event.
 func (a *app) runTaskStreaming(ctx context.Context, goal string) {
+	if a.budgetExceeded() {
+		a.emit("error", map[string]any{"text": a.budgetMsg()})
+		return
+	}
 	a.beginCheckpoint(goal)
 	defer a.endCheckpoint()
 	a.ag.SetGoalLoop(a.goalTTLFor(goal)) // judge-loop only when pursuing an explicit goal
@@ -2178,6 +2229,10 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		}
 	case "/history":
 		for _, l := range a.historyCommand(rest) {
+			fmt.Println(l)
+		}
+	case "/budget":
+		for _, l := range a.budgetCommand(rest) {
 			fmt.Println(l)
 		}
 	case "/reasoning":
@@ -2803,6 +2858,7 @@ func helpText() string {
 	return `commands:
   /status          show config, knowledge base, and trace paths
   /usage           session counters + token usage
+  /budget [usd]    cap estimated spend per run (refuses new tasks once hit; off to disable)
   /login           (re)configure the server URL / model / key, then reload
   /new [name]      start a NEW session (the old one stays in /sessions)
   /clear           wipe this session's context (same session)

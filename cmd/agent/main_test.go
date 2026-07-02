@@ -22,6 +22,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 	"github.com/ipsupport-llc/ipsupport-code/internal/usage"
 )
@@ -563,6 +564,39 @@ func TestReverseSearch(t *testing.T) {
 	m2.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	if m2.state != stIdle || m2.input.Value() != "write docs" {
 		t.Errorf("enter → state=%v input=%q, want idle + 'write docs'", m2.state, m2.input.Value())
+	}
+}
+
+func TestAtFileCompletion(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"src/main.go", "src/model.go", "README.md"} {
+		os.WriteFile(filepath.Join(dir, filepath.FromSlash(p)), []byte("x"), 0o644)
+	}
+	c := config.Default()
+	c.Workspace = dir
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	e, err := policy.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := &app{cfg: c, pol: e}
+
+	if _, matches := a.completePath("README"); len(matches) != 1 || matches[0] != "README.md" {
+		t.Errorf("README → %v, want [README.md]", matches)
+	}
+	if lcp, matches := a.completePath("src/m"); len(matches) != 2 || lcp != "src/m" {
+		t.Errorf("src/m → lcp %q matches %v, want src/m + 2", lcp, matches)
+	}
+
+	// Tab on "@src/mai" completes to the single file.
+	m := &tuiModel{input: textarea.New(), app: a}
+	m.input.SetValue("look at @src/mai")
+	m.completeAtFile()
+	if m.input.Value() != "look at @src/main.go " {
+		t.Errorf("completeAtFile → %q, want 'look at @src/main.go '", m.input.Value())
 	}
 }
 

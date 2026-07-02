@@ -821,6 +821,8 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			switch {
 			case strings.HasPrefix(m.input.Value(), "/"):
 				m.completeCommand()
+			case strings.Contains(m.input.Value(), "@"):
+				m.completeAtFile() // complete an @path reference against workspace files
 			case m.input.Value() == "" && m.suggestion != "":
 				m.input.SetValue(m.suggestion)
 				m.input.CursorEnd()
@@ -1654,7 +1656,7 @@ var keyHelp = [][2]string{
 	{"ctrl+r", "reverse-search the prompt history (type to narrow · ctrl+r older · enter use)"},
 	{"y / n / a", "on an approval: approve · deny · allow all of that kind this session"},
 	{"alt+enter", "newline in the input (also ctrl+j)"},
-	{"Tab", "complete a /command, or accept the NEXT suggestion"},
+	{"Tab", "complete a /command · an @file path · or accept the NEXT suggestion"},
 	{"shift+tab", "toggle plan ⇄ auto (mid-task: applies on the next task)"},
 	{"!cmd  ·  !", "run one shell command · bare ! drops to a shell"},
 	{"ctrl+u", "clear the input · ctrl+l clear the screen · PgUp/PgDn scroll the log"},
@@ -1711,6 +1713,37 @@ var commandList = []cmdInfo{
 // completeCommand completes a partial /command on Tab. Before the first space it
 // completes the command name; after it, the first argument for commands with a
 // fixed candidate set (e.g. /ai <provider>, /color <name>).
+// completeAtFile Tab-completes an @path token in the input against workspace files.
+func (m *tuiModel) completeAtFile() {
+	val := m.input.Value()
+	at := strings.LastIndexByte(val, '@')
+	if at < 0 || (at > 0 && val[at-1] != ' ' && val[at-1] != '\n') {
+		return // no @, or @ isn't the start of the current token
+	}
+	prefix := val[at+1:]
+	if strings.ContainsAny(prefix, " \n") {
+		return // the @token isn't at the cursor
+	}
+	lcp, matches := m.app.completePath(prefix)
+	switch len(matches) {
+	case 0:
+		return
+	case 1:
+		m.input.SetValue(val[:at] + "@" + matches[0] + " ")
+		m.input.CursorEnd()
+	default:
+		if len(lcp) > len(prefix) {
+			m.input.SetValue(val[:at] + "@" + lcp)
+			m.input.CursorEnd()
+		} else {
+			if len(matches) > 12 {
+				matches = matches[:12]
+			}
+			m.push(cDim.Render("  " + strings.Join(matches, "   ")))
+		}
+	}
+}
+
 func (m *tuiModel) completeCommand() {
 	val := m.input.Value()
 	if !strings.HasPrefix(val, "/") {

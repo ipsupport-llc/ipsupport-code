@@ -26,6 +26,7 @@ type cfgRow struct {
 var configRows = []cfgRow{
 	{header: "Model & provider"},
 	{key: "provider"},
+	{key: "addprovider"},
 	{key: "model"},
 	{key: "apikey"},
 	{header: "Behavior"},
@@ -94,9 +95,11 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 	case "provider":
 		extra := "enter: cycle"
 		if len(m.app.configuredProviderNames()) < 2 {
-			extra = "/ai key <name> <tok> to add one"
+			extra = "enter: cycle · use “add provider” below"
 		}
 		return "provider", m.app.providerName(), extra
+	case "addprovider":
+		return "add provider", "＋", "enter: any OpenAI-compatible endpoint"
 	case "model":
 		return "model", act.Model, "enter: choose"
 	case "apikey":
@@ -175,6 +178,11 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 	case "model": // needs the live model list — hand off to /model
 		m.state = stIdle
 		return m.runCommand("/model")
+	case "addprovider": // add a new OpenAI-compatible provider — prefill the flow
+		m.state = stIdle
+		m.push(cDim.Render("  add: /ai add <name> <base_url> [model]  ·  then a key (if needed): /ai key <name> <token>"))
+		m.input.SetValue("/ai add ")
+		m.input.CursorEnd()
 	case "apikey": // add or set a provider key — prefill; pick provider (Tab) + paste token
 		m.state = stIdle
 		m.input.SetValue("/ai key ")

@@ -417,6 +417,56 @@ func TestDeferredModeSwitchWhileRunning(t *testing.T) {
 	}
 }
 
+// countingApprover records how many times the real prompt was hit.
+type countingApprover struct {
+	calls int
+	reply bool
+}
+
+func (c *countingApprover) Approve(_, _ string) bool { c.calls++; return c.reply }
+
+// An "allow this kind for the session" grant short-circuits the real prompt for the
+// whole category, leaves other categories asking, and clears on reset.
+func TestSessionAllowGate(t *testing.T) {
+	inner := &countingApprover{reply: false}
+	a := &app{cfg: config.Default(), approver: inner}
+
+	if a.approveGated("write", "x") { // not allowed yet → hits inner (denies)
+		t.Error("write should be denied by the inner approver before any grant")
+	}
+	if inner.calls != 1 {
+		t.Fatalf("inner calls = %d, want 1", inner.calls)
+	}
+
+	a.allowSession("edit") // edit → "file" category
+	if !a.approveGated("write", "y") {
+		t.Error("write should be auto-allowed after a file-category session grant")
+	}
+	if inner.calls != 1 {
+		t.Errorf("inner was called again (%d) despite the session grant", inner.calls)
+	}
+	if a.approveGated("run", "z"); inner.calls != 2 {
+		t.Errorf("a different category (run) must still hit the prompt; calls=%d", inner.calls)
+	}
+
+	a.resetSessionAllow()
+	a.approveGated("write", "w")
+	if inner.calls != 3 {
+		t.Errorf("after reset, write must hit the prompt again; calls=%d", inner.calls)
+	}
+}
+
+func TestApprovalCategory(t *testing.T) {
+	for kind, want := range map[string]string{
+		"write": "file", "edit": "file", "append": "file", "mkdir": "file",
+		"run": "run", "git": "git", "spawn agent": "spawn", "mcp call": "mcp",
+	} {
+		if got := approvalCategory(kind); got != want {
+			t.Errorf("approvalCategory(%q) = %q, want %q", kind, got, want)
+		}
+	}
+}
+
 func TestSlugName(t *testing.T) {
 	cases := map[string]string{"Alice Bot": "alice-bot", "  ": "ipsupport-code", "C++/Helper!": "c-helper", "": "ipsupport-code"}
 	for in, want := range cases {

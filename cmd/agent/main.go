@@ -201,7 +201,13 @@ type app struct {
 	fileTracer trace.Tracer  // JSONL dataset
 	uiTracer   trace.Tracer  // live TUI (nil in plain mode)
 	tracer     trace.Tracer  // composite, set in wire()
-	approver   tool.Approver // stdin (plain) or the TUI bridge
+	approver   tool.Approver // stdin (plain) or the TUI bridge (the actual prompt)
+
+	// sessionAllow is the in-memory "don't ask again this session" set, keyed by
+	// approval category (file/run/git/spawn/mcp). Granted from an approval prompt,
+	// never persisted; cleared on /new and /clear. gatedApprover consults it.
+	sessionMu    sync.Mutex
+	sessionAllow map[string]bool
 
 	client          *llm.OpenAIClient
 	ag              *agent.Agent
@@ -249,10 +255,11 @@ func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
 		usageStore, _ = usage.Open("")
 	}
 
-	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader, approver: &stdinApprover{r: reader}}
-	cleanup := func() { a.closeMCP() } // shut down any launched MCP servers on exit
-	a.applyUsageRetention()            // honor usage_retention_days on startup
-	a.applyKnowledgeRetention()        // honor knowledge_retention_days on startup
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader}
+	a.approver = &stdinApprover{r: reader, app: a} // set after: it references the app for session-allow
+	cleanup := func() { a.closeMCP() }             // shut down any launched MCP servers on exit
+	a.applyUsageRetention()                        // honor usage_retention_days on startup
+	a.applyKnowledgeRetention()                    // honor knowledge_retention_days on startup
 	if ft, err := trace.NewFileTracer(cfg.TracePath, newRunID()); err != nil {
 		slog.Warn("trace disabled", "err", err)
 	} else {
@@ -363,7 +370,7 @@ func (a *app) spawnAgent(ctx context.Context, profile, task, dir string) (string
 	// one at a time instead of racing on the approver.
 	if a.cfg.Spawn.Default != "allow" {
 		a.spawnMu.Lock()
-		approved := a.approver.Approve("spawn agent", fmt.Sprintf("%s · %s · %s — %s", profile, llmCfg.Model, subWorkspace, oneLine(task, 60)))
+		approved := a.approveGated("spawn agent", fmt.Sprintf("%s · %s · %s — %s", profile, llmCfg.Model, subWorkspace, oneLine(task, 60)))
 		a.spawnMu.Unlock()
 		if !approved {
 			return "", fmt.Errorf("spawn denied by user")
@@ -490,11 +497,11 @@ func (a *app) resolveSpawnDir(dir string) (string, error) {
 // helper they don't need). The run (shell) tool is included only when spawn.exec
 // is on — the sharpest capability to hand an autonomous sub-agent.
 func (a *app) buildSubReg(pol *policy.Engine) *tool.Registry {
-	tools := []tool.Tool{tool.NewFile(pol, a.approver, a.snapFile)}
+	tools := []tool.Tool{tool.NewFile(pol, gatedApprover{a}, a.snapFile)}
 	if a.cfg.Spawn.Exec {
-		tools = append(tools, tool.NewRun(pol, a.approver, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second))
+		tools = append(tools, tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second))
 	}
-	tools = append(tools, tool.NewGit(pol, a.approver), tool.NewWeb(http.DefaultClient, a.cfg.Offline), tool.NewCalc())
+	tools = append(tools, tool.NewGit(pol, gatedApprover{a}), tool.NewWeb(http.DefaultClient, a.cfg.Offline), tool.NewCalc())
 	if a.skills != nil && a.skills.HasEnabled() {
 		tools = append(tools, tool.NewSkill(a.skills))
 	}
@@ -1206,7 +1213,7 @@ func (a *app) mcpCall(ctx context.Context, server, tool string, args map[string]
 		}
 	}
 	a.spawnMu.Lock()
-	approved := a.approver.Approve("mcp call", detail)
+	approved := a.approveGated("mcp call", detail)
 	a.spawnMu.Unlock()
 	if !approved {
 		return "", fmt.Errorf("mcp call denied by user")
@@ -1293,9 +1300,9 @@ func (a *app) wire() error {
 	}
 	var reg *tool.Registry
 	tools := []tool.Tool{
-		tool.NewFile(pol, a.approver, a.snapFile),
-		tool.NewRun(pol, a.approver, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second),
-		tool.NewGit(pol, a.approver),
+		tool.NewFile(pol, gatedApprover{a}, a.snapFile),
+		tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second),
+		tool.NewGit(pol, gatedApprover{a}),
 		tool.NewWeb(http.DefaultClient, a.cfg.Offline),
 		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),
 		tool.NewCalc(),
@@ -1474,7 +1481,8 @@ func (a *app) newNamedSession(name string, persist bool) error {
 	if err := a.wire(); err != nil {
 		return err
 	}
-	a.ag.Reset() // fresh — don't load name's prior thread
+	a.ag.Reset()          // fresh — don't load name's prior thread
+	a.resetSessionAllow() // a new session shouldn't inherit "allow all this session"
 	return nil
 }
 
@@ -3108,24 +3116,107 @@ func ask(r *bufio.Reader, label, def string) string {
 
 func isTTY() bool { return term.IsTerminal(int(os.Stdin.Fd())) }
 
-// stdinApprover prompts the operator on stderr for a policy "ask" decision. The
-// mutex serializes prompts so concurrent tool-call approvals never read the
-// shared stdin reader at the same time.
-type stdinApprover struct {
-	mu sync.Mutex
-	r  *bufio.Reader
+// approvalCategory groups the per-action approval kinds into the coarse buckets a
+// session-allow applies to, so "allow all file edits this session" covers
+// write/edit/append/mkdir, not just the one action you happened to approve.
+func approvalCategory(kind string) string {
+	switch kind {
+	case "write", "edit", "append", "mkdir":
+		return "file"
+	case "run":
+		return "run"
+	case "git":
+		return "git"
+	default:
+		if strings.HasPrefix(kind, "spawn") {
+			return "spawn"
+		}
+		if strings.HasPrefix(kind, "mcp") {
+			return "mcp"
+		}
+		return kind
+	}
 }
 
-func (a *stdinApprover) Approve(kind, detail string) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	fmt.Fprintf(os.Stderr, "\n[approve %s] %s\n  allow? [y/N] ", kind, detail)
-	line, err := a.r.ReadString('\n')
+// categoryLabel is the human phrase for the "allow all … this session" hint.
+func categoryLabel(cat string) string {
+	switch cat {
+	case "file":
+		return "file changes"
+	case "run":
+		return "shell commands"
+	case "git":
+		return "git actions"
+	case "spawn":
+		return "sub-agent spawns"
+	case "mcp":
+		return "MCP calls"
+	}
+	return cat
+}
+
+func (a *app) sessionAllowed(kind string) bool {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	return a.sessionAllow[approvalCategory(kind)]
+}
+
+// allowSession grants "don't ask again this session" for the kind's whole category.
+func (a *app) allowSession(kind string) {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	if a.sessionAllow == nil {
+		a.sessionAllow = map[string]bool{}
+	}
+	a.sessionAllow[approvalCategory(kind)] = true
+}
+
+// resetSessionAllow clears every session-allow (called on /new and /clear).
+func (a *app) resetSessionAllow() {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	a.sessionAllow = nil
+}
+
+// approveGated is the approval path the tools use: a session-allow for the kind's
+// category short-circuits the prompt, otherwise it asks the real approver.
+func (a *app) approveGated(kind, detail string) bool {
+	if a.sessionAllowed(kind) {
+		return true
+	}
+	return a.approver.Approve(kind, detail)
+}
+
+// gatedApprover adapts approveGated to the tool.Approver interface.
+type gatedApprover struct{ app *app }
+
+func (g gatedApprover) Approve(kind, detail string) bool { return g.app.approveGated(kind, detail) }
+
+// stdinApprover prompts the operator on stderr for a policy "ask" decision. The
+// mutex serializes prompts so concurrent tool-call approvals never read the
+// shared stdin reader at the same time. `a` grants the kind's category for the
+// whole session (via the app's session-allow set).
+type stdinApprover struct {
+	mu  sync.Mutex
+	r   *bufio.Reader
+	app *app
+}
+
+func (s *stdinApprover) Approve(kind, detail string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fmt.Fprintf(os.Stderr, "\n[approve %s] %s\n  allow? [y/N/a=all %s this session] ", kind, detail, categoryLabel(approvalCategory(kind)))
+	line, err := s.r.ReadString('\n')
 	if err != nil {
 		return false
 	}
 	switch strings.TrimSpace(strings.ToLower(line)) {
 	case "y", "yes":
+		return true
+	case "a", "all", "always":
+		if s.app != nil {
+			s.app.allowSession(kind)
+		}
 		return true
 	}
 	return false

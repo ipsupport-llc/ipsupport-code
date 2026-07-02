@@ -489,6 +489,49 @@ func TestClosePanelStates(t *testing.T) {
 	}
 }
 
+// A plan-mode task that finishes opens the accept→execute handshake: enter switches
+// to auto and launches execution; esc keeps planning; a cancelled run skips it.
+func TestPlanReviewHandshake(t *testing.T) {
+	newM := func() *tuiModel {
+		m := &tuiModel{state: stRunning, accent: lipgloss.Color("13"), input: textarea.New(),
+			bridge: newBridge(), ctx: context.Background(), app: &app{cfg: config.Default()}}
+		m.app.windowDetected = true // detectWindowCmd → nil (no probe)
+		m.app.client = llm.NewOpenAIClient(config.LLM{})
+		m.app.ag = agent.New(m.app.client, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
+		m.app.planMode = true
+		m.planTask = true
+		return m
+	}
+
+	// plan task finishes → plan-review prompt
+	m := newM()
+	m.Update(taskDoneMsg{})
+	if m.state != stPlanReview {
+		t.Fatalf("after a plan task, state = %v, want stPlanReview", m.state)
+	}
+	// enter = accept → switch to auto, a run starts (the cmd's goroutine isn't executed here)
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.app.planMode || m.state != stRunning {
+		t.Errorf("accept → planMode=%v state=%v; want auto + running", m.app.planMode, m.state)
+	}
+
+	// esc = keep planning → idle, plan mode preserved
+	m = newM()
+	m.Update(taskDoneMsg{})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.state != stIdle || !m.app.planMode {
+		t.Errorf("keep planning → state=%v planMode=%v; want stIdle + plan kept", m.state, m.app.planMode)
+	}
+
+	// a cancelled plan run must NOT pop the handshake
+	m = newM()
+	m.taskCancelled = true
+	m.Update(taskDoneMsg{})
+	if m.state == stPlanReview {
+		t.Error("a cancelled plan task should skip plan-review")
+	}
+}
+
 func TestApprovalCategory(t *testing.T) {
 	for kind, want := range map[string]string{
 		"write": "file", "edit": "file", "append": "file", "mkdir": "file",

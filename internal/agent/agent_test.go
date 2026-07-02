@@ -694,6 +694,21 @@ func TestRunGoalLoopUnclearJudgeDoesNotMarkMet(t *testing.T) {
 	}
 }
 
+// A model that double-encodes params as a JSON string AND puts a param at the top
+// level (e.g. path) must not lose the top-level one.
+func TestParseArgsStringParamsKeepsSiblings(t *testing.T) {
+	action, params := parseArgs(`{"action":"write","path":"x.txt","params":"{\"content\":\"y\"}"}`)
+	if action != "write" {
+		t.Errorf("action = %q, want write", action)
+	}
+	if params["path"] != "x.txt" {
+		t.Errorf("top-level path lost: %+v", params)
+	}
+	if params["content"] != "y" {
+		t.Errorf("content = %v, want y", params["content"])
+	}
+}
+
 func TestParseVerdict(t *testing.T) {
 	cases := []struct {
 		in       string

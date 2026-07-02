@@ -70,21 +70,37 @@ func (s *Store) Add(date, provider, model string, prompt, completion int) {
 	s.entries = append(s.entries, Entry{date, provider, model, prompt, completion})
 }
 
-// Save writes the ledger (no-op for an in-memory store).
+// Save writes the ledger (no-op for an in-memory store). The lock is held across
+// the write, and the write is atomic (temp + rename), so concurrent Saves from
+// parallel sub-agents can't interleave, lose an update, or truncate the file.
 func (s *Store) Save() error {
 	if s.path == "" {
 		return nil
 	}
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	data, err := json.MarshalIndent(s.entries, "", "  ")
-	s.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+	dir := filepath.Dir(s.path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(s.path, data, 0o644)
+	tmp, err := os.CreateTemp(dir, ".usage-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, s.path)
 }
 
 // Total is an aggregated row for display.

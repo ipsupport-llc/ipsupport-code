@@ -456,6 +456,31 @@ func TestSessionAllowGate(t *testing.T) {
 	}
 }
 
+// closePanel returns to the running task if one is still live, else to idle —
+// finalizing (draining the queue) a task that finished while the panel was open.
+func TestClosePanelStates(t *testing.T) {
+	// Task still running behind the panel → back to stRunning.
+	m := &tuiModel{state: stConfig, input: textarea.New(), app: &app{cfg: config.Default()}}
+	m.cancel = func() {}
+	if model, _ := m.closePanel(); model.(*tuiModel).state != stRunning {
+		t.Errorf("with a live task, closePanel → %v, want stRunning", m.state)
+	}
+
+	// Task finished while the panel was open → idle, and the queued command drains.
+	m = &tuiModel{state: stConfig, input: textarea.New(), app: &app{cfg: config.Default()}}
+	m.taskDoneAway = true
+	m.queued = []string{"/help"}
+	if _, _ = m.closePanel(); m.state != stIdle {
+		t.Errorf("after task-done-away, closePanel → %v, want stIdle", m.state)
+	}
+	if len(m.queued) != 0 {
+		t.Errorf("queued command should have drained on close, left %v", m.queued)
+	}
+	if m.taskDoneAway {
+		t.Error("taskDoneAway should be cleared after finalizing")
+	}
+}
+
 func TestApprovalCategory(t *testing.T) {
 	for kind, want := range map[string]string{
 		"write": "file", "edit": "file", "append": "file", "mkdir": "file",

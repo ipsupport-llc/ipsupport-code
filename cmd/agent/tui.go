@@ -70,6 +70,7 @@ type tuiModel struct {
 	histIdx       int      // history browse cursor; == len(inputHist) means "not browsing"
 	histDraft     string   // in-progress input saved when history browsing begins
 	pendingMode   *bool    // plan(true)/auto(false) requested via shift+tab mid-task; applied on task done
+	taskDoneAway  bool     // a task finished while a modal panel was open over it; finalize on panel close
 	pending       *approvalReq
 	approveChoice bool          // selected Yes(true)/No(false) while answering an approval
 	cfgCursor     int           // selected row in the /config panel (stConfig)
@@ -444,12 +445,16 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case taskDoneMsg:
-		m.state = stIdle
 		m.cancel = nil
 		m.retry = nil
 		m.applyPendingMode()          // a shift+tab during the task takes effect now, before the next one
 		detect := m.detectWindowCmd() // model is loaded now — confirm the real window
-		if len(m.queued) > 0 {        // drain the next pending message(s): tasks + /commands
+		if m.state != stRunning {     // a modal panel is open over the finished task — keep it; finalize on close
+			m.taskDoneAway = true
+			return m, detect
+		}
+		m.state = stIdle
+		if len(m.queued) > 0 { // drain the next pending message(s): tasks + /commands
 			model, cmd := m.drainQueue()
 			return model, tea.Batch(detect, cmd)
 		}
@@ -617,7 +622,7 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter", "right", "l", " ":
 			return m.configActivate()
 		case "esc", "q":
-			m.state = stIdle
+			return m.closePanel()
 		}
 		return m, nil
 	case stAgents:
@@ -1144,6 +1149,12 @@ func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
 	case "/status", "/help", "/?", "/color":
 		// Always safe: pure info, or /color which only recolors the frame.
 		return m.runCommand(line)
+	case "/config":
+		// Open the settings panel OVER the running task to view it; changes are held
+		// until the task finishes (re-wiring the agent it's using would race). The
+		// panel stays put when the task ends, and finalizes on close.
+		m.openConfig()
+		return m, nil
 	case "/usage", "/sessions", "/agents", "/agent", "/skills", "/permissions":
 		// The bare form is a read-only listing; a subcommand may mutate or re-wire
 		// the running stack, so defer those until the task finishes.

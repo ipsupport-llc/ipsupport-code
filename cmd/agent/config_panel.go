@@ -60,6 +60,24 @@ func (m *tuiModel) openConfig() {
 	m.state = stConfig
 }
 
+// closePanel leaves a modal panel: back to the still-running task if one is live,
+// otherwise to idle — finalizing (queue drain) a task that finished while the panel
+// was open over it.
+func (m *tuiModel) closePanel() (tea.Model, tea.Cmd) {
+	if m.cancel != nil { // a task is still running behind the panel
+		m.state = stRunning
+		return m, nil
+	}
+	m.state = stIdle
+	if m.taskDoneAway {
+		m.taskDoneAway = false
+		if len(m.queued) > 0 {
+			return m.drainQueue()
+		}
+	}
+	return m, m.input.Focus()
+}
+
 // configMove moves the cursor by delta, wrapping.
 func (m *tuiModel) configMove(delta int) {
 	n := len(cfgKeys())
@@ -121,6 +139,10 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 
 // configActivate handles Enter on the selected row.
 func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
+	if m.cancel != nil { // a task is running behind this panel — changing a setting would re-wire it live
+		m.push(cDim.Render("  settings are view-only while a task runs — esc to return, then change them"))
+		return m, nil
+	}
 	switch m.configKey() {
 	case "provider":
 		m.cycleProvider()
@@ -255,7 +277,11 @@ func (m *tuiModel) renderConfigPanel() string {
 			lines = append(lines, "   "+cDim.Render(labelCol)+" "+valCol+" "+cDim.Render(hint))
 		}
 	}
-	lines = append(lines, "", cDim.Render("  ↑↓ move · enter change · esc close"))
+	footer := "  ↑↓ move · enter change · esc close"
+	if m.cancel != nil {
+		footer = "  ↑↓ move · view-only while a task runs · esc back to it"
+	}
+	lines = append(lines, "", cDim.Render(footer))
 	lines = append(lines, cDim.Render("  saved to ~/.config/ipsupport-code/config.json (kept private)"))
 
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(m.accent).Padding(0, 1)

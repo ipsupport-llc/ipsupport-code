@@ -222,13 +222,19 @@ bottom of the screen.
 ## Permissions
 
 Mutating actions ask for approval by default. The prompt **doesn't steal your
-input** — keep typing, then press **↑** to answer (←→ / `y`/`n`, Enter confirms).
-A non-overridable deny floor (`rm -rf`, `sudo`, secrets, `.git`, `.env`, …) is
-always enforced.
+input** — keep typing, then answer with **`y`** (approve) / **`n`** (deny), or
+**↑** for the explicit Yes/No. A non-overridable deny floor (`rm -rf`, `sudo`,
+secrets, `.git`, `.env`, …) is always enforced.
 
-Tired of approving every write? `/permissions files on` auto-allows
-non-destructive file ops in the workspace (the deny floor still applies); same
-for `/permissions run on`. The choice is saved to the workspace config.
+**Grant it for the session.** Press **`a`** on any prompt to stop asking about
+that whole *kind* of action (file changes, shell, git, sub-agent spawns, MCP) for
+the rest of the session — in memory only, never written to config, cleared by
+`/new` and `/clear`. It's the "yes, and don't ask again for now" you reach for
+mid-task without loosening anything permanently.
+
+For a permanent relaxation instead, `/permissions files on` auto-allows
+non-destructive file ops in the workspace (the deny floor still applies); same for
+`/permissions run on`. That choice **is** saved to the workspace config.
 
 ## Skills
 

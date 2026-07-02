@@ -439,7 +439,8 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (finish your message). The user presses ↑ to switch to answering. Do NOT
 		// fetch the next approval yet — that would overwrite m.pending and orphan
 		// this one's reply channel (a hang when the model batches calls).
-		m.push(cToolCall.Render("  ⚠ approve "+req.kind+": ") + req.detail + cDim.Render("  — y approve · n deny · ↑ for Yes/No · or keep typing"))
+		m.push(cToolCall.Render("  ⚠ approve "+req.kind+": ") + req.detail +
+			cDim.Render("  — y approve · n deny · a allow all "+categoryLabel(approvalCategory(req.kind))+" this session · ↑ Yes/No · or keep typing"))
 		return m, nil
 
 	case taskDoneMsg:
@@ -656,6 +657,9 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "n", "N":
 			m.resolveApproval(false)
 			return m, m.waitApproval()
+		case "a", "A": // allow this kind for the rest of the session (in-memory)
+			m.approveSession()
+			return m, m.waitApproval()
 		case "enter":
 			m.resolveApproval(m.approveChoice)
 			return m, m.waitApproval()
@@ -667,11 +671,16 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case stRunning:
 		switch k.String() {
-		case "y", "Y", "n", "N":
+		case "y", "Y", "n", "N", "a", "A":
 			// Answer a pending approval directly — but only with an empty input, so
-			// typing a word starting with y/n mid-sentence still just types.
+			// typing a word starting with y/n/a mid-sentence still just types.
 			if m.pending != nil && strings.TrimSpace(m.input.Value()) == "" {
-				m.resolveApproval(k.String() == "y" || k.String() == "Y")
+				switch k.String() {
+				case "a", "A":
+					m.approveSession()
+				default:
+					m.resolveApproval(k.String() == "y" || k.String() == "Y")
+				}
 				return m, m.waitApproval()
 			}
 			var cmd tea.Cmd
@@ -813,6 +822,20 @@ func (m *tuiModel) resolveApproval(ok bool) {
 		verdict = cOk.Render("allowed")
 	}
 	m.push(cDim.Render("  → ") + verdict)
+}
+
+// approveSession approves the pending request AND stops asking about its whole
+// category for the rest of the session (in-memory; cleared on /new & /clear).
+func (m *tuiModel) approveSession() {
+	if m.pending == nil {
+		return
+	}
+	cat := categoryLabel(approvalCategory(m.pending.kind))
+	m.app.allowSession(m.pending.kind)
+	m.state = stRunning
+	m.pending.reply <- true
+	m.pending = nil
+	m.push(cDim.Render("  → ") + cOk.Render("allowed") + cDim.Render(" · won't ask about "+cat+" again this session"))
 }
 
 const maxInputHist = 100
@@ -968,6 +991,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		return m, m.detectWindowCmd()
 	case "/clear", "/reset": // wipe THIS thread + the screen
 		m.app.ag.Reset()
+		m.app.resetSessionAllow()
 		m.app.saveSession()
 		m.history = m.history[:0]
 		if m.ready {
@@ -1287,7 +1311,7 @@ func (m *tuiModel) View() string {
 		status = m.approvePrompt()
 	case m.pending != nil:
 		// An approval is waiting but you can keep typing; y/n answers it (↑ opens Yes/No).
-		status = cToolCall.Render("⚠ approval needed") + cDim.Render(" — y approve · n deny · ↑ Yes/No · or keep typing")
+		status = cToolCall.Render("⚠ approval needed") + cDim.Render(" — y approve · n deny · a allow-session · ↑ Yes/No · or keep typing")
 	case m.state == stRunning:
 		if m.retry != nil {
 			remain := time.Until(m.retry.until).Truncate(100 * time.Millisecond)
@@ -1371,7 +1395,7 @@ func (m *tuiModel) approvePrompt() string {
 	} else {
 		no = cErr.Bold(true).Render("  ▸No  ")
 	}
-	return cToolCall.Render("⚠ approve "+detail+"  ") + yes + no
+	return cToolCall.Render("⚠ approve "+detail+"  ") + yes + no + cDim.Render("  (a = allow all this session)")
 }
 
 // modeLine is the bottom indicator: auto (executes) or plan (proposes only),
@@ -1519,7 +1543,7 @@ func (m *tuiModel) renderContent() string {
 var keyHelp = [][2]string{
 	{"Enter", "send (or queue while a task runs)"},
 	{"↑ / ↓", "recall & edit previous messages; ↑ also opens a pending approval / the last queued line"},
-	{"y / n", "answer an approval prompt (with an empty input)"},
+	{"y / n / a", "on an approval: approve · deny · allow all of that kind this session"},
 	{"alt+enter", "newline in the input (also ctrl+j)"},
 	{"Tab", "complete a /command, or accept the NEXT suggestion"},
 	{"shift+tab", "toggle plan ⇄ auto (mid-task: applies on the next task)"},

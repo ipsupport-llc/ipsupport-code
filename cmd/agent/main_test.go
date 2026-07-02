@@ -344,6 +344,50 @@ func TestKeylessCustomProviderIsUsable(t *testing.T) {
 	}
 }
 
+func TestInputHistoryRecall(t *testing.T) {
+	m := &tuiModel{input: textarea.New()}
+	m.recordInput("first")
+	m.recordInput("second")
+	m.recordInput("second") // a consecutive duplicate is not stored twice
+	if len(m.inputHist) != 2 {
+		t.Fatalf("inputHist = %v, want [first second]", m.inputHist)
+	}
+
+	m.input.SetValue("draft-in-progress")
+	m.histIdx = len(m.inputHist) // not browsing
+	m.historyPrev()
+	if m.input.Value() != "second" {
+		t.Errorf("↑ once = %q, want second", m.input.Value())
+	}
+	m.historyPrev()
+	if m.input.Value() != "first" {
+		t.Errorf("↑ twice = %q, want first", m.input.Value())
+	}
+	m.historyPrev() // clamp at the oldest
+	if m.input.Value() != "first" {
+		t.Errorf("↑ past oldest = %q, want first", m.input.Value())
+	}
+	m.historyNext()
+	if m.input.Value() != "second" {
+		t.Errorf("↓ once = %q, want second", m.input.Value())
+	}
+	m.historyNext() // back past the newest restores the stashed draft
+	if m.input.Value() != "draft-in-progress" {
+		t.Errorf("↓ past newest = %q, want the stashed draft", m.input.Value())
+	}
+}
+
+func TestIsCommandLine(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		want bool
+	}{{"/plan", true}, {"!ls", true}, {"!", true}, {"fix the bug", false}, {"", false}} {
+		if got := isCommandLine(c.in); got != c.want {
+			t.Errorf("isCommandLine(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
 func TestSlugName(t *testing.T) {
 	cases := map[string]string{"Alice Bot": "alice-bot", "  ": "ipsupport-code", "C++/Helper!": "c-helper", "": "ipsupport-code"}
 	for in, want := range cases {
@@ -814,16 +858,19 @@ func TestCtrlUClearsInput(t *testing.T) {
 func TestCommandWhileBusy(t *testing.T) {
 	m := &tuiModel{width: 80, input: textarea.New(),
 		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
-	// a bare, read-only command runs immediately while busy (no deferral notice)
+	// a bare, read-only command runs immediately while busy (not queued)
 	m.commandWhileBusy("/help")
-	if strings.Contains(strings.Join(m.history, "\n"), "will run once") {
-		t.Error("/help should run while busy, not defer")
+	if len(m.queued) != 0 {
+		t.Errorf("/help should run while busy, not queue: %v", m.queued)
 	}
-	// a mutating subcommand is deferred until the task finishes
+	// a mutating subcommand is queued (not dropped) until the task finishes
 	m.history = nil
 	m.commandWhileBusy("/sessions delete foo")
-	if !strings.Contains(strings.Join(m.history, "\n"), "will run once") {
-		t.Errorf("/sessions <arg> should defer while busy, got %q", m.history)
+	if len(m.queued) != 1 || m.queued[0] != "/sessions delete foo" {
+		t.Errorf("/sessions <arg> should be queued while busy, got %v", m.queued)
+	}
+	if !strings.Contains(strings.Join(m.history, "\n"), "queued") {
+		t.Errorf("expected a 'queued' notice, got %q", m.history)
 	}
 }
 

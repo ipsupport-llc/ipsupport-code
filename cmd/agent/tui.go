@@ -1756,7 +1756,7 @@ var commandList = []cmdInfo{
 	{"/rename", "rename the agent (saved in settings)"},
 	{"/sessions", "list / switch / delete saved sessions (per agent name)"},
 	{"/history", "recent prompts (↑/↓ recalls them into the input); /history <text> to filter"},
-	{"/agents", "manage sub-agent profiles: /agents add|rm|exec (models the agent tool delegates to)"},
+	{"/agents", "sub-agent profiles: add (LLM) · add-tool (external CLI: codex/claude/…) · rm · exec"},
 	{"/loop", "re-run a task on an interval: /loop 5m <task> (esc to stop)"},
 	{"/exit", "leave"},
 }

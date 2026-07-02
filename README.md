@@ -153,6 +153,27 @@ relax it with `/permissions agents on`. Sub-agents read/write files and use git 
 the current plan/auto mode, can't spawn their own sub-agents (depth 1), and their
 tokens are recorded in `/usage` like any other.
 
+### External CLI agents
+
+Locally installed CLI coding agents (Codex, Claude Code, aider…) can be sub-agents
+too — registered as **external profiles**:
+
+```text
+/agents add-tool codex  codex exec {task}      # {task} = where the task goes
+/agents add-tool claude claude -p {task}       #   (appended if omitted)
+```
+
+The assistant delegates through the same `agent` tool; the CLI runs in the target
+`dir`, and the assistant gets back the **tail of its output plus a `git diff
+--stat` summary** (review the full patch with `/diff`). Use the CLI's
+**non-interactive mode** (`exec` / `-p` / `--message`) — an interactive launch just
+hangs until the timeout (15 min default, `timeout` per profile in config.json).
+
+⚠ External agents run **outside the sandbox**: their own tools, their own
+permissions, no policy jail, and `/rewind` can't see their edits. That's why every
+launch asks its **own approval** (`external CLI agents` category) — even when
+ordinary spawns are set to allow; `a` on the prompt relaxes it for the session.
+
 ## Updating
 
 The binary updates itself in place from GitHub Releases:

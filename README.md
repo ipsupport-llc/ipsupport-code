@@ -32,6 +32,17 @@ machine, with your own model, under a permission policy you control.
 > Not affiliated with Anthropic's Claude Code; the name reflects a similar
 > terminal-agent UX.
 
+**At a glance**
+
+- 🧰 Fat tools — `file` · `run` · `git` · `web` · `calc`, behind a permission policy + workspace jail
+- 🧠 Self-learning — distils lessons from each run and recovers from repeat mistakes
+- 🎯 Goals — `/goal` pursues a multi-turn objective; a judge re-feeds it until it's actually met
+- 🌐 Any model — local LM Studio by default, or any OpenAI-compatible provider (incl. keyless local ones)
+- 🤝 Sub-agents — delegate/fan-out a task across other models and merge the results
+- 🧩 Plan/auto modes · ⏪ `/rewind` · 🔌 MCP · 📦 skills · ♻️ self-updating
+
+**New here?** Install below, then jump to [Quick start](#quick-start).
+
 ## Install
 
 **One-liner** (macOS/Linux) — auto-detects your platform, verifies the SHA-256,
@@ -43,7 +54,7 @@ curl -fsSL https://raw.githubusercontent.com/ipsupport-llc/ipsupport-code/main/s
 ```
 
 That installs the latest **nightly**; append `-s -- latest` for the newest stable
-release, `-s -- v0.3.1` for a specific tag, or a second arg for a custom path.
+release, `-s -- v0.15.0` for a specific tag, or a second arg for a custom path.
 
 **Windows** (PowerShell) — installs to `%LOCALAPPDATA%\Programs\ipsupport-code`,
 verifies the SHA-256, and adds it to your user PATH:
@@ -84,7 +95,7 @@ OpenAI-compatible API and switch in one command — run a strong cloud model for
 hard task, then drop back to your local one:
 
 ```
-/ai                       list providers (local + openai, grok, groq, openrouter)
+/ai                       list providers (local + openai, anthropic, grok, groq, openrouter)
 /ai key openai sk-…       add an API key for a provider
 /ai openai                switch to it   ·   /ai local   back to LM Studio
 /model                    list models   ·   /model gpt-4o   pick   ·   /model sonnet   filter (great for OpenRouter)
@@ -171,9 +182,9 @@ model (LM Studio on localhost) keeps working. `/offline off` re-enables it.
 
 1. In LM Studio, load a **tool-calling** model (e.g. `qwen2.5-7b-instruct`) and
    start the local server on port `1234`.
-2. First interactive run walks you through the server URL, model, and context
-   window; settings are saved to `~/.config/ipsupport-code/config.json` (re-run
-   with `-init`).
+2. First interactive run walks you through the server URL, API key (blank for LM
+   Studio), and model, confirms the connection, and saves to
+   `~/.config/ipsupport-code/config.json` (re-run with `-init`).
 3. Run a one-shot task, or open the REPL:
 
    ```sh

@@ -1068,6 +1068,9 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/history":
 		m.pushLines(m.app.historyCommand(rest))
 		return m, nil
+	case "/budget":
+		m.pushLines(m.app.budgetCommand(rest))
+		return m, nil
 	case "/reasoning":
 		m.pushLines(m.app.reasoningCommand(rest))
 		return m, nil
@@ -1610,6 +1613,7 @@ var commandList = []cmdInfo{
 	{"/help", "this list"},
 	{"/status", "config, knowledge base, trace paths"},
 	{"/usage", "token history (day/week/month, by model); clear · purge <days> · retain <days>"},
+	{"/budget", "<usd>|off — cap estimated spend per run; refuses new tasks once hit"},
 	{"/login", "(re)configure server URL / model / key, then reload"},
 	{"/new", "start a NEW session (old stays in /sessions); /new <name> to name it"},
 	{"/clear", "wipe this session's context + the screen (same session)"},

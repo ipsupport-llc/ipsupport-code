@@ -186,7 +186,7 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	}
 	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: lipgloss.Color("13"), inputLines: 1}
 	act := a.activeLLM()
-	m.history = bannerLines(name, version, act.Model, a.workspace, act.ContextWindow, m.accent)
+	m.history = bannerLines(name, version, a.providerName(), act.Model, a.workspace, act.ContextWindow, m.accent)
 	if a.goal.Status == "active" && a.goal.Text != "" {
 		m.history = append(m.history, cDim.Render("◎ standing goal: "+oneLine(a.goal.Text, 60)+"  — /goal go to resume"))
 	}
@@ -289,14 +289,18 @@ func (m *tuiModel) renderChooser() string {
 // bannerLines builds the Claude-Code-style startup card: a rounded box with the
 // agent name + version, model, working directory, and detected context window,
 // then a one-line key hint.
-func bannerLines(name, ver, model, cwd string, window int, accent lipgloss.Color) []string {
+func bannerLines(name, ver, provider, model, cwd string, window int, accent lipgloss.Color) []string {
 	if h, err := os.UserHomeDir(); err == nil && h != "" && strings.HasPrefix(cwd, h) {
 		cwd = "~" + cwd[len(h):]
 	}
 	label := lipgloss.NewStyle().Bold(true).Foreground(accent)
+	modelRow := cDim.Render("model  ") + cBot.Render(model)
+	if provider != "" && provider != "local" { // surface the provider when it isn't the local default
+		modelRow += cDim.Render("  (" + provider + ")")
+	}
 	rows := []string{
 		label.Render("✦ "+name) + cDim.Render("  "+ver),
-		cDim.Render("model  ") + cBot.Render(model),
+		modelRow,
 		cDim.Render("cwd    ") + cBot.Render(cwd),
 	}
 	if window > 0 {
@@ -308,8 +312,9 @@ func bannerLines(name, ver, model, cwd string, window int, accent lipgloss.Color
 		BorderForeground(accent).
 		Padding(0, 2).
 		Render(body)
-	hint := cDim.Render("type a task, or /help · alt+enter newline · ctrl-u clear input · ctrl-l clear screen · ctrl-c quit")
-	return append(strings.Split(box, "\n"), "", hint)
+	tip := cDim.Render(`type a task — e.g. "explain what main.go does" — or /help for commands`)
+	keys := cDim.Render("alt+enter newline · ctrl+u clear · ctrl+l screen · ctrl+c quit · shift+tab plan⇄auto")
+	return append(strings.Split(box, "\n"), "", tip, keys)
 }
 
 func (a *app) runTUI(ctx context.Context) error {
@@ -413,7 +418,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case e.kind == "subagent_done": // finished — close the line, log the outcome
 			m.push(m.subDone(e)...)
 		case e.kind == "reflecting": // task is done; now distilling lessons
-			m.busyMsg = "✓ task done — distilling lessons (learning)"
+			m.busyMsg = "distilling lessons from this task"
 		case e.fields["agent"] != nil: // a sub-agent's own step — update its line only
 			m.subUpdate(e)
 		default:
@@ -939,7 +944,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/agents", "/agent":
 		m.pushLines(m.app.agentsCommand(m.ctx, rest))
 		return m, nil
-	case "/login":
+	case "/login", "/init":
 		if err := m.app.reconfigure(); err != nil {
 			m.push(cErr.Render("reload failed: " + err.Error()))
 			return m, nil
@@ -1063,7 +1068,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/exit", "/quit":
 		return m, tea.Quit
 	default:
-		m.push(cDim.Render("unknown command " + cmd + " — /help"))
+		m.push(cDim.Render("unknown command " + cmd + " — try /help"))
 	}
 	return m, nil
 }
@@ -1148,7 +1153,7 @@ func (m *tuiModel) rename(name string) {
 func (m *tuiModel) setSuggestion(text string) {
 	m.suggestion = text
 	m.input.Placeholder = text + "   (Tab to accept)"
-	m.push(cDim.Render("  💡 next: ") + m.accentBold().Render(text) + cDim.Render("   (Tab)"))
+	m.push(cDim.Render("  ✦ next: ") + m.accentBold().Render(text) + cDim.Render("   (Tab)"))
 }
 
 // startUpdate self-updates from GitHub in the background. An optional
@@ -1513,14 +1518,13 @@ func (m *tuiModel) renderContent() string {
 // keyHelp documents the keyboard shortcuts for /help.
 var keyHelp = [][2]string{
 	{"Enter", "send (or queue while a task runs)"},
-	{"↑ / ↓", "recall / edit previous messages (empty input); PgUp/PgDn scroll"},
-	{"y / n", "answer an approval prompt (empty input)"},
+	{"↑ / ↓", "recall & edit previous messages; ↑ also opens a pending approval / the last queued line"},
+	{"y / n", "answer an approval prompt (with an empty input)"},
 	{"alt+enter", "newline in the input (also ctrl+j)"},
 	{"Tab", "complete a /command, or accept the NEXT suggestion"},
 	{"shift+tab", "toggle plan ⇄ auto (mid-task: applies on the next task)"},
-	{"↑", "answer a pending approval, or edit the last queued line"},
-	{"ctrl+u", "clear the input (fast undo of a bad paste)"},
-	{"ctrl+l", "clear the screen"},
+	{"!cmd  ·  !", "run one shell command · bare ! drops to a shell"},
+	{"ctrl+u", "clear the input · ctrl+l clear the screen · PgUp/PgDn scroll the log"},
 	{"esc", "cancel the running task, or back out of a panel"},
 	{"ctrl+c", "quit"},
 }
@@ -1556,9 +1560,9 @@ var commandList = []cmdInfo{
 	{"/mcp", "list configured MCP servers and their tools"},
 	{"/rewind", "pick a step to roll back to (restores files + trims the chat)"},
 	{"/reflect", "on|off|<profile> — post-task learning; run it on a stronger model"},
-	{"/goal", "<n>|off — re-feed the goal and keep going until the plan is done"},
-	{"/reasoning", "off|minimal|low|medium|high — trim a thinking model's reasoning"},
-	{"/shell", "drop to a shell in the workspace (exit to return)"},
+	{"/goal", "<text> — set & pursue a multi-turn goal; a judge re-feeds it until met (go · clear · ttl <n>)"},
+	{"/reasoning", "off|minimal|low|medium|high (or reflect:) — trim a thinking model's reasoning"},
+	{"/shell", "drop to a shell (or !cmd for one command); exit to return"},
 	{"/skills", "list/toggle/install on-demand instruction packs"},
 	{"/permissions", "relax approval for file / shell / sub-agent-spawn actions"},
 	{"/color", "change the frame color (cycles if no name)"},
@@ -1709,7 +1713,7 @@ func (m *tuiModel) renderHelp() []string {
 	cmd := m.accentBold()
 	out := []string{cmd.Render("  commands") + cDim.Render("   (Tab completes, even while busy)")}
 	for _, c := range commandList {
-		out = append(out, "  "+cmd.Render(fmt.Sprintf("%-9s", c.name))+"  "+cDim.Render(c.desc))
+		out = append(out, "  "+cmd.Render(fmt.Sprintf("%-13s", c.name))+"  "+cDim.Render(c.desc))
 	}
 	out = append(out, cDim.Render("  anything else is run as a task"))
 	out = append(out, "", cmd.Render("  keys"))
@@ -2051,7 +2055,7 @@ func (m *tuiModel) renderDiff(path, diff string) []string {
 		verb = "Create"
 	}
 	h1 := lipgloss.NewStyle().Foreground(m.accent).Render("● ") + lipgloss.NewStyle().Bold(true).Render(verb+"("+path+")")
-	h2 := cDim.Render(fmt.Sprintf("  ⎿  Added %d %s, removed %d %s", add, plural(add, "line"), del, plural(del, "line")))
+	h2 := cDim.Render(fmt.Sprintf("  ⎿  %d %s added, %d %s removed", add, plural(add, "line"), del, plural(del, "line")))
 	return append([]string{h1, h2}, body...)
 }
 

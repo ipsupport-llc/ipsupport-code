@@ -286,7 +286,7 @@ func (m *tuiModel) renderAgentsPanel() string {
 		lines = append(lines, accent.Bold(true).Render("sub-agent profiles"))
 		names := agentProfileNames(m.app.cfg)
 		if len(names) == 0 {
-			lines = append(lines, cDim.Render("  none yet"))
+			lines = append(lines, cDim.Render(`  no profiles yet — select "+ add new" below`))
 		}
 		for i, n := range names {
 			p := m.app.cfg.Agents[n]

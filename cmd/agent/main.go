@@ -2703,6 +2703,7 @@ func helpText() string {
   /mcp             list configured MCP servers and their tools (mcp_servers in config.json)
   /rewind [n]      roll back to a previous step (restores files + trims the chat)
   /reflect [on|off|<profile>] post-task learning; run it on a stronger model
+  /goal <text>     set & pursue a multi-turn goal (go · clear · ttl <n> · off)
   /reasoning [off|low|…] trim a thinking model's reasoning (minimal|low|medium|high)
   /shell, /sh      drop to a shell in the workspace (exit to return)
   /skills          list/toggle/install on-demand instruction packs
@@ -2941,7 +2942,7 @@ func (a *app) knowledgeCommand(rest string) []string {
 func (a *app) knowledgeReport() []string {
 	all := a.kb.All()
 	if len(all) == 0 {
-		return []string{"no learned lessons yet — they accrue from task reflections."}
+		return []string{"no learned lessons yet — they accrue from task reflections"}
 	}
 	byDomain := map[string]int{}
 	for _, p := range all {

@@ -106,11 +106,11 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 // the context window when that's larger (big-context models may legitimately
 // write more). A turn beyond this is looping, not working.
 func maxResponseTokens(ctxWindow int) int {
-	cap := 32768
-	if n := 4 * ctxWindow; n > cap {
-		cap = n
+	limit := 32768
+	if n := 4 * ctxWindow; n > limit {
+		limit = n
 	}
-	return cap
+	return limit
 }
 
 // startIdleWatchdog cancels the request if neither the response nor any stream

@@ -376,8 +376,6 @@ func SaveUsageRetention(days int) error {
 	return mergeGlobalKeys(map[string]any{"usage_retention_days": days})
 }
 
-// SaveProviders persists the active provider name and the external provider
-// presets (which may include API keys — the file is written 0600).
 // SaveSpawn persists the sub-agent spawn policy (approval mode + exec) globally.
 func SaveSpawn(s SpawnPolicy) error { return mergeGlobalKeys(map[string]any{"spawn": s}) }
 
@@ -409,6 +407,8 @@ func SaveAgents(agents map[string]AgentProfile) error {
 	return mergeGlobalKeys(map[string]any{"agents": agents})
 }
 
+// SaveProviders persists the active provider name and the external provider
+// presets (which may include API keys — the file is written 0600).
 func SaveProviders(provider string, providers map[string]LLM) error {
 	return mergeGlobalKeys(map[string]any{"provider": provider, "providers": providers})
 }

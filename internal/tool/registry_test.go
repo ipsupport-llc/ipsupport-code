@@ -77,12 +77,3 @@ func TestRegistryMutates(t *testing.T) {
 		t.Error("unknown tool should be non-mutating")
 	}
 }
-
-func TestRequire(t *testing.T) {
-	if err := Require(map[string]any{"a": "x"}, "a", "b"); err == nil || !strings.Contains(err.Error(), "b") {
-		t.Errorf("err = %v, want to mention missing 'b'", err)
-	}
-	if err := Require(map[string]any{"a": "x"}, "a"); err != nil {
-		t.Errorf("present param should pass, got %v", err)
-	}
-}

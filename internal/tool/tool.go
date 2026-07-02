@@ -66,21 +66,6 @@ type Tool interface {
 	Mutates(action string) bool
 }
 
-// Require returns an error naming every missing/empty required param at once, so
-// the model can fix them in a single retry.
-func Require(params map[string]any, keys ...string) error {
-	var missing []string
-	for _, k := range keys {
-		if v, ok := params[k]; !ok || isEmpty(v) {
-			missing = append(missing, k)
-		}
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("missing required param(s): %s", strings.Join(missing, ", "))
-	}
-	return nil
-}
-
 func isEmpty(v any) bool {
 	switch x := v.(type) {
 	case nil:

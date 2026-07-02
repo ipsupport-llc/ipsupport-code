@@ -132,8 +132,6 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 	return n, nil
 }
 
-// remember appends the goal and its final answer to the session, trimming to the
-// most recent maxHistory messages.
 // stopNote describes a run that stopped before a clean answer, so the next turn
 // ("continue") has context — the edits/output are already on disk/screen. Covers
 // the user's cancel and any mid-run failure (runaway cap, transport error).
@@ -160,6 +158,8 @@ func stopNote(msgs []llm.Message, cancelled bool, err error) string {
 		". Those changes/outputs are kept — say 'continue' or what to do next.)"
 }
 
+// remember appends the goal and its final answer to the session, trimming to the
+// most recent maxHistory messages.
 func (a *Agent) remember(goal, final string) {
 	a.history = append(a.history, llm.User(goal), llm.Message{Role: "assistant", Content: final})
 	if a.maxHistory > 0 && len(a.history) > a.maxHistory {

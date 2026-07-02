@@ -75,7 +75,7 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 	switch key {
 	case "provider":
 		extra := "enter: cycle"
-		if len(m.configuredProviders()) < 2 {
+		if len(m.app.configuredProviderNames()) < 2 {
 			extra = "/ai key <name> <tok> to add one"
 		}
 		return "provider", m.app.providerName(), extra
@@ -165,21 +165,9 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// configuredProviders is local plus the external providers that have a key set
-// (preset or env) — the ones the panel can actually switch between.
-func (m *tuiModel) configuredProviders() []string {
-	out := []string{"local"}
-	for _, n := range config.KnownProviders() {
-		if l, ok := config.ResolveProvider(m.app.cfg, n); ok && l.APIKey != "" {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-
 // cycleProvider switches to the next configured provider and re-wires.
 func (m *tuiModel) cycleProvider() {
-	provs := m.configuredProviders()
+	provs := m.app.configuredProviderNames()
 	if len(provs) < 2 {
 		return
 	}

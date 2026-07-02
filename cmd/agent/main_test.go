@@ -315,6 +315,35 @@ func TestFinishGoalStatusFromTranscript(t *testing.T) {
 	}
 }
 
+// A provider defined purely in config with NO api_key (a local Ollama/vLLM/etc.)
+// must be usable: listed for switching and connectable. Only a custom provider
+// missing base_url is rejected — with a clear message.
+func TestKeylessCustomProviderIsUsable(t *testing.T) {
+	cfg := config.Default()
+	cfg.Providers = map[string]config.LLM{
+		"ollama": {BaseURL: "http://localhost:11434/v1", Model: "qwen2.5-coder:7b"}, // no api_key
+	}
+	a := &app{cfg: cfg, workspace: t.TempDir()}
+
+	listed := false
+	for _, n := range a.configuredProviderNames() {
+		if n == "ollama" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Errorf("keyless custom provider not listed: %v", a.configuredProviderNames())
+	}
+	if l, msg := a.providerConn("ollama"); msg != "" || l.BaseURL == "" {
+		t.Errorf("providerConn(ollama) = %+v, %q; want a keyless connection, no error", l, msg)
+	}
+
+	cfg.Providers["broken"] = config.LLM{Model: "x"} // custom but no base_url
+	if _, msg := a.providerConn("broken"); !strings.Contains(msg, "base_url") {
+		t.Errorf("providerConn(broken) msg = %q, want a base_url complaint", msg)
+	}
+}
+
 func TestSlugName(t *testing.T) {
 	cases := map[string]string{"Alice Bot": "alice-bot", "  ": "ipsupport-code", "C++/Helper!": "c-helper", "": "ipsupport-code"}
 	for in, want := range cases {

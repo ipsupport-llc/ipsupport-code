@@ -90,6 +90,18 @@ hard task, then drop back to your local one:
 /model                    list models   ·   /model gpt-4o   pick   ·   /model sonnet   filter (great for OpenRouter)
 ```
 
+**Add a provider by hand.** Any OpenAI-compatible endpoint works as a first-class
+provider straight from the config — no command needed, and **no API key required**
+for a keyless local server (Ollama, vLLM, a second LM Studio). Add it under
+`providers` and point `provider` at it:
+
+```json
+{ "provider": "ollama",
+  "providers": { "ollama": { "base_url": "http://localhost:11434/v1", "model": "qwen2.5-coder:7b" } } }
+```
+
+It's then active at launch and switchable via `/ai ollama` and `/config`.
+
 Switching keeps your session, tokens, and mode. Keys live in
 `~/.config/ipsupport-code/config.json` (written `chmod 600`) or fall back to the
 env var (`OPENAI_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`).

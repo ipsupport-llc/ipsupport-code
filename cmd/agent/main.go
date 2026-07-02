@@ -687,7 +687,13 @@ func (a *app) providerConn(provider string) (config.LLM, string) {
 	if !ok {
 		return config.LLM{}, fmt.Sprintf("unknown provider %q — configured: %s", provider, strings.Join(a.configuredProviderNames(), ", "))
 	}
-	if rp.APIKey == "" {
+	if config.IsCustomProvider(a.cfg, provider) {
+		if rp.BaseURL == "" { // a custom provider must at least name where to connect
+			return config.LLM{}, fmt.Sprintf("%s has no base_url — set providers.%s.base_url in config", provider, provider)
+		}
+		return rp, "" // keyless is fine (local Ollama/vLLM/etc.)
+	}
+	if rp.APIKey == "" { // built-in cloud templates need a key
 		return config.LLM{}, fmt.Sprintf("%s has no API key — add one with /ai key %s <token> first", provider, provider)
 	}
 	return rp, ""
@@ -702,7 +708,7 @@ func (a *app) configuredProviderNames() []string {
 		if seen[n] {
 			return
 		}
-		if l, ok := config.ResolveProvider(a.cfg, n); ok && l.APIKey != "" {
+		if l, ok := config.ResolveProvider(a.cfg, n); ok && (l.APIKey != "" || config.IsCustomProvider(a.cfg, n)) {
 			out = append(out, n)
 			seen[n] = true
 		}
@@ -2229,7 +2235,11 @@ func (a *app) setProvider(name string) []string {
 		if !ok {
 			return []string{fmt.Sprintf("unknown provider %q — try: local, %s", name, strings.Join(config.KnownProviders(), ", "))}
 		}
-		if l.APIKey == "" {
+		if config.IsCustomProvider(a.cfg, name) {
+			if l.BaseURL == "" {
+				return []string{fmt.Sprintf("%s has no base_url — set providers.%s.base_url in config", name, name)}
+			}
+		} else if l.APIKey == "" { // built-in cloud template
 			return []string{fmt.Sprintf("%s needs an API key — run: /ai key %s <token>  (or set the env var)", name, name)}
 		}
 	}

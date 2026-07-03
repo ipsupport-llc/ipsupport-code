@@ -8,9 +8,9 @@ import (
 	"os/exec"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
 // External CLI agents (codex, claude, aider…) run OUTSIDE our sandbox: their own
@@ -151,11 +151,11 @@ func expandTaskArgs(args []string, task string) []string {
 func externalResult(command, stdout, stderr, diffStat string, runErr error) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "external agent `%s` finished.\n", command)
-	if out := tailClip(strings.TrimSpace(stdout), maxExternalStdout); out != "" {
+	if out := textutil.Tail(strings.TrimSpace(stdout), maxExternalStdout); out != "" {
 		b.WriteString("\n--- output (tail) ---\n" + out + "\n")
 	}
 	if runErr != nil {
-		if errOut := tailClip(strings.TrimSpace(stderr), maxExternalStderr); errOut != "" {
+		if errOut := textutil.Tail(strings.TrimSpace(stderr), maxExternalStderr); errOut != "" {
 			b.WriteString("\n--- stderr (tail) ---\n" + errOut + "\n")
 		}
 	}
@@ -163,17 +163,4 @@ func externalResult(command, stdout, stderr, diffStat string, runErr error) stri
 		b.WriteString("\n--- changes (git diff --stat) ---\n" + diffStat + "\n(full patch: /diff)\n")
 	}
 	return strings.TrimSpace(b.String())
-}
-
-// tailClip keeps the last max bytes of s, backing off to a rune boundary so a
-// multibyte character is never split.
-func tailClip(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	cut := len(s) - max
-	for cut < len(s) && !utf8.RuneStart(s[cut]) {
-		cut++
-	}
-	return "…" + s[cut:]
 }

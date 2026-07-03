@@ -1171,6 +1171,8 @@ func gitOut(dir string, args ...string) (string, error) {
 	return string(out), err
 }
 
+// mustGit is gitOut with the error dropped — for best-effort reads (diff/stat)
+// where an empty string is an acceptable answer in a non-repo dir.
 func mustGit(dir string, args ...string) string { s, _ := gitOut(dir, args...); return s }
 
 // diffCommand shows the uncommitted working-tree changes in the current dir — a
@@ -1552,6 +1554,11 @@ func (a *app) detectContextWindow() {
 // wire (re)builds the policy-gated tools, LLM client, agent, and reflector from
 // the current config and the current approver/tracers. Called at startup, after
 // /login, and when the TUI installs its bridge.
+// wire (re)builds the full runtime stack from a.cfg — policy engine, tool
+// registries (main + sub-agent), LLM client (usage carried over), agent loop and
+// system prompt. Called at startup and after any setting that changes what the
+// agent is allowed to do or talk to. NOT safe while a task goroutine is running
+// (the running agent's history would race) — callers gate on that.
 func (a *app) wire() error {
 	pol, err := policy.New(a.cfg)
 	if err != nil {
@@ -2304,6 +2311,13 @@ func (a *app) repl(ctx context.Context) {
 
 // command handles a /slash line in plain mode. Returns true when the REPL should
 // exit.
+// printLines prints a command handler's output lines (the REPL dispatch shim).
+func printLines(lines []string) {
+	for _, l := range lines {
+		fmt.Println(l)
+	}
+}
+
 func (a *app) command(ctx context.Context, line string) (quit bool) {
 	cmd, rest := splitCommand(line)
 	switch cmd {
@@ -2325,9 +2339,7 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 			fmt.Println(l)
 		}
 	case "/agents", "/agent":
-		for _, l := range a.agentsCommand(ctx, rest) {
-			fmt.Println(l)
-		}
+		printLines(a.agentsCommand(ctx, rest))
 	case "/login", "/init":
 		maybeInit(a.reader, true)
 		if err := a.reconfigure(); err != nil {
@@ -2368,74 +2380,44 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 			runUpdate(strings.Fields(rest))
 		}
 	case "/offline":
-		for _, l := range a.offlineCommand(rest) {
-			fmt.Println(l)
-		}
+		printLines(a.offlineCommand(rest))
 	case "/cd":
-		for _, l := range a.cdCommand(rest) {
-			fmt.Println(l)
-		}
+		printLines(a.cdCommand(rest))
 	case "/knowledge", "/kb":
-		for _, l := range a.knowledgeCommand(rest) {
-			fmt.Println(l)
-		}
+		printLines(a.knowledgeCommand(rest))
 	case "/mcp":
 		fmt.Println(a.mcpList(ctx))
 	case "/rewind":
-		for _, l := range a.rewindCommand(rest) {
-			fmt.Println(l)
-		}
+		printLines(a.rewindCommand(rest))
 	case "/reflect":
-		for _, l := range a.reflectCommand(rest) {
-			fmt.Println(l)
-		}
+		printLines(a.reflectCommand(rest))
 	case "/goal":
 		if text, ok := a.launchGoalText(rest); ok {
 			a.setGoal(text)
 			a.runOne(ctx, text)
 		} else {
-			for _, l := range a.goalCommand(rest) {
-				fmt.Println(l)
-			}
+			printLines(a.goalCommand(rest))
 		}
 	case "/history":
-		for _, l := range a.historyCommand(rest) {
-			fmt.Println(l)
-		}
+		printLines(a.historyCommand(rest))
 	case "/budget":
-		for _, l := range a.budgetCommand(rest) {
-			fmt.Println(l)
-		}
+		printLines(a.budgetCommand(rest))
 	case "/diff":
-		for _, l := range a.diffCommand() {
-			fmt.Println(l)
-		}
+		printLines(a.diffCommand())
 	case "/reasoning":
-		for _, l := range a.reasoningCommand(rest) {
-			fmt.Println(l)
-		}
+		printLines(a.reasoningCommand(rest))
 	case "/ai":
-		for _, l := range a.aiCommand(rest) {
-			fmt.Println(l)
-		}
+		printLines(a.aiCommand(rest))
 	case "/model":
-		for _, l := range a.modelCommand(ctx, rest) {
-			fmt.Println(l)
-		}
+		printLines(a.modelCommand(ctx, rest))
 	case "/config":
-		for _, l := range a.configOverview() {
-			fmt.Println(l)
-		}
+		printLines(a.configOverview())
 	case "/shell", "/sh":
 		a.runShell(ctx)
 	case "/skills":
-		for _, l := range a.skillsCommand(ctx, rest) {
-			fmt.Println(l)
-		}
+		printLines(a.skillsCommand(ctx, rest))
 	case "/permissions", "/perms":
-		for _, l := range a.permissionsCommand(rest) {
-			fmt.Println(l)
-		}
+		printLines(a.permissionsCommand(rest))
 	case "/color":
 		fmt.Println("/color changes the TUI frame color — interactive mode only.")
 	case "/rename":
@@ -2780,6 +2762,9 @@ func (a *app) configOverview() []string {
 		fmt.Sprintf("  api key      %s", key),
 		fmt.Sprintf("  context      %-22s (auto-compact ~75%%)", ctxLabel(act.ContextWindow)),
 		fmt.Sprintf("  channel      %-22s update stable|nightly", channelOf(a.cfg)),
+		fmt.Sprintf("  reasoning    %-22s /reasoning off|low|…", a.reasoningLevel(a.providerName(), act.Model)),
+		fmt.Sprintf("  budget       %-22s /budget <usd>|off", a.budgetStatusLine()),
+		fmt.Sprintf("  offline      %-22s /offline on|off", onOff(a.cfg.Offline)),
 		fmt.Sprintf("  permissions  files=%-5s run=%-5s    /permissions", a.cfg.File.Default, a.cfg.Run.Default),
 		fmt.Sprintf("  sub-agents   %-22s /agents", fmt.Sprintf("%d profile(s)", len(a.cfg.Agents))),
 		fmt.Sprintf("  name         %-22s /rename <name>", a.cfg.Name),
@@ -2885,8 +2870,11 @@ func (a *app) permissionsCommand(rest string) []string {
 		return a.permissionsSet(&a.cfg.Run.Default, arg, "shell commands")
 	case "agents", "agent", "spawn":
 		return a.permissionsSetSpawn(arg)
+	case "reset":
+		a.resetSessionAllow()
+		return []string{"session allowances revoked — approvals ask again"}
 	default:
-		return []string{"usage: /permissions [files on|off] [run on|off] [agents on|off]"}
+		return []string{"usage: /permissions [files on|off] [run on|off] [agents on|off] [reset]"}
 	}
 }
 
@@ -2912,15 +2900,32 @@ func (a *app) permissionsStatus() []string {
 	if a.cfg.Spawn.Exec {
 		exec = "on"
 	}
-	return []string{
+	out := []string{
 		"permissions:",
 		fmt.Sprintf("  files   %s   (jail %q)", a.cfg.File.Default, a.cfg.File.Jail),
 		fmt.Sprintf("  run     %s", a.cfg.Run.Default),
 		fmt.Sprintf("  agents  %s   (sub-agent shell exec: %s — set in /config)", a.cfg.Spawn.Default, exec),
 		"  deny floor (always on): secrets, .git, .env, rm -rf, sudo, …",
+	}
+	if allowed := a.sessionAllows(); len(allowed) > 0 {
+		out = append(out, "  session-allowed ('a' on a prompt): "+strings.Join(allowed, ", ")+"  — /permissions reset revokes")
+	}
+	return append(out,
 		"  /permissions files on  → stop asking before file writes in the workspace",
 		"  /permissions agents on → spawn sub-agents without asking each time",
+	)
+}
+
+// sessionAllows lists the categories currently allowed for this session (sorted).
+func (a *app) sessionAllows() []string {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	out := make([]string, 0, len(a.sessionAllow))
+	for cat := range a.sessionAllow {
+		out = append(out, categoryLabel(cat))
 	}
+	sort.Strings(out)
+	return out
 }
 
 func (a *app) permissionsSet(field *string, arg, label string) []string {
@@ -3087,6 +3092,8 @@ func (a *app) statusText() string {
   server       %s
   model        %s
   max_steps    %d
+  reasoning    %s
+  offline      %s
   workspace    %s
   jail         %q
   defaults     run=%s  file=%s
@@ -3094,15 +3101,26 @@ func (a *app) statusText() string {
   instructions %s
   session      %d messages
   goal         %s
+  budget       %s
   knowledge    %s (%d lessons)
+  facts        %d learned
   trace        %s
 `,
 		version, channelOf(a.cfg), a.providerName(),
 		act.BaseURL, act.Model, act.MaxSteps,
+		a.reasoningLevel(a.providerName(), act.Model), onOff(a.cfg.Offline),
 		a.cfg.Workspace, a.cfg.File.Jail, a.cfg.Run.Default, a.cfg.File.Default,
 		promptOrDefault(a.promptSrc), instr, a.ag.SessionLen(),
-		a.goalStatusLine(),
-		a.cfg.KBPath, len(a.kb.All()), a.cfg.TracePath)
+		a.goalStatusLine(), a.budgetStatusLine(),
+		a.cfg.KBPath, len(a.kb.All()), len(a.facts), a.cfg.TracePath)
+}
+
+// budgetStatusLine is the one-line spend summary shown in /status.
+func (a *app) budgetStatusLine() string {
+	if a.cfg.SessionBudgetUSD <= 0 {
+		return fmt.Sprintf("none · spent ~$%.2f this run", a.sessionCost())
+	}
+	return fmt.Sprintf("$%.2f cap · spent ~$%.2f this run", a.cfg.SessionBudgetUSD, a.sessionCost())
 }
 
 // goalStatusLine is the one-line goal summary shown in /status.

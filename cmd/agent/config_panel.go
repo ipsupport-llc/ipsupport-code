@@ -35,6 +35,8 @@ var configRows = []cfgRow{
 	{key: "perm_files"},
 	{key: "perm_run"},
 	{key: "timeout"},
+	{key: "budget"},
+	{key: "offline"},
 	{header: "Sub-agents"},
 	{key: "agents"},
 	{key: "spawn"},
@@ -123,6 +125,14 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		return "shell run", m.app.cfg.Run.Default, "enter: ask/allow/deny"
 	case "timeout":
 		return "run timeout", runTimeoutLabel(m.app.cfg.Run.TimeoutSeconds), "enter: cycle"
+	case "budget":
+		v := "— none"
+		if m.app.cfg.SessionBudgetUSD > 0 {
+			v = fmt.Sprintf("$%.2f/run (spent ~$%.2f)", m.app.cfg.SessionBudgetUSD, m.app.sessionCost())
+		}
+		return "spend cap", v, "enter: set via /budget"
+	case "offline":
+		return "offline", onOff(m.app.cfg.Offline), "enter: toggle (no internet egress)"
 	case "agents":
 		return "profiles", fmt.Sprintf("%d configured", len(m.app.cfg.Agents)), "enter: add (provider → model)"
 	case "spawn":
@@ -178,6 +188,13 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		m.app.agentsExec(arg)
 	case "agents": // open the interactive profile manager (provider → model → name)
 		m.openAgents()
+	case "budget": // needs a number — hand off to /budget with the flow prefilled
+		m.state = stIdle
+		m.push(cDim.Render("  /budget <usd> caps estimated spend per run · /budget off disables"))
+		m.input.SetValue("/budget ")
+		m.input.CursorEnd()
+	case "offline": // toggle internet egress
+		m.pushLines(m.app.offlineCommand(map[bool]string{true: "off", false: "on"}[m.app.cfg.Offline]))
 	case "reasoning": // cycle the active model's reasoning effort off→high
 		provider, model := m.app.providerName(), m.app.activeLLM().Model
 		next := nextReasoning(m.app.reasoningLevel(provider, model))

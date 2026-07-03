@@ -73,12 +73,9 @@ func (m *tuiModel) agentsListKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.agCursor = (m.agCursor - 1 + n) % n
 	case "down", "j":
 		m.agCursor = (m.agCursor + 1) % n
-	case "d": // delete the highlighted profile
+	case "d": // delete the highlighted profile (cursor stays valid: it lands on the next row)
 		if m.agCursor < len(names) {
 			_ = m.app.agentsRemove(names[m.agCursor]) // persists + re-wires
-			if left := len(agentProfileNames(m.app.cfg)); m.agCursor > left {
-				m.agCursor = left
-			}
 		}
 	case "enter", "right", "l":
 		switch {
@@ -235,10 +232,11 @@ func (m *tuiModel) saveDraft(name string) {
 	if m.app.cfg.Agents == nil {
 		m.app.cfg.Agents = map[string]config.AgentProfile{}
 	}
+	keep := m.app.cfg.Agents[m.agDraft.orig] // preserve fields the builder doesn't edit (Prompt)
 	if m.agDraft.orig != "" && m.agDraft.orig != name {
 		delete(m.app.cfg.Agents, m.agDraft.orig) // a rename
 	}
-	m.app.cfg.Agents[name] = config.AgentProfile{Provider: m.agDraft.provider, Model: m.agDraft.model}
+	m.app.cfg.Agents[name] = config.AgentProfile{Provider: m.agDraft.provider, Model: m.agDraft.model, Prompt: keep.Prompt}
 	_ = config.SaveAgents(m.app.cfg.Agents)
 	_ = m.app.wire() // the agent tool / roster may have changed
 }

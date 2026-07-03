@@ -649,6 +649,63 @@ func TestZaiProvider(t *testing.T) {
 	}
 }
 
+// The /config "add provider" row opens an IN-PANEL form (no dump back to the
+// prompt): name → URL → model → key, esc steps back, save registers the provider.
+func TestConfigAddProviderFlow(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveProviders writes the global config
+	m := &tuiModel{state: stConfig, width: 100, input: textarea.New(),
+		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	for i, k := range cfgKeys() { // put the cursor on the add-provider row
+		if k == "addprovider" {
+			m.cfgCursor = i
+		}
+	}
+	typeIn := func(s string) {
+		for _, r := range s {
+			m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		}
+	}
+	enter := func() { m.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) }
+
+	m.configActivate()
+	if m.cfgPhase != cfgPhaseName {
+		t.Fatalf("activate → phase %d, want name form", m.cfgPhase)
+	}
+	enter() // empty name is refused
+	if m.cfgPhase != cfgPhaseName {
+		t.Fatal("empty name must not advance")
+	}
+	typeIn("ollama")
+	enter()
+	typeIn("localhost:11434/v1") // no scheme — must be refused
+	enter()
+	if m.cfgPhase != cfgPhaseURL {
+		t.Fatal("URL without a scheme must not advance")
+	}
+	m.cfgDraft.url = "http://localhost:11434/v1"
+	enter()
+	enter() // model: optional, skip
+	enter() // key: optional (keyless), save
+	if m.cfgPhase != cfgPhaseList {
+		t.Errorf("after save → phase %d, want back at the list", m.cfgPhase)
+	}
+	if m.state != stConfig {
+		t.Errorf("must stay IN the panel, state=%v", m.state)
+	}
+	p, ok := m.app.cfg.Providers["ollama"]
+	if !ok || p.BaseURL != "http://localhost:11434/v1" || p.APIKey != "" {
+		t.Errorf("provider not saved keyless: %+v ok=%v", p, ok)
+	}
+
+	// esc from the first field returns to the list, not out of the panel
+	m.configActivate()
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.cfgPhase != cfgPhaseList || m.state != stConfig {
+		t.Errorf("esc → phase %d state %v, want list inside the panel", m.cfgPhase, m.state)
+	}
+}
+
 // ctxMeter thresholds: empty without data, dim under 50%, warn at ≥50%, red⚠ at
 // the auto-compact line (the styles degrade to plain text in tests).
 func TestCtxMeterFor(t *testing.T) {

@@ -61,7 +61,112 @@ func cfgKeys() []string {
 // openConfig enters the panel.
 func (m *tuiModel) openConfig() {
 	m.cfgCursor = 0
+	m.cfgPhase = cfgPhaseList
 	m.state = stConfig
+}
+
+// The add-provider form lives INSIDE the panel (no hand-off that dumps the user
+// back at the prompt): name → base URL → model → key, esc steps back.
+const (
+	cfgPhaseList = iota
+	cfgPhaseName
+	cfgPhaseURL
+	cfgPhaseModel
+	cfgPhaseKey
+)
+
+// providerDraft is the provider being added via the panel form.
+type providerDraft struct {
+	name, url, model, key string
+}
+
+// cfgAddField returns the form field being edited for the current phase.
+func (m *tuiModel) cfgAddField() *string {
+	switch m.cfgPhase {
+	case cfgPhaseName:
+		return &m.cfgDraft.name
+	case cfgPhaseURL:
+		return &m.cfgDraft.url
+	case cfgPhaseModel:
+		return &m.cfgDraft.model
+	default:
+		return &m.cfgDraft.key
+	}
+}
+
+// configAddKey handles typing in the add-provider form: enter advances (saving on
+// the last field), esc steps back (to the list from the first).
+func (m *tuiModel) configAddKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	field := m.cfgAddField()
+	switch k.String() {
+	case "enter":
+		switch m.cfgPhase {
+		case cfgPhaseName:
+			if strings.TrimSpace(m.cfgDraft.name) == "" {
+				return m, nil // a name is required
+			}
+			m.cfgPhase = cfgPhaseURL
+		case cfgPhaseURL:
+			if u := strings.TrimSpace(m.cfgDraft.url); !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
+				return m, nil // a real URL is required
+			}
+			m.cfgPhase = cfgPhaseModel
+		case cfgPhaseModel: // optional — empty means "pick one later with /model"
+			m.cfgPhase = cfgPhaseKey
+		default: // key (optional — empty = keyless, e.g. Ollama/vLLM): save
+			m.configAddSave()
+		}
+	case "esc":
+		if m.cfgPhase == cfgPhaseName {
+			m.cfgPhase = cfgPhaseList
+		} else {
+			m.cfgPhase--
+		}
+	case "backspace":
+		if r := []rune(*field); len(r) > 0 {
+			*field = string(r[:len(r)-1])
+		}
+	default:
+		if len(k.String()) == 1 { // printable
+			*field += k.String()
+		}
+	}
+	return m, nil
+}
+
+// configAddSave registers the drafted provider (reusing the /ai add validation)
+// and, when a key was given, stores it too — then returns to the panel list.
+func (m *tuiModel) configAddSave() {
+	d := m.cfgDraft
+	arg := strings.TrimSpace(strings.TrimSpace(d.name) + " " + strings.TrimSpace(d.url) + " " + strings.TrimSpace(d.model))
+	lines := m.app.addProvider(arg)
+	if key := strings.TrimSpace(d.key); key != "" && strings.Contains(strings.Join(lines, " "), "saved") {
+		lines = append(lines, m.app.setProviderKey(strings.TrimSpace(d.name), key)...)
+	}
+	m.pushLines(lines)
+	m.cfgPhase = cfgPhaseList
+	m.cfgDraft = providerDraft{}
+}
+
+// renderAddProviderForm draws the in-panel add-provider form.
+func (m *tuiModel) renderAddProviderForm(accent lipgloss.Style) []string {
+	row := func(phase int, label, val, hint string) string {
+		line := fmt.Sprintf("  %-9s %s", label, val)
+		if m.cfgPhase == phase {
+			return accent.Render(" ▸") + accent.Bold(true).Render(line[2:]) + cDim.Render("▏ "+hint)
+		}
+		return "  " + line
+	}
+	return []string{
+		accent.Bold(true).Render("add provider — any OpenAI-compatible endpoint"),
+		"",
+		row(cfgPhaseName, "name", m.cfgDraft.name, "e.g. ollama · enter next"),
+		row(cfgPhaseURL, "base URL", m.cfgDraft.url, "e.g. http://localhost:11434/v1"),
+		row(cfgPhaseModel, "model", m.cfgDraft.model, "optional — /model lists them later"),
+		row(cfgPhaseKey, "api key", m.cfgDraft.key, "optional — empty = keyless (Ollama/vLLM)"),
+		"",
+		cDim.Render("  enter next/save · esc back"),
+	}
 }
 
 // closePanel leaves a modal panel: back to the still-running task if one is live,
@@ -204,11 +309,9 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 	case "model": // needs the live model list — hand off to /model
 		m.state = stIdle
 		return m.runCommand("/model")
-	case "addprovider": // add a new OpenAI-compatible provider — prefill the flow
-		m.state = stIdle
-		m.push(cDim.Render("  add: /ai add <name> <base_url> [model]  ·  then a key (if needed): /ai key <name> <token>"))
-		m.input.SetValue("/ai add ")
-		m.input.CursorEnd()
+	case "addprovider": // open the in-panel form (name → URL → model → key)
+		m.cfgPhase = cfgPhaseName
+		m.cfgDraft = providerDraft{}
 	case "apikey": // add or set a provider key — prefill; pick provider (Tab) + paste token
 		m.state = stIdle
 		m.input.SetValue("/ai key ")
@@ -292,6 +395,10 @@ func (m *tuiModel) toggleChannel() {
 // renderConfigPanel draws the boxed, sectioned settings screen.
 func (m *tuiModel) renderConfigPanel() string {
 	accent := lipgloss.NewStyle().Foreground(m.accent)
+	if m.cfgPhase != cfgPhaseList { // the in-panel add-provider form
+		box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(m.accent).Padding(0, 1)
+		return box.Render(strings.Join(m.renderAddProviderForm(accent), "\n"))
+	}
 	cur := m.configKey()
 
 	lines := []string{accent.Bold(true).Render("config")}

@@ -1240,6 +1240,12 @@ func reasoningShape(provider, level string) (json.RawMessage, bool) {
 			return json.RawMessage(`{}`), true // omit thinking = off
 		}
 		return nil, false // budget_tokens is model-specific — set raw
+	case "zai":
+		// GLM thinking is binary — any level enables it, off disables.
+		if off {
+			return json.RawMessage(`{"thinking":{"type":"disabled"}}`), true
+		}
+		return json.RawMessage(`{"thinking":{"type":"enabled"}}`), true
 	}
 	return nil, false
 }

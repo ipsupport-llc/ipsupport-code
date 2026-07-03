@@ -95,7 +95,7 @@ OpenAI-compatible API and switch in one command — run a strong cloud model for
 hard task, then drop back to your local one:
 
 ```
-/ai                       list providers (local + openai, anthropic, grok, groq, openrouter)
+/ai                       list providers (local + openai, anthropic, grok, groq, openrouter, zai)
 /ai key openai sk-…       add an API key for a provider
 /ai openai                switch to it   ·   /ai local   back to LM Studio
 /model                    list models   ·   /model gpt-4o   pick   ·   /model sonnet   filter (great for OpenRouter)
@@ -115,7 +115,8 @@ It's then active at launch and switchable via `/ai ollama` and `/config`.
 
 Switching keeps your session, tokens, and mode. Keys live in
 `~/.config/ipsupport-code/config.json` (written `chmod 600`) or fall back to the
-env var (`OPENAI_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`).
+env var (`OPENAI_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`,
+`ZAI_API_KEY`).
 `/config` opens an interactive settings panel: **↑↓** to move, **Enter** to
 cycle a value in place (provider, mode, permissions, run timeout, color, channel)
 or jump to the right flow (model, key, rename), **esc** to close — changes apply

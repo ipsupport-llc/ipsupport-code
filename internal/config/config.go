@@ -164,6 +164,7 @@ var ProviderTemplates = map[string]LLM{
 	"grok":       {BaseURL: "https://api.x.ai/v1", Model: "grok-2-latest"},
 	"groq":       {BaseURL: "https://api.groq.com/openai/v1", Model: "llama-3.3-70b-versatile"},
 	"openrouter": {BaseURL: "https://openrouter.ai/api/v1", Model: "openai/gpt-4o-mini"},
+	"zai":        {BaseURL: "https://api.z.ai/api/paas/v4", Model: "glm-5.2"}, // Z.ai (Zhipu GLM), OpenAI-compat endpoint
 }
 
 // providerEnvKey maps a provider to the env var its API key falls back to.
@@ -173,6 +174,7 @@ var providerEnvKey = map[string]string{
 	"grok":       "XAI_API_KEY",
 	"groq":       "GROQ_API_KEY",
 	"openrouter": "OPENROUTER_API_KEY",
+	"zai":        "ZAI_API_KEY",
 }
 
 // KnownProviders lists the built-in template names (sorted), for help/listing.

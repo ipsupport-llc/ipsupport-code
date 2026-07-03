@@ -123,7 +123,7 @@
     <p class="sub">It drives your own local model through a reason → act → observe loop over a
        handful of fat tools, recovers from errors using lessons it learned on past runs, and gets
        better over time. Local by default — but the same loop runs any OpenAI-compatible provider
-       (OpenAI, Anthropic, Grok, Groq, OpenRouter), and it can <b>delegate a task to a sub-agent on
+       (OpenAI, Anthropic, Grok, Groq, OpenRouter, Z.ai), and it can <b>delegate a task to a sub-agent on
        a different model</b>. Your machine, your keys, under a permission policy you control.</p>
 
     <div class="badges">
@@ -153,7 +153,7 @@
     <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>ipsupport-code</span></div>
 <pre><span class="p">❯</span> ipsupport-code
 <span class="box">╭────────────────────────────────╮
-│ ✦ ipsupport-code   v0.4.8       │
+│ ✦ ipsupport-code   v0.22        │
 │ model  qwen2.5-7b-instruct      │
 │ cwd    ~/myproject              │
 ╰────────────────────────────────╯</span>
@@ -185,7 +185,7 @@
       <div class="card"><h3><span class="i">✦</span>Self-learning</h3><p>After each task it reflects and writes durable lessons and project facts to disk, then folds them into the next run. Tool errors are met with fixes it found before.</p></div>
       <div class="card"><h3><span class="i">⚙</span>Fat tools</h3><p>One tool per domain — <span class="mono">file · run · git · web · calc</span> — so the catalog stays tiny and small models route well. Native tool-calls only.</p></div>
       <div class="card"><h3><span class="i">∙</span>Your model, your machine</h3><p>LM Studio by default over its OpenAI-compatible server. Nothing leaves your box unless you point it at a cloud provider.</p></div>
-      <div class="card"><h3><span class="i">⇄</span>Multi-provider</h3><p>One <span class="mono">/ai key</span> away from OpenAI, Anthropic, Grok, Groq, or OpenRouter — switch models live with <span class="mono">/model</span> (search its 300+).</p></div>
+      <div class="card"><h3><span class="i">⇄</span>Multi-provider</h3><p>One <span class="mono">/ai key</span> away from OpenAI, Anthropic, Grok, Groq, OpenRouter, or Z.ai — switch models live with <span class="mono">/model</span> (search its 300+).</p></div>
       <div class="card"><h3><span class="i">⇉</span>Sub-agents</h3><p>Delegate a task to a sub-agent on <em>another</em> model — run locally, then have a frontier model review the diff, or compare a review across 2–3 models. Paid spawns ask first.</p></div>
       <div class="card"><h3><span class="i">⌥</span>Sessions &amp; usage</h3><p>Per-name sessions with restore-on-startup, plus a token ledger with day/week/month rollups and estimated <span class="mono">$</span> cost by model.</p></div>
       <div class="card"><h3><span class="i">▮</span>Permission policy</h3><p>Allow/deny globs, a workspace jail, and a non-overridable safety floor. A <span class="mono">plan</span> / <span class="mono">auto</span> toggle and non-stealing approval prompts.</p></div>
@@ -215,15 +215,17 @@
     <p class="lead">Every feature is a slash-command or a keystroke — <code>/help</code> shows this inside the agent too.</p>
     <div class="grid">
       <div class="card"><h3><span class="i">/</span>Commands</h3><p>
-        <code>/help</code> · <code>/status</code> · <code>/usage</code> · <code>/config</code><br>
-        <code>/ai</code> &amp; <code>/ai key</code> · <code>/model</code> · <code>/agents</code><br>
+        <code>/help</code> · <code>/status</code> · <code>/usage</code> · <code>/budget</code> · <code>/config</code><br>
+        <code>/ai</code> &amp; <code>/ai key</code> · <code>/model</code> · <code>/reasoning</code> · <code>/agents</code><br>
+        <code>/goal</code> · <code>/diff</code> · <code>/rewind</code> · <code>/history</code> · <code>/knowledge</code><br>
         <code>/skills</code> · <code>/permissions</code> · <code>/sessions</code> · <code>/cd</code> · <code>/mcp</code><br>
-        <code>/new</code> · <code>/clear</code> · <code>/compact</code> · <code>/plan</code>·<code>/auto</code><br>
+        <code>/new</code> · <code>/clear</code> · <code>/compact</code> · <code>/plan</code>·<code>/auto</code> · <code>/reflect</code><br>
         <code>/loop</code> · <code>/update</code> · <code>/offline</code> · <code>/rename</code> · <code>/color</code>
       </p></div>
       <div class="card"><h3><span class="i">⌨</span>Keys</h3><p>
         <b>Enter</b> send · <b>alt+enter</b> newline<br>
-        <b>Tab</b> complete a /command <span class="dim">(even while busy)</span><br>
+        <b>Tab</b> complete a /command or <code>@file</code> path<br>
+        <b>ctrl+r</b> reverse-search prompt history<br>
         <b>shift+tab</b> plan ⇄ auto mode<br>
         <b>ctrl+u</b> clear input · <b>ctrl+l</b> clear screen<br>
         <b>↑</b> answer approval / edit queued · <b>esc</b> cancel · <b>ctrl+c</b> quit
@@ -232,7 +234,7 @@
         Define <b>profiles</b> in <code>/config → Sub-agents</code> (provider → model → name).
         Then ask, e.g. <em>"review internal/tool across grok and claude, then merge."</em>
         They run in <b>parallel</b>, each jailed to its own directory. Manage with
-        <code>/agents add|rm|exec</code>; relax the per-spawn prompt with <code>/permissions agents on</code>.
+        <code>/agents add|add-tool|rm|exec</code> — <code>add-tool</code> plugs in local CLI agents (codex, claude, aider…); relax the per-spawn prompt with <code>/permissions agents on</code>.
       </p></div>
     </div>
   </section>
@@ -247,6 +249,8 @@
       <span class="chip">Grok <span class="dim">(xAI)</span></span>
       <span class="chip">Groq</span>
       <span class="chip">OpenRouter</span>
+      <span class="chip">Z.ai <span class="dim">(GLM)</span></span>
+      <span class="chip">codex / claude / aider <span class="dim">(as sub-agents)</span></span>
     </div>
   </section>
 

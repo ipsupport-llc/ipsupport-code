@@ -15,7 +15,7 @@ task — reflects and writes new lessons to disk so it actually gets better over
 time.
 
 Local by default, but the same loop runs **any OpenAI-compatible provider**
-(OpenAI, Anthropic, Grok, Groq, OpenRouter) — switch in one command — and it can
+(OpenAI, Anthropic, Grok, Groq, OpenRouter, Z.ai) — switch in one command — and it can
 **delegate a task to a sub-agent on a different model**, so a local agent can hand
 a review to a frontier one and compare. See [Providers](#providers--local-or-external)
 and [Sub-agents](#sub-agents).
@@ -38,7 +38,8 @@ machine, with your own model, under a permission policy you control.
 - 🧠 Self-learning — distils lessons from each run and recovers from repeat mistakes
 - 🎯 Goals — `/goal` pursues a multi-turn objective; a judge re-feeds it until it's actually met
 - 🌐 Any model — local LM Studio by default, or any OpenAI-compatible provider (incl. keyless local ones)
-- 🤝 Sub-agents — delegate/fan-out a task across other models and merge the results
+- 🤝 Sub-agents — delegate/fan-out across other models **or local CLI agents** (codex/claude/…) and merge the results
+- 💰 Guardrails — `/budget` spend cap per run · `/diff` to review what the agent changed
 - 🧩 Plan/auto modes · ⏪ `/rewind` · 🔌 MCP · 📦 skills · ♻️ self-updating
 
 **New here?** Install below, then jump to [Quick start](#quick-start).
@@ -54,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/ipsupport-llc/ipsupport-code/main/s
 ```
 
 That installs the latest **nightly**; append `-s -- latest` for the newest stable
-release, `-s -- v0.15.0` for a specific tag, or a second arg for a custom path.
+release, `-s -- v0.22.0` for a specific tag, or a second arg for a custom path.
 
 **Windows** (PowerShell) — installs to `%LOCALAPPDATA%\Programs\ipsupport-code`,
 verifies the SHA-256, and adds it to your user PATH:
@@ -115,8 +116,8 @@ It's then active at launch and switchable via `/ai ollama` and `/config`.
 
 Switching keeps your session, tokens, and mode. Keys live in
 `~/.config/ipsupport-code/config.json` (written `chmod 600`) or fall back to the
-env var (`OPENAI_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, `OPENROUTER_API_KEY`,
-`ZAI_API_KEY`).
+env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`,
+`OPENROUTER_API_KEY`, `ZAI_API_KEY`).
 `/config` opens an interactive settings panel: **↑↓** to move, **Enter** to
 cycle a value in place (provider, mode, permissions, run timeout, color, channel)
 or jump to the right flow (model, key, rename), **esc** to close — changes apply
@@ -378,15 +379,17 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | `/skills` | list / toggle / install on-demand instruction packs |
 | `/permissions` | relax approval for non-destructive file/shell actions |
 | `/status` | config, knowledge base, and trace paths |
+| `/budget [usd]` | cap estimated spend per run — refuses new tasks once hit; `off` disables |
+| `/diff` | show uncommitted workspace changes (what the agent changed), colorized |
 | `/usage` | token spend + **estimated $** (today / 7d / 30d / all, by day, by model); `clear` · `purge <days>` · `retain <days>` |
 | `/login` | (re)configure server URL / model / key, then reload |
-| `/new` | clear the session conversation memory |
-| `/clear` | fresh start — clear the screen and the session |
+| `/new [name]` | start a NEW session (the old one stays in `/sessions`) |
+| `/clear` | wipe this session's context + the screen (same session) |
 | `/compact` | summarize the session so far to free up context |
 | `/color [name]` | change the TUI frame color (cycles if no name) |
 | `/rename <name>` | rename the agent (saved in settings) |
 | `/sessions` | list / switch / delete saved sessions (per agent name) |
-| `/agents` | manage sub-agent profiles: `add` / `rm` / `exec` (models the agent tool delegates to) |
+| `/agents` | sub-agent profiles: `add` (LLM) / `add-tool` (external CLI) / `rm` / `exec` |
 | `/loop <interval> [xN] <task>` | re-run a task on an interval (e.g. `/loop 5m <task>`, `/loop 30s x10 <task>`); **esc** stops it |
 | `/help` | command list |
 | `/exit`, `/quit` | leave |
@@ -398,7 +401,10 @@ and **alt+enter** (or **ctrl+j**) inserts a newline by hand. **Enter** submits.
 **History.** With an empty input, **↑ / ↓** recall previous messages to re-run or
 fix a typo — the first **↑** jumps to your last prompt. History is **persisted per
 workspace** (`.agent/history`), so recall spans past runs; `/history` lists recent
-prompts and `/history <text>` filters them. (PgUp/PgDn and the wheel scroll the log.)
+prompts and `/history <text>` filters them, and **ctrl+r** opens an incremental
+reverse-search (type to narrow · ctrl+r older · enter use). **Tab** completes
+`/commands` and `@file` paths against the workspace. (PgUp/PgDn and the wheel
+scroll the log.)
 
 Everything you type is a **message queue**. While a task runs the input stays
 live: Enter **queues** the next message — a task *or* a `/command` — pinned above
@@ -407,8 +413,10 @@ longer dropped). **↑** on an empty input pulls the last queued message back to
 edit or drop, and **esc** cancels.
 
 **Approvals.** When the agent asks to approve a file write or shell command, just
-press **y** (approve) or **n** (deny) — you can keep typing your next message
-meanwhile, and **↑** still opens the explicit Yes/No prompt.
+press **y** (approve), **n** (deny) or **a** — allow every action of that kind
+(file/shell/git/spawn/external) for the rest of the session; `/permissions`
+shows what you allowed and `/permissions reset` revokes it. You can keep typing
+your next message meanwhile, and **↑** still opens the explicit Yes/No prompt.
 
 **Shell.** `/shell` (or `!`) drops you into an
 interactive shell in the workspace — do things by hand, exit to return. `!cmd`
@@ -483,16 +491,20 @@ Logging: `IPS_LOG=debug|info|warn|error` (default `warn`) to stderr.
 ## Layout
 
 ```
-cmd/agent          CLI, plain REPL, and the Bubble Tea TUI
+cmd/agent          CLI, plain REPL, the Bubble Tea TUI, external CLI-agent runner
 internal/llm        LM Studio client (streaming, retry, context detection)
-internal/agent      the reason → act → observe loop (+ plan mode)
-internal/tool       fat tools: file, run, git, web, calc, skill, help
+internal/agent      the reason → act → observe loop (+ plan mode, goal judge)
+internal/tool       fat tools: file, run, git, web, calc, agent, mcp, skill, help
 internal/skill      downloadable, toggleable instruction packs
 internal/policy     workspace permission engine (+ jail, deny floor)
 internal/knowledge  persistent pitfall store
 internal/reflect    post-task lesson + project-fact distillation
 internal/trace      JSONL decision trace (the dataset)
 internal/config     config load/merge
+internal/mcp        MCP client (stdio + HTTP)
+internal/usage      token/cost ledger (powers /usage and /budget)
+internal/selfupdate checksum-verified in-place self-update
+internal/textutil · internal/atomicfile   shared helpers (clipping, atomic writes)
 ```
 
 ## Contributing

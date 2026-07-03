@@ -813,16 +813,47 @@ func TestAgentsPanelExternalRows(t *testing.T) {
 		t.Errorf("external edit → state=%v input=%q", m.state, m.input.Value())
 	}
 
-	// the "+ add CLI tool" row (after the profile and "+ add new") → scan + prefill
+	// the "+ add CLI tool" row (after the profile and "+ add new") → in-panel picker
+	binDir := t.TempDir() // a fake `codex` on PATH so the picker sees ✓ installed
+	os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
+	t.Setenv("PATH", binDir)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // add-tool persists via SaveAgents
+
 	m.state, m.agPhase = stAgents, agList
 	m.input.SetValue("")
 	m.agCursor = 2 // 1 profile, then "add new", then "add CLI tool"
 	m.agentsKey(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.state != stIdle || m.input.Value() != "/agents add-tool " {
-		t.Errorf("add-CLI-tool row → state=%v input=%q", m.state, m.input.Value())
+	if m.state != stAgents || m.agPhase != agPickTool {
+		t.Fatalf("add-CLI-tool row → state=%v phase=%v, want the in-panel picker", m.state, m.agPhase)
 	}
-	if !strings.Contains(strings.Join(m.history, "\n"), "known CLI agents") {
-		t.Error("the PATH scan listing should be shown on hand-off")
+	if !m.agInstalled["codex"] || m.agInstalled["gemini"] {
+		t.Errorf("PATH scan wrong: %v (fake codex installed, gemini not)", m.agInstalled)
+	}
+
+	// enter on a NOT-installed CLI refuses and stays in the picker
+	m.agCursor = 2 // gemini
+	m.agentsKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.agPhase != agPickTool {
+		t.Error("picking a missing CLI must stay in the picker")
+	}
+
+	// enter on the installed one registers it and returns to the list
+	delete(m.app.cfg.Agents, "codex") // drop the pre-seeded profile; re-add via picker
+	m.agCursor = 0                    // codex
+	m.agentsKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.agPhase != agList {
+		t.Errorf("after adding, phase=%v want back at the list", m.agPhase)
+	}
+	if p := m.app.cfg.Agents["codex"]; p.Kind != "external" || p.Command != "codex" {
+		t.Errorf("picker didn't register codex: %+v", p)
+	}
+
+	// the custom… row hands off to the freeform add-tool line
+	m.agPhase, m.agCursor = agPickTool, len(externalCatalog)
+	m.agentsKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.state != stIdle || m.input.Value() != "/agents add-tool " {
+		t.Errorf("custom row → state=%v input=%q", m.state, m.input.Value())
 	}
 }
 

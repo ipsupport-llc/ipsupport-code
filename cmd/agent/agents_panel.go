@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -24,6 +25,7 @@ const (
 	agPickProvider
 	agPickModel
 	agName
+	agPickTool // pick an external CLI agent from the catalog (✓ = installed)
 )
 
 // agentDraft is the profile being added or edited.
@@ -60,9 +62,42 @@ func (m *tuiModel) agentsKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.agentsModelKey(k)
 	case agName:
 		return m.agentsNameKey(k)
+	case agPickTool:
+		return m.agentsToolKey(k)
 	default:
 		return m.agentsListKey(k)
 	}
+}
+
+// agentsToolKey drives the external-CLI picker: the catalog with install markers
+// plus a "custom…" row for anything else. Enter on an installed CLI registers it
+// with its known non-interactive flags in one keypress.
+func (m *tuiModel) agentsToolKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	n := len(externalCatalog) + 1 // + the "custom…" row
+	switch k.String() {
+	case "up", "k":
+		m.agCursor = (m.agCursor - 1 + n) % n
+	case "down", "j":
+		m.agCursor = (m.agCursor + 1) % n
+	case "enter", "right", "l":
+		if m.agCursor >= len(externalCatalog) { // custom… — freeform launch line
+			m.state = stIdle
+			m.push(cDim.Render("  /agents add-tool <name> <command> [args…]   — {task} marks where the task goes"))
+			m.input.SetValue("/agents add-tool ")
+			m.input.CursorEnd()
+			return m, nil
+		}
+		name := externalCatalog[m.agCursor].name
+		if !m.agInstalled[name] {
+			m.push(cDim.Render("  " + name + " isn't in PATH — install it first, or use custom… with a full path"))
+			return m, nil
+		}
+		m.pushLines(m.app.agentsAddExternal(name)) // catalog flags; persists + re-wires
+		m.agPhase, m.agCursor = agList, 0
+	case "esc", "q":
+		m.agPhase, m.agCursor = agList, 0
+	}
+	return m, nil
 }
 
 func (m *tuiModel) agentsListKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -82,11 +117,14 @@ func (m *tuiModel) agentsListKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case m.agCursor == len(names): // "add new" (the LLM profile builder)
 			m.agDraft = agentDraft{}
 			m.agCursor = 0
-		case m.agCursor > len(names): // "add CLI tool" — hand off to /agents add-tool
-			m.state = stIdle
-			m.pushLines(m.app.agentsAddExternal("")) // the PATH scan: what's installed
-			m.input.SetValue("/agents add-tool ")
-			m.input.CursorEnd()
+		case m.agCursor > len(names): // "add CLI tool" — open the in-panel picker
+			m.agInstalled = map[string]bool{} // cache the PATH scan for the render
+			for _, c := range externalCatalog {
+				if _, err := exec.LookPath(c.name); err == nil {
+					m.agInstalled[c.name] = true
+				}
+			}
+			m.agPhase, m.agCursor = agPickTool, 0
 			return m, nil
 		default:
 			name := names[m.agCursor]
@@ -250,6 +288,8 @@ func (m *tuiModel) agentsHint() string {
 		return "  ↑↓ move · type to filter · enter pick · esc back"
 	case agName:
 		return "  type a name · enter save · esc back"
+	case agPickTool:
+		return "  ↑↓ move · enter add (✓ = installed) · esc back"
 	default:
 		return "  ↑↓ move · enter add/edit · d delete · esc close"
 	}
@@ -296,6 +336,17 @@ func (m *tuiModel) renderAgentsPanel() string {
 			lines = append(lines, cDim.Render("  (blank → "+defaultProfileName(m.agDraft.model)+")"))
 		}
 		lines = append(lines, "", cDim.Render(fmt.Sprintf("  %s · %s", m.agDraft.provider, m.agDraft.model)))
+	case agPickTool:
+		lines = append(lines, accent.Bold(true).Render("add CLI tool — runs outside the sandbox, every launch asks"))
+		for i, c := range externalCatalog {
+			mark := cDim.Render("—")
+			note := cDim.Render("  (not in PATH)")
+			if m.agInstalled[c.name] {
+				mark, note = cOk.Render("✓"), cDim.Render("  "+c.name+" "+strings.Join(c.args, " "))
+			}
+			lines = append(lines, agRow(accent, fmt.Sprintf("%s %-10s%s", mark, c.name, note), i == m.agCursor))
+		}
+		lines = append(lines, agRow(accent, "custom… (type the full launch line)", m.agCursor >= len(externalCatalog)))
 	default: // agList
 		lines = append(lines, accent.Bold(true).Render("sub-agent profiles"))
 		names := agentProfileNames(m.app.cfg)

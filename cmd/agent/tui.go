@@ -104,6 +104,7 @@ type tuiModel struct {
 	agModelsErr string
 	agFilter    string // type-to-filter over the model list
 	agLoading   bool
+	agInstalled map[string]bool // PATH scan of the CLI catalog, cached on entering agPickTool
 
 	rewindRows   []rewindRow // checkpoints offered by the /rewind picker (stRewind)
 	rewindCursor int

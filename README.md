@@ -160,8 +160,9 @@ Locally installed CLI coding agents (Codex, Claude Code, aider…) can be sub-ag
 too — registered as **external profiles**:
 
 ```text
-/agents add-tool codex  codex exec {task}      # {task} = where the task goes
-/agents add-tool claude claude -p {task}       #   (appended if omitted)
+/agents add-tool                # scan PATH: which known CLI agents are installed
+/agents add-tool codex          # one word — codex/claude/gemini/qwen/aider/goose/opencode
+/agents add-tool mytool mytool --headless {task}   # any other tool ({task} = where the task goes)
 ```
 
 The assistant delegates through the same `agent` tool; the CLI runs in the target

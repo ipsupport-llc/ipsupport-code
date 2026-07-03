@@ -602,15 +602,32 @@ func (a *app) agentsCommand(ctx context.Context, rest string) []string {
 // approval (the "external agent" category, separate from ordinary spawns).
 func (a *app) agentsAddExternal(arg string) []string {
 	fields := strings.Fields(arg)
-	if len(fields) < 2 {
+	if len(fields) == 0 { // bare add-tool: scan PATH for the known CLI agents
+		out := []string{"known CLI agents (✓ = installed):"}
+		for _, c := range externalCatalog {
+			mark, hint := "—", "not in PATH"
+			if _, err := exec.LookPath(c.name); err == nil {
+				mark, hint = "✓", "add it: /agents add-tool "+c.name
+			}
+			out = append(out, fmt.Sprintf("  %s %-10s %s", mark, c.name, hint))
+		}
+		return append(out,
+			"any other tool: /agents add-tool <name> <command> [args…]   — {task} marks where the task goes",
+			"  e.g. /agents add-tool mytool mytool --headless {task}")
+	}
+	// One word and it's a known CLI → catalog flags; otherwise the full form.
+	name, command, args := fields[0], fields[0], []string(nil)
+	if len(fields) >= 2 {
+		command, args = fields[1], fields[2:]
+	} else if args = catalogArgs(name); args == nil {
 		return []string{
-			"usage: /agents add-tool <name> <command> [args…]   — {task} marks where the task goes (appended if omitted)",
-			"  e.g. /agents add-tool codex codex exec {task}",
-			"       /agents add-tool claude claude -p {task}",
-			"use the CLI's non-interactive mode (exec / -p / --message …) or it will hang until the timeout",
+			fmt.Sprintf("don't know %q — give its full launch: /agents add-tool %s <command> [args…]  ({task} = where the task goes)", name, name),
+			"one-word adds work for: " + strings.Join(catalogNames(), ", "),
 		}
 	}
-	name, command, args := fields[0], fields[1], fields[2:]
+	if len(args) == 0 { // full form without args, but a catalog command → its known flags
+		args = catalogArgs(command)
+	}
 	if _, err := exec.LookPath(command); err != nil {
 		return []string{fmt.Sprintf("%q not found in PATH — install it first, or give a full path", command)}
 	}

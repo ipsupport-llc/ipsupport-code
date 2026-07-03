@@ -91,7 +91,7 @@ func TestTabCompletesArgument(t *testing.T) {
 	// /ai completes only providers that are actually configured (key set) + local.
 	// Clear provider env keys so the test doesn't pick up the host's, then
 	// configure only grok via a preset.
-	for _, env := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"} {
+	for _, env := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "ZAI_API_KEY"} {
 		t.Setenv(env, "")
 	}
 	m := &tuiModel{input: textarea.New(), app: &app{
@@ -632,6 +632,21 @@ func TestAtFileCompletion(t *testing.T) {
 	}
 }
 
+func TestZaiProvider(t *testing.T) {
+	t.Setenv("ZAI_API_KEY", "zk-test")
+	l, ok := config.ResolveProvider(config.Config{}, "zai")
+	if !ok || l.BaseURL != "https://api.z.ai/api/paas/v4" || l.Model != "glm-5.2" || l.APIKey != "zk-test" {
+		t.Errorf("ResolveProvider(zai) = %+v,%v — want the template + env key", l, ok)
+	}
+	// GLM thinking is binary: off → disabled, any level → enabled.
+	if s, ok := reasoningShape("zai", "off"); !ok || !strings.Contains(string(s), "disabled") {
+		t.Errorf("zai off = %s,%v", s, ok)
+	}
+	if s, ok := reasoningShape("zai", "high"); !ok || !strings.Contains(string(s), "enabled") {
+		t.Errorf("zai high = %s,%v", s, ok)
+	}
+}
+
 func TestExpandTaskArgs(t *testing.T) {
 	// {{task}} must be replaced before {task} (it contains it) — no stray braces.
 	got := expandTaskArgs([]string{"exec", "{{task}}", "--x={task}"}, "fix it")
@@ -943,7 +958,7 @@ func (f fixedApprover) Approve(_, _ string) bool { return bool(f) }
 func TestSubagentTargetsAndDepthCap(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
-	for _, env := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"} {
+	for _, env := range []string{"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "XAI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "ZAI_API_KEY"} {
 		t.Setenv(env, "")
 	}
 	kb, _ := knowledge.Open("")

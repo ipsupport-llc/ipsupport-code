@@ -80,6 +80,8 @@ type tuiModel struct {
 	pending       *approvalReq
 	approveChoice bool          // selected Yes(true)/No(false) while answering an approval
 	cfgCursor     int           // selected row in the /config panel (stConfig)
+	cfgPhase      int           // stConfig sub-flow: cfgPhaseList, or an add-provider form field
+	cfgDraft      providerDraft // the provider being added in the panel form
 	chooseRows    []sessionMeta // saved sessions offered by the startup chooser (stChooseSession)
 	chooseCursor  int           // selected row (0..len = the "new session" row)
 	cancel        context.CancelFunc
@@ -657,6 +659,9 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case stConfig:
+		if m.cfgPhase != cfgPhaseList { // typing inside the add-provider form
+			return m.configAddKey(k)
+		}
 		switch k.String() {
 		case "up", "k":
 			m.configMove(-1)

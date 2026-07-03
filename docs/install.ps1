@@ -7,13 +7,13 @@
 
   A specific channel/tag (iex can't pass args, so use the scriptblock form):
     & ([scriptblock]::Create((irm https://ipsupport-llc.github.io/ipsupport-code/install.ps1))) latest
-    & ([scriptblock]::Create((irm https://ipsupport-llc.github.io/ipsupport-code/install.ps1))) v0.15.0
+    & ([scriptblock]::Create((irm https://ipsupport-llc.github.io/ipsupport-code/install.ps1))) v0.22.0
 
   Installs to %LOCALAPPDATA%\Programs\ipsupport-code and adds it to your user PATH.
 #>
 [CmdletBinding()]
 param(
-  [string]$Tag = 'nightly',   # 'nightly' | 'latest' | a tag like v0.15.0
+  [string]$Tag = 'nightly',   # 'nightly' | 'latest' | a tag like v0.22.0
   [string]$Dest               # optional full path to the .exe
 )
 

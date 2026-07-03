@@ -647,6 +647,45 @@ func TestZaiProvider(t *testing.T) {
 	}
 }
 
+func TestAddToolCatalog(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveAgents writes the global config
+	a := &app{cfg: config.Default(), workspace: t.TempDir()}
+
+	// bare add-tool lists the catalog with install markers
+	list := strings.Join(a.agentsAddExternal(""), "\n")
+	for _, want := range []string{"codex", "claude", "aider", "add-tool <name> <command>"} {
+		if !strings.Contains(list, want) {
+			t.Errorf("catalog listing missing %q:\n%s", want, list)
+		}
+	}
+
+	// one-word add of a known CLI: catalog flags; PATH check still applies
+	out := strings.Join(a.agentsAddExternal("codex"), " ")
+	if _, err := exec.LookPath("codex"); err != nil {
+		if !strings.Contains(out, "not found in PATH") {
+			t.Errorf("codex absent → want the PATH hint, got %q", out)
+		}
+	} else if _, ok := a.cfg.Agents["codex"]; !ok {
+		t.Errorf("codex present → profile should be saved, got %q", out)
+	}
+
+	// one-word add of an unknown tool: asks for the full launch, lists the catalog
+	out = strings.Join(a.agentsAddExternal("mystery"), " ")
+	if !strings.Contains(out, "full launch") || !strings.Contains(out, "codex") {
+		t.Errorf("unknown one-word add = %q", out)
+	}
+
+	// full form still works with any binary (echo is everywhere)
+	out = strings.Join(a.agentsAddExternal("ek echo {task}"), " ")
+	if !strings.Contains(out, "saved") {
+		t.Fatalf("full form = %q", out)
+	}
+	if p := a.cfg.Agents["ek"]; p.Kind != "external" || p.Command != "echo" || len(p.Args) != 1 {
+		t.Errorf("saved profile = %+v", p)
+	}
+}
+
 func TestExpandTaskArgs(t *testing.T) {
 	// {{task}} must be replaced before {task} (it contains it) — no stray braces.
 	got := expandTaskArgs([]string{"exec", "{{task}}", "--x={task}"}, "fix it")

@@ -26,6 +26,42 @@ const (
 	maxExternalStderr      = 2_000
 )
 
+// externalCatalog holds known CLI coding agents with their NON-INTERACTIVE launch
+// shape, so `/agents add-tool codex` works without remembering flags (and a bare
+// `/agents add-tool` scans PATH to show what's installed). Best-effort defaults —
+// the full add-tool form overrides them for a custom setup.
+var externalCatalog = []struct {
+	name string
+	args []string
+}{
+	{"codex", []string{"exec", "{task}"}},               // OpenAI Codex CLI
+	{"claude", []string{"-p", "{task}"}},                // Claude Code (print mode)
+	{"gemini", []string{"-p", "{task}"}},                // Gemini CLI
+	{"qwen", []string{"-p", "{task}"}},                  // Qwen Code
+	{"aider", []string{"--yes", "--message", "{task}"}}, // aider (one-shot)
+	{"goose", []string{"run", "-t", "{task}"}},          // Goose
+	{"opencode", []string{"run", "{task}"}},             // OpenCode
+}
+
+// catalogArgs returns the known launch args for a catalog CLI (nil = unknown).
+func catalogArgs(command string) []string {
+	for _, c := range externalCatalog {
+		if c.name == command {
+			return c.args
+		}
+	}
+	return nil
+}
+
+// catalogNames lists the catalog CLI names in display order.
+func catalogNames() []string {
+	names := make([]string, len(externalCatalog))
+	for i, c := range externalCatalog {
+		names[i] = c.name
+	}
+	return names
+}
+
 // spawnExternalAgent runs an external-CLI profile as a sub-agent: exec Command in
 // the target dir with the task substituted into Args, and hand the tail of its
 // output (plus a change summary) back to the delegating model.

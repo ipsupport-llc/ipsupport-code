@@ -213,7 +213,8 @@ type app struct {
 
 	promptHist []string // submitted inputs (tasks + /commands), oldest→newest, persisted per workspace for ↑ recall across restarts
 
-	sessionCostUSD float64 // estimated spend this process run, for the SessionBudgetUSD guard
+	costMu         sync.Mutex // guards sessionCostUSD (parallel sub-agent spawns accrue too)
+	sessionCostUSD float64    // estimated spend this process run, for the SessionBudgetUSD guard
 
 	client          *llm.OpenAIClient
 	ag              *agent.Agent
@@ -398,6 +399,7 @@ func (a *app) spawnAgent(ctx context.Context, profile, task, dir string) (string
 	if a.usage != nil { // the sub-agent's spend counts too
 		pt, ct := client.Usage()
 		a.usage.Add(today(), provider, llmCfg.Model, pt, ct)
+		a.addSessionCost(llmCfg.Model, pt, ct) // sub-agent spend counts toward /budget too
 		_ = a.usage.Save()
 	}
 	done := map[string]any{"agent": id, "profile": profile, "ok": err == nil}
@@ -630,6 +632,10 @@ func (a *app) agentsAddExternal(arg string) []string {
 	}
 	if _, err := exec.LookPath(command); err != nil {
 		return []string{fmt.Sprintf("%q not found in PATH — install it first, or give a full path", command)}
+	}
+	if existing, ok := a.cfg.Agents[name]; ok && existing.Kind != "external" {
+		// Don't silently clobber an LLM profile with a CLI tool of the same name.
+		return []string{fmt.Sprintf("%q is an LLM profile (%s · %s) — /agents rm %s first, or pick another name", name, existing.Provider, existing.Model, name)}
 	}
 	if a.cfg.Agents == nil {
 		a.cfg.Agents = map[string]config.AgentProfile{}
@@ -979,7 +985,10 @@ func (a *app) finishGoal(goal string, tr agent.Transcript) {
 	if a.goal.Status != "active" || strings.TrimSpace(goal) != a.goal.Text {
 		return
 	}
-	if tr.GoalMet && !tr.Stopped {
+	// With the judge loop off (/goal off · ttl 0) GoalMet is never set — the model
+	// decides when it's done, so a clean uninterrupted finish counts as done
+	// (otherwise the goal stays "incomplete" and the resume prompt nags forever).
+	if (tr.GoalMet || a.cfg.GoalMaxReturns == 0) && !tr.Stopped && !tr.Cancelled {
 		a.goal.Status = "done"
 	} else {
 		a.goal.Status = "incomplete"
@@ -2050,21 +2059,36 @@ func (a *app) recordUsage() {
 		return
 	}
 	a.usage.Add(today(), a.providerName(), a.activeLLM().Model, dp, dc)
-	a.sessionCostUSD += usage.CostUSD(a.activeLLM().Model, dp, dc, a.priceOverrides()) // for the budget guard
+	a.addSessionCost(a.activeLLM().Model, dp, dc) // for the budget guard
 	if err := a.usage.Save(); err != nil {
 		slog.Warn("usage ledger save failed", "err", err)
 	}
 }
 
+// addSessionCost accrues estimated spend for the budget guard. Mutex-guarded:
+// parallel sub-agent spawns record their spend from their own goroutines.
+func (a *app) addSessionCost(model string, prompt, completion int) {
+	a.costMu.Lock()
+	a.sessionCostUSD += usage.CostUSD(model, prompt, completion, a.priceOverrides())
+	a.costMu.Unlock()
+}
+
+// sessionCost reads the accrued estimated spend (guarded, see addSessionCost).
+func (a *app) sessionCost() float64 {
+	a.costMu.Lock()
+	defer a.costMu.Unlock()
+	return a.sessionCostUSD
+}
+
 // budgetExceeded reports whether this session's estimated spend has hit the cap.
 func (a *app) budgetExceeded() bool {
-	return a.cfg.SessionBudgetUSD > 0 && a.sessionCostUSD >= a.cfg.SessionBudgetUSD
+	return a.cfg.SessionBudgetUSD > 0 && a.sessionCost() >= a.cfg.SessionBudgetUSD
 }
 
 // budgetMsg is the refusal shown when a task would run over the session budget.
 func (a *app) budgetMsg() string {
 	return fmt.Sprintf("budget reached — spent ~$%.2f of the $%.2f session cap. Raise it with /budget <n>, or /budget off.",
-		a.sessionCostUSD, a.cfg.SessionBudgetUSD)
+		a.sessionCost(), a.cfg.SessionBudgetUSD)
 }
 
 // budgetCommand shows or sets the per-session spend cap (USD).
@@ -2073,10 +2097,10 @@ func (a *app) budgetCommand(arg string) []string {
 	switch arg {
 	case "":
 		if a.cfg.SessionBudgetUSD <= 0 {
-			return []string{fmt.Sprintf("no session budget · spent ~$%.2f this run", a.sessionCostUSD),
+			return []string{fmt.Sprintf("no session budget · spent ~$%.2f this run", a.sessionCost()),
 				"  /budget <usd> caps spend per run · /budget off disables"}
 		}
-		return []string{fmt.Sprintf("session budget: $%.2f · spent ~$%.2f this run", a.cfg.SessionBudgetUSD, a.sessionCostUSD),
+		return []string{fmt.Sprintf("session budget: $%.2f · spent ~$%.2f this run", a.cfg.SessionBudgetUSD, a.sessionCost()),
 			"  /budget <usd> to change · /budget off to disable"}
 	case "off", "no", "0":
 		a.cfg.SessionBudgetUSD = 0
@@ -2093,7 +2117,7 @@ func (a *app) budgetCommand(arg string) []string {
 	if a.cfg.SessionBudgetUSD == 0 {
 		return []string{"session budget → off"}
 	}
-	return []string{fmt.Sprintf("session budget → $%.2f (spent ~$%.2f so far this run)", a.cfg.SessionBudgetUSD, a.sessionCostUSD)}
+	return []string{fmt.Sprintf("session budget → $%.2f (spent ~$%.2f so far this run)", a.cfg.SessionBudgetUSD, a.sessionCost())}
 }
 
 func today() string { return time.Now().Format("2006-01-02") }

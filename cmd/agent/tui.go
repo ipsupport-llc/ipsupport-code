@@ -501,7 +501,6 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(detect, m.input.Focus())
 
 	case compactDoneMsg:
-		m.state = stIdle
 		switch {
 		case msg.err != nil:
 			m.push(cErr.Render("compact failed: " + msg.err.Error()))
@@ -511,17 +510,16 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.app.saveSession()
 			m.push(cDim.Render(fmt.Sprintf("compacted %d messages → summary", msg.n)))
 		}
-		return m, m.input.Focus()
+		return m.idleDrain()
 
 	case skillsMsg:
-		m.state = stIdle
 		if msg.err != nil {
 			m.push(cErr.Render("install failed: " + msg.err.Error()))
 		} else {
 			_ = m.app.wire() // register the skill tool + index on the UI thread (no race)
 			m.push(cDim.Render("installed & enabled: " + strings.Join(msg.names, ", ")))
 		}
-		return m, m.input.Focus()
+		return m.idleDrain()
 
 	case updateMsg:
 		if strings.TrimSpace(msg.notice) != "" {
@@ -530,9 +528,8 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case updateDoneMsg:
-		m.state = stIdle
 		m.push(cDim.Render("  " + msg.text))
-		return m, m.input.Focus()
+		return m.idleDrain()
 
 	case shellDoneMsg:
 		m.push(cDim.Render("  ⇱ back in ipsupport-code"))
@@ -561,13 +558,13 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case modelsMsg:
-		m.state = stIdle
 		if msg.setTo != "" { // resolved a /model arg to one model — switch (UI thread)
 			m.pushLines(m.app.setModel(msg.setTo))
-			return m, tea.Batch(m.input.Focus(), m.detectWindowCmd()) // re-detect off-thread
+			model, cmd := m.idleDrain()
+			return model, tea.Batch(cmd, m.detectWindowCmd()) // re-detect off-thread
 		}
 		m.pushLines(msg.lines)
-		return m, m.input.Focus()
+		return m.idleDrain()
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -625,8 +622,10 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// A pending approval doesn't grab the keyboard — keep typing. Press ↑ to
-	// switch to answering it (your input text is preserved).
-	if m.pending != nil && m.state != stApprove && k.String() == "up" {
+	// switch to answering it (your input text is preserved). Only from the plain
+	// idle/running screens: inside a panel (e.g. /config over a task) ↑ must keep
+	// moving the cursor — esc the panel first, then answer.
+	if m.pending != nil && (m.state == stRunning || m.state == stIdle) && k.String() == "up" {
 		m.state = stApprove
 		m.approveChoice = true
 		return m, nil
@@ -791,6 +790,12 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input, cmd = m.input.Update(k)
 			return m, cmd
 		case "esc":
+			if m.cancel == nil && m.busyMsg != "" {
+				// A non-task chore (update / compact / model list) has no cancel
+				// hook — saying "cancelling" would be a lie.
+				m.push(cDim.Render("  " + m.busyMsg + " can't be cancelled — it finishes on its own"))
+				return m, nil
+			}
 			if m.cancel != nil {
 				m.cancel()
 			}
@@ -1006,6 +1011,18 @@ func (m *tuiModel) historyNext() {
 		m.input.SetValue(h[m.histIdx])
 	}
 	m.input.CursorEnd()
+}
+
+// idleDrain returns to idle after a non-task async op (compact / update / model
+// list / skills install) and runs anything the user queued while it worked — the
+// same finalization taskDoneMsg does. Without this, a type-ahead submitted during
+// such an op sat in the queue until the NEXT task finished (or forever).
+func (m *tuiModel) idleDrain() (tea.Model, tea.Cmd) {
+	m.state = stIdle
+	if len(m.queued) > 0 {
+		return m.drainQueue()
+	}
+	return m, m.input.Focus()
 }
 
 // drainQueue runs the next pending messages: it executes queued /commands in place
@@ -1448,7 +1465,14 @@ func (m *tuiModel) View() string {
 	case m.state == stRewind:
 		status = cDim.Render("rewind — ↑↓ pick a step, enter to return there, esc to cancel")
 	case m.state == stConfig:
-		status = cDim.Render("settings — changes apply and save as you make them")
+		switch { // /config is the one panel that can sit over a live task
+		case m.pending != nil:
+			status = cToolCall.Render("⚠ approval waiting behind this panel") + cDim.Render(" — esc, then answer it")
+		case m.cancel != nil:
+			status = cDim.Render("settings — view-only while the task runs · esc back to it")
+		default:
+			status = cDim.Render("settings — changes apply and save as you make them")
+		}
 	case m.state == stPlanReview:
 		status = m.accentBold().Render("▸ plan ready") + cDim.Render(" — enter: do it (switch to auto & execute) · esc: keep planning")
 	case m.state == stGoalResume:

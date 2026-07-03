@@ -647,6 +647,42 @@ func TestZaiProvider(t *testing.T) {
 	}
 }
 
+// A type-ahead queued during a NON-task async op (compact/update/model/skills)
+// must run when the op finishes — it used to sit in the queue forever.
+func TestAsyncOpsDrainQueue(t *testing.T) {
+	m := &tuiModel{state: stRunning, width: 80, input: textarea.New(),
+		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	m.app.client = llm.NewOpenAIClient(config.LLM{})
+	m.queued = []string{"/help"}
+	m.Update(updateDoneMsg{text: "done"})
+	if len(m.queued) != 0 {
+		t.Errorf("queue not drained after an async op: %v", m.queued)
+	}
+	if m.state != stIdle {
+		t.Errorf("state = %v, want stIdle", m.state)
+	}
+	if !strings.Contains(strings.Join(m.history, "\n"), "commands") {
+		t.Error("the queued /help should have executed on drain")
+	}
+}
+
+// With the judge loop off (/goal off) a clean finish must mark the goal done —
+// otherwise the startup resume prompt nags forever. Cancelled runs stay incomplete.
+func TestGoalDoneWithJudgeOff(t *testing.T) {
+	a := &app{cfg: config.Default(), workspace: t.TempDir()}
+	a.cfg.GoalMaxReturns = 0 // judge loop off
+	a.goal = goalState{Text: "ship it", Status: "active"}
+	a.finishGoal("ship it", agent.Transcript{}) // clean finish, GoalMet never set
+	if a.goal.Status != "done" {
+		t.Errorf("clean TTL-off finish → %q, want done", a.goal.Status)
+	}
+	a.goal = goalState{Text: "ship it", Status: "active"}
+	a.finishGoal("ship it", agent.Transcript{Cancelled: true})
+	if a.goal.Status != "incomplete" {
+		t.Errorf("cancelled run → %q, want incomplete", a.goal.Status)
+	}
+}
+
 // The stAgents panel must not funnel an external profile into the LLM builder
 // (that would silently convert it) — enter hands off to its add-tool line; the
 // "+ add CLI tool" row hands off to the scan + prefill.
@@ -711,6 +747,16 @@ func TestAddToolCatalog(t *testing.T) {
 	}
 	if p := a.cfg.Agents["ek"]; p.Kind != "external" || p.Command != "echo" || len(p.Args) != 1 {
 		t.Errorf("saved profile = %+v", p)
+	}
+
+	// an existing LLM profile is never silently clobbered by add-tool
+	a.cfg.Agents["grok"] = config.AgentProfile{Provider: "openrouter", Model: "x-ai/grok"}
+	out = strings.Join(a.agentsAddExternal("grok echo {task}"), " ")
+	if !strings.Contains(out, "LLM profile") {
+		t.Errorf("clobbering an LLM profile should be refused, got %q", out)
+	}
+	if a.cfg.Agents["grok"].Kind == "external" {
+		t.Error("the LLM profile was overwritten")
 	}
 }
 

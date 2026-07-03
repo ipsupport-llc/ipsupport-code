@@ -647,6 +647,34 @@ func TestZaiProvider(t *testing.T) {
 	}
 }
 
+// The stAgents panel must not funnel an external profile into the LLM builder
+// (that would silently convert it) — enter hands off to its add-tool line; the
+// "+ add CLI tool" row hands off to the scan + prefill.
+func TestAgentsPanelExternalRows(t *testing.T) {
+	cfg := config.Default()
+	cfg.Agents = map[string]config.AgentProfile{"codex": {Kind: "external", Command: "codex", Args: []string{"exec", "{task}"}}}
+	m := &tuiModel{state: stAgents, input: textarea.New(), app: &app{cfg: cfg, workspace: t.TempDir()}}
+
+	// enter on the external profile → prefilled add-tool line, panel closed
+	m.agCursor = 0
+	m.agentsKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.state != stIdle || m.input.Value() != "/agents add-tool codex codex exec {task}" {
+		t.Errorf("external edit → state=%v input=%q", m.state, m.input.Value())
+	}
+
+	// the "+ add CLI tool" row (after the profile and "+ add new") → scan + prefill
+	m.state, m.agPhase = stAgents, agList
+	m.input.SetValue("")
+	m.agCursor = 2 // 1 profile, then "add new", then "add CLI tool"
+	m.agentsKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.state != stIdle || m.input.Value() != "/agents add-tool " {
+		t.Errorf("add-CLI-tool row → state=%v input=%q", m.state, m.input.Value())
+	}
+	if !strings.Contains(strings.Join(m.history, "\n"), "known CLI agents") {
+		t.Error("the PATH scan listing should be shown on hand-off")
+	}
+}
+
 func TestAddToolCatalog(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveAgents writes the global config

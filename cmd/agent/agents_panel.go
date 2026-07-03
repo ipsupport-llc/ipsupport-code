@@ -67,7 +67,7 @@ func (m *tuiModel) agentsKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *tuiModel) agentsListKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	names := agentProfileNames(m.app.cfg)
-	n := len(names) + 1 // +1 for the "add new" row
+	n := len(names) + 2 // + the "add new" and "add CLI tool" rows
 	switch k.String() {
 	case "up", "k":
 		m.agCursor = (m.agCursor - 1 + n) % n
@@ -81,12 +81,28 @@ func (m *tuiModel) agentsListKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case "enter", "right", "l":
-		if m.agCursor >= len(names) { // "add new"
+		switch {
+		case m.agCursor == len(names): // "add new" (the LLM profile builder)
 			m.agDraft = agentDraft{}
 			m.agCursor = 0
-		} else { // edit the selected profile
+		case m.agCursor > len(names): // "add CLI tool" — hand off to /agents add-tool
+			m.state = stIdle
+			m.pushLines(m.app.agentsAddExternal("")) // the PATH scan: what's installed
+			m.input.SetValue("/agents add-tool ")
+			m.input.CursorEnd()
+			return m, nil
+		default:
 			name := names[m.agCursor]
 			p := m.app.cfg.Agents[name]
+			if p.Kind == "external" {
+				// The provider→model builder would silently convert this into an
+				// LLM profile — edit it as its add-tool line instead (enter re-saves).
+				m.state = stIdle
+				m.push(cDim.Render("  edit the launch line and press enter to re-save"))
+				m.input.SetValue(strings.TrimRight("/agents add-tool "+name+" "+p.Command+" "+strings.Join(p.Args, " "), " "))
+				m.input.CursorEnd()
+				return m, nil
+			}
 			m.agDraft = agentDraft{orig: name, provider: p.Provider, model: p.Model, name: name}
 			m.agCursor = indexOf(m.agProviders(), p.Provider)
 		}
@@ -296,7 +312,8 @@ func (m *tuiModel) renderAgentsPanel() string {
 			}
 			lines = append(lines, agRow(accent, label, i == m.agCursor))
 		}
-		lines = append(lines, agRow(accent, "+ add new", m.agCursor >= len(names)))
+		lines = append(lines, agRow(accent, "+ add new (LLM profile)", m.agCursor == len(names)))
+		lines = append(lines, agRow(accent, "+ add CLI tool (codex/claude/…)", m.agCursor > len(names)))
 	}
 	lines = append(lines, "", cDim.Render(strings.TrimLeft(m.agentsHint(), " ")))
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(m.accent).Padding(0, 1)

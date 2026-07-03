@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
+	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 	"github.com/ipsupport-llc/ipsupport-code/internal/usage"
 )
@@ -647,6 +649,62 @@ func TestZaiProvider(t *testing.T) {
 	}
 }
 
+// ctxMeter thresholds: empty without data, dim under 50%, warn at ≥50%, red⚠ at
+// the auto-compact line (the styles degrade to plain text in tests).
+func TestCtxMeterFor(t *testing.T) {
+	if got := ctxMeterFor(0, 1000); got != "" {
+		t.Errorf("no usage → %q, want empty", got)
+	}
+	if got := ctxMeterFor(500, 0); got != "" {
+		t.Errorf("no window → %q, want empty", got)
+	}
+	for _, c := range []struct {
+		used int
+		want string
+	}{{300, "ctx 30%"}, {600, "ctx 60%"}, {800, "ctx 80%⚠"}} {
+		if got := ctxMeterFor(c.used, 1000); !strings.Contains(got, c.want) {
+			t.Errorf("used=%d → %q, want it to contain %q", c.used, got, c.want)
+		}
+	}
+}
+
+// externalResult keeps the parent's context lean: stdout tail always, stderr only
+// on failure, diff summary with the /diff pointer.
+func TestExternalResult(t *testing.T) {
+	ok := externalResult("codex", "did the thing", "warn noise", "1 file changed", nil)
+	if !strings.Contains(ok, "did the thing") || strings.Contains(ok, "warn noise") {
+		t.Errorf("success must include stdout, not stderr:\n%s", ok)
+	}
+	if !strings.Contains(ok, "1 file changed") || !strings.Contains(ok, "/diff") {
+		t.Errorf("diff summary + /diff pointer missing:\n%s", ok)
+	}
+	bad := externalResult("codex", "partial", "boom", "", fmt.Errorf("exit 1"))
+	if !strings.Contains(bad, "boom") {
+		t.Errorf("failure must include the stderr tail:\n%s", bad)
+	}
+	long := externalResult("codex", strings.Repeat("x", maxExternalStdout+500), "", "", nil)
+	if !strings.Contains(long, "…") {
+		t.Error("oversized stdout should be tail-clipped with a marker")
+	}
+}
+
+// While a task runs behind the /config panel, changing a value must be refused
+// (applying would re-wire the agent the task is using).
+func TestConfigViewOnlyWhileBusy(t *testing.T) {
+	m := &tuiModel{state: stConfig, width: 80, input: textarea.New(),
+		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	m.cancel = func() {} // a live task
+	m.cfgCursor = 1      // any actionable row
+	before := m.app.cfg
+	m.configActivate()
+	if !strings.Contains(strings.Join(m.history, "\n"), "view-only") {
+		t.Error("expected the view-only notice")
+	}
+	if m.app.cfg.Provider != before.Provider || m.app.cfg.File.Default != before.File.Default {
+		t.Error("a setting changed while a task was running")
+	}
+}
+
 // A type-ahead queued during a NON-task async op (compact/update/model/skills)
 // must run when the op finishes — it used to sit in the queue forever.
 func TestAsyncOpsDrainQueue(t *testing.T) {
@@ -793,11 +851,11 @@ func TestExternalApprovalCategorySeparate(t *testing.T) {
 }
 
 func TestTailClip(t *testing.T) {
-	if got := tailClip("short", 100); got != "short" {
+	if got := textutil.Tail("short", 100); got != "short" {
 		t.Errorf("under cap = %q", got)
 	}
 	long := strings.Repeat("щ", 100) // 2-byte runes — the cut lands mid-rune
-	got := tailClip(long, 51)
+	got := textutil.Tail(long, 51)
 	if !utf8.ValidString(got) {
 		t.Errorf("tailClip split a rune: %q", got)
 	}

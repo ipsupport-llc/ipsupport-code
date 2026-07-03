@@ -343,7 +343,7 @@ func bannerLines(name, ver, provider, model, cwd string, window int, accent lipg
 		Padding(0, 2).
 		Render(body)
 	tip := cDim.Render(`type a task — e.g. "explain what main.go does" — or /help for commands`)
-	keys := cDim.Render("alt+enter newline · ctrl+u clear · ctrl+l screen · ctrl+c quit · shift+tab plan⇄auto")
+	keys := cDim.Render("Tab complete · ctrl+r history · alt+enter newline · ctrl+u clear · ctrl+c quit · shift+tab plan⇄auto")
 	return append(strings.Split(box, "\n"), "", tip, keys)
 }
 
@@ -1292,18 +1292,22 @@ func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
 	switch cmd {
 	case "/exit", "/quit":
 		return m, tea.Quit
-	case "/status", "/help", "/?", "/color":
-		// Always safe: pure info, or /color which only recolors the frame.
+	case "/status", "/help", "/?", "/color", "/diff", "/history":
+		// Always safe: pure info (incl. /history <filter> and the read-only /diff),
+		// or /color which only recolors the frame.
 		return m.runCommand(line)
 	case "/config":
-		// Open the settings panel OVER the running task to view it; changes are held
-		// until the task finishes (re-wiring the agent it's using would race). The
-		// panel stays put when the task ends, and finalizes on close.
+		// Open the settings panel OVER the running task to view it; changing a
+		// value stays blocked while the task runs (re-wiring the agent it's using
+		// would race), the panel stays put when the task ends, and it finalizes
+		// (queue drain) on close.
 		m.openConfig()
 		return m, nil
-	case "/usage", "/sessions", "/agents", "/agent", "/skills", "/permissions":
-		// The bare form is a read-only listing; a subcommand may mutate or re-wire
-		// the running stack, so defer those until the task finishes.
+	case "/usage", "/sessions", "/agents", "/agent", "/skills", "/permissions",
+		"/budget", "/reasoning", "/goal", "/ai", "/knowledge", "/kb", "/mcp",
+		"/offline", "/cd", "/reflect":
+		// The bare form is a read-only report/listing; a subcommand may mutate or
+		// re-wire the running stack, so defer those until the task finishes.
 		if strings.TrimSpace(rest) == "" {
 			return m.runCommand(cmd)
 		}
@@ -1763,7 +1767,7 @@ var commandList = []cmdInfo{
 	{"/auto", "auto mode — execute the task (default)"},
 	{"/ai", "switch/add AI provider; /ai key <name> <tok>; /ai add <name> <url> (custom)"},
 	{"/model", "list the provider's models, or pick one"},
-	{"/config", "interactive settings panel (↑↓ move · enter change · esc close)"},
+	{"/config", "settings panel — interactive in the TUI (↑↓ · enter · esc); a static overview in the REPL"},
 	{"/update", "self-update from GitHub (stable|nightly)"},
 	{"/offline", "on|off — work without internet (disables web + update checks)"},
 	{"/cd", "set the working dir (relative paths + sub-agents resolve there)"},
@@ -1909,9 +1913,19 @@ func (m *tuiModel) argCandidates(name string) []string {
 	case "/reflect":
 		return append([]string{"on", "off", "self"}, agentProfileNames(m.app.cfg)...)
 	case "/goal":
-		return []string{"go", "clear", "ttl", "off", "on"}
+		return []string{"go", "resume", "clear", "ttl", "off", "on"}
 	case "/reasoning":
 		return []string{"off", "minimal", "low", "medium", "high", "reflect"}
+	case "/agents", "/agent":
+		return append([]string{"add", "add-tool", "rm", "exec"}, agentProfileNames(m.app.cfg)...)
+	case "/skills":
+		return []string{"on", "off", "install", "remove"}
+	case "/permissions":
+		return []string{"files", "run", "agents", "reset"}
+	case "/update":
+		return []string{"stable", "nightly"}
+	case "/budget":
+		return []string{"off"}
 	case "/knowledge", "/kb":
 		return []string{"clear", "purge", "retain"}
 	case "/usage":
@@ -1985,21 +1999,28 @@ func (m *tuiModel) renderStatus() []string {
 		instr = "(none)"
 	}
 	act := m.app.activeLLM()
-	return m.renderKV("status", [][2]string{
+	rows := [][2]string{
 		{"version", fmt.Sprintf("%s (%s channel)", version, channelOf(c))},
 		{"provider", m.app.providerName()},
 		{"server", act.BaseURL},
 		{"model", act.Model},
+		{"reasoning", m.app.reasoningLevel(m.app.providerName(), act.Model)},
 		{"workspace", c.Workspace},
 		{"jail", c.File.Jail},
 		{"defaults", fmt.Sprintf("run=%s  file=%s", c.Run.Default, c.File.Default)},
 		{"prompt", promptOrDefault(m.app.promptSrc)},
 		{"instructions", instr},
 		{"session", fmt.Sprintf("%d messages", m.app.ag.SessionLen())},
+		{"goal", m.app.goalStatusLine()},
+		{"budget", m.app.budgetStatusLine()},
 		{"knowledge", fmt.Sprintf("%s (%d lessons)", c.KBPath, len(m.app.kb.All()))},
 		{"facts", fmt.Sprintf("%s (%d learned)", m.app.factsPath(), len(m.app.facts))},
 		{"trace", c.TracePath},
-	})
+	}
+	if c.Offline {
+		rows = append(rows, [2]string{"offline", "ON — no internet egress"})
+	}
+	return m.renderKV("status", rows)
 }
 
 func (m *tuiModel) renderUsage() []string {
@@ -2457,21 +2478,29 @@ func outputLines(content, marker string, style lipgloss.Style) []string {
 // half, warn as it approaches the auto-compact threshold, red once it will compact.
 // Empty when there's no window or nothing sent yet.
 func (m *tuiModel) ctxMeter() string {
-	win := m.app.activeLLM().ContextWindow
-	used := m.app.client.Context()
+	return ctxMeterFor(m.app.client.Context(), m.app.activeLLM().ContextWindow)
+}
+
+// ctxMeterFor is the pure part of the meter, split out for tests.
+func ctxMeterFor(used, win int) string {
 	if win <= 0 || used <= 0 {
 		return ""
 	}
-	s := fmt.Sprintf("ctx %d%%", used*100/win)
+	pct := used * 100 / win
+	s := fmt.Sprintf("ctx %d%%", pct)
 	switch {
 	case float64(used) >= float64(win)*autoCompactRatio:
 		return cErr.Render(s + "⚠") // at/over the auto-compact threshold
-	case used*100/win >= 50:
+	case pct >= ctxWarnPercent:
 		return cToolCall.Render(s)
 	default:
 		return cDim.Render(s)
 	}
 }
+
+// ctxWarnPercent is the fill level at which the ctx meter turns to the warn color
+// (the red ⚠ comes later, at the autoCompactRatio threshold).
+const ctxWarnPercent = 50
 
 // colorizeDiff tints one unified-diff line: added green, removed red, hunk headers
 // accented, file headers dim — leaving stat/plain lines as-is.

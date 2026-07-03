@@ -14,6 +14,21 @@ func OneLine(s string, max int) string {
 	return out
 }
 
+// Tail keeps the last max bytes of s, backing off to a rune boundary so a
+// multibyte character is never split; a clipped result is prefixed with "…".
+// The counterpart of Clip for when the END of the text is the valuable part
+// (e.g. a CLI agent's final answer after pages of progress noise).
+func Tail(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := len(s) - max
+	for cut < len(s) && !utf8.RuneStart(s[cut]) {
+		cut++
+	}
+	return "…" + s[cut:]
+}
+
 // Clip truncates s to at most max bytes without splitting a multibyte UTF-8 rune,
 // returning the (possibly shorter) string and whether it was truncated. Backing
 // off to a rune boundary avoids feeding the model — and the JSONL trace — a

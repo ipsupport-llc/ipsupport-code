@@ -177,6 +177,16 @@ permissions, no policy jail, and `/rewind` can't see their edits. That's why eve
 launch asks its **own approval** (`external CLI agents` category) — even when
 ordinary spawns are set to allow; `a` on the prompt relaxes it for the session.
 
+### Background jobs (fire-and-forget)
+
+Any sub-agent — LLM or external CLI — can run as a **detached background job**:
+the assistant adds `background=true`, the call returns at once, and it keeps
+working while the job runs. When the job finishes you see a `✓ job #N` notice,
+and the **result is delivered to the assistant at the start of its next turn**.
+`/jobs` lists them, `/jobs result <id>` prints one in full, `/jobs kill <id>`
+cancels. Jobs survive their parent task (and esc) — perfect for a long codex
+review running while you continue in the main loop.
+
 ## Updating
 
 The binary updates itself in place from GitHub Releases:

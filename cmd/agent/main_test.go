@@ -1682,6 +1682,23 @@ func TestRenderMarkdownConvertsLatex(t *testing.T) {
 	}
 }
 
+// An approval's FULL detail (incl. a long sub-agent/external task) must land in
+// the log unabridged — the status line clips, the log must not.
+func TestApprovalDetailFullyVisible(t *testing.T) {
+	m := &tuiModel{bridge: newBridge(), input: textarea.New(), state: stRunning, width: 80}
+	long := strings.Repeat("review everything carefully ", 10) // ~280 chars
+	req := approvalReq{kind: "external agent", detail: "codex · /some/dir\n  task: " + long, reply: make(chan bool, 1)}
+	m.Update(approvalMsg(req))
+	if !strings.Contains(strings.Join(m.history, "\n"), long) {
+		t.Error("the full task must be pushed to the log, not truncated")
+	}
+	// the one-line status stays single-line and clipped
+	m.state = stApprove
+	if p := m.approvePrompt(); strings.Contains(p, "\n") || strings.Contains(p, long) {
+		t.Error("approvePrompt must be a single clipped line")
+	}
+}
+
 // Batched tool calls each request approval concurrently. Showing one approval
 // must NOT immediately wait for the next (that pre-fetch overwrote m.pending and
 // orphaned the first reply channel — a forever "Thinking" hang). The next is

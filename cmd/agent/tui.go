@@ -472,8 +472,13 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (finish your message). The user presses ↑ to switch to answering. Do NOT
 		// fetch the next approval yet — that would overwrite m.pending and orphan
 		// this one's reply channel (a hang when the model batches calls).
-		m.push(cToolCall.Render("  ⚠ approve "+req.kind+": ") + req.detail +
-			cDim.Render("  — y approve · n deny · a allow all "+categoryLabel(approvalCategory(req.kind))+" this session · ↑ Yes/No · or keep typing"))
+		// Multi-line: the head on the ⚠ line, extra detail lines (e.g. the FULL
+		// task of a sub-agent/external launch) pushed raw so they soft-wrap, and
+		// the keys on their own line — nothing is truncated out of sight.
+		lines := strings.Split(req.detail, "\n")
+		m.push(cToolCall.Render("  ⚠ approve "+req.kind+": ") + lines[0])
+		m.pushLines(lines[1:])
+		m.push(cDim.Render("    y approve · n deny · a allow all " + categoryLabel(approvalCategory(req.kind)) + " this session · ↑ Yes/No · or keep typing"))
 		return m, nil
 
 	case taskDoneMsg:
@@ -1581,7 +1586,9 @@ func (m *tuiModel) View() string {
 func (m *tuiModel) approvePrompt() string {
 	detail := ""
 	if m.pending != nil {
-		detail = m.pending.kind + " " + m.pending.detail
+		// One status line — clip; the full request (incl. a long task) is already
+		// in the log from the approvalMsg push.
+		detail = m.pending.kind + " " + oneLine(m.pending.detail, 70)
 	}
 	yes, no := cDim.Render("  Yes  "), cDim.Render("  No  ")
 	if m.approveChoice {

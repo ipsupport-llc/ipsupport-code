@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -1622,12 +1623,18 @@ func TestRestoredSessionRendersRecap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	joined := strings.Join(m.history, "\n")
+	joined := stripAnsi(strings.Join(m.history, "\n"))
 	for _, want := range []string{"restored session", "build a thing", "built it"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("recap missing %q in:\n%s", want, joined)
 		}
 	}
+}
+
+// stripAnsi removes color/style escape sequences so tests can assert on the text
+// of styled (e.g. markdown-rendered) output.
+func stripAnsi(s string) string {
+	return regexp.MustCompile("\\x1b\\[[0-9;]*m").ReplaceAllString(s, "")
 }
 
 // Changed-your-mind: while a task runs, Up with an empty input pulls the most

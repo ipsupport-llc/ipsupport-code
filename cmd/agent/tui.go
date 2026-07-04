@@ -254,7 +254,13 @@ func (m *tuiModel) sessionRecap() []string {
 			if strings.TrimSpace(msg.Content) == "" {
 				continue
 			}
-			lines := strings.Split(strings.TrimRight(msg.Content, "\n"), "\n")
+			// Render like a live answer (markdown), not a raw dump with ** showing.
+			// The recap is built before the first WindowSizeMsg → sane width fallback.
+			w := m.width
+			if w <= 0 {
+				w = 100
+			}
+			lines := strings.Split(strings.TrimRight(renderMarkdown(msg.Content, w), "\n"), "\n")
 			if len(lines) > maxFinalLines {
 				lines = append(lines[:maxFinalLines:maxFinalLines], cDim.Render("  …"))
 			}

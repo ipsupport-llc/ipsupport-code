@@ -229,8 +229,8 @@ func (m *tuiModel) offerGoalResume() {
 		return
 	}
 	m.state = stGoalResume
-	m.push(m.accentBold().Render("  ◎ resume goal: ") + oneLine(m.app.goal.Text, 60) +
-		cDim.Render("  — enter: resume · esc: not now"))
+	m.push("  " + m.attention("◎ RESUME GOAL") + " " + oneLine(m.app.goal.Text, 60) +
+		"  — enter: resume · esc: not now")
 }
 
 // sessionRecap renders the tail of a restored session as log lines, so the screen
@@ -500,7 +500,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// A plan-mode task just proposed a plan — offer the accept→execute handshake.
 			m.planTask = false
 			m.state = stPlanReview
-			m.push(m.accentBold().Render("  ▸ plan ready — ") + cDim.Render("enter: do it (switch to auto & execute) · esc: keep planning (type to refine)"))
+			m.push("  " + m.attention("▸ PLAN READY") + "  enter: do it (switch to auto & execute) · esc: keep planning (type to refine)")
 			return m, detect
 		}
 		m.planTask = false
@@ -977,6 +977,12 @@ func (m *tuiModel) recordInput(line string) {
 	m.app.addPromptHist(line)
 	m.histIdx = len(m.app.promptHist)
 	m.histDraft = ""
+}
+
+// attention renders an unmissable input-needed badge: inverse video on the accent
+// color. A handshake waiting for a key must not look like a dim footnote.
+func (m *tuiModel) attention(text string) string {
+	return lipgloss.NewStyle().Background(m.accent).Foreground(lipgloss.Color("0")).Bold(true).Render(" " + text + " ")
 }
 
 // browsing reports whether the input is currently showing a recalled history line.
@@ -1495,9 +1501,10 @@ func (m *tuiModel) View() string {
 			status = cDim.Render("settings — changes apply and save as you make them")
 		}
 	case m.state == stPlanReview:
-		status = m.accentBold().Render("▸ plan ready") + cDim.Render(" — enter: do it (switch to auto & execute) · esc: keep planning")
+		// Waiting for a keypress — animated spinner + inverse badge, NOT a dim footnote.
+		status = m.spin.View() + " " + m.attention("▸ PLAN READY") + "  enter: do it (switch to auto & execute) · esc: keep planning"
 	case m.state == stGoalResume:
-		status = m.accentBold().Render("◎ resume goal") + cDim.Render(" — enter: resume · esc: not now")
+		status = m.spin.View() + " " + m.attention("◎ RESUME GOAL") + "  enter: resume · esc: not now"
 	case m.state == stHistSearch:
 		match := cDim.Render("(no match)")
 		if m.searchIdx >= 0 {

@@ -381,7 +381,7 @@ func (a *app) spawnAgent(ctx context.Context, profile, task, dir string) (string
 	// one at a time instead of racing on the approver.
 	if a.cfg.Spawn.Default != "allow" {
 		a.spawnMu.Lock()
-		approved := a.approveGated("spawn agent", fmt.Sprintf("%s · %s · %s — %s", profile, llmCfg.Model, subWorkspace, oneLine(task, 60)))
+		approved := a.approveGated("spawn agent", fmt.Sprintf("%s · %s · %s\n  task: %s", profile, llmCfg.Model, subWorkspace, task))
 		a.spawnMu.Unlock()
 		if !approved {
 			return "", fmt.Errorf("spawn denied by user")

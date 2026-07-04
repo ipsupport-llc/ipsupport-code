@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1205,6 +1206,9 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/budget":
 		m.pushLines(m.app.budgetCommand(rest))
 		return m, nil
+	case "/jobs":
+		m.pushLines(m.app.jobsCommand(rest))
+		return m, nil
 	case "/diff":
 		for _, l := range m.app.diffCommand() {
 			m.push(colorizeDiff(l))
@@ -1315,7 +1319,7 @@ func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
 	switch cmd {
 	case "/exit", "/quit":
 		return m, tea.Quit
-	case "/status", "/help", "/?", "/color", "/diff", "/history":
+	case "/status", "/help", "/?", "/color", "/diff", "/history", "/jobs":
 		// Always safe: pure info (incl. /history <filter> and the read-only /diff),
 		// or /color which only recolors the frame.
 		return m.runCommand(line)
@@ -1784,6 +1788,7 @@ var commandList = []cmdInfo{
 	{"/status", "config, knowledge base, trace paths"},
 	{"/usage", "token history (day/week/month, by model); clear · purge <days> · retain <days>"},
 	{"/budget", "<usd>|off — cap estimated spend per run; refuses new tasks once hit"},
+	{"/jobs", "background sub-agent jobs: list · result <id> · kill <id>"},
 	{"/diff", "show uncommitted changes in the workspace (what the agent changed)"},
 	{"/login", "(re)configure server URL / model / key, then reload"},
 	{"/new", "start a NEW session (old stays in /sessions); /new <name> to name it"},
@@ -1952,6 +1957,8 @@ func (m *tuiModel) argCandidates(name string) []string {
 		return []string{"stable", "nightly"}
 	case "/budget":
 		return []string{"off"}
+	case "/jobs":
+		return []string{"result", "kill"}
 	case "/knowledge", "/kb":
 		return []string{"clear", "purge", "retain"}
 	case "/usage":
@@ -2039,6 +2046,7 @@ func (m *tuiModel) renderStatus() []string {
 		{"session", fmt.Sprintf("%d messages", m.app.ag.SessionLen())},
 		{"goal", m.app.goalStatusLine()},
 		{"budget", m.app.budgetStatusLine()},
+		{"jobs", fmt.Sprintf("%d running (/jobs)", m.app.jobsPending())},
 		{"knowledge", fmt.Sprintf("%s (%d lessons)", c.KBPath, len(m.app.kb.All()))},
 		{"facts", fmt.Sprintf("%s (%d learned)", m.app.factsPath(), len(m.app.facts))},
 		{"trace", c.TracePath},
@@ -2282,6 +2290,17 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 	case "fact":
 		f, _ := e.fields["text"].(string)
 		return []string{cLesson.Render("  ✦ noted ") + cDim.Render(f)}
+	case "job_started":
+		return []string{cToolCall.Render(fmt.Sprintf("  ⚙ background job #%d — ", toInt(e.fields["job"]))) +
+			fmt.Sprint(e.fields["profile"]) + cDim.Render("  · "+fmt.Sprint(e.fields["task"])+" · /jobs to watch")}
+	case "job_done":
+		id := toInt(e.fields["job"])
+		if ok, _ := e.fields["ok"].(bool); !ok {
+			return []string{cErr.Render(fmt.Sprintf("  ✖ job #%d (%v) failed", id, e.fields["profile"])) +
+				cDim.Render("  · /jobs result "+strconv.Itoa(id))}
+		}
+		return []string{cOk.Render(fmt.Sprintf("  ✓ job #%d (%v) finished", id, e.fields["profile"])) +
+			cDim.Render("  — result lands next turn · /jobs result "+strconv.Itoa(id)+" to read now")}
 	case "subagent":
 		prof, _ := e.fields["profile"].(string)
 		model, _ := e.fields["model"].(string)

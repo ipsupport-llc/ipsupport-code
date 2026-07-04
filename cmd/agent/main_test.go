@@ -799,6 +799,92 @@ func TestGoalDoneWithJudgeOff(t *testing.T) {
 	}
 }
 
+// Fire-and-forget: agent.run(background=true) returns an ack at once, the job
+// runs detached, /jobs tracks it, and injectJobResults folds the result into the
+// conversation at the next turn boundary.
+func TestBackgroundJobLifecycle(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.Agents = map[string]config.AgentProfile{
+		"echo":  {Kind: "external", Command: "echo", Args: []string{"ok:", "{task}"}},
+		"sleep": {Kind: "external", Command: "sleep", Timeout: 30},
+	}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	ack, err := a.spawnAgentBackground(context.Background(), "echo", "ping the thing", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ack, "job #1") {
+		t.Errorf("ack = %q, want an immediate job #1 acknowledgement", ack)
+	}
+	for i := 0; i < 100 && a.jobsPending() > 0; i++ { // wait for the detached run
+		time.Sleep(20 * time.Millisecond)
+	}
+	list := strings.Join(a.jobsCommand(""), "\n")
+	if !strings.Contains(list, "✓ #1") {
+		t.Fatalf("job not finished ok:\n%s", list)
+	}
+	if full := strings.Join(a.jobsCommand("result 1"), "\n"); !strings.Contains(full, "ok: ping the thing") {
+		t.Errorf("/jobs result = %q", full)
+	}
+
+	// next turn boundary: the result lands in the conversation exactly once
+	before := a.ag.SessionLen()
+	a.injectJobResults()
+	h := a.ag.History()
+	if len(h) != before+1 || !strings.Contains(h[len(h)-1].Content, "ok: ping the thing") {
+		t.Fatalf("result not injected into history")
+	}
+	a.injectJobResults()
+	if a.ag.SessionLen() != before+1 {
+		t.Error("re-injection must not duplicate the note")
+	}
+
+	// unknown profile fails NOW, not silently inside a job
+	if _, err := a.spawnAgentBackground(context.Background(), "zzz-nope-xyz", "x", ""); err == nil {
+		t.Error("unknown profile must fail immediately")
+	}
+
+	// kill: a long job is cancelled and records a failure outcome
+	if _, err := a.spawnAgentBackground(context.Background(), "sleep", "25", ""); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond) // let it start
+	if out := strings.Join(a.jobsCommand("kill 2"), " "); !strings.Contains(out, "cancelling") {
+		t.Fatalf("kill = %q", out)
+	}
+	for i := 0; i < 100 && a.jobsPending() > 0; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if list := strings.Join(a.jobsCommand(""), "\n"); !strings.Contains(list, "✖ #2") {
+		t.Errorf("killed job should record failure:\n%s", list)
+	}
+}
+
+// The agent tool routes background=true to the fire-and-forget spawn func.
+func TestAgentToolBackgroundRouting(t *testing.T) {
+	var fg, bg bool
+	tl := tool.NewAgent(
+		func(_ context.Context, _, _, _ string) (string, error) { fg = true; return "fg", nil },
+		func(_ context.Context, _, _, _ string) (string, error) { bg = true; return "bg", nil },
+	)
+	tl.Call(context.Background(), "run", map[string]any{"profile": "p", "task": "t", "background": true})
+	if !bg || fg {
+		t.Errorf("background=true → bg func, got fg=%v bg=%v", fg, bg)
+	}
+	fg, bg = false, false
+	tl.Call(context.Background(), "run", map[string]any{"profile": "p", "task": "t"})
+	if !fg || bg {
+		t.Errorf("default → foreground func, got fg=%v bg=%v", fg, bg)
+	}
+}
+
 // The stAgents panel must not funnel an external profile into the LLM builder
 // (that would silently convert it) — enter hands off to its add-tool line; the
 // "+ add CLI tool" row hands off to the scan + prefill.

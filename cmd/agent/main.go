@@ -213,6 +213,10 @@ type app struct {
 
 	promptHist []string // submitted inputs (tasks + /commands), oldest→newest, persisted per workspace for ↑ recall across restarts
 
+	jobMu  sync.Mutex // guards jobs/jobSeq — background sub-agent runs (see jobs.go)
+	jobs   []*job
+	jobSeq int
+
 	costMu         sync.Mutex // guards sessionCostUSD (parallel sub-agent spawns accrue too)
 	sessionCostUSD float64    // estimated spend this process run, for the SessionBudgetUSD guard
 
@@ -570,7 +574,7 @@ func (a *app) subagentTargetsPrompt() string {
 	}
 	prompt := "\n\n## Sub-agents you can delegate to (the agent tool)\n" +
 		"Profiles (call agent with profile=<name>): " + strings.Join(parts, ", ") + "\n" +
-		"ALWAYS pass dir=<the specific project's directory> (the repo root) — without it a sub-agent inherits this session's workspace, which may be a home dir. Fan a task out across several profiles in one turn — they run in parallel — then merge their findings. To keep your own context lean, delegate a big exploration to a sub-agent and take back just its summary."
+		"ALWAYS pass dir=<the specific project's directory> (the repo root) — without it a sub-agent inherits this session's workspace, which may be a home dir. Fan a task out across several profiles in one turn — they run in parallel — then merge their findings. To keep your own context lean, delegate a big exploration to a sub-agent and take back just its summary. For a LONG task you don't need immediately (a big external review, a broad exploration), add background=true: the call returns at once, you keep working, and the job's result is delivered to you at the start of a later turn — never wait or poll for it."
 	if external {
 		prompt += "\nexternal·<command> profiles are autonomous local CLI coding agents (not our models): give them one complete, self-contained task; they edit files themselves and you get back their output tail plus a change summary."
 	}
@@ -1588,7 +1592,7 @@ func (a *app) wire() error {
 	// The `agent` tool is only worth its catalog space when there is a profile to
 	// delegate to; with no profiles configured, the tool is hidden entirely.
 	if a.hasSubagentTargets() {
-		tools = append(tools, tool.NewAgent(a.spawnAgent))
+		tools = append(tools, tool.NewAgent(a.spawnAgent, a.spawnAgentBackground))
 	}
 	// One proxy tool fronts every configured MCP server, so the catalog grows by a
 	// single tool — not by every server's schemas. Only when servers are set.
@@ -2221,6 +2225,7 @@ func (a *app) runOne(ctx context.Context, goal string) {
 		fmt.Println(a.budgetMsg())
 		return
 	}
+	a.injectJobResults() // finished background jobs land before the model thinks
 	a.beginCheckpoint(goal)
 	defer a.endCheckpoint()
 	a.ag.SetGoalLoop(a.goalTTLFor(goal)) // judge-loop only when pursuing an explicit goal
@@ -2260,6 +2265,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string) {
 		a.emit("error", map[string]any{"text": a.budgetMsg()})
 		return
 	}
+	a.injectJobResults() // finished background jobs land before the model thinks
 	a.beginCheckpoint(goal)
 	defer a.endCheckpoint()
 	a.ag.SetGoalLoop(a.goalTTLFor(goal)) // judge-loop only when pursuing an explicit goal
@@ -2402,6 +2408,8 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		printLines(a.historyCommand(rest))
 	case "/budget":
 		printLines(a.budgetCommand(rest))
+	case "/jobs":
+		printLines(a.jobsCommand(rest))
 	case "/diff":
 		printLines(a.diffCommand())
 	case "/reasoning":
@@ -3039,6 +3047,7 @@ func helpText() string {
   /status          show config, knowledge base, and trace paths
   /usage           session counters + token usage
   /budget [usd]    cap estimated spend per run (refuses new tasks once hit; off to disable)
+  /jobs            background sub-agent jobs: list · result <id> · kill <id>
   /diff            show uncommitted changes in the workspace (what the agent changed)
   /login           (re)configure the server URL / model / key, then reload
   /new [name]      start a NEW session (the old one stays in /sessions)
@@ -3102,6 +3111,7 @@ func (a *app) statusText() string {
   session      %d messages
   goal         %s
   budget       %s
+  jobs         %d running (/jobs)
   knowledge    %s (%d lessons)
   facts        %d learned
   trace        %s
@@ -3111,7 +3121,7 @@ func (a *app) statusText() string {
 		a.reasoningLevel(a.providerName(), act.Model), onOff(a.cfg.Offline),
 		a.cfg.Workspace, a.cfg.File.Jail, a.cfg.Run.Default, a.cfg.File.Default,
 		promptOrDefault(a.promptSrc), instr, a.ag.SessionLen(),
-		a.goalStatusLine(), a.budgetStatusLine(),
+		a.goalStatusLine(), a.budgetStatusLine(), a.jobsPending(),
 		a.cfg.KBPath, len(a.kb.All()), len(a.facts), a.cfg.TracePath)
 }
 

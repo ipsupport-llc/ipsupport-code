@@ -15,17 +15,25 @@ type SpawnFunc func(ctx context.Context, profile, task, dir string) (string, err
 // optionally in another directory. Sub-agents can't spawn their own sub-agents
 // (the host gives them a catalog without this tool). Issue several calls in one
 // turn to fan a task out across profiles; they run in parallel.
-func NewAgent(spawn SpawnFunc) Tool {
+//
+// spawnBg is the fire-and-forget variant: it starts the task as a detached
+// background job and returns an immediate acknowledgement; the host delivers
+// the job's result to the model at the start of a later turn.
+func NewAgent(spawn, spawnBg SpawnFunc) Tool {
 	return NewDomain(DomainSpec{
 		Name:    "agent",
 		Summary: "Delegate a self-contained task to a sub-agent — a separate LLM session for a configured profile, optionally in another directory; returns its answer.",
 		NotHere: "Only for handing a whole task to another model — do your own work with file/run/git.",
 		Actions: []Action{{
 			Name:   "run",
-			Params: []Param{Req("profile", "str"), Req("task", "str"), Opt("dir", "str", "")},
-			Note:   "(profile=one of the configured profiles; dir=working directory e.g. ~/proj, defaults to here; task must be self-contained — the sub-agent can't see this chat)",
+			Params: []Param{Req("profile", "str"), Req("task", "str"), Opt("dir", "str", ""), Opt("background", "bool", "false")},
+			Note:   "(profile=one of the configured profiles; dir=working directory e.g. ~/proj, defaults to here; task must be self-contained — the sub-agent can't see this chat; background=true starts it as a detached job — the call returns at once and the result is delivered to you on a later turn)",
 			Run: func(ctx context.Context, a Args) Result {
-				out, err := spawn(ctx, a.Str("profile"), a.Str("task"), a.Str("dir"))
+				run := spawn
+				if a.Bool("background") && spawnBg != nil {
+					run = spawnBg
+				}
+				out, err := run(ctx, a.Str("profile"), a.Str("task"), a.Str("dir"))
 				if err != nil {
 					return Err("sub-agent: " + err.Error())
 				}

@@ -2224,11 +2224,19 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 	case "observation":
 		isErr, _ := e.fields["is_error"].(bool)
 		c, _ := e.fields["content"].(string)
-		if tool, _ := e.fields["tool"].(string); tool == "file" && !isErr {
+		tool, _ := e.fields["tool"].(string)
+		if tool == "file" && !isErr {
 			if action, _ := e.fields["action"].(string); action == "read" {
 				path, _ := e.fields["path"].(string)
 				return renderCode(c, path) // syntax-highlight file reads
 			}
+		}
+		if tool == "agent" && !isErr {
+			// A sub-agent's answer (an LLM final or an external CLI's report) is
+			// markdown prose — render it like our own answers, uncapped, instead
+			// of a raw 25-line dump with ** and [links]() showing.
+			return append([]string{cOk.Render("  → sub-agent result")},
+				strings.Split(renderMarkdown(c, m.width), "\n")...)
 		}
 		if isErr {
 			return outputLines(c, "✖", cErr)

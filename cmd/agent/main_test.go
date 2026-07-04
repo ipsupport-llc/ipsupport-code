@@ -1654,6 +1654,31 @@ func TestQueuedViewPinsMessages(t *testing.T) {
 	}
 }
 
+// A sub-agent's observation (LLM final / external CLI report) renders as
+// markdown — no raw ** markers — and is NOT capped at 25 lines like ordinary
+// tool output.
+func TestSubagentResultRendersMarkdown(t *testing.T) {
+	m := &tuiModel{width: 80, app: &app{cfg: config.Default()}}
+	long := strings.Repeat("- finding line\n", 40) // > the 25-line outputLines cap
+	got := strings.Join(m.renderEvent(uiEvent{kind: "observation", fields: map[string]any{
+		"tool": "agent", "content": "**Critical** issue found\n\n" + long}}), "\n")
+	if strings.Contains(got, "**") {
+		t.Error("markdown markers leaked into the sub-agent result render")
+	}
+	if !strings.Contains(got, "Critical") {
+		t.Error("content lost in render")
+	}
+	if n := strings.Count(got, "finding"); n < 40 { // glamour restyles the bullets
+		t.Errorf("sub-agent result must not be capped: %d/40 lines", n)
+	}
+	// ordinary tool output stays capped + raw
+	raw := m.renderEvent(uiEvent{kind: "observation", fields: map[string]any{
+		"tool": "run", "content": long}})
+	if len(raw) > 27 {
+		t.Errorf("plain output should stay capped, got %d lines", len(raw))
+	}
+}
+
 func TestRenderMarkdownKeepsContent(t *testing.T) {
 	out := renderMarkdown("Wrote **hello.sh** and ran it.", 80)
 	if !strings.Contains(out, "hello.sh") {

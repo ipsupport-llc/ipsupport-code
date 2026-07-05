@@ -217,6 +217,9 @@ type app struct {
 	jobs   []*job
 	jobSeq int
 
+	btwMu      sync.Mutex // guards pendingBtw — /btw side-channel steering notes
+	pendingBtw []string   // user asides awaiting the running task's next turn (see jobs.go drainBtw)
+
 	costMu         sync.Mutex // guards sessionCostUSD (parallel sub-agent spawns accrue too)
 	sessionCostUSD float64    // estimated spend this process run, for the SessionBudgetUSD guard
 
@@ -1622,7 +1625,8 @@ func (a *app) wire() error {
 	}
 	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.goalSteps())
 	a.ag.SetHistory(prior)
-	a.ag.SetPlanMode(a.planMode) // carry the mode into the rebuilt agent
+	a.ag.SetPlanMode(a.planMode)   // carry the mode into the rebuilt agent
+	a.ag.SetBeforeTurn(a.drainBtw) // /btw notes fold in between turns of a running task
 	return nil
 }
 
@@ -2410,6 +2414,8 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		printLines(a.budgetCommand(rest))
 	case "/jobs":
 		printLines(a.jobsCommand(rest))
+	case "/btw": // in plain mode a task runs synchronously, so this always steers the NEXT run
+		printLines(a.btwCommand(rest, false))
 	case "/diff":
 		printLines(a.diffCommand())
 	case "/reasoning":
@@ -3048,6 +3054,7 @@ func helpText() string {
   /usage           session counters + token usage
   /budget [usd]    cap estimated spend per run (refuses new tasks once hit; off to disable)
   /jobs            background sub-agent jobs: list · result <id> · kill <id>
+  /btw <note>      steer a RUNNING task without stopping it (esc cancels; /btw nudges)
   /diff            show uncommitted changes in the workspace (what the agent changed)
   /login           (re)configure the server URL / model / key, then reload
   /new [name]      start a NEW session (the old one stays in /sessions)

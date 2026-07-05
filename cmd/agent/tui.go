@@ -70,6 +70,7 @@ type tuiModel struct {
 	state         uiState
 	history       []string
 	queued        []string // pending user messages (tasks + /commands), drained in order
+	steer         []string // /btw asides for the current run — pinned above the input, not in scrollback; cleared when the task ends
 	histIdx       int      // recall cursor into app.promptHist; == len means "not browsing"
 	histDraft     string   // in-progress input saved when history browsing begins
 	pendingMode   *bool    // plan(true)/auto(false) requested via shift+tab mid-task; applied on task done
@@ -491,6 +492,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case taskDoneMsg:
 		m.cancel = nil
 		m.retry = nil
+		m.steer = nil                 // steering notes belonged to the run that just ended
 		m.applyPendingMode()          // a shift+tab during the task takes effect now, before the next one
 		detect := m.detectWindowCmd() // model is loaded now — confirm the real window
 		if m.state != stRunning {     // a modal panel is open over the finished task — keep it; finalize on close
@@ -1209,6 +1211,9 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/jobs":
 		m.pushLines(m.app.jobsCommand(rest))
 		return m, nil
+	case "/btw": // idle: the note is pinned and steers the next run you start
+		m.addSteer(rest)
+		return m, nil
 	case "/diff":
 		for _, l := range m.app.diffCommand() {
 			m.push(colorizeDiff(l))
@@ -1323,6 +1328,11 @@ func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
 		// Always safe: pure info (incl. /history <filter> and the read-only /diff),
 		// or /color which only recolors the frame.
 		return m.runCommand(line)
+	case "/btw":
+		// Steer the LIVE task without stopping it: buffer the note for the model's
+		// next turn and pin it above the input — never into the scrolling log.
+		m.addSteer(rest)
+		return m, nil
 	case "/config":
 		// Open the settings panel OVER the running task to view it; changing a
 		// value stays blocked while the task runs (re-wiring the agent it's using
@@ -1594,6 +1604,7 @@ func (m *tuiModel) View() string {
 		parts = append(parts, sub)
 	}
 	parts = append(parts, status)
+	parts = append(parts, m.steerView()...)  // /btw asides, pinned above the input
 	parts = append(parts, m.queuedView()...) // pinned just above the input
 	parts = append(parts, m.topRule(frame), m.input.View(), frame.Render(strings.Repeat("─", m.width)), bottom)
 	return strings.Join(parts, "\n")
@@ -1692,6 +1703,35 @@ func (m *tuiModel) syncInputHeight() {
 // queuedView renders the type-ahead queue pinned just above the input, so
 // waiting messages stay visible (and ↑-editable) instead of scrolling away in
 // the log. Empty when nothing is queued.
+// addSteer records a /btw aside: buffer it for the model's next turn and pin it
+// above the input. Deliberately NOT pushed to the log — a steering note must not
+// scroll away, and it's not a fleeting status line either.
+func (m *tuiModel) addSteer(note string) {
+	if !m.app.addBtw(note) { // empty note — nothing to steer with
+		return
+	}
+	m.steer = append(m.steer, strings.TrimSpace(note))
+	m.syncViewport()
+}
+
+// steerView renders the pinned /btw block just above the input: the asides that
+// will fold into the running task on its next step. Same pinned treatment as the
+// queued-task view, so it stays put instead of scrolling into history.
+func (m *tuiModel) steerView() []string {
+	if len(m.steer) == 0 {
+		return nil
+	}
+	verb := "folds into this task on its next step"
+	if m.state != stRunning {
+		verb = "steers the next run you start"
+	}
+	out := []string{cDim.Render("  ✦ by the way — " + verb + ":")}
+	for _, s := range m.steer {
+		out = append(out, m.accentBold().Render("  ▹ ")+s)
+	}
+	return out
+}
+
 func (m *tuiModel) queuedView() []string {
 	if len(m.queued) == 0 {
 		return nil
@@ -1789,6 +1829,7 @@ var commandList = []cmdInfo{
 	{"/usage", "token history (day/week/month, by model); clear · purge <days> · retain <days>"},
 	{"/budget", "<usd>|off — cap estimated spend per run; refuses new tasks once hit"},
 	{"/jobs", "background sub-agent jobs: list · result <id> · kill <id>"},
+	{"/btw", "steer a RUNNING task without stopping it (esc cancels; /btw nudges)"},
 	{"/diff", "show uncommitted changes in the workspace (what the agent changed)"},
 	{"/login", "(re)configure server URL / model / key, then reload"},
 	{"/new", "start a NEW session (old stays in /sessions); /new <name> to name it"},

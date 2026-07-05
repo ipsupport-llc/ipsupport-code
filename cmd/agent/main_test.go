@@ -1984,3 +1984,43 @@ func TestExitCommandQuits(t *testing.T) {
 		t.Errorf("/exit did not produce tea.Quit")
 	}
 }
+
+// TestBtwSteeringDrainsOnce covers the /btw side-channel: a note is buffered
+// (safe from the UI goroutine), the agent's beforeTurn hook folds it in as a
+// prefixed user aside exactly once, and the buffer clears so it can't repeat.
+func TestBtwSteeringDrainsOnce(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	if a.addBtw("   ") {
+		t.Error("blank /btw note must be ignored")
+	}
+	a.addBtw("look in internal/tool, not cmd")
+	a.addBtw("keep the diff small")
+	if n := a.btwPending(); n != 2 {
+		t.Fatalf("btwPending = %d, want 2", n)
+	}
+
+	msgs := a.drainBtw() // this is the agent's beforeTurn hook
+	if len(msgs) != 2 {
+		t.Fatalf("drainBtw returned %d messages, want 2", len(msgs))
+	}
+	if msgs[0].Role != "user" || !strings.HasPrefix(msgs[0].Content, "[by the way] ") {
+		t.Errorf("note not delivered as a prefixed user aside: %+v", msgs[0])
+	}
+	if !strings.Contains(msgs[0].Content, "internal/tool") {
+		t.Errorf("note content lost: %q", msgs[0].Content)
+	}
+	if got := a.drainBtw(); got != nil { // drained once — never repeats
+		t.Errorf("second drain must be empty, got %v", got)
+	}
+	if a.btwPending() != 0 {
+		t.Error("buffer not cleared after drain")
+	}
+}

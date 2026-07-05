@@ -39,6 +39,7 @@ machine, with your own model, under a permission policy you control.
 - 🎯 Goals — `/goal` pursues a multi-turn objective; a judge re-feeds it until it's actually met
 - 🌐 Any model — local LM Studio by default, or any OpenAI-compatible provider (incl. keyless local ones)
 - 🤝 Sub-agents — delegate/fan-out across other models **or local CLI agents** (codex/claude/…) and merge the results
+- 🛎️ Steer live — `/btw <note>` nudges a running task mid-flight without stopping it (esc still cancels)
 - 💰 Guardrails — `/budget` spend cap per run · `/diff` to review what the agent changed
 - 🧩 Plan/auto modes · ⏪ `/rewind` · 🔌 MCP · 📦 skills · ♻️ self-updating
 
@@ -186,6 +187,15 @@ and the **result is delivered to the assistant at the start of its next turn**.
 `/jobs` lists them, `/jobs result <id>` prints one in full, `/jobs kill <id>`
 cancels. Jobs survive their parent task (and esc) — perfect for a long codex
 review running while you continue in the main loop.
+
+### Steering a running task (`/btw`)
+
+`esc` cancels a task; **`/btw <note>` steers it without stopping.** Type it while
+the model is working and the note folds into its **very next step** — it doesn't
+wait for the task to finish and doesn't queue as a follow-up. Use it to redirect
+mid-run ("`/btw the loader is in internal/config, not cmd`"). The note is pinned
+above the input for the rest of the run, never buried in the scrollback. Typed
+while idle, it simply steers the next task you start.
 
 ## Updating
 
@@ -391,6 +401,7 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | `/status` | config, knowledge base, and trace paths |
 | `/budget [usd]` | cap estimated spend per run — refuses new tasks once hit; `off` disables |
 | `/diff` | show uncommitted workspace changes (what the agent changed), colorized |
+| `/btw <note>` | steer a **running** task without stopping it — folds into its next step (esc cancels instead) |
 | `/usage` | token spend + **estimated $** (today / 7d / 30d / all, by day, by model); `clear` · `purge <days>` · `retain <days>` |
 | `/login` | (re)configure server URL / model / key, then reload |
 | `/new [name]` | start a NEW session (the old one stays in `/sessions`) |

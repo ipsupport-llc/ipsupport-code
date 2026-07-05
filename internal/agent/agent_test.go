@@ -799,3 +799,39 @@ func TestRunWrongToolHint(t *testing.T) {
 		t.Errorf("wrong-tool correction not surfaced: %+v", got)
 	}
 }
+
+// TestBeforeTurnInjectsBetweenTurns proves the /btw seam: a hook registered via
+// SetBeforeTurn feeds messages into the working set BETWEEN turns of a live run,
+// so a note dropped after the first turn reaches the model on the next one —
+// without interrupting the loop.
+func TestBeforeTurnInjectsBetweenTurns(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "calc", `{"action":"calculate","params":{"expression":"2+2"}}`),
+		{Role: "assistant", Content: "done"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	calls := 0
+	a.SetBeforeTurn(func() []llm.Message {
+		calls++
+		if calls == 2 { // a note dropped after the first turn, mid-run
+			return []llm.Message{llm.User("[by the way] use tabs")}
+		}
+		return nil
+	})
+	if _, err := a.Run(context.Background(), "compute"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	found := false
+	for _, m := range fake.lastMsgs { // messages the model saw on the final (2nd) turn
+		if m.Role == "user" && strings.Contains(m.Content, "[by the way] use tabs") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("beforeTurn note never reached the model on the next turn")
+	}
+	if calls < 2 {
+		t.Errorf("beforeTurn called %d times, want it fired each turn", calls)
+	}
+}

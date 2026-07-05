@@ -1172,6 +1172,45 @@ func (a *app) completePath(prefix string) (string, []string) {
 	return longestCommonPrefix(matches), matches
 }
 
+// completeDir Tab-completes a directory path for /cd, one segment at a time like
+// a shell: it lists the sub-directories of the already-typed parent whose name
+// starts with the segment under the cursor. Candidates keep the parent the user
+// typed (incl. ~, .., an absolute root) and end in "/" so completing can descend.
+// Resolution goes through the policy engine, so only dirs inside the jail show.
+func (a *app) completeDir(prefix string) (string, []string) {
+	dirPart, seg := "", prefix
+	if i := strings.LastIndexByte(prefix, '/'); i >= 0 {
+		dirPart, seg = prefix[:i+1], prefix[i+1:]
+	}
+	listBase := dirPart
+	if listBase == "" {
+		listBase = "."
+	}
+	abs, err := a.pol.Resolve(listBase) // ~, relative→workdir, and the jail
+	if err != nil {
+		return "", nil
+	}
+	entries, err := os.ReadDir(abs)
+	if err != nil {
+		return "", nil
+	}
+	var matches []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if strings.HasPrefix(name, ".") && !strings.HasPrefix(seg, ".") {
+			continue // hide dot-dirs unless the user is explicitly typing one
+		}
+		if strings.HasPrefix(name, seg) {
+			matches = append(matches, dirPart+name+"/")
+		}
+	}
+	sort.Strings(matches)
+	return longestCommonPrefix(matches), matches
+}
+
 // gitOut runs a read-only git command in dir and returns its stdout.
 func gitOut(dir string, args ...string) (string, error) {
 	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()

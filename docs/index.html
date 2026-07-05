@@ -152,8 +152,8 @@
   <div class="term" aria-label="example session">
     <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>ipsupport-code</span></div>
 <pre><span class="p">❯</span> ipsupport-code
+<span class="box">✦ ipsupport-code  <span id="rel-ver">v0.24.1</span></span>
 <span class="box">╭────────────────────────────────╮
-│ ✦ ipsupport-code   v0.22        │
 │ model  qwen2.5-7b-instruct      │
 │ cwd    ~/myproject              │
 ╰────────────────────────────────╯</span>
@@ -216,7 +216,7 @@
     <div class="grid">
       <div class="card"><h3><span class="i">/</span>Commands</h3><p>
         <code>/help</code> · <code>/status</code> · <code>/usage</code> · <code>/budget</code> · <code>/config</code><br>
-        <code>/ai</code> &amp; <code>/ai key</code> · <code>/model</code> · <code>/reasoning</code> · <code>/agents</code><br>
+        <code>/ai</code> &amp; <code>/ai key</code> · <code>/model</code> · <code>/reasoning</code> · <code>/agents</code> · <code>/jobs</code><br>
         <code>/goal</code> · <code>/diff</code> · <code>/rewind</code> · <code>/history</code> · <code>/knowledge</code><br>
         <code>/skills</code> · <code>/permissions</code> · <code>/sessions</code> · <code>/cd</code> · <code>/mcp</code><br>
         <code>/new</code> · <code>/clear</code> · <code>/compact</code> · <code>/plan</code>·<code>/auto</code> · <code>/reflect</code><br>
@@ -235,6 +235,7 @@
         Then ask, e.g. <em>"review internal/tool across grok and claude, then merge."</em>
         They run in <b>parallel</b>, each jailed to its own directory. Manage with
         <code>/agents add|add-tool|rm|exec</code> — <code>add-tool</code> plugs in local CLI agents (codex, claude, aider…); relax the per-spawn prompt with <code>/permissions agents on</code>.
+        Or fire one in the <b>background</b> and keep working — its result folds into the next turn; watch them with <code>/jobs</code>.
       </p></div>
     </div>
   </section>
@@ -279,6 +280,17 @@
       setTimeout(function(){ btn.textContent = old; }, 1600);
     });
   }
+  // Show the current release tag in the banner. Falls back to the baked-in
+  // version if GitHub is unreachable or rate-limits the anonymous API.
+  (function(){
+    var el = document.getElementById('rel-ver');
+    if (!el) return;
+    fetch('https://api.github.com/repos/ipsupport-llc/ipsupport-code/releases/latest',
+          { headers: { Accept: 'application/vnd.github+json' } })
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(d){ if (d && d.tag_name) el.textContent = d.tag_name; })
+      .catch(function(){});
+  })();
 </script>
 </body>
 </html>

@@ -152,11 +152,9 @@
   <div class="term" aria-label="example session">
     <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>ipsupport-code</span></div>
 <pre><span class="p">❯</span> ipsupport-code
-<span class="box">✦ ipsupport-code  <span id="rel-ver">v0.24.1</span></span>
-<span class="box">╭─────────────────────────────────╮
-│ model  qwen2.5-7b-instruct      │
-│ cwd    ~/myproject              │
-╰─────────────────────────────────╯</span>
+<span class="box" id="banner">✦ ipsupport-code
+model  qwen2.5-7b-instruct
+cwd    ~/myproject</span>
 
 <span class="p">❯</span> add a /health endpoint and run the tests
   <span class="c">⚙ file</span> edit  server.go   <span class="add">+6</span> <span class="del">−0</span>
@@ -280,15 +278,34 @@
       setTimeout(function(){ btn.textContent = old; }, 1600);
     });
   }
-  // Show the current release tag in the banner. Falls back to the baked-in
-  // version if GitHub is unreachable or rate-limits the anonymous API.
+  // Startup banner: draw the frame around the content at render time so it fits
+  // ANY version string — a longer release tag can never push a hand-counted box
+  // out of alignment. The version comes live from the GitHub releases API, with
+  // a baked-in fallback if it is unreachable or rate-limits the anonymous call.
+  // No-JS visitors keep the plain (frameless) rows already in #banner.
   (function(){
-    var el = document.getElementById('rel-ver');
+    var el = document.getElementById('banner');
     if (!el) return;
+    function draw(version){
+      var rows = [
+        '✦ ipsupport-code' + (version ? '  ' + version : ''),
+        'model  qwen2.5-7b-instruct',
+        'cwd    ~/myproject'
+      ];
+      var w = 0;
+      rows.forEach(function(r){ if (r.length > w) w = r.length; });
+      var inner = w + 4;                       // 2 spaces of padding each side
+      var bar = '─'.repeat(inner);
+      var mid = rows.map(function(r){
+        return '│  ' + r + ' '.repeat(inner - 2 - r.length) + '│';
+      });
+      el.textContent = ['╭' + bar + '╮'].concat(mid, ['╰' + bar + '╯']).join('\n');
+    }
+    draw('');                                  // no version until the API answers — nothing hardcoded
     fetch('https://api.github.com/repos/ipsupport-llc/ipsupport-code/releases/latest',
           { headers: { Accept: 'application/vnd.github+json' } })
       .then(function(r){ return r.ok ? r.json() : null; })
-      .then(function(d){ if (d && d.tag_name) el.textContent = d.tag_name; })
+      .then(function(d){ if (d && d.tag_name) draw(d.tag_name); })
       .catch(function(){});
   })();
 </script>

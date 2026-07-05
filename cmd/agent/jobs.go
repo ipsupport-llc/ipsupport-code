@@ -98,6 +98,68 @@ func (a *app) injectJobResults() {
 	a.ag.SetHistory(h)
 }
 
+// --- /btw side-channel steering --------------------------------------------
+//
+// /btw drops a note into a RUNNING task without stopping it (esc cancels; /btw
+// steers). The note is buffered under btwMu and the agent's beforeTurn hook
+// (drainBtw) folds it into the model's working set between turns, so it lands on
+// the next reason→act→observe step instead of interrupting the stream. Typed
+// while idle, it simply steers the next run.
+
+// addBtw queues a user aside. Safe to call from the UI goroutine while the run
+// goroutine drains it.
+func (a *app) addBtw(note string) bool {
+	note = strings.TrimSpace(note)
+	if note == "" {
+		return false
+	}
+	a.btwMu.Lock()
+	a.pendingBtw = append(a.pendingBtw, note)
+	a.btwMu.Unlock()
+	return true
+}
+
+// drainBtw is the agent's beforeTurn hook: it returns queued /btw notes as
+// user-role messages (prefixed so the model reads them as an aside, not a new
+// task) and clears the buffer.
+func (a *app) drainBtw() []llm.Message {
+	a.btwMu.Lock()
+	notes := a.pendingBtw
+	a.pendingBtw = nil
+	a.btwMu.Unlock()
+	if len(notes) == 0 {
+		return nil
+	}
+	msgs := make([]llm.Message, 0, len(notes))
+	for _, n := range notes {
+		msgs = append(msgs, llm.User("[by the way] "+n))
+	}
+	return msgs
+}
+
+// btwPending reports how many /btw notes are queued (for /status).
+func (a *app) btwPending() int {
+	a.btwMu.Lock()
+	defer a.btwMu.Unlock()
+	return len(a.pendingBtw)
+}
+
+// btwCommand handles /btw. running distinguishes steering a live task from
+// leaving a note for the next run (the wording, not the mechanism, differs).
+func (a *app) btwCommand(rest string, running bool) []string {
+	if strings.TrimSpace(rest) == "" {
+		if n := a.btwPending(); n > 0 {
+			return []string{fmt.Sprintf("%d aside(s) queued for the next turn — add more with /btw <note>", n)}
+		}
+		return []string{"usage: /btw <note> — drop a side-note into the running task without stopping it"}
+	}
+	a.addBtw(rest)
+	if running {
+		return []string{"✦ noted — steering the running task; it lands on the next step"}
+	}
+	return []string{"✦ noted — will steer your next run"}
+}
+
 // jobsPending reports how many jobs are still running (for /status).
 func (a *app) jobsPending() int {
 	a.jobMu.Lock()

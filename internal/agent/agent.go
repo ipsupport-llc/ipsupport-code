@@ -47,6 +47,12 @@ type Agent struct {
 	planMode   bool
 	label      string // non-empty for a sub-agent; tags its events so the UI can group them
 
+	// beforeTurn, if set, is called at the top of every loop iteration and its
+	// messages are folded into the working set before the next model call. It's
+	// the seam for side-channel steering (/btw) that must reach the model between
+	// turns WITHOUT interrupting the run. Must be safe to call concurrently.
+	beforeTurn func() []llm.Message
+
 	// Goal pursuit: when the model finalizes but a judge (judgeGoal) decides the
 	// goal isn't met, it's re-fed the goal and continues, up to maxReturns (a TTL).
 	maxReturns int
@@ -81,6 +87,12 @@ func (a *Agent) SetGoalLoop(maxReturns int) {
 // it emits (as the "agent" field) so the UI can group a sub-agent's progress on
 // its own status line during a parallel fan-out.
 func (a *Agent) SetLabel(s string) { a.label = s }
+
+// SetBeforeTurn registers a hook called at the top of every loop iteration; the
+// messages it returns are appended to the working set before the next model
+// call. Used for /btw side-channel steering. The hook must be concurrency-safe —
+// it's invoked from the run goroutine while the UI goroutine may be feeding it.
+func (a *Agent) SetBeforeTurn(fn func() []llm.Message) { a.beforeTurn = fn }
 
 // SetPlanMode toggles plan mode. In plan mode the agent investigates with
 // read-only tools and proposes a plan; mutating tool calls are refused, so it
@@ -223,6 +235,15 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	refusalNudged := false    // already pushed back on a "can't edit / here are the files" dodge?
 	for step := 0; step < a.maxSteps; step++ {
 		tr.Steps = step + 1
+
+		// Side-channel steering (/btw): fold any notes the user dropped mid-run into
+		// the working set before this turn's model call, so they land between
+		// iterations instead of interrupting the stream.
+		if a.beforeTurn != nil {
+			if extra := a.beforeTurn(); len(extra) > 0 {
+				msgs = append(msgs, extra...)
+			}
+		}
 
 		assistant, err := a.llm.Chat(ctx, msgs, tools)
 		if err != nil {

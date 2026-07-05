@@ -492,7 +492,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case taskDoneMsg:
 		m.cancel = nil
 		m.retry = nil
-		m.steer = nil // steering notes belonged to the run that just ended
+		m.steer = nil                 // steering notes belonged to the run that just ended
 		m.applyPendingMode()          // a shift+tab during the task takes effect now, before the next one
 		detect := m.detectWindowCmd() // model is loaded now — confirm the real window
 		if m.state != stRunning {     // a modal panel is open over the finished task — keep it; finalize on close

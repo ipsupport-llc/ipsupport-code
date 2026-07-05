@@ -1804,7 +1804,7 @@ var keyHelp = [][2]string{
 	{"ctrl+r", "reverse-search the prompt history (type to narrow · ctrl+r older · enter use)"},
 	{"y / n / a", "on an approval: approve · deny · allow all of that kind this session"},
 	{"alt+enter", "newline in the input (also ctrl+j)"},
-	{"Tab", "complete a /command · an @file path · or accept the NEXT suggestion"},
+	{"Tab", "complete a /command · a /cd dir · an @file path · or accept the NEXT suggestion"},
 	{"shift+tab", "toggle plan ⇄ auto (mid-task: applies on the next task)"},
 	{"!cmd  ·  !", "run one shell command · bare ! drops to a shell"},
 	{"ctrl+u", "clear the input · ctrl+l clear the screen · PgUp/PgDn scroll the log"},
@@ -1842,7 +1842,7 @@ var commandList = []cmdInfo{
 	{"/config", "settings panel — interactive in the TUI (↑↓ · enter · esc); a static overview in the REPL"},
 	{"/update", "self-update from GitHub (stable|nightly)"},
 	{"/offline", "on|off — work without internet (disables web + update checks)"},
-	{"/cd", "set the working dir (relative paths + sub-agents resolve there)"},
+	{"/cd", "set the working dir (Tab-completes sub-dirs; relative paths + sub-agents resolve there)"},
 	{"/knowledge", "learned-lessons store: report · clear · purge <days> · retain <days>"},
 	{"/mcp", "list configured MCP servers and their tools"},
 	{"/rewind", "pick a step to roll back to (restores files + trims the chat)"},
@@ -1935,6 +1935,14 @@ func (m *tuiModel) completeArg(name, arg string) {
 		if !strings.ContainsRune(sub, ' ') {
 			m.applyCompletion("/ai key", sub, config.KnownProviders())
 		}
+		return
+	}
+	// "/cd <dir>" — complete directory paths one segment at a time (shell-style),
+	// resolved through the jail. Reuses applyCompletion, which adds no trailing
+	// space on a unique match, so you can keep descending into sub-dirs.
+	if name == "/cd" {
+		_, matches := m.app.completeDir(arg)
+		m.applyCompletion("/cd", arg, matches)
 		return
 	}
 	if strings.ContainsRune(arg, ' ') { // only the first token completes

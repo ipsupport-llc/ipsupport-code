@@ -2024,3 +2024,57 @@ func TestBtwSteeringDrainsOnce(t *testing.T) {
 		t.Error("buffer not cleared after drain")
 	}
 }
+
+// TestCompleteDirSegments covers /cd Tab-completion: it lists sub-dirs of the
+// already-typed parent one segment at a time, preserves that parent in each
+// candidate (so completion can descend), appends "/", and hides dot-dirs unless
+// the user is explicitly typing one.
+func TestCompleteDirSegments(t *testing.T) {
+	has := func(ss []string, s string) bool {
+		for _, x := range ss {
+			if x == s {
+				return true
+			}
+		}
+		return false
+	}
+	ws := t.TempDir()
+	for _, d := range []string{"internal/agent", "internal/config", "cmd/agent", ".git/hooks"} {
+		if err := os.MkdirAll(filepath.Join(ws, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, m := a.completeDir("") // top level: real dirs, dot-dir hidden
+	if !has(m, "cmd/") || !has(m, "internal/") {
+		t.Fatalf("top-level = %v, want cmd/ and internal/", m)
+	}
+	if has(m, ".git/") {
+		t.Errorf("dot-dir must be hidden by default: %v", m)
+	}
+
+	if _, m = a.completeDir("inter"); len(m) != 1 || m[0] != "internal/" {
+		t.Fatalf("partial segment = %v, want [internal/]", m)
+	}
+
+	_, m = a.completeDir("internal/") // descend: parent preserved in each candidate
+	if !has(m, "internal/agent/") || !has(m, "internal/config/") {
+		t.Fatalf("descend = %v, want internal/agent/ + internal/config/", m)
+	}
+
+	if _, m = a.completeDir("internal/ag"); len(m) != 1 || m[0] != "internal/agent/" {
+		t.Fatalf("deeper partial = %v, want [internal/agent/]", m)
+	}
+
+	if _, m = a.completeDir("../../etc"); len(m) != 0 { // jail: no escaping the workspace
+		t.Errorf("path outside the jail must yield nothing, got %v", m)
+	}
+}

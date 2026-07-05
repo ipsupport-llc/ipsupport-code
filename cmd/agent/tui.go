@@ -326,9 +326,12 @@ func (m *tuiModel) renderChooser() string {
 	return box.Render(strings.Join(lines, "\n"))
 }
 
-// bannerLines builds the Claude-Code-style startup card: a rounded box with the
-// agent name + version, model, working directory, and detected context window,
-// then a one-line key hint.
+// bannerLines builds the Claude-Code-style startup card: the "✦ name version"
+// brand line, then a rounded box with model, working directory, and detected
+// context window, then a one-line key hint. The ✦ lives OUTSIDE the box on
+// purpose: some terminal/font combos draw it two cells wide while lipgloss
+// counts one, which pushed that row past the right border and broke the frame —
+// nothing width-ambiguous goes inside the box.
 func bannerLines(name, ver, provider, model, cwd string, window int, accent lipgloss.Color) []string {
 	if h, err := os.UserHomeDir(); err == nil && h != "" && strings.HasPrefix(cwd, h) {
 		cwd = "~" + cwd[len(h):]
@@ -339,7 +342,6 @@ func bannerLines(name, ver, provider, model, cwd string, window int, accent lipg
 		modelRow += cDim.Render("  (" + provider + ")")
 	}
 	rows := []string{
-		label.Render("✦ "+name) + cDim.Render("  "+ver),
 		modelRow,
 		cDim.Render("cwd    ") + cBot.Render(cwd),
 	}
@@ -352,9 +354,10 @@ func bannerLines(name, ver, provider, model, cwd string, window int, accent lipg
 		BorderForeground(accent).
 		Padding(0, 2).
 		Render(body)
+	head := label.Render("✦ "+name) + cDim.Render("  "+ver)
 	tip := cDim.Render(`type a task — e.g. "explain what main.go does" — or /help for commands`)
 	keys := cDim.Render("Tab complete · ctrl+r history · alt+enter newline · ctrl+u clear · ctrl+c quit · shift+tab plan⇄auto")
-	return append(strings.Split(box, "\n"), "", tip, keys)
+	return append(append([]string{head}, strings.Split(box, "\n")...), "", tip, keys)
 }
 
 func (a *app) runTUI(ctx context.Context) error {

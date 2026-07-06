@@ -50,6 +50,22 @@ func TestSplitCommand(t *testing.T) {
 	}
 }
 
+func TestManagedUpdateNotice(t *testing.T) {
+	dir := t.TempDir()
+	if scoopInstallDir(dir) {
+		t.Fatal("empty directory detected as Scoop install")
+	}
+
+	for _, name := range []string{"manifest.json", "install.json"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !scoopInstallDir(dir) {
+		t.Fatal("Scoop metadata was not detected")
+	}
+}
+
 func TestParseLoop(t *testing.T) {
 	// interval + task, no count cap
 	if iv, max, g, ok := parseLoop("5m build it"); !ok || iv != 5*time.Minute || max != 0 || g != "build it" {

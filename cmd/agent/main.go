@@ -47,6 +47,27 @@ import (
 // and `make release`); "dev" for a plain `go build`.
 var version = "dev"
 
+// managedUpdateNotice identifies installs whose package manager owns upgrades.
+// Keep this small and explicit: other distribution methods retain self-update.
+func managedUpdateNotice() string {
+	exe, err := os.Executable()
+	if err == nil && scoopInstallDir(filepath.Dir(exe)) {
+		return "this installation is managed by Scoop — run `scoop update ipsupport-code`"
+	}
+	return ""
+}
+
+// Scoop writes both files beside every installed app. Checking its own metadata
+// keeps package-manager state local to this installation—no env var or CLI flag.
+func scoopInstallDir(dir string) bool {
+	for _, name := range []string{"manifest.json", "install.json"} {
+		if info, err := os.Stat(filepath.Join(dir, name)); err != nil || info.IsDir() {
+			return false
+		}
+	}
+	return true
+}
+
 func main() {
 	var (
 		workspace   string
@@ -123,6 +144,10 @@ func main() {
 // runUpdate downloads and installs a newer binary from GitHub Releases for the
 // configured channel (an optional "stable"/"nightly" arg switches and saves it).
 func runUpdate(args []string) {
+	if notice := managedUpdateNotice(); notice != "" {
+		fmt.Println(notice)
+		return
+	}
 	cfg, _ := config.Load(".")
 	channel := cfg.Channel
 	if channel == "" {
@@ -171,6 +196,9 @@ func (a *app) startupNotice(ctx context.Context) string {
 // freshnessNotice returns a one-line "newer build available" message, or "" when
 // up to date, on a local (dev) build, or if the check fails. Best-effort.
 func (a *app) freshnessNotice(ctx context.Context) string {
+	if managedUpdateNotice() != "" { // package managers own their update checks
+		return ""
+	}
 	if a.cfg.Offline { // offline mode: never reach GitHub to check for updates
 		return ""
 	}
@@ -2423,7 +2451,9 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	case "/auto":
 		fmt.Println(a.setMode(false))
 	case "/update":
-		if a.cfg.Offline {
+		if notice := managedUpdateNotice(); notice != "" {
+			fmt.Println(notice)
+		} else if a.cfg.Offline {
 			fmt.Println("offline mode is on — /update needs the internet. Run /offline off first.")
 		} else {
 			runUpdate(strings.Fields(rest))

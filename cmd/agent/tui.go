@@ -1171,6 +1171,10 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/auto":
 		m.push(cDim.Render(m.app.setMode(false)))
 	case "/update":
+		if notice := managedUpdateNotice(); notice != "" {
+			m.push(cDim.Render(notice))
+			return m, nil
+		}
 		if m.app.cfg.Offline {
 			m.push(cDim.Render("offline mode is on — /update needs the internet. Run /offline off first."))
 			return m, nil

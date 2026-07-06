@@ -213,6 +213,11 @@ channel (`stable` by default — set `"channel": "nightly"` in
 `~/.config/ipsupport-code/config.json`, or switch with `update nightly`). Local
 dev builds are never nagged.
 
+Scoop-managed installations leave updates to Scoop: the startup check is
+skipped, and `update` or `/update` directs you to run
+`scoop update ipsupport-code`. Direct installations retain the stable/nightly
+self-update behaviour above.
+
 **Working directory.** Launched from a parent dir (or `~`)? `/cd <subdir>` points
 the session at your project — relative file/run/git paths resolve there, and
 sub-agents inherit it as their default `dir`, so you set the path once instead of

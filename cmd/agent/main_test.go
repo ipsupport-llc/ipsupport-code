@@ -50,6 +50,16 @@ func TestSplitCommand(t *testing.T) {
 	}
 }
 
+func TestFreshnessNoticeSkippedWhenUpdateCheckOff(t *testing.T) {
+	// With the check disabled, freshnessNotice must return "" before any network
+	// call — independent of Offline. (An enabled dev build also returns "", so we
+	// assert the disabled path via the guard, not the network.)
+	a := &app{cfg: config.Config{UpdateCheck: false}}
+	if got := a.freshnessNotice(context.Background()); got != "" {
+		t.Errorf("freshnessNotice with update_check off = %q, want empty", got)
+	}
+}
+
 func TestParseLoop(t *testing.T) {
 	// interval + task, no count cap
 	if iv, max, g, ok := parseLoop("5m build it"); !ok || iv != 5*time.Minute || max != 0 || g != "build it" {

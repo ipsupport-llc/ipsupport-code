@@ -7,6 +7,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
@@ -143,6 +145,12 @@ type Config struct {
 	// makes anything that would reach the net fail fast with a clear message.
 	// Local model calls (e.g. LM Studio on localhost) are unaffected.
 	Offline bool `json:"offline,omitempty"`
+	// UpdateCheck controls the best-effort startup "newer build available" notice.
+	// On by default; set it false to silence the check WITHOUT going fully Offline
+	// (which also disables the web tool) — for pinned or package-managed installs
+	// that own their own upgrades. No omitempty: false must round-trip and show in
+	// `config list`.
+	UpdateCheck bool `json:"update_check"`
 	// ReflectDisabled skips the post-task reflection pass (lesson distillation).
 	// Reflection is on by default; turn it off when a weak model loops there.
 	ReflectDisabled bool `json:"reflect_disabled,omitempty"`
@@ -260,6 +268,7 @@ func Default() Config {
 			DenyWrite:  append([]string{}, fileDenyFloor...),
 		},
 		Spawn:          SpawnPolicy{Default: "ask", Exec: false},
+		UpdateCheck:    true,
 		GoalMaxReturns: 6,
 		GoalMaxSteps:   80,
 	}
@@ -406,6 +415,201 @@ func SaveAgents(agents map[string]AgentProfile) error {
 // presets (which may include API keys — the file is written 0600).
 func SaveProviders(provider string, providers map[string]LLM) error {
 	return mergeGlobalKeys(map[string]any{"provider": provider, "providers": providers})
+}
+
+// ---- dotted-path get/set/unset for the `config` subcommand --------------
+//
+// These operate on a config file as a generic JSON object so any key (including
+// nested policy like run.default or llm.model) is reachable without a
+// field-by-field flag. Writes reuse the same safety properties as the typed
+// savers: refuse to touch a corrupt file, and write atomically.
+
+// SetFileValue sets the dotted-path key in the JSON config file at path to the
+// value parsed from raw (valid JSON becomes its typed form — false→bool, 8→int,
+// [..]/{..}→array/object; anything else is the literal string), preserving every
+// other key. It refuses to write if the existing file is unparseable, and
+// validates that the result is a well-formed Config with no unknown keys (so a
+// typo like `goal_max_retunrs` is rejected rather than silently persisted).
+func SetFileValue(path string, perm os.FileMode, dotted, raw string) error {
+	segs, err := splitPath(dotted)
+	if err != nil {
+		return err
+	}
+	root, err := readObject(path)
+	if err != nil {
+		return err
+	}
+	if err := setPath(root, segs, parseValue(raw)); err != nil {
+		return err
+	}
+	if err := validateConfigObject(root); err != nil {
+		return err
+	}
+	return writeObject(path, perm, root)
+}
+
+// UnsetFileValue removes the dotted-path key from the config file at path. A key
+// that isn't present is a no-op (not an error).
+func UnsetFileValue(path string, perm os.FileMode, dotted string) error {
+	segs, err := splitPath(dotted)
+	if err != nil {
+		return err
+	}
+	root, err := readObject(path)
+	if err != nil {
+		return err
+	}
+	m := root
+	for _, s := range segs[:len(segs)-1] {
+		next, ok := m[s].(map[string]any)
+		if !ok {
+			return nil // parent path absent → nothing to unset
+		}
+		m = next
+	}
+	delete(m, segs[len(segs)-1])
+	return writeObject(path, perm, root)
+}
+
+// LookupPath returns the effective value at a dotted path in cfg (its marshaled
+// view), and whether that path exists.
+func LookupPath(cfg Config, dotted string) (any, bool) {
+	segs, err := splitPath(dotted)
+	if err != nil {
+		return nil, false
+	}
+	var cur any = toObject(cfg)
+	for _, s := range segs {
+		obj, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if cur, ok = obj[s]; !ok {
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
+// Flatten returns the effective config as sorted "dotted.path\tvalue" lines
+// (value as compact JSON), for `config list`.
+func Flatten(cfg Config) []string {
+	var out []string
+	var walk func(prefix string, v any)
+	walk = func(prefix string, v any) {
+		if obj, ok := v.(map[string]any); ok && len(obj) > 0 {
+			for k, vv := range obj {
+				child := k
+				if prefix != "" {
+					child = prefix + "." + k
+				}
+				walk(child, vv)
+			}
+			return
+		}
+		b, _ := json.Marshal(v)
+		out = append(out, prefix+"\t"+string(b))
+	}
+	walk("", toObject(cfg))
+	sort.Strings(out)
+	return out
+}
+
+func splitPath(dotted string) ([]string, error) {
+	dotted = strings.TrimSpace(dotted)
+	if dotted == "" {
+		return nil, errors.New("empty key")
+	}
+	segs := strings.Split(dotted, ".")
+	for _, s := range segs {
+		if s == "" {
+			return nil, fmt.Errorf("invalid key %q: empty path segment", dotted)
+		}
+	}
+	return segs, nil
+}
+
+// parseValue interprets a CLI value: valid JSON keeps its type, otherwise it's
+// the literal string (so `nightly` or a path needn't be quoted).
+func parseValue(raw string) any {
+	var v any
+	if err := json.Unmarshal([]byte(raw), &v); err == nil {
+		return v
+	}
+	return raw
+}
+
+func setPath(root map[string]any, segs []string, val any) error {
+	m := root
+	for i, s := range segs[:len(segs)-1] {
+		next, ok := m[s]
+		if !ok {
+			child := map[string]any{}
+			m[s] = child
+			m = child
+			continue
+		}
+		child, ok := next.(map[string]any)
+		if !ok {
+			return fmt.Errorf("cannot set %s: %s is not an object", strings.Join(segs, "."), strings.Join(segs[:i+1], "."))
+		}
+		m = child
+	}
+	m[segs[len(segs)-1]] = val
+	return nil
+}
+
+// readObject loads the config file as a generic JSON object, aborting (rather
+// than clobbering) if it exists but can't be parsed. A missing file yields an
+// empty object.
+func readObject(path string) (map[string]any, error) {
+	root := map[string]any{}
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if err := json.Unmarshal(data, &root); err != nil {
+			return nil, fmt.Errorf("refusing to edit: %s is not valid JSON (%v) — fix or remove it first so your settings aren't lost", path, err)
+		}
+	case errors.Is(err, fs.ErrNotExist):
+		// new file
+	default:
+		return nil, err
+	}
+	return root, nil
+}
+
+func writeObject(path string, perm os.FileMode, root map[string]any) error {
+	data, err := json.MarshalIndent(root, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicfile.Write(path, data, perm)
+}
+
+// validateConfigObject rejects a proposed config object that wouldn't decode
+// into a Config — a wrong type (goal_max_returns "abc") or an unknown key (a
+// typo). Map contents (provider names, agent names) stay free; only struct
+// fields are checked.
+func validateConfigObject(root map[string]any) error {
+	data, err := json.Marshal(root)
+	if err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	var c Config
+	if err := dec.Decode(&c); err != nil {
+		return fmt.Errorf("invalid config after edit: %w", err)
+	}
+	return nil
+}
+
+// toObject renders cfg as a generic JSON object for path lookup/flattening.
+func toObject(cfg Config) map[string]any {
+	var m map[string]any
+	data, _ := json.Marshal(cfg)
+	_ = json.Unmarshal(data, &m)
+	return m
 }
 
 // Load merges the user config then the workspace config over Default(), unions

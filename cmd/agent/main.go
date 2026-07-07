@@ -62,6 +62,7 @@ func main() {
 	flag.BoolVar(&dumpPrompt, "dump-prompt", false, "print the built-in system prompt and exit (e.g. > .agent/system.md to start editing)")
 	flag.BoolVar(&newSession, "new", false, "start a fresh session (don't restore the saved one)")
 	flag.StringVar(&sessionName, "session", "", "use a named session (a separate saved thread)")
+	flag.Usage = printUsage
 	flag.Parse()
 	if showVersion {
 		fmt.Println("ipsupport-code", version)
@@ -71,13 +72,31 @@ func main() {
 		fmt.Println(agent.DefaultSystemPrompt())
 		return
 	}
-	if args := flag.Args(); len(args) >= 1 && args[0] == "update" {
-		runUpdate(args[1:])
-		return
+	// Subcommand dispatch — one clear surface for the non-task verbs, rather than
+	// ad-hoc arg checks. `init` needs the reader, so it's handled just below.
+	if args := flag.Args(); len(args) >= 1 {
+		switch args[0] {
+		case "version":
+			fmt.Println("ipsupport-code", version)
+			return
+		case "update":
+			runUpdate(args[1:])
+			return
+		case "config":
+			runConfig(workspace, args[1:])
+			return
+		case "help":
+			printUsage()
+			return
+		}
 	}
 	setupLogging()
 
 	reader := bufio.NewReader(os.Stdin)
+	if args := flag.Args(); len(args) >= 1 && args[0] == "init" {
+		maybeInit(reader, true) // `init` subcommand: (re-)run setup and exit
+		return
+	}
 	maybeInit(reader, doInit)
 
 	app, cleanup, err := build(workspace, reader)
@@ -171,6 +190,9 @@ func (a *app) startupNotice(ctx context.Context) string {
 // freshnessNotice returns a one-line "newer build available" message, or "" when
 // up to date, on a local (dev) build, or if the check fails. Best-effort.
 func (a *app) freshnessNotice(ctx context.Context) string {
+	if !a.cfg.UpdateCheck { // update check disabled (pinned / package-managed install)
+		return ""
+	}
 	if a.cfg.Offline { // offline mode: never reach GitHub to check for updates
 		return ""
 	}

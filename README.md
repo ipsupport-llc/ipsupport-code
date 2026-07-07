@@ -211,7 +211,9 @@ ipsupport-code update stable     # switch back to stable
 best-effort check and prints a one-line notice if a newer build is out on your
 channel (`stable` by default — set `"channel": "nightly"` in
 `~/.config/ipsupport-code/config.json`, or switch with `update nightly`). Local
-dev builds are never nagged.
+dev builds are never nagged. To silence the startup check on a pinned or
+package-managed install without going fully offline, set
+`ipsupport-code config set update_check false`.
 
 **Working directory.** Launched from a parent dir (or `~`)? `/cd <subdir>` points
 the session at your project — relative file/run/git paths resolve there, and
@@ -496,6 +498,25 @@ Settings merge over safe defaults from two JSON files:
 - **`<workspace>/.agent/config.json`** — per-project: the permission policy (see
   [`.agent/config.example.json`](.agent/config.example.json)). Wins over the user
   file.
+
+Edit either file from a script with the `config` subcommand — no interactive
+session needed:
+
+```sh
+ipsupport-code config set update_check false   # any key, dotted paths for nested
+ipsupport-code config set goal_max_returns 8   # JSON values keep their type
+ipsupport-code config get llm.model            # print the effective value
+ipsupport-code config unset channel            # back to the default
+ipsupport-code config list                     # effective config, one key per line
+ipsupport-code config --local set run.default allow   # write the workspace file
+```
+
+Values that parse as JSON keep their type (`false`, `8`, `["x"]`); anything else
+is a literal string. `set` writes the global user file by default (`--local`
+targets `<workspace>/.agent/config.json`); a wrong type or a misspelled key is
+rejected rather than saved. `get`/`list` show the effective, merged value — a key
+sitting at its zero default (e.g. `offline` when off) prints nothing, like
+`git config --get`.
 
 `run.timeout_seconds` caps how long a shell command may run (default 60s); raise
 it for slow builds/test suites, or let the model pass a larger per-call `timeout`.

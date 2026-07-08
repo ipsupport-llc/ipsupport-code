@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -65,7 +66,7 @@ func catalogNames() []string {
 // spawnExternalAgent runs an external-CLI profile as a sub-agent: exec Command in
 // the target dir with the task substituted into Args, and hand the tail of its
 // output (plus a change summary) back to the delegating model.
-func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.AgentProfile, task, dir string) (string, error) {
+func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.AgentProfile, task, dir string, onLine func(string)) (string, error) {
 	command := strings.TrimSpace(p.Command)
 	if command == "" {
 		return "", fmt.Errorf("profile %q: external agent has no command", profile)
@@ -106,13 +107,21 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 	defer cancel()
 
 	id := fmt.Sprintf("sub%d", a.spawnSeq.Add(1)) // groups this sub-agent's UI events
-	a.emit("subagent", map[string]any{"agent": id, "profile": profile, "provider": "external", "model": command, "dir": root, "task": oneLine(task, 80)})
+	a.emit("subagent", map[string]any{"agent": id, "profile": profile, "provider": "external", "model": command, "dir": root, "task": task})
 
 	cmd := exec.CommandContext(cctx, command, expandTaskArgs(p.Args, task)...)
 	cmd.Dir = root
 	setProcGroup(cmd) // cancel/timeout kills the whole process tree, not just the child
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if onLine != nil {
+		// Still accumulate for the final report, but also tap each output line so a
+		// background job can surface its progress in /jobs. Separate taps per stream
+		// keep their line buffers race-free under concurrent stdout/stderr copies.
+		cmd.Stdout = io.MultiWriter(&stdout, &lineTap{onLine: onLine})
+		cmd.Stderr = io.MultiWriter(&stderr, &lineTap{onLine: onLine})
+	} else {
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	}
 	runErr := cmd.Run()
 	if cctx.Err() == context.DeadlineExceeded {
 		runErr = fmt.Errorf("timed out after %s — use the CLI's non-interactive mode (exec / -p / --message) so it can't sit waiting for input", timeout)
@@ -169,4 +178,27 @@ func externalResult(command, stdout, stderr, diffStat string, runErr error) stri
 		b.WriteString("\n--- changes (git diff --stat) ---\n" + diffStat + "\n(full patch: /diff)\n")
 	}
 	return strings.TrimSpace(b.String())
+}
+
+// lineTap is an io.Writer that forwards each completed, non-empty output line to
+// onLine (trimmed) — used to surface a running external agent's latest line in
+// /jobs. One tap serves one stream, so its line buffer needs no locking.
+type lineTap struct {
+	buf    []byte
+	onLine func(string)
+}
+
+func (t *lineTap) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	for {
+		i := bytes.IndexByte(t.buf, '\n')
+		if i < 0 {
+			break
+		}
+		if line := strings.TrimSpace(string(t.buf[:i])); line != "" {
+			t.onLine(line)
+		}
+		t.buf = t.buf[i+1:]
+	}
+	return len(p), nil
 }

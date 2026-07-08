@@ -186,7 +186,9 @@ working while the job runs. When the job finishes you see a `✓ job #N` notice,
 and the **result is folded into the assistant's next step** — even mid-task, via
 the same between-steps seam as [`/btw`](#steering-a-running-task-btw), so a job
 that lands while the assistant is working doesn't wait for the next task to be
-noticed. `/jobs` lists them (with a live `⚙ running <elapsed>` line), `/jobs
+noticed. `/jobs` lists them (each running one shows `⚙ running <elapsed>` plus
+`↳ <its latest output line> (<age> ago)` for an external agent — a long gap
+hints it's stuck, not working), `/jobs
 result <id>` prints one in full, `/jobs kill <id>` cancels. Jobs survive their
 parent task (and esc) — perfect for a long codex review running while you
 continue in the main loop.

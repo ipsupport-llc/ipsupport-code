@@ -102,6 +102,78 @@ func TestBeforeTurnDeliversFinishedJob(t *testing.T) {
 	}
 }
 
+func TestLineTap(t *testing.T) {
+	var got []string
+	tap := &lineTap{onLine: func(s string) { got = append(got, s) }}
+	// A partial line spanning two writes joins; blank lines are skipped; each
+	// complete line is trimmed.
+	tap.Write([]byte("hello\nwor"))
+	tap.Write([]byte("ld\n\n  spaced  \n"))
+	tap.Write([]byte("no newline yet")) // buffered, not emitted
+	want := []string{"hello", "world", "spaced"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Errorf("lineTap emitted %v, want %v", got, want)
+	}
+}
+
+func TestJobsShowsLiveProgress(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.jobs = append(a.jobs, &job{id: 1, profile: "codex", task: "fix the repo", started: time.Now()})
+
+	a.setJobProgress(1, "applying patch to foo.go")
+	list := strings.Join(a.jobsCommand(""), "\n")
+	if !strings.Contains(list, "↳ applying patch to foo.go") || !strings.Contains(list, "running") {
+		t.Fatalf("/jobs missing live progress line:\n%s", list)
+	}
+}
+
+func TestSubagentRenderShowsFullTask(t *testing.T) {
+	m := &tuiModel{width: 60}
+	task := "Fix ALL issues identified in the code review of the notecli repository and then open a pull request"
+	lines := m.renderEvent(uiEvent{kind: "subagent", fields: map[string]any{
+		"profile": "codex", "model": "codex", "dir": "/x/notecli", "task": task}})
+	if len(lines) < 2 {
+		t.Fatalf("expected the head line + wrapped task, got %v", lines)
+	}
+	norm := strings.Join(strings.Fields(stripAnsi(strings.Join(lines, " "))), " ")
+	if !strings.Contains(norm, task) { // the whole task survives, wrapped not clipped
+		t.Errorf("full task not shown:\n%s", norm)
+	}
+}
+
+func TestBackgroundJobStreamsProgress(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.Agents = map[string]config.AgentProfile{
+		"streamer": {Kind: "external", Command: "sh", Args: []string{"-c", "echo working on it; sleep 0.1"}, Timeout: 30},
+	}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.spawnAgentBackground(context.Background(), "streamer", "do stuff", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 200 && a.jobsPending() > 0; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	a.jobMu.Lock()
+	last := a.jobs[0].lastLine
+	a.jobMu.Unlock()
+	if !strings.Contains(last, "working on it") { // the tapped line reached the job
+		t.Errorf("job lastLine = %q, want the streamed output", last)
+	}
+}
+
 func TestParseLoop(t *testing.T) {
 	// interval + task, no count cap
 	if iv, max, g, ok := parseLoop("5m build it"); !ok || iv != 5*time.Minute || max != 0 || g != "build it" {

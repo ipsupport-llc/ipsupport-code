@@ -344,7 +344,14 @@ func (a *app) hasSubagentTargets() bool {
 // host tools minus `agent` so it can't recurse — and minus run unless spawn.exec
 // is on; it inherits the current plan/auto mode), runs it, records its tokens,
 // and returns its final answer. Safe to call concurrently (fan-out).
+// spawnAgent is the SpawnFunc handed to the `agent` tool (no output tap).
 func (a *app) spawnAgent(ctx context.Context, profile, task, dir string) (string, error) {
+	return a.spawnAgentTapped(ctx, profile, task, dir, nil)
+}
+
+// spawnAgentTapped runs a sub-agent, optionally forwarding an external agent's
+// output lines to onLine (used by background jobs to show live progress).
+func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, onLine func(string)) (string, error) {
 	if strings.TrimSpace(task) == "" {
 		return "", fmt.Errorf("task is required")
 	}
@@ -359,7 +366,7 @@ func (a *app) spawnAgent(ctx context.Context, profile, task, dir string) (string
 	profile = resolved
 	p := a.cfg.Agents[profile]
 	if p.Kind == "external" { // a local CLI agent, not one of our LLM sub-agents
-		return a.spawnExternalAgent(ctx, profile, p, task, dir)
+		return a.spawnExternalAgent(ctx, profile, p, task, dir, onLine)
 	}
 	provider := p.Provider
 	if provider == "" {

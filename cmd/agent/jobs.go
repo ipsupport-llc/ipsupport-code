@@ -28,8 +28,23 @@ type job struct {
 	cancel    context.CancelFunc
 	done      bool
 	ok        bool
-	result    string // final answer, or the error text
-	delivered bool   // already folded into the model's conversation
+	result    string    // final answer, or the error text
+	delivered bool      // already folded into the model's conversation
+	lastLine  string    // most recent output line from an external agent (liveness)
+	lastAt    time.Time // when lastLine arrived — a long gap hints the job is stuck
+}
+
+// setJobProgress records the latest output line of a running job (called from the
+// external agent's output tap; safe from that goroutine).
+func (a *app) setJobProgress(id int, line string) {
+	a.jobMu.Lock()
+	for _, j := range a.jobs {
+		if j.id == id {
+			j.lastLine, j.lastAt = line, time.Now()
+			break
+		}
+	}
+	a.jobMu.Unlock()
 }
 
 // spawnAgentBackground is the SpawnFunc for background=true: validate up front
@@ -56,7 +71,9 @@ func (a *app) spawnAgentBackground(_ context.Context, profile, task, dir string)
 
 	go func() {
 		defer cancel()
-		out, err := a.spawnAgent(jctx, resolved, task, dir) // approval still gates inside
+		// Tap the external agent's output so /jobs shows a live "last line" — a
+		// stuck job stops updating while a working one keeps ticking.
+		out, err := a.spawnAgentTapped(jctx, resolved, task, dir, func(line string) { a.setJobProgress(id, line) })
 		a.jobMu.Lock()
 		j.done, j.finished = true, time.Now()
 		if err != nil {
@@ -215,8 +232,13 @@ func (a *app) jobsCommand(arg string) []string {
 		for _, j := range a.jobs {
 			switch {
 			case !j.done:
-				out = append(out, fmt.Sprintf("  ⚙ #%d %-10s running %s · %s", j.id, j.profile,
-					time.Since(j.started).Truncate(time.Second), oneLine(j.task, 60)))
+				prog := ""
+				if j.lastLine != "" {
+					prog = fmt.Sprintf(" · ↳ %s (%s ago)", oneLine(j.lastLine, 40),
+						time.Since(j.lastAt).Truncate(time.Second))
+				}
+				out = append(out, fmt.Sprintf("  ⚙ #%d %-10s running %s%s · %s", j.id, j.profile,
+					time.Since(j.started).Truncate(time.Second), prog, oneLine(j.task, 60)))
 			case j.ok:
 				note := "result delivered"
 				if !j.delivered {

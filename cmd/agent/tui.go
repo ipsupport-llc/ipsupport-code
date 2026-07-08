@@ -2374,7 +2374,17 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		if dir != "" {
 			head += " · " + filepath.Base(dir)
 		}
-		return []string{cToolCall.Render("  ⇉ spawned "+head) + cDim.Render("  "+task)}
+		// The FULL task (an autonomous agent's whole instruction) goes on its own
+		// wrapped, indented lines so it's never clipped to the viewport width.
+		lines := []string{cToolCall.Render("  ⇉ spawned " + head)}
+		tw := m.width - 5
+		if tw < 20 {
+			tw = 20
+		}
+		for _, tl := range strings.Split(lipgloss.NewStyle().Width(tw).Render(task), "\n") {
+			lines = append(lines, cDim.Render("     "+tl))
+		}
+		return lines
 	case "loop":
 		label := fmt.Sprintf("↻ loop %d", toInt(e.fields["i"]))
 		if total := toInt(e.fields["max"]); total > 0 {

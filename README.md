@@ -200,6 +200,16 @@ mid-run ("`/btw the loader is in internal/config, not cmd`"). The note is pinned
 above the input for the rest of the run, never buried in the scrollback. Typed
 while idle, it simply steers the next task you start.
 
+### Prompt templates (`/snip`)
+
+Save a prompt you reuse and pull it back when you need it. `/snip save <name>`
+stores your **last prompt** under a name (or `/snip save <name> <text>` to store
+text directly); `/snip <name>` drops that template **into the input box** so you
+can tweak it and hit Enter — not auto-sent. `/snip list` shows them, `/snip rm
+<name>` deletes. Templates are stored globally
+(`~/.config/ipsupport-code/snippets.json`), so they follow you across projects,
+and Tab completes both the subcommands and your snippet names.
+
 ## Updating
 
 The binary updates itself in place from GitHub Releases:
@@ -407,6 +417,7 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | `/budget [usd]` | cap estimated spend per run — refuses new tasks once hit; `off` disables |
 | `/diff` | show uncommitted workspace changes (what the agent changed), colorized |
 | `/btw <note>` | steer a **running** task without stopping it — folds into its next step (esc cancels instead) |
+| `/snip [name]` | prompt templates — `/snip <name>` pulls a saved template into the input to edit & send; `save <name> [text]` (omit text → your last prompt) · `list` · `rm <name>` |
 | `/usage` | token spend + **estimated $** (today / 7d / 30d / all, by day, by model); `clear` · `purge <days>` · `retain <days>` |
 | `/login` | (re)configure server URL / model / key, then reload |
 | `/new [name]` | start a NEW session (the old one stays in `/sessions`) |

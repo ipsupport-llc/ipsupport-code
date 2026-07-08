@@ -1686,8 +1686,8 @@ func (a *app) wire() error {
 	}
 	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.goalSteps())
 	a.ag.SetHistory(prior)
-	a.ag.SetPlanMode(a.planMode)   // carry the mode into the rebuilt agent
-	a.ag.SetBeforeTurn(a.drainBtw) // /btw notes fold in between turns of a running task
+	a.ag.SetPlanMode(a.planMode)     // carry the mode into the rebuilt agent
+	a.ag.SetBeforeTurn(a.beforeTurn) // /btw notes + finished background jobs fold in between steps of a running task
 	return nil
 }
 

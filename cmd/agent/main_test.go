@@ -427,14 +427,17 @@ func TestFinishGoalStatusFromTranscript(t *testing.T) {
 
 	a.setGoal("do it")
 	a.finishGoal("do it", agent.Transcript{GoalMet: true})
-	if a.goal.Status != "done" {
-		t.Errorf("met goal status = %q, want done", a.goal.Status)
+	if a.goal.Text != "" || a.goal.Status != "" { // a met goal is cleared, not kept as "done"
+		t.Errorf("met goal = %+v, want cleared", a.goal)
+	}
+	if _, err := os.Stat(a.goalPath()); err == nil {
+		t.Error("met goal file should be removed")
 	}
 
 	a.setGoal("do it")
 	a.finishGoal("do it", agent.Transcript{GoalMet: false})
-	if a.goal.Status != "incomplete" {
-		t.Errorf("unmet goal status = %q, want incomplete", a.goal.Status)
+	if a.goal.Status != "incomplete" || a.goal.Offered {
+		t.Errorf("unmet goal = %+v, want incomplete & not offered", a.goal)
 	}
 
 	// A run that isn't the standing goal must not touch its status.
@@ -442,6 +445,27 @@ func TestFinishGoalStatusFromTranscript(t *testing.T) {
 	a.finishGoal("some other task", agent.Transcript{GoalMet: true})
 	if a.goal.Status != "active" {
 		t.Errorf("off-goal run changed status to %q, want active", a.goal.Status)
+	}
+}
+
+func TestGoalOfferOnce(t *testing.T) {
+	a := &app{workspace: t.TempDir(), cfg: config.Default()}
+
+	a.setGoal("ship it")
+	if a.goal.Offered {
+		t.Fatal("a fresh goal must not be pre-marked offered")
+	}
+	// Surfacing it once persists the offered flag, so a reload won't re-nag.
+	a.markGoalOffered()
+	b := &app{workspace: a.workspace, cfg: config.Default()}
+	b.loadGoal()
+	if !b.goal.Offered {
+		t.Errorf("offered flag not persisted: %+v", b.goal)
+	}
+	// Engaging it again (a run that leaves it unfinished) re-arms one more offer.
+	b.finishGoal("ship it", agent.Transcript{GoalMet: false})
+	if b.goal.Offered {
+		t.Error("an unfinished run should re-arm the resume offer")
 	}
 }
 
@@ -912,9 +936,9 @@ func TestGoalDoneWithJudgeOff(t *testing.T) {
 	a := &app{cfg: config.Default(), workspace: t.TempDir()}
 	a.cfg.GoalMaxReturns = 0 // judge loop off
 	a.goal = goalState{Text: "ship it", Status: "active"}
-	a.finishGoal("ship it", agent.Transcript{}) // clean finish, GoalMet never set
-	if a.goal.Status != "done" {
-		t.Errorf("clean TTL-off finish → %q, want done", a.goal.Status)
+	a.finishGoal("ship it", agent.Transcript{}) // clean finish, GoalMet never set → counts as done
+	if a.goal.Text != "" || a.goal.Status != "" {
+		t.Errorf("clean TTL-off finish should clear the goal, got %+v", a.goal)
 	}
 	a.goal = goalState{Text: "ship it", Status: "active"}
 	a.finishGoal("ship it", agent.Transcript{Cancelled: true})

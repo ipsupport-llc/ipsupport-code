@@ -399,7 +399,9 @@ default 6 re-feeds) before it gives up, on top of the usual esc / stuck / runawa
 guards and a hard step cap.
 
 The goal is a first-class, persisted object: it lives in `.agent/goal.json`, so it
-survives a restart. `/goal` shows the standing goal and its status; `/goal go`
+survives a restart — an unfinished one offers to resume **once** on the next
+start (not every time), and a completed goal clears itself. `/goal` shows the
+standing goal and its status; `/goal go`
 resumes it; `/goal clear` drops it; `/goal off` disables the loop (a goal then runs
 as a single pass). Plain tasks (anything you type that isn't a goal) run as one
 pass with no judge overhead — only an explicit goal gets the loop.

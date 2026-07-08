@@ -200,7 +200,11 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	m.histIdx = len(a.promptHist) // start "not browsing": first ↑ recalls the most recent prompt
 	act := a.activeLLM()
 	m.history = bannerLines(name, version, a.providerName(), act.Model, a.workspace, act.ContextWindow, m.accent)
-	if a.goal.Status == "active" && a.goal.Text != "" {
+	// Surface an unfinished standing goal AT MOST ONCE per restart: after we offer
+	// it, mark it offered so it doesn't re-nag on every subsequent start (a done
+	// goal is cleared outright; engaging it again re-arms one offer).
+	firstGoalOffer := a.goal.Text != "" && (a.goal.Status == "active" || a.goal.Status == "incomplete") && !a.goal.Offered
+	if firstGoalOffer && a.goal.Status == "active" {
 		m.history = append(m.history, cDim.Render("◎ standing goal: "+oneLine(a.goal.Text, 60)+"  — /goal go to resume"))
 	}
 	switch {
@@ -212,8 +216,11 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 			m.state = stChooseSession
 		}
 	}
-	if m.state == stIdle {
-		m.offerGoalResume() // an unfinished goal? offer to pick it back up
+	if m.state == stIdle && firstGoalOffer {
+		m.offerGoalResume() // an unfinished goal? offer to pick it back up — once
+	}
+	if firstGoalOffer {
+		a.markGoalOffered()
 	}
 	return m, nil
 }

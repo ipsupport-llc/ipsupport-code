@@ -303,6 +303,17 @@ For a permanent relaxation instead, `/permissions files on` auto-allows
 non-destructive file ops in the workspace (the deny floor still applies); same for
 `/permissions run on`. That choice **is** saved to the workspace config.
 
+**OS sandbox (opt-in).** The permission engine decides *whether* a command runs;
+an OS-level sandbox can additionally confine *what it can touch* once it does — so
+even an allowed command can't write outside the workspace. Turn it on with
+`config set sandbox seatbelt` (macOS) or `config set sandbox auto` (pick the
+platform's mechanism). Shell (`run`) commands then execute inside the kernel
+sandbox: writes are confined to the workspace, the network follows `/offline`,
+reads and everything else are unchanged. It's **off by default**, and on a
+platform without a supported sandbox (currently anything but macOS Seatbelt;
+Linux Landlock is planned) commands run unconfined as before. External CLI agents
+are **not** sandboxed (they run outside it, as documented above).
+
 ## Skills
 
 On-demand instruction packs — the user-extensible version of guides-on-demand.

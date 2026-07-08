@@ -145,6 +145,11 @@ type Config struct {
 	// makes anything that would reach the net fail fast with a clear message.
 	// Local model calls (e.g. LM Studio on localhost) are unaffected.
 	Offline bool `json:"offline,omitempty"`
+	// Sandbox selects an OS-level containment layer for shell (`run`) commands,
+	// UNDER the policy engine: off (default) | seatbelt (macOS) | landlock (Linux,
+	// planned) | auto (the platform's mechanism). It confines writes to the
+	// workspace even for an allowed command; unsupported platforms run unconfined.
+	Sandbox string `json:"sandbox,omitempty"`
 	// UpdateCheck controls the best-effort startup "newer build available" notice.
 	// On by default; set it false to silence the check WITHOUT going fully Offline
 	// (which also disables the web tool) — for pinned or package-managed installs

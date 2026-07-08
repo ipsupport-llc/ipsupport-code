@@ -33,6 +33,31 @@ func TestRunEcho(t *testing.T) {
 	}
 }
 
+func TestRunAppliesCmdWrapper(t *testing.T) {
+	c := config.Default()
+	c.Workspace = t.TempDir()
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	c.Run = config.RunPolicy{Default: "allow"}
+	e, err := policy.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotName string
+	var gotArgs []string
+	wrap := func(name string, args []string) (string, []string) {
+		gotName, gotArgs = name, args
+		return "sh", []string{"-c", "echo WRAPPED"} // rewrite the command entirely
+	}
+	tl := NewRun(e, yes(), 0, wrap)
+	r := tl.Call(context.Background(), "shell", map[string]any{"command": "echo original"})
+	if r.IsError || !strings.Contains(r.Content, "WRAPPED") || strings.Contains(r.Content, "original") {
+		t.Errorf("wrapper not applied: %+v", r)
+	}
+	if gotName != "sh" || len(gotArgs) != 2 || gotArgs[1] != "echo original" {
+		t.Errorf("wrapper saw %s %v, want sh [-c echo original]", gotName, gotArgs)
+	}
+}
+
 func TestRunPerCallTimeout(t *testing.T) {
 	tl := runToolFor(t, t.TempDir(), "allow", yes(), nil)
 	r := tl.Call(context.Background(), "shell", map[string]any{"command": "sleep 3", "timeout": 1})

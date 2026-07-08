@@ -35,6 +35,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/reflect"
+	"github.com/ipsupport-llc/ipsupport-code/internal/sandbox"
 	"github.com/ipsupport-llc/ipsupport-code/internal/selfupdate"
 	"github.com/ipsupport-llc/ipsupport-code/internal/skill"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
@@ -1636,6 +1637,34 @@ func (a *app) detectContextWindow() {
 // system prompt. Called at startup and after any setting that changes what the
 // agent is allowed to do or talk to. NOT safe while a task goroutine is running
 // (the running agent's history would race) — callers gate on that.
+// sandboxWrapper builds the OS-sandbox command wrapper for the run tool from the
+// current config (mode + jail + offline), or nil when sandboxing is off or the
+// platform can't confine (then commands run as before). Writes are confined to
+// the workspace jail; the network follows offline mode.
+func (a *app) sandboxWrapper() tool.CmdWrapper {
+	mode := a.cfg.Sandbox
+	if mode == "" || mode == sandbox.Off {
+		return nil
+	}
+	if !sandbox.Available(mode) {
+		slog.Warn("sandbox not available on this platform — running commands unconfined", "mode", mode)
+		return nil
+	}
+	root := a.cfg.Workspace
+	if j := strings.TrimSpace(a.cfg.File.Jail); j != "" && j != "." {
+		if filepath.IsAbs(j) {
+			root = j
+		} else {
+			root = filepath.Join(a.cfg.Workspace, j)
+		}
+	}
+	spec := sandbox.Spec{WritableRoots: []string{root}, AllowNetwork: !a.cfg.Offline}
+	return func(name string, args []string) (string, []string) {
+		n, out, _ := sandbox.Wrap(mode, spec, name, args)
+		return n, out
+	}
+}
+
 func (a *app) wire() error {
 	pol, err := policy.New(a.cfg)
 	if err != nil {
@@ -1648,7 +1677,7 @@ func (a *app) wire() error {
 	var reg *tool.Registry
 	tools := []tool.Tool{
 		tool.NewFile(pol, gatedApprover{a}, a.snapFile),
-		tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second),
+		tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.sandboxWrapper()),
 		tool.NewGit(pol, gatedApprover{a}),
 		tool.NewWeb(http.DefaultClient, a.cfg.Offline),
 		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),

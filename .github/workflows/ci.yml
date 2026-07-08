@@ -27,9 +27,24 @@ jobs:
         run: make vet
       - name: tests (race)
         run: make race
-      # The code is pure, cross-platform Go (no build tags / GOOS-specific files),
-      # so a host build proves it compiles everywhere — no need to cross-compile
-      # all 5 targets on every push. The full matrix is built on tags
-      # (release.yml) and daily (nightly.yml).
+      # Almost all code is pure, cross-platform Go, so a host build proves it
+      # compiles everywhere. The few GOOS-specific files (procgroup_*, sandbox
+      # wrap_*) are cross-compiled below; the full release matrix is built on
+      # tags (release.yml) and daily (nightly.yml).
       - name: build (host)
         run: make build
+      - name: build (darwin/windows cross)
+        run: GOOS=darwin GOARCH=arm64 go build ./... && GOOS=windows GOARCH=amd64 go build ./...
+
+  # The macOS sandbox (Seatbelt) can only be exercised on macOS, so run the
+  # sandbox package's tests there — they execute real sandbox-exec confinement.
+  sandbox-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: sandbox tests (real Seatbelt)
+        run: go test ./internal/sandbox/...

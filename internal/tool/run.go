@@ -19,20 +19,29 @@ const (
 	maxRunOutput      = 50_000
 )
 
+// CmdWrapper rewrites the exec (name, args) before it runs — used to wrap a
+// command in an OS sandbox. It knows nothing about the sandbox itself; the app
+// injects a closure. nil means run the command directly.
+type CmdWrapper func(name string, args []string) (string, []string)
+
 type runTool struct {
 	pol     *policy.Engine
 	ap      Approver
 	timeout time.Duration // default per-command wall-clock limit
+	wrap    CmdWrapper    // optional OS-sandbox wrapper (nil = run directly)
 }
 
 // NewRun returns the run tool: a single `shell` action gated by the policy
 // engine, executed with a timeout and a jail-confined working directory. The
 // default timeout comes from config (run.timeout_seconds); 0 falls back to 60s.
-func NewRun(p *policy.Engine, ap Approver, defaultTimeout time.Duration) Tool {
+func NewRun(p *policy.Engine, ap Approver, defaultTimeout time.Duration, wrap ...CmdWrapper) Tool {
 	if defaultTimeout <= 0 {
 		defaultTimeout = defaultRunTimeout
 	}
 	r := &runTool{pol: p, ap: ap, timeout: defaultTimeout}
+	if len(wrap) > 0 {
+		r.wrap = wrap[0]
+	}
 	return NewDomain(DomainSpec{
 		Name:    "run",
 		Summary: "Run a shell command (sh -c) in the workspace; returns combined stdout+stderr and the exit code. Gated by the workspace permission policy.",
@@ -81,7 +90,11 @@ func (r *runTool) shell(ctx context.Context, a Args) Result {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(cctx, "sh", "-c", command)
+	name, args := "sh", []string{"-c", command}
+	if r.wrap != nil { // wrap in the OS sandbox (confines writes to the workspace)
+		name, args = r.wrap(name, args)
+	}
+	cmd := exec.CommandContext(cctx, name, args...)
 	cmd.Dir = dir
 	var out bytes.Buffer
 	cmd.Stdout = &out

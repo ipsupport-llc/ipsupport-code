@@ -1211,6 +1211,14 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/jobs":
 		m.pushLines(m.app.jobsCommand(rest))
 		return m, nil
+	case "/snip":
+		if act := m.app.snip(rest); act.recall != "" {
+			m.input.SetValue(act.recall) // pull the template into the input to edit & send
+			m.input.CursorEnd()
+		} else {
+			m.pushLines(act.lines)
+		}
+		return m, nil
 	case "/btw": // idle: the note is pinned and steers the next run you start
 		m.addSteer(rest)
 		return m, nil
@@ -1324,9 +1332,10 @@ func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
 	switch cmd {
 	case "/exit", "/quit":
 		return m, tea.Quit
-	case "/status", "/help", "/?", "/color", "/diff", "/history", "/jobs":
+	case "/status", "/help", "/?", "/color", "/diff", "/history", "/jobs", "/snip":
 		// Always safe: pure info (incl. /history <filter> and the read-only /diff),
-		// or /color which only recolors the frame.
+		// /color which only recolors the frame, or /snip (edits the input / its own
+		// store, never the running stack).
 		return m.runCommand(line)
 	case "/btw":
 		// Steer the LIVE task without stopping it: buffer the note for the model's
@@ -1830,6 +1839,7 @@ var commandList = []cmdInfo{
 	{"/budget", "<usd>|off — cap estimated spend per run; refuses new tasks once hit"},
 	{"/jobs", "background sub-agent jobs: list · result <id> · kill <id>"},
 	{"/btw", "steer a RUNNING task without stopping it (esc cancels; /btw nudges)"},
+	{"/snip", "prompt templates: /snip <name> recalls into the input; save <name> [text]; list; rm <name>"},
 	{"/diff", "show uncommitted changes in the workspace (what the agent changed)"},
 	{"/login", "(re)configure server URL / model / key, then reload"},
 	{"/new", "start a NEW session (old stays in /sessions); /new <name> to name it"},
@@ -2008,6 +2018,8 @@ func (m *tuiModel) argCandidates(name string) []string {
 		return []string{"off"}
 	case "/jobs":
 		return []string{"result", "kill"}
+	case "/snip":
+		return append([]string{"save", "list", "rm"}, m.app.snipNames()...)
 	case "/knowledge", "/kb":
 		return []string{"clear", "purge", "retain"}
 	case "/usage":

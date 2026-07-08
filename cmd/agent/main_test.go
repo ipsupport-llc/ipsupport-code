@@ -60,6 +60,48 @@ func TestFreshnessNoticeSkippedWhenUpdateCheckOff(t *testing.T) {
 	}
 }
 
+// A background job that finishes MID-task reaches the model on its next step via
+// the beforeTurn hook (not only at the next task boundary), lands in durable
+// history, and isn't re-delivered by the task-boundary path.
+func TestBeforeTurnDeliversFinishedJob(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	a.jobs = append(a.jobs, &job{id: 1, profile: "codex", task: "fix the repo", done: true, ok: true, result: "codex report: patched"})
+	a.addBtw("also check the tests") // both channels fold through beforeTurn
+
+	before := a.ag.SessionLen()
+	msgs := a.beforeTurn()
+	if len(msgs) != 2 {
+		t.Fatalf("beforeTurn returned %d messages, want 2 (btw + job)", len(msgs))
+	}
+	joined := msgs[0].Content + "\n" + msgs[1].Content
+	if !strings.Contains(joined, "also check the tests") || !strings.Contains(joined, "codex report: patched") {
+		t.Fatalf("beforeTurn missing btw or job note: %q", joined)
+	}
+
+	// The job note is durable (folded into history); the btw aside is not.
+	h := a.ag.History()
+	if len(h) != before+1 || !strings.Contains(h[len(h)-1].Content, "codex report: patched") {
+		t.Fatalf("job note not persisted to history")
+	}
+
+	// The task-boundary path must not re-deliver an already-delivered job.
+	a.injectJobResults()
+	if a.ag.SessionLen() != before+1 {
+		t.Error("injectJobResults re-delivered a job already drained by beforeTurn")
+	}
+	if got := a.drainJobResults(); got != nil {
+		t.Errorf("drainJobResults re-delivered: %v", got)
+	}
+}
+
 func TestParseLoop(t *testing.T) {
 	// interval + task, no count cap
 	if iv, max, g, ok := parseLoop("5m build it"); !ok || iv != 5*time.Minute || max != 0 || g != "build it" {

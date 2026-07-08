@@ -183,10 +183,13 @@ ordinary spawns are set to allow; `a` on the prompt relaxes it for the session.
 Any sub-agent — LLM or external CLI — can run as a **detached background job**:
 the assistant adds `background=true`, the call returns at once, and it keeps
 working while the job runs. When the job finishes you see a `✓ job #N` notice,
-and the **result is delivered to the assistant at the start of its next turn**.
-`/jobs` lists them, `/jobs result <id>` prints one in full, `/jobs kill <id>`
-cancels. Jobs survive their parent task (and esc) — perfect for a long codex
-review running while you continue in the main loop.
+and the **result is folded into the assistant's next step** — even mid-task, via
+the same between-steps seam as [`/btw`](#steering-a-running-task-btw), so a job
+that lands while the assistant is working doesn't wait for the next task to be
+noticed. `/jobs` lists them (with a live `⚙ running <elapsed>` line), `/jobs
+result <id>` prints one in full, `/jobs kill <id>` cancels. Jobs survive their
+parent task (and esc) — perfect for a long codex review running while you
+continue in the main loop.
 
 ### Steering a running task (`/btw`)
 

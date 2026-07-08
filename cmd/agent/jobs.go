@@ -70,32 +70,60 @@ func (a *app) spawnAgentBackground(_ context.Context, profile, task, dir string)
 	return fmt.Sprintf("background job #%d started (%s). Its result will be delivered to you at the start of a later turn — continue with other work; don't wait or poll.", id, resolved), nil
 }
 
-// injectJobResults folds finished, undelivered background-job results into the
-// conversation as user-role notes, so the model sees them on its next turn.
-// Called at the start of a task, before the agent runs (same goroutine — safe).
-func (a *app) injectJobResults() {
+// jobNote formats a finished job as the user-role note the model reads.
+func jobNote(j *job) string {
+	status := "finished"
+	if !j.ok {
+		status = "FAILED"
+	}
+	return fmt.Sprintf("[background job #%d %s — %s · %s]\n%s",
+		j.id, status, j.profile, oneLine(j.task, 80), j.result)
+}
+
+// takeFinishedJobs marks every done-but-undelivered job delivered and returns
+// their notes as user-role messages. Shared by both delivery paths; the
+// `delivered` flag keeps them from double-delivering.
+func (a *app) takeFinishedJobs() []llm.Message {
 	a.jobMu.Lock()
-	var notes []string
+	defer a.jobMu.Unlock()
+	var out []llm.Message
 	for _, j := range a.jobs {
 		if j.done && !j.delivered {
 			j.delivered = true
-			status := "finished"
-			if !j.ok {
-				status = "FAILED"
-			}
-			notes = append(notes, fmt.Sprintf("[background job #%d %s — %s · %s]\n%s",
-				j.id, status, j.profile, oneLine(j.task, 80), j.result))
+			out = append(out, llm.User(jobNote(j)))
 		}
 	}
-	a.jobMu.Unlock()
-	if len(notes) == 0 {
-		return
+	return out
+}
+
+// injectJobResults folds finished, undelivered background-job results into the
+// durable history, so the model sees them at the start of its next task. Called
+// before the agent runs (same goroutine — safe). The between-steps path is
+// drainJobResults, via the beforeTurn hook.
+func (a *app) injectJobResults() {
+	if notes := a.takeFinishedJobs(); len(notes) > 0 {
+		a.ag.SetHistory(append(a.ag.History(), notes...))
 	}
-	h := a.ag.History()
-	for _, n := range notes {
-		h = append(h, llm.User(n))
+}
+
+// beforeTurn is the agent's between-steps hook (SetBeforeTurn): it folds both
+// /btw asides and any just-finished background-job results into the model's
+// working set, so a job that completes MID-task lands on the next
+// reason→act→observe step instead of waiting for the next task boundary.
+func (a *app) beforeTurn() []llm.Message {
+	return append(a.drainBtw(), a.drainJobResults()...)
+}
+
+// drainJobResults is the between-steps counterpart of injectJobResults: it
+// delivers a job that finished while a task is running onto the model's next
+// step, and folds the same notes into durable history so the report survives the
+// run (matching the task-boundary path). Returns nil when nothing is pending.
+func (a *app) drainJobResults() []llm.Message {
+	notes := a.takeFinishedJobs()
+	if len(notes) > 0 {
+		a.ag.SetHistory(append(a.ag.History(), notes...))
 	}
-	a.ag.SetHistory(h)
+	return notes
 }
 
 // --- /btw side-channel steering --------------------------------------------

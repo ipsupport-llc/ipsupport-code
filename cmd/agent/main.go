@@ -968,8 +968,9 @@ func (a *app) reflectUsing() string {
 // pursues across the judge-driven loop. Stored at <workspace>/.agent/goal.json so
 // it survives a restart and can be resumed.
 type goalState struct {
-	Text   string `json:"text"`
-	Status string `json:"status"` // active | done | incomplete
+	Text    string `json:"text"`
+	Status  string `json:"status"`            // active | done | incomplete
+	Offered bool   `json:"offered,omitempty"` // already surfaced once after a restart — don't auto-nag again
 }
 
 func (a *app) goalPath() string { return filepath.Join(a.workspace, ".agent", "goal.json") }
@@ -1028,12 +1029,29 @@ func (a *app) finishGoal(goal string, tr agent.Transcript) {
 	// decides when it's done, so a clean uninterrupted finish counts as done
 	// (otherwise the goal stays "incomplete" and the resume prompt nags forever).
 	if (tr.GoalMet || a.cfg.GoalMaxReturns == 0) && !tr.Stopped && !tr.Cancelled {
-		a.goal.Status = "done"
-	} else {
-		a.goal.Status = "incomplete"
+		// Done: clear it entirely so it never resurfaces after a restart.
+		a.goal = goalState{}
+		os.Remove(a.goalPath())
+		return
 	}
+	// Still unfinished: re-arm one resume offer for the next restart (you just
+	// engaged it), then persist.
+	a.goal.Status, a.goal.Offered = "incomplete", false
 	if err := a.saveGoal(); err != nil {
 		slog.Warn("goal status not persisted", "err", err)
+	}
+}
+
+// markGoalOffered records that the standing goal has been surfaced once after a
+// restart, so it isn't re-offered on every subsequent start (until you engage it
+// again or set a new goal).
+func (a *app) markGoalOffered() {
+	if a.goal.Offered || a.goal.Text == "" {
+		return
+	}
+	a.goal.Offered = true
+	if err := a.saveGoal(); err != nil {
+		slog.Warn("goal offer-state not persisted", "err", err)
 	}
 }
 

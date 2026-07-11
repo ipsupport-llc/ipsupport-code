@@ -1757,6 +1757,15 @@ func TestCustomProvider(t *testing.T) {
 	if a.cfg.Providers["mylab"].BaseURL != "http://localhost:8080/v1" {
 		t.Fatalf("custom provider not stored: %+v", a.cfg.Providers["mylab"])
 	}
+	// add + key in one command; the key must land as the key, not the model.
+	a.addProvider("onestep https://api.co/v1 gpt-x key=sk-onestep")
+	if p := a.cfg.Providers["onestep"]; p.APIKey != "sk-onestep" || p.Model != "gpt-x" || p.BaseURL != "https://api.co/v1" {
+		t.Errorf("add-with-key stored wrong: %+v", p)
+	}
+	// a bad base_url is reported (not silently accepted)
+	if out := strings.Join(a.addProvider("bad ftp://x"), " "); !strings.Contains(out, "http://") {
+		t.Errorf("bad url = %q, want an http:// hint", out)
+	}
 	// a key can be set for a custom provider (was rejected before)
 	if out := strings.Join(a.setProviderKey("mylab", "sk-x"), " "); !strings.Contains(out, "saved") {
 		t.Errorf("setProviderKey(custom) = %q, want saved", out)

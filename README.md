@@ -98,10 +98,14 @@ hard task, then drop back to your local one:
 
 ```
 /ai                       list providers (local + openai, anthropic, grok, groq, openrouter, zai)
-/ai key openai sk-…       add an API key for a provider
+/ai key openai sk-…       add an API key for a built-in provider (one command)
+/ai add mylab https://api.lab.co/v1 llama-3.1 key=sk-…   add a CUSTOM provider + key in one step
 /ai openai                switch to it   ·   /ai local   back to LM Studio
 /model                    list models   ·   /model gpt-4o   pick   ·   /model sonnet   filter (great for OpenRouter)
 ```
+
+Pasting a key on Linux? A middle-click paste is swallowed by the mouse-wheel
+scroll tracking — use **Ctrl+Shift+V** (bracketed paste), which always works.
 
 **Add a provider by hand.** Any OpenAI-compatible endpoint works as a first-class
 provider straight from the config — no command needed, and **no API key required**

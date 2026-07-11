@@ -2626,22 +2626,35 @@ func (a *app) aiCommand(rest string) []string {
 }
 
 // addProvider registers a custom OpenAI-compatible provider (any base URL), so
-// you're not limited to the built-in templates: /ai add <name> <base_url> [model],
-// then /ai key <name> <token>, then /ai <name>.
+// you're not limited to the built-in templates: /ai add <name> <base_url> [model]
+// [key=<token>]. Give key= to add and key it in one step; otherwise follow with
+// /ai key <name> <token>. Then /ai <name> to switch.
 func (a *app) addProvider(arg string) []string {
-	f := strings.Fields(arg)
+	// Pull an optional key=<token> out of the args first, so a key can be given in
+	// the SAME command — and so a token can't be silently mistaken for the model.
+	var key string
+	var f []string
+	for _, w := range strings.Fields(arg) {
+		if v, ok := strings.CutPrefix(w, "key="); ok {
+			key = v
+			continue
+		}
+		f = append(f, w)
+	}
 	if len(f) < 2 {
-		return []string{"usage: /ai add <name> <base_url> [model]", "  e.g. /ai add mylab http://localhost:8080/v1 llama-3.1-8b"}
+		return []string{"usage: /ai add <name> <base_url> [model] [key=<token>]",
+			"  e.g. /ai add mylab https://api.lab.co/v1 llama-3.1-8b key=sk-...",
+			"  (a built-in provider just needs a key: /ai key <name> <token>)"}
 	}
 	name, url := f[0], f[1]
 	if name == "local" {
 		return []string{`"local" is reserved — it's your LM Studio endpoint (/config to change it)`}
 	}
 	if _, ok := config.ProviderTemplates[name]; ok {
-		return []string{fmt.Sprintf("%q is a built-in provider — just /ai key %s <token>", name, name)}
+		return []string{fmt.Sprintf("%q is a built-in provider — set its key in one step: /ai key %s <token>", name, name)}
 	}
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		return []string{"base_url must start with http:// or https://"}
+		return []string{"base_url must start with http:// or https:// — got " + url}
 	}
 	if a.cfg.Providers == nil {
 		a.cfg.Providers = map[string]config.LLM{}
@@ -2651,9 +2664,18 @@ func (a *app) addProvider(arg string) []string {
 	if len(f) >= 3 {
 		p.Model = f[2]
 	}
+	if key != "" {
+		p.APIKey = key
+	}
 	a.cfg.Providers[name] = p
 	if err := config.SaveProviders(a.cfg.Provider, a.cfg.Providers); err != nil {
 		return []string{"error: " + err.Error()}
+	}
+	if key != "" {
+		if a.cfg.Provider == name {
+			_ = a.wire()
+		}
+		return []string{fmt.Sprintf("added %q → %s with a key — /ai %s to use it", name, p.BaseURL, name)}
 	}
 	return []string{fmt.Sprintf("added %q → %s — next: /ai key %s <token>, then /ai %s", name, p.BaseURL, name, name)}
 }

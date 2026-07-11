@@ -1854,7 +1854,7 @@ var commandList = []cmdInfo{
 	{"/compact", "summarize the session so far to free up context"},
 	{"/plan", "plan mode — propose a plan, change nothing"},
 	{"/auto", "auto mode — execute the task (default)"},
-	{"/ai", "switch/add AI provider; /ai key <name> <tok>; /ai add <name> <url> (custom)"},
+	{"/ai", "switch/add AI provider; key <name> <tok>; add <name> <url> [model] [key=<tok>] (custom, one step)"},
 	{"/model", "list the provider's models, or pick one"},
 	{"/config", "settings panel — interactive in the TUI (↑↓ · enter · esc); a static overview in the REPL"},
 	{"/update", "self-update from GitHub (stable|nightly)"},
@@ -2001,10 +2001,10 @@ func (m *tuiModel) applyCompletion(prefix, partial string, cands []string) {
 func (m *tuiModel) argCandidates(name string) []string {
 	switch name {
 	case "/ai":
-		// Only offer providers you can actually switch to: local plus the external
-		// ones (built-in or custom) with a key. Suggesting a keyless provider is a
-		// dead end — /ai would just reject it.
-		return m.app.configuredProviderNames()
+		// The verbs plus providers you can actually switch to: local plus the
+		// external ones (built-in or custom) with a key. Suggesting a keyless
+		// provider is a dead end — /ai would just reject it.
+		return append([]string{"add", "key"}, m.app.configuredProviderNames()...)
 	case "/offline":
 		return []string{"on", "off"}
 	case "/reflect":

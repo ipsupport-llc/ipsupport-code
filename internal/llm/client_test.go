@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -187,6 +188,47 @@ func TestChatRetriesOnServerError(t *testing.T) {
 	}
 	if notified == 0 {
 		t.Error("OnRetry was not called — the UI wouldn't show the backoff")
+	}
+}
+
+// A connection dropped MID-STREAM (not an idle stall) is a transient network
+// error — the client must retry it, not abort the whole task.
+func TestChatRetriesOnMidStreamDrop(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n++
+		if n < 2 { // first attempt: start streaming, then drop the connection mid-body
+			conn, bufrw, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			bufrw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+			data := "data: {\"choices\":[{\"delta\":{\"content\":\"par\"}}]}\n\n"
+			fmt.Fprintf(bufrw, "%x\r\n%s\r\n", len(data), data) // one chunk, then NO terminating 0-chunk
+			bufrw.Flush()
+			conn.Close() // abrupt drop → client sees an unexpected EOF mid-stream
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\n")
+		fl.Flush()
+		io.WriteString(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+	var notified int
+	cl.OnRetry = func(_ int, _ time.Duration, _ string) { notified++ }
+
+	msg, err := cl.Chat(context.Background(), []Message{User("hi")}, nil)
+	if err != nil {
+		t.Fatalf("Chat should retry past a mid-stream drop: %v", err)
+	}
+	if msg.Content != "recovered" || notified == 0 {
+		t.Errorf("content=%q notified=%d, want recovered after a retry", msg.Content, notified)
 	}
 }
 

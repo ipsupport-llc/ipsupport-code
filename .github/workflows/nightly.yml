@@ -2,8 +2,8 @@ name: nightly
 
 # A rolling pre-release that tracks main: rebuilt on every push to main (so it
 # never lags behind a merge), with a daily cron as a backstop and on-demand
-# dispatch. The `nightly` tag/release is replaced each run, so its assets always
-# track the latest main.
+# dispatch. The `nightly` release is updated in place each run (never deleted, so
+# `update` never hits a 404) and its assets are refreshed to track the latest main.
 on:
   push:
     branches: [main]
@@ -33,9 +33,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete nightly --yes --cleanup-tag 2>/dev/null || true
-          gh release create nightly \
-            dist/*.tar.gz dist/*.zip dist/checksums.txt \
-            --prerelease \
-            --title "Nightly build" \
-            --notes "Automated build from main — commit $(git rev-parse --short HEAD), $(date -u +%Y-%m-%d). Pre-release; not a stable version."
+          set -euo pipefail
+          NOTES="Automated build from main — commit $(git rev-parse --short HEAD), $(date -u +%Y-%m-%d). Pre-release; not a stable version."
+
+          # Move the rolling tag to this commit.
+          git tag -f nightly
+          git push -f origin refs/tags/nightly
+
+          # Upsert a PUBLISHED prerelease — never delete it. The old flow deleted
+          # then recreated, so a failed/partial recreate left either nothing (404)
+          # or a half-written draft (also 404 for the anonymous update client).
+          # Always forcing --draft=false self-heals a release stuck in draft.
+          if gh release view nightly >/dev/null 2>&1; then
+            gh release edit nightly --draft=false --prerelease --title "Nightly build" --notes "$NOTES"
+          else
+            gh release create nightly --prerelease --target "$GITHUB_SHA" --title "Nightly build" --notes "$NOTES"
+          fi
+
+          # Replace the assets (their names carry the date+sha, so clear the stale
+          # set first, then upload today's). The release itself stays published
+          # throughout, so `update` never sees a 404.
+          for a in $(gh release view nightly --json assets -q '.assets[].name'); do
+            gh release delete-asset nightly "$a" --yes
+          done
+          gh release upload nightly dist/*.tar.gz dist/*.zip dist/checksums.txt

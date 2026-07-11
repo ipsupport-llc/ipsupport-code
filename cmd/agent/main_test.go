@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -171,6 +172,27 @@ func TestBackgroundJobStreamsProgress(t *testing.T) {
 	a.jobMu.Unlock()
 	if !strings.Contains(last, "working on it") { // the tapped line reached the job
 		t.Errorf("job lastLine = %q, want the streamed output", last)
+	}
+}
+
+func TestRedirectLogToFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	prev := slog.Default()
+	defer slog.SetDefault(prev)
+
+	closeLog := redirectLogToFile()
+	if closeLog == nil {
+		t.Fatal("redirectLogToFile returned nil (couldn't open the log file)")
+	}
+	slog.Warn("retry test", "attempt", 1)
+	closeLog()
+
+	data, err := os.ReadFile(config.LogPath())
+	if err != nil {
+		t.Fatalf("log file not written: %v", err)
+	}
+	if !strings.Contains(string(data), "retry test") {
+		t.Errorf("warning didn't reach the log file:\n%s", data)
 	}
 }
 

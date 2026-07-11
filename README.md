@@ -565,7 +565,10 @@ catches `cd x && rm -rf /`); file globs are path-aware (`**`, `*.go`) and confin
 to `jail`. The protective deny floor is always unioned in — your config adds to
 it, it can't remove it.
 
-Logging: `IPS_LOG=debug|info|warn|error` (default `warn`) to stderr.
+Logging: `IPS_LOG=debug|info|warn|error` (default `warn`). In the TUI it writes to
+`~/.config/ipsupport-code/agent.log` (so raw log lines don't bleed over the
+screen) — `tail -f` it to watch retries/warnings live; a piped/one-shot run logs
+to stderr.
 
 ## Layout
 

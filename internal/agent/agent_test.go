@@ -611,7 +611,7 @@ func TestRunGoalLoopRefeedsUntilJudgeSaysDone(t *testing.T) {
 		{Role: "assistant", Content: "DONE"},     // judge: met
 	}}
 	a := New(fake, reg, nil, nil, "", 20)
-	a.SetGoalLoop(3)
+	a.SetGoalLoop(3, false)
 
 	tr, err := a.Run(context.Background(), "do part 1 and part 2")
 	if err != nil {
@@ -634,7 +634,7 @@ func TestRunGoalLoopSkipsToollessAnswer(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
 	fake := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "just an answer"}}}
 	a := New(fake, reg, nil, nil, "", 10)
-	a.SetGoalLoop(3)
+	a.SetGoalLoop(3, false)
 
 	tr, _ := a.Run(context.Background(), "hi")
 	if tr.Returns != 0 {
@@ -656,7 +656,7 @@ func TestRunGoalLoopStopsAtTTL(t *testing.T) {
 		calcCall(), {Role: "assistant", Content: "f3"}, // returns==TTL → accept, no judge
 	}}
 	a := New(fake, reg, nil, nil, "", 20)
-	a.SetGoalLoop(2)
+	a.SetGoalLoop(2, false)
 
 	tr, _ := a.Run(context.Background(), "loop")
 	if tr.Returns != 2 {
@@ -665,8 +665,9 @@ func TestRunGoalLoopStopsAtTTL(t *testing.T) {
 	if tr.GoalMet {
 		t.Error("GoalMet = true, want false (TTL exhausted, never judged done)")
 	}
-	if tr.Final != "f3" {
-		t.Errorf("final = %q, want f3", tr.Final)
+	// The last finalize stands, with the honest "not confirmed" note appended.
+	if !strings.Contains(tr.Final, "f3") || !strings.Contains(tr.Final, "not confirmed complete") {
+		t.Errorf("final = %q, want f3 + the not-confirmed note", tr.Final)
 	}
 }
 
@@ -680,7 +681,7 @@ func TestRunGoalLoopUnclearJudgeDoesNotMarkMet(t *testing.T) {
 		{Role: "assistant", Content: "hmm, hard to say really"},   // judge: no DONE/MORE token
 	}}
 	a := New(fake, reg, nil, nil, "", 20)
-	a.SetGoalLoop(3)
+	a.SetGoalLoop(3, false)
 
 	tr, _ := a.Run(context.Background(), "do the thing")
 	if tr.GoalMet {
@@ -691,6 +692,50 @@ func TestRunGoalLoopUnclearJudgeDoesNotMarkMet(t *testing.T) {
 	}
 	if tr.Final != "I think that's everything" {
 		t.Errorf("final = %q", tr.Final)
+	}
+}
+
+// With nudgeIdle OFF, a model that re-reads the goal after a re-feed but then
+// finishes without doing any work is accepted immediately — and the final says the
+// goal wasn't confirmed (not a misleading "done").
+func TestRunGoalIdleNudgeOff(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(), {Role: "assistant", Content: "did some"}, // act, finalize #1
+		{Role: "assistant", Content: "MORE: not done"}, // judge → re-feed
+		{Role: "assistant", Content: "I'll stop here"}, // idle finalize (no tool) after re-feed
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false) // idle-nudge off
+
+	tr, _ := a.Run(context.Background(), "do it all")
+	if tr.GoalMet {
+		t.Error("GoalMet = true, want false (never confirmed)")
+	}
+	if !strings.Contains(tr.Final, "not confirmed complete") {
+		t.Errorf("final = %q, want the goal-not-confirmed note", tr.Final)
+	}
+}
+
+// With nudgeIdle ON, that same no-work finish gets ONE push; the model then does
+// the work and the goal completes.
+func TestRunGoalIdleNudgeOn(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(), {Role: "assistant", Content: "did some"}, // act, finalize #1
+		{Role: "assistant", Content: "MORE: not done"}, // judge → re-feed
+		{Role: "assistant", Content: "I'll stop here"}, // idle finalize → nudged (no judge)
+		calcCall(), {Role: "assistant", Content: "now done"}, // acts after the nudge, finalize #2
+		{Role: "assistant", Content: "DONE"}, // judge: met
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, true) // idle-nudge on
+
+	tr, _ := a.Run(context.Background(), "do it all")
+	// Reaching "now done" + DONE is only possible if the idle finish was nudged and
+	// the model then worked (without the nudge it would stop at the stalled note).
+	if !tr.GoalMet || tr.Final != "now done" {
+		t.Errorf("idle nudge didn't recover: final=%q met=%v", tr.Final, tr.GoalMet)
 	}
 }
 

@@ -56,6 +56,9 @@ type Agent struct {
 	// Goal pursuit: when the model finalizes but a judge (judgeGoal) decides the
 	// goal isn't met, it's re-fed the goal and continues, up to maxReturns (a TTL).
 	maxReturns int
+	// nudgeIdle: after a re-feed, if the model finishes without doing any work,
+	// push it once (instead of silently giving up) before accepting the finish.
+	nudgeIdle bool
 }
 
 // New builds an Agent. maxSteps <= 0 defaults to 12.
@@ -79,8 +82,11 @@ func (a *Agent) SetSystem(s string) { a.system = s }
 // SetGoalLoop configures goal pursuit: when the model finalizes, a judge decides
 // whether the goal is met; if not, re-feed the goal and keep going, up to
 // maxReturns times (a TTL). 0 disables it — one run, the model's finish stands.
-func (a *Agent) SetGoalLoop(maxReturns int) {
+// nudgeIdle gives a model that re-finalizes without working after a re-feed one
+// push before giving up.
+func (a *Agent) SetGoalLoop(maxReturns int, nudgeIdle bool) {
 	a.maxReturns = maxReturns
+	a.nudgeIdle = nudgeIdle
 }
 
 // SetLabel tags this agent as a sub-agent: the label is attached to every event
@@ -233,6 +239,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	returns := 0              // goal re-feeds so far (TTL = a.maxReturns)
 	goalMet := false          // the judge confirmed the goal was met
 	refusalNudged := false    // already pushed back on a "can't edit / here are the files" dodge?
+	idleNudged := false       // already pushed a no-progress model once since the last re-feed?
 	for step := 0; step < a.maxSteps; step++ {
 		tr.Steps = step + 1
 
@@ -292,32 +299,50 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 			// goal plus what's missing (keeping the objective in focus, not buried) and
 			// keep going — up to maxReturns (a TTL). Only after real progress, so a
 			// model that just re-finalizes can't burn the budget.
-			if !a.planMode && a.maxReturns > 0 && returns < a.maxReturns && actedSinceReturn && acted {
-				verdict, missing := a.judgeGoal(ctx, goal, clean)
-				switch verdict {
-				case judgeMore:
-					returns++
-					actedSinceReturn = false
-					msgs = append(msgs, llm.User(goalReturn(goal, missing)))
-					a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing})
+			if !a.planMode && a.maxReturns > 0 && returns < a.maxReturns {
+				switch {
+				case actedSinceReturn && acted:
+					verdict, missing := a.judgeGoal(ctx, goal, clean)
+					switch verdict {
+					case judgeMore:
+						returns++
+						actedSinceReturn, idleNudged = false, false
+						msgs = append(msgs, llm.User(goalReturn(goal, missing)))
+						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing})
+						continue
+					case judgeDone:
+						goalMet = true // only an explicit DONE marks the goal verifiably met
+						a.emit("judge", map[string]any{"done": true})
+					}
+					// judgeUnclear → accept this final (don't trap the loop), but leave
+					// goalMet false: an unverifiable judge is NOT a confirmed success.
+				case a.nudgeIdle && !idleNudged && returns > 0:
+					// The goal was just re-fed but the model finished WITHOUT doing any
+					// work this turn. Rather than silently give up, push it once.
+					idleNudged = true
+					msgs = append(msgs, llm.User(idleNudge))
+					a.emit("nudge", map[string]any{"idle": true})
 					continue
-				case judgeDone:
-					goalMet = true // only an explicit DONE marks the goal verifiably met
-					a.emit("judge", map[string]any{"done": true})
 				}
-				// judgeUnclear → accept this final (don't trap the loop), but leave
-				// goalMet false: an unverifiable judge is NOT a confirmed success.
 			}
+			// The goal loop ran and re-fed at least once, but the judge never
+			// confirmed the goal met — say so plainly instead of implying success.
+			goalStalled := a.maxReturns > 0 && returns > 0 && !goalMet
 			if strings.TrimSpace(clean) == "" {
 				// Blank final turn. If the model already did work via tools, say it
 				// finished (the changes/output are above); otherwise it produced
 				// nothing — flag that instead of ending on silence.
-				if acted {
+				switch {
+				case goalStalled:
+					clean = fmt.Sprintf("(goal not confirmed complete — stopped after %d/%d continues; the model finished without further progress. `/goal go` to keep pushing, or switch to a stronger model with /model.)", returns, a.maxReturns)
+				case acted:
 					clean = "(done — finished without a written summary; see the changes/output above.)"
-				} else {
+				default:
 					clean = "(the model returned an empty reply — no answer and no tool call. Try rephrasing, or pick a stronger model with /model.)"
 				}
 				suggest = ""
+			} else if goalStalled {
+				clean += "\n\n(note: the goal was not confirmed complete — `/goal go` to keep pushing.)"
 			}
 			tr.Final = clean
 			tr.Messages = msgs
@@ -469,6 +494,10 @@ const stuckSuggest = "take a different approach — outline the steps first"
 // task — pasting file contents or claiming it can't touch the filesystem —
 // instead of using its tools.
 const refusalNudge = `You changed nothing — you only described changes or pasted file contents. You are NOT a plain chat model here: you are an agent with working tools in THIS session — file (write/edit/append), run, git — that modify real files on disk, and the user has authorized them. Do not paste file contents, and never say you lack file access (it is false). Make every change now by calling the file tool (write or edit) for each file, then run anything relevant and report the real result.`
+
+// idleNudge is the single push for a model that re-reads the goal after a re-feed
+// but then finishes without touching a tool — do the next step, don't just stop.
+const idleNudge = `You re-read the GOAL but did nothing this turn — no tool call, no change on disk. Don't stop and don't just describe what to do: take the next concrete step now with your tools (file, run, git) toward the goal, then keep going. Only finish if the goal is genuinely already complete — and if so, state explicitly what's done and why.`
 
 // goalReturn re-states the goal when the judge finds it unmet, keeping the
 // objective in focus (recency) instead of letting it sink under the transcript,

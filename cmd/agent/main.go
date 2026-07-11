@@ -2349,7 +2349,7 @@ func (a *app) runOne(ctx context.Context, goal string) {
 	a.injectJobResults() // finished background jobs land before the model thinks
 	a.beginCheckpoint(goal)
 	defer a.endCheckpoint()
-	a.ag.SetGoalLoop(a.goalTTLFor(goal)) // judge-loop only when pursuing an explicit goal
+	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
 	tr, err := a.ag.Run(ctx, goal)
 	if err != nil {
 		slog.Error("run failed", "err", err)
@@ -2389,7 +2389,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string) {
 	a.injectJobResults() // finished background jobs land before the model thinks
 	a.beginCheckpoint(goal)
 	defer a.endCheckpoint()
-	a.ag.SetGoalLoop(a.goalTTLFor(goal)) // judge-loop only when pursuing an explicit goal
+	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
 	tr, err := a.ag.Run(ctx, goal)
 	if err != nil {
 		a.emit("error", map[string]any{"text": err.Error()})

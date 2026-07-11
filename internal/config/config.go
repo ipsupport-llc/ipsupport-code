@@ -121,6 +121,10 @@ type Config struct {
 	GoalMaxReturns int `json:"goal_max_returns,omitempty"`
 	// GoalMaxSteps is the hard step backstop for one goal pursuit. Default 80.
 	GoalMaxSteps int `json:"goal_max_steps,omitempty"`
+	// GoalNudge, when true (default), gives the model ONE push if it re-reads the
+	// goal after a re-feed but then finishes without doing any work — instead of
+	// silently giving up. Set false to accept a no-progress finish immediately.
+	GoalNudge bool `json:"goal_nudge"`
 	// SessionBudgetUSD caps estimated spend for one run of the process: once this
 	// session's estimated cost reaches it, new tasks are refused until it's raised.
 	// 0 disables the guard.
@@ -276,6 +280,7 @@ func Default() Config {
 		UpdateCheck:    true,
 		GoalMaxReturns: 6,
 		GoalMaxSteps:   80,
+		GoalNudge:      true,
 	}
 }
 

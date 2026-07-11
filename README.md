@@ -408,7 +408,11 @@ pass with no judge overhead — only an explicit goal gets the loop.
 
 The judge defaults to done on any unparseable reply, so a confused model can't trap
 the agent in the loop. The whole thing is gated on real progress: a turn that calls
-no tools is never judged or re-fed.
+no tools is never judged or re-fed. If a re-fed model then finishes without doing
+any work, it gets **one** push to act before the loop gives up (turn it off with
+`config set goal_nudge false`). And when the loop stops without the judge ever
+confirming success, it says so plainly — *"goal not confirmed complete, `/goal go`
+to keep pushing"* — instead of implying it's done.
 
 ## Context & auto-compact
 

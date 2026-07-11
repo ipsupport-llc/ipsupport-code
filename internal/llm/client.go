@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -204,7 +205,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	// Local servers (LM Studio) hiccup with transient 5xx and need time to
 	// reload a model unloaded by the idle timeout. Retry those (and network
 	// errors) with exponential backoff instead of failing the whole task.
-	const maxAttempts = 5
+	const maxAttempts = 8 // ride out a longer network glitch before giving up (it's the internet)
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		// Snapshot the live completion count so a stalled attempt's un-reconciled
@@ -240,6 +241,15 @@ func backoff(attempt int) time.Duration {
 		d = 8 * time.Second
 	}
 	return d
+}
+
+// runawayError marks a token-cap runaway — the model looping in its own
+// reasoning. Unlike a network error, retrying it won't help, so it's not
+// retriable.
+type runawayError struct{ max int }
+
+func (e *runawayError) Error() string {
+	return fmt.Sprintf("the model generated over %d tokens in one turn without finishing — it's looping in its own reasoning, not making progress. Try a stronger model, give it more context, or rephrase the task", e.max)
 }
 
 // send makes one attempt; the bool reports whether the failure is worth a retry.
@@ -292,10 +302,20 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bo
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		m, err := c.parseStream(resp.Body, tick, c.maxRespTk)
-		if err != nil && stalled() {
-			return Message{}, fmt.Errorf("llm stream stalled (no data for %s)", c.idle), true
+		if err != nil {
+			var re *runawayError
+			switch {
+			case errors.As(err, &re):
+				return m, err, false // model looping — a retry won't help
+			case stalled():
+				return Message{}, fmt.Errorf("llm stream stalled (no data for %s)", c.idle), true
+			default:
+				// A mid-stream read error (connection reset, unexpected EOF) is a
+				// transient network problem — retry, unless the USER cancelled.
+				return Message{}, err, ctx.Err() == nil
+			}
 		}
-		return m, err, false // runaway / parse errors are not retriable
+		return m, nil, false
 	}
 	m, err := c.parseJSON(resp.Body) // server ignored stream (e.g. a test fake)
 	return m, err, false
@@ -323,7 +343,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 		// runaway backstop, not a billing meter — the usage chunk reconciles the real
 		// count — so an approximate trigger point is acceptable.
 		if maxTk > 0 && reqCompl > maxTk {
-			return Message{}, fmt.Errorf("the model generated over %d tokens in one turn without finishing — it's looping in its own reasoning, not making progress. Try a stronger model, give it more context, or rephrase the task", maxTk)
+			return Message{}, &runawayError{maxTk}
 		}
 		line := strings.TrimSpace(sc.Text())
 		if !strings.HasPrefix(line, "data:") {

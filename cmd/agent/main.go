@@ -124,6 +124,11 @@ func main() {
 		}
 		app.runOne(ctx, strings.TrimSpace(strings.Join(flag.Args(), " ")))
 	case isTTY():
+		// The TUI owns the alt-screen — routing logs to stderr would bleed raw
+		// "level=WARN …" lines over the interface (retries are shown in-UI anyway).
+		if closeLog := redirectLogToFile(); closeLog != nil {
+			defer closeLog()
+		}
 		app.startNew = newSession             // the TUI shows an in-screen session chooser (unless -new)
 		if sessionName != "" && !newSession { // -session: go straight to that named thread
 			app.loadSession()
@@ -3749,17 +3754,37 @@ func (s *stdinApprover) Approve(kind, detail string) bool {
 	return false
 }
 
-func setupLogging() {
-	level := slog.LevelWarn
+// logLevel is the log threshold: warnings and up by default (so retries/errors
+// are visible), tuned by IPS_LOG=debug|info|warn|error.
+func logLevel() slog.Level {
 	switch strings.ToLower(os.Getenv("IPS_LOG")) {
 	case "debug":
-		level = slog.LevelDebug
+		return slog.LevelDebug
 	case "info":
-		level = slog.LevelInfo
+		return slog.LevelInfo
 	case "error":
-		level = slog.LevelError
+		return slog.LevelError
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})))
+	return slog.LevelWarn
+}
+
+func setupLogging() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel()})))
+}
+
+// redirectLogToFile points the logger at config.LogPath() instead of stderr, so
+// TUI runs don't corrupt the alt-screen with raw log lines. Returns a closer, or
+// nil (leaving stderr logging) if the file can't be opened. Tail the file to
+// watch warnings/retries live.
+func redirectLogToFile() func() {
+	_ = os.MkdirAll(filepath.Dir(config.LogPath()), 0o755) // config dir may not exist on first run
+	f, err := os.OpenFile(config.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		slog.Warn("could not open log file — logging to stderr", "path", config.LogPath(), "err", err)
+		return nil
+	}
+	slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: logLevel()})))
+	return func() { f.Close() }
 }
 
 func newRunID() string {

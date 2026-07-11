@@ -317,6 +317,10 @@ func DefaultSkillsPath() string { return filepath.Join(configHome(), "skills") }
 // SnippetsPath is the global prompt-snippets store (/snip save+recall).
 func SnippetsPath() string { return filepath.Join(configHome(), "snippets.json") }
 
+// LogPath is where logs go while the TUI owns the screen (writing them to stderr
+// would corrupt the alt-screen). Tail it to watch retries/warnings live.
+func LogPath() string { return filepath.Join(configHome(), "agent.log") }
+
 // SystemPromptPath is the optional global system-prompt override file; if it (or
 // a workspace .agent/system.md) exists, it replaces the built-in base prompt.
 func SystemPromptPath() string { return filepath.Join(configHome(), "system.md") }

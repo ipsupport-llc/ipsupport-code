@@ -232,6 +232,34 @@ func TestChatRetriesOnMidStreamDrop(t *testing.T) {
 	}
 }
 
+// The idle watchdog must be reset ONLY by real token progress — SSE heartbeats,
+// comments, and empty deltas (which proxies emit) must not, or a stalled stream
+// that keeps heartbeating would "think" forever without producing a token.
+func TestParseStreamTicksOnlyOnProgress(t *testing.T) {
+	cl := NewOpenAIClient(config.LLM{Model: "x"})
+	ticks := 0
+	tick := func() { ticks++ }
+
+	// A comment/heartbeat, a blank data line, and an empty delta — no progress.
+	heartbeats := ": ping\n\ndata: \n\ndata: {\"choices\":[{\"delta\":{}}]}\n\n"
+	if _, err := cl.parseStream(strings.NewReader(heartbeats), tick, 0); err != nil {
+		t.Fatal(err)
+	}
+	if ticks != 0 {
+		t.Errorf("heartbeats/empty deltas reset the watchdog %d times, want 0", ticks)
+	}
+
+	// A real content delta does reset it.
+	ticks = 0
+	real := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
+	if _, err := cl.parseStream(strings.NewReader(real), tick, 0); err != nil {
+		t.Fatal(err)
+	}
+	if ticks != 1 {
+		t.Errorf("a real content delta reset the watchdog %d times, want 1", ticks)
+	}
+}
+
 func TestBackoffGrows(t *testing.T) {
 	if backoff(1) != 500*time.Millisecond || backoff(2) != time.Second || backoff(3) != 2*time.Second {
 		t.Errorf("backoff = %s,%s,%s want 500ms,1s,2s", backoff(1), backoff(2), backoff(3))

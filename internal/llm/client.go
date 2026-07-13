@@ -84,6 +84,22 @@ type OpenAIClient struct {
 	lastPromptTk int // prompt size of the most recent request (context fullness)
 }
 
+// deadlineConn arms a fresh read deadline before every Read, so a single read
+// can't block longer than idle. A read that returns re-arms the next one, so a
+// live stream is unaffected; a wedged read is force-woken with a deadline error
+// (which send() treats as retriable). The netpoller enforces this regardless of
+// socket/kernel state — unlike ctx-cancel, nothing else has to fire. (The timer
+// is monotonic, so on a laptop suspend it counts from RESUME, not during sleep.)
+type deadlineConn struct {
+	net.Conn
+	idle time.Duration
+}
+
+func (c *deadlineConn) Read(b []byte) (int, error) {
+	_ = c.Conn.SetReadDeadline(time.Now().Add(c.idle))
+	return c.Conn.Read(b)
+}
+
 // NewOpenAIClient builds a client from LLM config (LM Studio by default). The
 // http client has no TOTAL timeout on purpose — a long generation can run for
 // minutes; the idle watchdog in send() guards against a silent stream. But the
@@ -103,8 +119,19 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 		extra:   c.Extra,
 		hc: &http.Client{
 			Transport: &http.Transport{
-				Proxy:                 http.ProxyFromEnvironment,
-				DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				Proxy: http.ProxyFromEnvironment,
+				// Wrap the conn with a ROLLING read deadline: every read is bounded by
+				// the idle window, re-armed as data flows. This is the self-contained
+				// floor under the idle watchdog — a wedged read (e.g. a dead socket
+				// after the laptop sleeps) wakes on the netpoller's own timer without
+				// depending on ctx propagation or the transport closing the right conn.
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					cn, err := (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext(ctx, network, addr)
+					if err != nil {
+						return nil, err
+					}
+					return &deadlineConn{Conn: cn, idle: idle}, nil
+				},
 				ForceAttemptHTTP2:     true,
 				MaxIdleConns:          100,
 				IdleConnTimeout:       60 * time.Second, // drop pooled conns so a post-sleep zombie isn't reused
@@ -350,8 +377,16 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 	calls := map[int]*ToolCall{}
 	var order []int
 	reqCompl := 0
+	// progress marks a REAL token delta: it counts it and pushes the idle deadline
+	// back. Only real progress resets the watchdog — SSE heartbeats / keep-alive
+	// comments (": ping", blank lines from proxies) must NOT, or a wedged-but-
+	// heartbeating stream would "think" forever without ever producing a token.
+	progress := func() {
+		reqCompl++
+		c.bumpToken()
+		tick()
+	}
 	for sc.Scan() {
-		tick() // data arrived — push the idle deadline back
 		// reqCompl counts stream deltas, not true tokens (there's no per-chunk token
 		// count mid-stream). LM Studio sends ~1 token/chunk so the cap is accurate
 		// there; a server that batches many tokens per chunk trips it late. It's a
@@ -376,14 +411,12 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 			d := ch.Choices[0].Delta
 			if d.Content != "" {
 				content.WriteString(d.Content)
-				reqCompl++
-				c.bumpToken()
+				progress()
 			}
 			// Count reasoning deltas toward live progress (reconciled to the
 			// server's real total by the usage chunk) — but don't show them.
 			if d.ReasoningContent != "" || d.Reasoning != "" {
-				reqCompl++
-				c.bumpToken()
+				progress()
 			}
 			for _, tc := range d.ToolCalls {
 				cur, ok := calls[tc.Index]
@@ -400,8 +433,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 				}
 				if tc.Function.Arguments != "" {
 					cur.Arguments += tc.Function.Arguments
-					reqCompl++
-					c.bumpToken()
+					progress()
 				}
 			}
 		}

@@ -77,6 +77,7 @@ type tuiModel struct {
 	taskDoneAway  bool     // a task finished while a modal panel was open over it; finalize on panel close
 	planTask      bool     // the running task started in plan mode → offer accept-plan when it finishes
 	taskCancelled bool     // the running task was cancelled by esc → don't offer accept-plan
+	draining      bool     // a force-detached task's goroutine is still shutting down (block a new one)
 	searchQuery   string   // Ctrl+R reverse-search query (stHistSearch)
 	searchIdx     int      // index into app.promptHist of the current match; -1 = none
 	pending       *approvalReq
@@ -497,6 +498,13 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case taskDoneMsg:
+		if m.draining {
+			// The force-detached goroutine finally landed — the UI already moved on,
+			// so just clear the guard (don't finalize/accept-plan a task we abandoned).
+			m.draining = false
+			m.push(cDim.Render("  ✓ previous request shut down — you're clear"))
+			return m.drainQueue()
+		}
 		m.cancel = nil
 		m.retry = nil
 		m.steer = nil                 // steering notes belonged to the run that just ended
@@ -823,12 +831,19 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.push(cDim.Render("  " + m.busyMsg + " can't be cancelled — it finishes on its own"))
 				return m, nil
 			}
+			if m.state == stRunning && m.taskCancelled {
+				// Already asked to cancel and it still hasn't stopped — the request
+				// is wedged (classic after the laptop sleeps: a dead socket read that
+				// ignores cancellation). Force-detach so the UI isn't held hostage.
+				m.forceDetach()
+				return m, nil
+			}
 			if m.cancel != nil {
 				m.cancel()
 			}
 			m.taskCancelled = true // a cancelled plan run shouldn't pop the accept-plan prompt
 			m.bridge.Abort()       // deny any in-flight approvals so no tool goroutine hangs
-			m.push(cDim.Render("  …cancelling"))
+			m.push(cDim.Render("  …cancelling  (esc again to force-detach if it's stuck)"))
 			if m.pending != nil {
 				// The shown approval consumed the single reader; re-arm one so the
 				// next task's approvals are still read.
@@ -1094,6 +1109,13 @@ func (m *tuiModel) submit(line string) (tea.Model, tea.Cmd) {
 		return m, m.runShellCmd(strings.TrimPrefix(line, "!"))
 	case strings.HasPrefix(line, "/"):
 		return m.runCommand(line)
+	}
+	if m.draining {
+		// A force-detached request is still shutting down — don't start a second
+		// agent run over it. Keep what they typed so they can resend in a moment.
+		m.push(cDim.Render("  a moment — the previous request is still shutting down; resend in a sec"))
+		m.input.SetValue(line)
+		return m, nil
 	}
 	m.push(cYou.Render("❯ ") + line)
 	return m, m.runTask(line)
@@ -1486,6 +1508,23 @@ func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
 	tctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel
 	return tctx, cancel
+}
+
+// forceDetach abandons a wedged task's goroutine (a stuck request that ignored
+// cancellation) and returns the UI to idle. The goroutine keeps shutting down in
+// the background — its transport timeouts bound that — so we block a NEW task
+// until it lands (draining), which its taskDoneMsg clears. That keeps the two
+// from running the agent concurrently.
+func (m *tuiModel) forceDetach() {
+	m.draining = true
+	m.state = stIdle
+	m.cancel = nil
+	m.retry = nil
+	m.steer = nil
+	m.busyMsg = ""
+	m.push(cErr.Render("  ⚠ force-detached") + cDim.Render(" — the stuck request is still shutting down in the background."))
+	m.push(cDim.Render("    you can keep working; a new task waits a moment until it frees up."))
+	m.syncViewport()
 }
 
 // runTask runs a single goal in the background, streaming via the bridge and

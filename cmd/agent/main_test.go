@@ -175,6 +175,29 @@ func TestBackgroundJobStreamsProgress(t *testing.T) {
 	}
 }
 
+// A wedged task (a request that ignored cancellation, e.g. after the laptop
+// slept) must not hold the UI hostage: a second esc force-detaches, a new task is
+// blocked until the abandoned goroutine lands, and its taskDoneMsg clears it.
+func TestForceDetachFreesTheUI(t *testing.T) {
+	m := &tuiModel{state: stRunning, taskCancelled: true, cancel: func() {}, input: textarea.New()}
+	m.forceDetach()
+	if !m.draining || m.state != stIdle || m.cancel != nil {
+		t.Fatalf("after force-detach: draining=%v state=%v cancel==nil=%v", m.draining, m.state, m.cancel == nil)
+	}
+	// A new task is blocked while draining; the typed text is preserved to resend.
+	if _, cmd := m.submit("build the thing"); cmd != nil {
+		t.Error("a task started while a detached request was still draining")
+	}
+	if m.input.Value() != "build the thing" {
+		t.Errorf("input not preserved while draining: %q", m.input.Value())
+	}
+	// The abandoned goroutine finally lands — the guard clears.
+	m.Update(taskDoneMsg{})
+	if m.draining {
+		t.Error("draining not cleared when the zombie goroutine landed")
+	}
+}
+
 func TestAsideDrainsOnce(t *testing.T) {
 	a := &app{}
 	if a.addAside("  "); len(a.pendingAside) != 0 {

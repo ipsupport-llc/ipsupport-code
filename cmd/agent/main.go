@@ -3248,7 +3248,7 @@ func helpText() string {
   /exit, /quit     leave
 
 keys: Enter send · alt+enter newline · Tab complete /commands + @file paths ·
-  ctrl+r history search · shift+tab plan/auto · ctrl+u clear input · esc cancel
+  ctrl+r history search · shift+tab plan/auto · ctrl+u clear input · esc cancel (twice = force-detach a stuck task)
 
 sub-agents: define profiles in /config → Sub-agents (provider → model → name),
   then ask e.g. "review internal/tool across grok and claude, then merge". The

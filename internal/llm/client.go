@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -84,20 +85,34 @@ type OpenAIClient struct {
 }
 
 // NewOpenAIClient builds a client from LLM config (LM Studio by default). The
-// http client has no total timeout on purpose — a long generation can run for
-// minutes; the idle watchdog in send() is what guards against a true hang.
+// http client has no TOTAL timeout on purpose — a long generation can run for
+// minutes; the idle watchdog in send() guards against a silent stream. But the
+// transport DOES bound the connect/handshake/response-header phases so a dead
+// connection (e.g. after the laptop sleeps) can't wedge a request forever —
+// short of that, a stuck socket read ignores context cancellation.
 func NewOpenAIClient(c config.LLM) *OpenAIClient {
 	idle := 90 * time.Second
 	if c.IdleTimeoutSeconds > 0 {
 		idle = time.Duration(c.IdleTimeoutSeconds) * time.Second
 	}
 	return &OpenAIClient{
-		baseURL:   strings.TrimRight(c.BaseURL, "/"),
-		model:     c.Model,
-		apiKey:    c.APIKey,
-		temp:      c.Temperature,
-		extra:     c.Extra,
-		hc:        &http.Client{},
+		baseURL: strings.TrimRight(c.BaseURL, "/"),
+		model:   c.Model,
+		apiKey:  c.APIKey,
+		temp:    c.Temperature,
+		extra:   c.Extra,
+		hc: &http.Client{
+			Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConns:          100,
+				IdleConnTimeout:       60 * time.Second, // drop pooled conns so a post-sleep zombie isn't reused
+				TLSHandshakeTimeout:   30 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+				ResponseHeaderTimeout: idle, // no response headers within the idle window → abort
+			},
+		},
 		idle:      idle,
 		maxRespTk: maxResponseTokens(c.ContextWindow),
 	}

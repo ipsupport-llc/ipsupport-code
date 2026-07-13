@@ -739,6 +739,34 @@ func TestRunGoalIdleNudgeOn(t *testing.T) {
 	}
 }
 
+// A /btw side question is answered in its own no-tools turn between steps, and
+// that answer does NOT become the task's final — the task keeps going.
+func TestRunAnswersAside(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "coverage is about 80%"}, // consumed by the aside answer
+		{Role: "assistant", Content: "task finished"},         // the main task's finish
+	}}
+	rt := &recTracer{}
+	a := New(fake, reg, nil, rt, "", 10)
+	asked := false
+	a.SetAsides(func() []string {
+		if asked {
+			return nil
+		}
+		asked = true
+		return []string{"what's the test coverage?"}
+	})
+
+	tr, _ := a.Run(context.Background(), "do the thing")
+	if !rt.has("aside") {
+		t.Error("no aside event emitted for the /btw question")
+	}
+	if tr.Final != "task finished" {
+		t.Errorf("final = %q — the aside answer must not become the task's final", tr.Final)
+	}
+}
+
 // A model that double-encodes params as a JSON string AND puts a param at the top
 // level (e.g. path) must not lose the top-level one.
 func TestParseArgsStringParamsKeepsSiblings(t *testing.T) {

@@ -1226,8 +1226,16 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 			m.pushLines(act.lines)
 		}
 		return m, nil
-	case "/btw": // idle: the note is pinned and steers the next run you start
+	case "/steer": // idle: the note is pinned and steers the next run you start
 		m.addSteer(rest)
+		return m, nil
+	case "/btw": // idle: no running task — answer the side question right away
+		if q := strings.TrimSpace(rest); q != "" {
+			m.push(cDim.Render("  ✦ by the way — asking on the side…"))
+			go func() { m.app.emit("aside", map[string]any{"q": q, "a": m.app.ag.AnswerAside(m.ctx, q)}) }()
+		} else {
+			m.push(cDim.Render("  usage: /btw <question> — a quick answer, no tools"))
+		}
 		return m, nil
 	case "/diff":
 		for _, l := range m.app.diffCommand() {
@@ -1344,10 +1352,19 @@ func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
 		// /color which only recolors the frame, or /snip (edits the input / its own
 		// store, never the running stack).
 		return m.runCommand(line)
-	case "/btw":
+	case "/steer":
 		// Steer the LIVE task without stopping it: buffer the note for the model's
 		// next turn and pin it above the input — never into the scrolling log.
 		m.addSteer(rest)
+		return m, nil
+	case "/btw":
+		// A quick SIDE question — the agent answers it in one no-tools turn between
+		// steps and keeps working; the answer arrives as an "aside" event.
+		if m.app.addAside(rest) {
+			m.push(cDim.Render("  ✦ by the way — answering on the side, then back to it…"))
+		} else {
+			m.push(cDim.Render("  usage: /btw <question>"))
+		}
 		return m, nil
 	case "/config":
 		// Open the settings panel OVER the running task to view it; changing a
@@ -1845,7 +1862,8 @@ var commandList = []cmdInfo{
 	{"/usage", "token history (day/week/month, by model); clear · purge <days> · retain <days>"},
 	{"/budget", "<usd>|off — cap estimated spend per run; refuses new tasks once hit"},
 	{"/jobs", "background sub-agent jobs: list · result <id> · kill <id>"},
-	{"/btw", "steer a RUNNING task without stopping it (esc cancels; /btw nudges)"},
+	{"/steer", "fold a note into a RUNNING task without stopping it (esc cancels)"},
+	{"/btw", "ask a quick side question mid-task — one-turn answer, no tools, task keeps going"},
 	{"/snip", "prompt templates: /snip <name> recalls into the input; save <name> [text]; list; rm <name>"},
 	{"/diff", "show uncommitted changes in the workspace (what the agent changed)"},
 	{"/login", "(re)configure server URL / model / key, then reload"},
@@ -2369,6 +2387,19 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		}
 		return []string{cOk.Render(fmt.Sprintf("  ✓ job #%d (%v) finished", id, e.fields["profile"])) +
 			cDim.Render("  — result lands next turn · /jobs result "+strconv.Itoa(id)+" to read now")}
+	case "aside":
+		// A /btw side answer: the question on one line, the answer wrapped below.
+		q, _ := e.fields["q"].(string)
+		ans, _ := e.fields["a"].(string)
+		out := []string{cLesson.Render("  ✦ by the way") + cDim.Render("  "+oneLine(q, 70))}
+		tw := m.width - 4
+		if tw < 20 {
+			tw = 20
+		}
+		for _, l := range strings.Split(lipgloss.NewStyle().Width(tw).Render(ans), "\n") {
+			out = append(out, cDim.Render("    "+l))
+		}
+		return out
 	case "subagent":
 		prof, _ := e.fields["profile"].(string)
 		model, _ := e.fields["model"].(string)

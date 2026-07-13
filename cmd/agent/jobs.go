@@ -189,20 +189,49 @@ func (a *app) btwPending() int {
 	return len(a.pendingBtw)
 }
 
-// btwCommand handles /btw. running distinguishes steering a live task from
+// steerCommand handles /steer. running distinguishes steering a live task from
 // leaving a note for the next run (the wording, not the mechanism, differs).
-func (a *app) btwCommand(rest string, running bool) []string {
+func (a *app) steerCommand(rest string, running bool) []string {
 	if strings.TrimSpace(rest) == "" {
 		if n := a.btwPending(); n > 0 {
-			return []string{fmt.Sprintf("%d aside(s) queued for the next turn — add more with /btw <note>", n)}
+			return []string{fmt.Sprintf("%d steering note(s) queued for the next turn — add more with /steer <note>", n)}
 		}
-		return []string{"usage: /btw <note> — drop a side-note into the running task without stopping it"}
+		return []string{"usage: /steer <note> — fold a note into the running task without stopping it (for a side question, use /btw)"}
 	}
 	a.addBtw(rest)
 	if running {
 		return []string{"✦ noted — steering the running task; it lands on the next step"}
 	}
 	return []string{"✦ noted — will steer your next run"}
+}
+
+// --- /btw side questions ----------------------------------------------------
+//
+// /btw asks a quick question WHILE a task runs, answered in one no-tools turn
+// from the live context (the agent drains asides between steps via SetAsides),
+// without steering the task. Idle, it's answered on the spot.
+
+// addAside queues a side question for the running task's next step. Safe from the
+// UI goroutine.
+func (a *app) addAside(q string) bool {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return false
+	}
+	a.asideMu.Lock()
+	a.pendingAside = append(a.pendingAside, q)
+	a.asideMu.Unlock()
+	return true
+}
+
+// drainAsides is the agent's SetAsides hook: it returns and clears the queued
+// side questions.
+func (a *app) drainAsides() []string {
+	a.asideMu.Lock()
+	qs := a.pendingAside
+	a.pendingAside = nil
+	a.asideMu.Unlock()
+	return qs
 }
 
 // jobsPending reports how many jobs are still running (for /status).

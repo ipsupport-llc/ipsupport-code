@@ -246,8 +246,11 @@ type app struct {
 	jobs   []*job
 	jobSeq int
 
-	btwMu      sync.Mutex // guards pendingBtw — /btw side-channel steering notes
-	pendingBtw []string   // user asides awaiting the running task's next turn (see jobs.go drainBtw)
+	btwMu      sync.Mutex // guards pendingBtw — /steer notes folded into a running task
+	pendingBtw []string   // steering notes awaiting the running task's next turn (see jobs.go drainBtw)
+
+	asideMu      sync.Mutex // guards pendingAside — /btw side questions answered in one no-tools turn
+	pendingAside []string
 
 	costMu         sync.Mutex // guards sessionCostUSD (parallel sub-agent spawns accrue too)
 	sessionCostUSD float64    // estimated spend this process run, for the SessionBudgetUSD guard
@@ -1748,7 +1751,8 @@ func (a *app) wire() error {
 	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.goalSteps())
 	a.ag.SetHistory(prior)
 	a.ag.SetPlanMode(a.planMode)     // carry the mode into the rebuilt agent
-	a.ag.SetBeforeTurn(a.beforeTurn) // /btw notes + finished background jobs fold in between steps of a running task
+	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
+	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
 	return nil
 }
 
@@ -2542,8 +2546,14 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		} else {
 			printLines(act.lines)
 		}
-	case "/btw": // in plain mode a task runs synchronously, so this always steers the NEXT run
-		printLines(a.btwCommand(rest, false))
+	case "/steer": // in plain mode a task runs synchronously, so this always steers the NEXT run
+		printLines(a.steerCommand(rest, false))
+	case "/btw": // side question — plain mode has no running task, so answer it now
+		if strings.TrimSpace(rest) == "" {
+			printLines([]string{"usage: /btw <question> — a quick answer from the conversation, no tools"})
+		} else {
+			printLines([]string{"✦ by the way:", a.ag.AnswerAside(ctx, rest)})
+		}
 	case "/diff":
 		printLines(a.diffCommand())
 	case "/reasoning":
@@ -3204,7 +3214,8 @@ func helpText() string {
   /usage           session counters + token usage
   /budget [usd]    cap estimated spend per run (refuses new tasks once hit; off to disable)
   /jobs            background sub-agent jobs: list · result <id> · kill <id>
-  /btw <note>      steer a RUNNING task without stopping it (esc cancels; /btw nudges)
+  /steer <note>    fold a note into a RUNNING task without stopping it (esc cancels)
+  /btw <question>  ask a quick side question mid-task — one-turn answer, no tools, task keeps going
   /snip [name]     prompt templates: /snip <name> recalls into the input · save <name> [text] · list · rm <name>
   /diff            show uncommitted changes in the workspace (what the agent changed)
   /login           (re)configure the server URL / model / key, then reload

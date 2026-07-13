@@ -59,6 +59,10 @@ type Agent struct {
 	// nudgeIdle: after a re-feed, if the model finishes without doing any work,
 	// push it once (instead of silently giving up) before accepting the finish.
 	nudgeIdle bool
+	// asides, if set, is drained between steps of a running task; each returned
+	// question gets a one-turn, no-tools answer (the /btw side-channel) without
+	// derailing the task.
+	asides func() []string
 }
 
 // New builds an Agent. maxSteps <= 0 defaults to 12.
@@ -99,6 +103,33 @@ func (a *Agent) SetLabel(s string) { a.label = s }
 // call. Used for /btw side-channel steering. The hook must be concurrency-safe —
 // it's invoked from the run goroutine while the UI goroutine may be feeding it.
 func (a *Agent) SetBeforeTurn(fn func() []llm.Message) { a.beforeTurn = fn }
+
+// SetAsides registers the /btw side-channel: fn is drained between steps of a
+// running task, and each question gets a one-turn, no-tools answer (emitted as an
+// "aside" event) using the live conversation, without steering the task.
+func (a *Agent) SetAsides(fn func() []string) { a.asides = fn }
+
+// asidePrompt frames a /btw side question so the model answers it in one turn and
+// doesn't try to act on it.
+const asidePrompt = "The user asked a quick SIDE question while the main task keeps running. Answer it in one turn from the conversation so far — do NOT call tools, do NOT change anything, just answer concisely.\n\nQuestion: "
+
+// askAside makes a one-shot, no-tools answer to a side question against base (the
+// live message set), returning the answer text.
+func (a *Agent) askAside(ctx context.Context, base []llm.Message, question string) string {
+	msgs := append(append([]llm.Message(nil), base...), llm.User(asidePrompt+question))
+	reply, err := a.llm.Chat(ctx, msgs, nil) // nil tools — a single answering turn
+	if err != nil {
+		return "(couldn't answer the aside: " + err.Error() + ")"
+	}
+	return strings.TrimSpace(reply.Content)
+}
+
+// AnswerAside answers a side question when no task is running, using the committed
+// session history as context.
+func (a *Agent) AnswerAside(ctx context.Context, question string) string {
+	base := append([]llm.Message{llm.System(a.system)}, a.history...)
+	return a.askAside(ctx, base, question)
+}
 
 // SetPlanMode toggles plan mode. In plan mode the agent investigates with
 // read-only tools and proposes a plan; mutating tool calls are refused, so it
@@ -249,6 +280,13 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		if a.beforeTurn != nil {
 			if extra := a.beforeTurn(); len(extra) > 0 {
 				msgs = append(msgs, extra...)
+			}
+		}
+		// /btw side questions: answer each in one no-tools turn from the live
+		// context, then continue the task (the answer isn't fed back into it).
+		if a.asides != nil {
+			for _, q := range a.asides() {
+				a.emit("aside", map[string]any{"q": q, "a": a.askAside(ctx, msgs, q)})
 			}
 		}
 

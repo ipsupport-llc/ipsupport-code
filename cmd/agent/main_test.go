@@ -175,6 +175,22 @@ func TestBackgroundJobStreamsProgress(t *testing.T) {
 	}
 }
 
+func TestAsideDrainsOnce(t *testing.T) {
+	a := &app{}
+	if a.addAside("  "); len(a.pendingAside) != 0 {
+		t.Error("blank aside should be ignored")
+	}
+	a.addAside("what's the coverage?")
+	a.addAside("which framework?")
+	got := a.drainAsides()
+	if len(got) != 2 || got[0] != "what's the coverage?" {
+		t.Fatalf("drainAsides = %v, want the 2 queued questions", got)
+	}
+	if a.drainAsides() != nil {
+		t.Error("asides should drain once, then be empty")
+	}
+}
+
 func TestRedirectLogToFile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	prev := slog.Default()

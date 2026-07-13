@@ -252,6 +252,11 @@ type app struct {
 	asideMu      sync.Mutex // guards pendingAside — /btw side questions answered in one no-tools turn
 	pendingAside []string
 
+	// taskEpoch bumps on each task start and on a force-detach. A run's outputs
+	// (its taskDoneMsg, its post-Run side effects) are honoured only while the
+	// epoch it captured is still current — a force-detached run is orphaned.
+	taskEpoch atomic.Int64
+
 	costMu         sync.Mutex // guards sessionCostUSD (parallel sub-agent spawns accrue too)
 	sessionCostUSD float64    // estimated spend this process run, for the SessionBudgetUSD guard
 
@@ -2390,7 +2395,7 @@ func (a *app) runOne(ctx context.Context, goal string) {
 
 // runTaskStreaming is the TUI path: no printing — progress reaches the screen via
 // the UI tracer. Errors surface as an "error" event.
-func (a *app) runTaskStreaming(ctx context.Context, goal string) {
+func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	if a.budgetExceeded() {
 		a.emit("error", map[string]any{"text": a.budgetMsg()})
 		return
@@ -2400,6 +2405,9 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string) {
 	defer a.endCheckpoint()
 	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
 	tr, err := a.ag.Run(ctx, goal)
+	if a.taskEpoch.Load() != epoch {
+		return // force-detached mid-run — its results belong to a run the UI abandoned
+	}
 	if err != nil {
 		a.emit("error", map[string]any{"text": err.Error()})
 		return

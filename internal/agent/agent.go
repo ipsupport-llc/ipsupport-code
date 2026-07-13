@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
@@ -35,10 +36,14 @@ type Transcript struct {
 // the user goals and final answers are kept, not the tool back-and-forth, so a
 // small model's context isn't swamped.
 type Agent struct {
-	llm      llm.Chatter
-	reg      *tool.Registry
-	kb       *knowledge.KB
-	tr       trace.Tracer
+	llm llm.Chatter
+	reg *tool.Registry
+	kb  *knowledge.KB
+	tr  trace.Tracer
+	// detached marks an agent whose task was force-abandoned (a wedged request).
+	// Its remaining work must not touch shared UI/session state, so emit and
+	// remember become no-ops. A fresh agent takes over; this one is orphaned.
+	detached atomic.Bool
 	system   string
 	maxSteps int
 
@@ -209,7 +214,17 @@ func stopNote(msgs []llm.Message, cancelled bool, err error) string {
 
 // remember appends the goal and its final answer to the session, trimming to the
 // most recent maxHistory messages.
+// Detach orphans the agent: its emit and remember become no-ops, so a wedged
+// run that later unblocks can't scribble on the UI or the (now fresh) session.
+func (a *Agent) Detach() { a.detached.Store(true) }
+
+// Reattach undoes Detach (used only if the agent swap it was part of failed).
+func (a *Agent) Reattach() { a.detached.Store(false) }
+
 func (a *Agent) remember(goal, final string) {
+	if a.detached.Load() {
+		return
+	}
 	a.history = append(a.history, llm.User(goal), llm.Message{Role: "assistant", Content: final})
 	if a.maxHistory > 0 && len(a.history) > a.maxHistory {
 		a.history = append([]llm.Message(nil), a.history[len(a.history)-a.maxHistory:]...)
@@ -774,7 +789,7 @@ func usageError(s string) bool {
 }
 
 func (a *Agent) emit(kind string, fields map[string]any) {
-	if a.tr == nil {
+	if a.tr == nil || a.detached.Load() {
 		return
 	}
 	if a.label != "" { // a sub-agent — tag every event so the UI can group it

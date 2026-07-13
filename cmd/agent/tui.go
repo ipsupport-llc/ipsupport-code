@@ -77,7 +77,7 @@ type tuiModel struct {
 	taskDoneAway  bool     // a task finished while a modal panel was open over it; finalize on panel close
 	planTask      bool     // the running task started in plan mode → offer accept-plan when it finishes
 	taskCancelled bool     // the running task was cancelled by esc → don't offer accept-plan
-	draining      bool     // a force-detached task's goroutine is still shutting down (block a new one)
+	epoch         int64    // current run's epoch (mirrors app.taskEpoch) — stale taskDoneMsgs are ignored
 	searchQuery   string   // Ctrl+R reverse-search query (stHistSearch)
 	searchIdx     int      // index into app.promptHist of the current match; -1 = none
 	pending       *approvalReq
@@ -139,7 +139,7 @@ type retryInfo struct {
 // Bubble Tea messages.
 type eventMsg uiEvent
 type approvalMsg approvalReq
-type taskDoneMsg struct{}
+type taskDoneMsg struct{ epoch int64 } // which run finished — a force-detached run's is stale
 type compactDoneMsg struct {
 	n   int
 	err error
@@ -498,12 +498,11 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case taskDoneMsg:
-		if m.draining {
-			// The force-detached goroutine finally landed — the UI already moved on,
-			// so just clear the guard (don't finalize/accept-plan a task we abandoned).
-			m.draining = false
-			m.push(cDim.Render("  ✓ previous request shut down — you're clear"))
-			return m.drainQueue()
+		if msg.epoch != m.epoch {
+			// A force-detached (orphaned) run finally landed — the UI moved on to a
+			// fresh agent long ago. Ignore it: don't finalize/accept-plan/drain a
+			// task nobody is waiting on.
+			return m, nil
 		}
 		m.cancel = nil
 		m.retry = nil
@@ -835,8 +834,7 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Already asked to cancel and it still hasn't stopped — the request
 				// is wedged (classic after the laptop sleeps: a dead socket read that
 				// ignores cancellation). Force-detach so the UI isn't held hostage.
-				m.forceDetach()
-				return m, nil
+				return m.forceDetach()
 			}
 			if m.cancel != nil {
 				m.cancel()
@@ -1109,13 +1107,6 @@ func (m *tuiModel) submit(line string) (tea.Model, tea.Cmd) {
 		return m, m.runShellCmd(strings.TrimPrefix(line, "!"))
 	case strings.HasPrefix(line, "/"):
 		return m.runCommand(line)
-	}
-	if m.draining {
-		// A force-detached request is still shutting down — don't start a second
-		// agent run over it. Keep what they typed so they can resend in a moment.
-		m.push(cDim.Render("  a moment — the previous request is still shutting down; resend in a sec"))
-		m.input.SetValue(line)
-		return m, nil
 	}
 	m.push(cYou.Render("❯ ") + line)
 	return m, m.runTask(line)
@@ -1505,36 +1496,46 @@ func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
 	m.bridge.arm()              // fresh abort signal so a previous cancel doesn't deny this task's approvals
 	m.planTask = m.app.planMode // remember so we can offer accept-plan when it finishes
 	m.taskCancelled = false
+	m.epoch = m.app.taskEpoch.Add(1) // this run's identity — a force-detach bumps it to orphan the run
 	tctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel
 	return tctx, cancel
 }
 
 // forceDetach abandons a wedged task's goroutine (a stuck request that ignored
-// cancellation) and returns the UI to idle. The goroutine keeps shutting down in
-// the background — its transport timeouts bound that — so we block a NEW task
-// until it lands (draining), which its taskDoneMsg clears. That keeps the two
-// from running the agent concurrently.
-func (m *tuiModel) forceDetach() {
-	m.draining = true
+// cancellation) and returns the UI to idle IMMEDIATELY. It orphans the stuck
+// agent (Detach → its emit/remember become no-ops) and swaps in a FRESH agent
+// carrying the same history (via wire), so a new task shares no state with the
+// zombie. Bumping the epoch makes the zombie's eventual taskDoneMsg/side-effects
+// no-ops too. Nothing blocks; the queue drains onto the fresh agent.
+func (m *tuiModel) forceDetach() (tea.Model, tea.Cmd) {
+	old := m.app.ag
+	old.Detach()           // silence the wedged run (emit/remember → no-ops)
+	m.app.taskEpoch.Add(1) // orphan its run: its taskDoneMsg + side effects are stale now
+	m.epoch = m.app.taskEpoch.Load()
+	if err := m.app.wire(); err != nil {
+		old.Reattach() // couldn't spin up a fresh agent — fall back to the old one
+		m.push(cErr.Render("  ⚠ couldn't fully detach: " + err.Error()))
+	}
 	m.state = stIdle
 	m.cancel = nil
 	m.retry = nil
 	m.steer = nil
 	m.busyMsg = ""
-	m.push(cErr.Render("  ⚠ force-detached") + cDim.Render(" — the stuck request is still shutting down in the background."))
-	m.push(cDim.Render("    you can keep working; a new task waits a moment until it frees up."))
-	m.syncViewport()
+	m.taskCancelled = false
+	m.push(cErr.Render("  ⚠ force-detached") + cDim.Render(" — abandoned the stuck request; you're clear to work."))
+	return m.drainQueue() // run anything queued, on the fresh agent
 }
 
 // runTask runs a single goal in the background, streaming via the bridge and
 // ending with taskDoneMsg.
 func (m *tuiModel) runTask(goal string) tea.Cmd {
 	tctx, cancel := m.startTask()
+	ep := m.epoch // captured synchronously so a later force-detach can't shift it
 	return func() tea.Msg {
 		defer cancel()
-		m.app.runTaskStreaming(tctx, goal)
-		return taskDoneMsg{}
+		m.app.runTaskStreaming(tctx, goal, ep)
+		return taskDoneMsg{epoch: ep}
 	}
 }
 
@@ -1542,13 +1543,14 @@ func (m *tuiModel) runTask(goal string) tea.Cmd {
 // again, until max iterations (0 = until stopped) or the user cancels (esc).
 func (m *tuiModel) runLoop(interval time.Duration, max int, goal string) tea.Cmd {
 	tctx, cancel := m.startTask()
+	ep := m.epoch
 	return func() tea.Msg {
 		defer cancel()
 		for i := 0; max == 0 || i < max; i++ {
 			if i > 0 {
 				select {
 				case <-tctx.Done():
-					return taskDoneMsg{}
+					return taskDoneMsg{epoch: ep}
 				case <-time.After(interval):
 				}
 			}
@@ -1556,9 +1558,9 @@ func (m *tuiModel) runLoop(interval time.Duration, max int, goal string) tea.Cmd
 				break
 			}
 			m.bridge.Emit("loop", map[string]any{"i": i + 1, "max": max, "every": interval.String()})
-			m.app.runTaskStreaming(tctx, goal)
+			m.app.runTaskStreaming(tctx, goal, ep)
 		}
-		return taskDoneMsg{}
+		return taskDoneMsg{epoch: ep}
 	}
 }
 

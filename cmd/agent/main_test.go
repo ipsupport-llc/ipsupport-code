@@ -176,25 +176,37 @@ func TestBackgroundJobStreamsProgress(t *testing.T) {
 }
 
 // A wedged task (a request that ignored cancellation, e.g. after the laptop
-// slept) must not hold the UI hostage: a second esc force-detaches, a new task is
-// blocked until the abandoned goroutine lands, and its taskDoneMsg clears it.
+// slept) must not hold the UI hostage: a second esc force-detaches — the UI goes
+// idle immediately on a FRESH agent, the epoch is bumped, and the abandoned run's
+// late taskDoneMsg is ignored (no state shared with the new agent).
 func TestForceDetachFreesTheUI(t *testing.T) {
-	m := &tuiModel{state: stRunning, taskCancelled: true, cancel: func() {}, input: textarea.New()}
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	m := &tuiModel{app: a, state: stRunning, taskCancelled: true, cancel: func() {}, input: textarea.New()}
+	m.epoch = a.taskEpoch.Add(1) // pretend a task is running at this epoch
+	oldAgent, oldEpoch := a.ag, m.epoch
+
 	m.forceDetach()
-	if !m.draining || m.state != stIdle || m.cancel != nil {
-		t.Fatalf("after force-detach: draining=%v state=%v cancel==nil=%v", m.draining, m.state, m.cancel == nil)
+
+	if m.state != stIdle || m.cancel != nil {
+		t.Fatalf("after force-detach: state=%v cancel==nil=%v (want idle, nil)", m.state, m.cancel == nil)
 	}
-	// A new task is blocked while draining; the typed text is preserved to resend.
-	if _, cmd := m.submit("build the thing"); cmd != nil {
-		t.Error("a task started while a detached request was still draining")
+	if a.ag == oldAgent {
+		t.Error("agent was not swapped for a fresh one")
 	}
-	if m.input.Value() != "build the thing" {
-		t.Errorf("input not preserved while draining: %q", m.input.Value())
+	if m.epoch == oldEpoch || a.taskEpoch.Load() == oldEpoch {
+		t.Error("epoch was not bumped to orphan the wedged run")
 	}
-	// The abandoned goroutine finally lands — the guard clears.
-	m.Update(taskDoneMsg{})
-	if m.draining {
-		t.Error("draining not cleared when the zombie goroutine landed")
+	// The abandoned goroutine finally lands with its stale epoch — must be ignored.
+	m.Update(taskDoneMsg{epoch: oldEpoch})
+	if m.state != stIdle {
+		t.Error("a stale (orphaned) taskDoneMsg disturbed the idle UI")
 	}
 }
 

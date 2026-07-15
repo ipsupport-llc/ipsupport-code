@@ -330,6 +330,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		// refusing to edit instead of calling file.edit).
 		slog.Debug("model turn", "step", step+1,
 			"tool_calls", toolCallNames(assistant.ToolCalls),
+			"args", toolCallArgs(assistant.ToolCalls),
 			"content", clip(strings.TrimSpace(assistant.Content), 240))
 		assistant.Content = unwrapEnvelope(assistant.Content) // salvage envelope-as-content leaks
 		msgs = append(msgs, assistant)
@@ -503,6 +504,19 @@ func toolCallNames(calls []llm.ToolCall) []string {
 		names[i] = c.Name
 	}
 	return names
+}
+
+// toolCallArgs renders each call's raw argument JSON (clipped) for the debug
+// log — the first thing you need when a model's calls misbehave.
+func toolCallArgs(calls []llm.ToolCall) []string {
+	if len(calls) == 0 {
+		return nil
+	}
+	args := make([]string, len(calls))
+	for i, c := range calls {
+		args[i] = clip(c.Arguments, 200)
+	}
+	return args
 }
 
 // splitSuggestion peels a trailing "NEXT: <step>" line off the final answer,

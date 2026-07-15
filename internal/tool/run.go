@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
+	"github.com/ipsupport-llc/ipsupport-code/internal/procgroup"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
@@ -96,6 +97,10 @@ func (r *runTool) shell(ctx context.Context, a Args) Result {
 	}
 	cmd := exec.CommandContext(cctx, name, args...)
 	cmd.Dir = dir
+	// Kill the WHOLE process group on timeout/cancel, and bound Wait so a child
+	// that outlives the shell while holding the output pipe (a dev server, a
+	// backgrounded process) can't hang this tool call forever.
+	procgroup.Set(cmd)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
@@ -110,6 +115,11 @@ func (r *runTool) shell(ctx context.Context, a Args) Result {
 	if runErr != nil {
 		var ee *exec.ExitError
 		switch {
+		case errors.Is(runErr, exec.ErrWaitDelay):
+			// The shell itself exited fine; we just stopped waiting for a lingering
+			// child that still held the output pipe (e.g. something backgrounded).
+			// The output we have is the shell's complete output — a success.
+			runErr = nil
 		case cctx.Err() == context.DeadlineExceeded:
 			// Not silent: tell the model it was killed, how to allow longer (the
 			// exact param + an example), and hand back whatever ran before the kill.

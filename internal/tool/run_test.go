@@ -58,6 +58,21 @@ func TestRunAppliesCmdWrapper(t *testing.T) {
 	}
 }
 
+// A command whose CHILD outlives the shell while holding the output pipe (a
+// backgrounded process, a dev server at timeout) must not hang the tool call:
+// WaitDelay bounds the pipe wait. Without it this test blocks ~20s.
+func TestRunReturnsWhenChildHoldsPipe(t *testing.T) {
+	tl := runToolFor(t, t.TempDir(), "allow", yes(), nil)
+	start := time.Now()
+	r := tl.Call(context.Background(), "shell", map[string]any{"command": "sleep 20 & echo started"})
+	if d := time.Since(start); d > 15*time.Second {
+		t.Fatalf("tool call blocked %s on a pipe-holding child, want a bounded return", d)
+	}
+	if r.IsError || !strings.Contains(r.Content, "started") {
+		t.Errorf("result = %+v, want the shell's own output", r)
+	}
+}
+
 func TestRunPerCallTimeout(t *testing.T) {
 	tl := runToolFor(t, t.TempDir(), "allow", yes(), nil)
 	r := tl.Call(context.Background(), "shell", map[string]any{"command": "sleep 3", "timeout": 1})

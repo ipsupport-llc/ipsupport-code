@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/procgroup"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
@@ -111,7 +113,7 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 
 	cmd := exec.CommandContext(cctx, command, expandTaskArgs(p.Args, task)...)
 	cmd.Dir = root
-	setProcGroup(cmd) // cancel/timeout kills the whole process tree, not just the child
+	procgroup.Set(cmd) // cancel/timeout kills the whole process tree, not just the child
 	var stdout, stderr bytes.Buffer
 	if onLine != nil {
 		// Still accumulate for the final report, but also tap each output line so a
@@ -123,6 +125,9 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	}
 	runErr := cmd.Run()
+	if errors.Is(runErr, exec.ErrWaitDelay) {
+		runErr = nil // the CLI exited fine; a lingering child just held the pipe
+	}
 	if cctx.Err() == context.DeadlineExceeded {
 		runErr = fmt.Errorf("timed out after %s — use the CLI's non-interactive mode (exec / -p / --message) so it can't sit waiting for input", timeout)
 	}

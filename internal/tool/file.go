@@ -50,6 +50,23 @@ func NewFile(p *policy.Engine, ap Approver, snap Snapshotter) Tool {
 			{Name: "search", Params: []Param{Req("query", "str"), Opt("path", "str", ".")}, Note: "(regex; file:line: match)", Run: f.search},
 			{Name: "mkdir", Mutates: true, Params: []Param{Req("path", "str")}, Run: f.mkdir},
 		},
+		// When a model omits "action", recover a READ-ONLY intent from the params
+		// (never a mutation — if content/edits/find are present it's ambiguous with
+		// a write, so make the model say so). This unblocks read-heavy work (e.g.
+		// "review the repo") on models that skip the action field.
+		Infer: func(p map[string]any) string {
+			switch {
+			case !isEmpty(p["content"]) || !isEmpty(p["edits"]) || !isEmpty(p["find"]):
+				return "" // looks like a write/edit — don't guess a mutation
+			case !isEmpty(p["query"]):
+				return "search"
+			case !isEmpty(p["pattern"]):
+				return "find"
+			case !isEmpty(p["path"]):
+				return "read"
+			}
+			return ""
+		},
 	})
 }
 

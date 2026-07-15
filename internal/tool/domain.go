@@ -48,6 +48,11 @@ type DomainSpec struct {
 	Details string // optional extra lines after the action list
 	NotHere string
 	Actions []Action
+	// Infer recovers a likely action from the params when a model omits "action"
+	// (some models violate the required+enum schema). It MUST only ever return a
+	// read-only action — never guess a mutation — so a wrong guess is harmless and
+	// self-correcting. "" = can't tell, surface the normal "no action" error.
+	Infer func(params map[string]any) string
 }
 
 // Domain is the universal tool object (MCP-style): standard methods —
@@ -69,6 +74,15 @@ func NewDomain(spec DomainSpec) *Domain {
 }
 
 func (d *Domain) Name() string { return d.spec.Name }
+
+// InferAction guesses a read-only action from the params when the model omitted
+// "action". Returns "" when the spec has no inference or nothing fits.
+func (d *Domain) InferAction(params map[string]any) string {
+	if d.spec.Infer == nil {
+		return ""
+	}
+	return d.spec.Infer(params)
+}
 
 // Mutates reports whether the named action is declared as state-changing.
 func (d *Domain) Mutates(action string) bool {

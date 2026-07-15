@@ -49,6 +49,10 @@ import (
 var version = "dev"
 
 func main() {
+	// Landlock re-exec leg (Linux): when the run tool wraps a command in the
+	// sandbox, it re-runs THIS binary, which self-restricts and execs the real
+	// command. Must run first; a normal launch falls straight through.
+	sandbox.MaybeExecConfined()
 	var (
 		workspace   string
 		doInit      bool
@@ -1689,7 +1693,14 @@ func (a *app) sandboxWrapper() tool.CmdWrapper {
 			root = filepath.Join(a.cfg.Workspace, j)
 		}
 	}
-	spec := sandbox.Spec{WritableRoots: []string{root}, AllowNetwork: !a.cfg.Offline}
+	roots := []string{root}
+	// Build tooling writes caches outside the workspace (go → ~/.cache/go-build,
+	// linters, etc.). Allow the user cache dir so `go build` / `go test` work
+	// under the sandbox; it's tool scratch, not user data.
+	if cache, err := os.UserCacheDir(); err == nil {
+		roots = append(roots, cache)
+	}
+	spec := sandbox.Spec{WritableRoots: roots, AllowNetwork: !a.cfg.Offline}
 	return func(name string, args []string) (string, []string) {
 		n, out, _ := sandbox.Wrap(mode, spec, name, args)
 		return n, out

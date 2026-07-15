@@ -315,13 +315,15 @@ non-destructive file ops in the workspace (the deny floor still applies); same f
 **OS sandbox (opt-in).** The permission engine decides *whether* a command runs;
 an OS-level sandbox can additionally confine *what it can touch* once it does — so
 even an allowed command can't write outside the workspace. Turn it on with
-`config set sandbox seatbelt` (macOS) or `config set sandbox auto` (pick the
-platform's mechanism). Shell (`run`) commands then execute inside the kernel
-sandbox: writes are confined to the workspace, the network follows `/offline`,
-reads and everything else are unchanged. It's **off by default**, and on a
-platform without a supported sandbox (currently anything but macOS Seatbelt;
-Linux Landlock is planned) commands run unconfined as before. External CLI agents
-are **not** sandboxed (they run outside it, as documented above).
+`config set sandbox auto` (picks the platform's mechanism: **Seatbelt** on macOS,
+**Landlock** on Linux — kernel 5.13+), or name one explicitly (`seatbelt` /
+`landlock`). Shell (`run`) commands then execute inside the kernel sandbox:
+writes are confined to the workspace (plus temp dirs and the user cache, so
+build tools keep working), the network follows `/offline` (Landlock needs kernel
+6.7+ for that part), reads and everything else are unchanged. It's **off by
+default**, and on a platform/kernel without a supported sandbox commands run
+unconfined as before. External CLI agents are **not** sandboxed (they run
+outside it, as documented above).
 
 ## Skills
 

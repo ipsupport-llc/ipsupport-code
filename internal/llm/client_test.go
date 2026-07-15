@@ -260,6 +260,44 @@ func TestParseStreamTicksOnlyOnProgress(t *testing.T) {
 	}
 }
 
+// Some gateways (an Anthropic→OpenAI converter passing tool_use.input through)
+// emit tool-call "arguments" as a raw JSON OBJECT instead of the spec's string.
+// That must not drop the arguments — the raw JSON text must reach the tool call.
+func TestToolCallObjectArgumentsAccepted(t *testing.T) {
+	// Streaming: name in one chunk, OBJECT arguments in another.
+	url := sseServer(t,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"file","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":{"action":"list","params":{"path":"."}}}}]}}]}`,
+	)
+	cl := NewOpenAIClient(config.LLM{BaseURL: url, Model: "fake"})
+	msg, err := cl.Chat(context.Background(), []Message{User("hi")}, []map[string]any{{"type": "function"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.ToolCalls) != 1 || msg.ToolCalls[0].Name != "file" {
+		t.Fatalf("tool calls = %+v", msg.ToolCalls)
+	}
+	if !strings.Contains(msg.ToolCalls[0].Arguments, `"action":"list"`) {
+		t.Errorf("object arguments lost: %q", msg.ToolCalls[0].Arguments)
+	}
+
+	// Non-streaming JSON response with object arguments.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"",
+			"tool_calls":[{"id":"c2","type":"function","function":{"name":"file","arguments":{"action":"read","params":{"path":"x.go"}}}}]}}]}`)
+	}))
+	defer srv.Close()
+	cl2 := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+	msg2, err := cl2.Chat(context.Background(), []Message{User("hi")}, []map[string]any{{"type": "function"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg2.ToolCalls) != 1 || !strings.Contains(msg2.ToolCalls[0].Arguments, `"action":"read"`) {
+		t.Errorf("non-stream object arguments lost: %+v", msg2.ToolCalls)
+	}
+}
+
 func TestBackoffGrows(t *testing.T) {
 	if backoff(1) != 500*time.Millisecond || backoff(2) != time.Second || backoff(3) != 2*time.Second {
 		t.Errorf("backoff = %s,%s,%s want 500ms,1s,2s", backoff(1), backoff(2), backoff(3))

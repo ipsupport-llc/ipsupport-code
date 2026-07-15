@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -191,12 +192,38 @@ func (c *OpenAIClient) startIdleWatchdog(ctx context.Context, cancel context.Can
 	}
 }
 
+// argString decodes a tool call's "arguments" field. Per the OpenAI spec it's a
+// JSON-encoded STRING — but some gateways (e.g. an Anthropic→OpenAI converter
+// passing tool_use.input through) emit it as a raw OBJECT. Rejecting that made
+// the whole chunk unparseable, silently dropping the arguments: the model then
+// looked like it called the tool with no action at all. Accept both shapes;
+// either way the value becomes the raw JSON text the tool-args parser expects.
+// Marshals back as a plain string, so outgoing requests are unchanged.
+type argString string
+
+func (s *argString) UnmarshalJSON(data []byte) error {
+	if len(data) > 0 && data[0] == '"' { // spec shape: a JSON string
+		var str string
+		if err := json.Unmarshal(data, &str); err != nil {
+			return err
+		}
+		*s = argString(str)
+		return nil
+	}
+	if string(data) == "null" {
+		*s = ""
+		return nil
+	}
+	*s = argString(data) // object/array: keep its raw JSON text
+	return nil
+}
+
 type wireToolCall struct {
 	ID       string `json:"id"`
 	Type     string `json:"type"`
 	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
+		Name      string    `json:"name"`
+		Arguments argString `json:"arguments"`
 	} `json:"function"`
 }
 
@@ -404,7 +431,10 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 			break
 		}
 		var ch streamChunk
-		if json.Unmarshal([]byte(payload), &ch) != nil {
+		if err := json.Unmarshal([]byte(payload), &ch); err != nil {
+			// A chunk we can't parse is DROPPED — if that ever bites again (a
+			// gateway inventing a new shape), IPS_LOG=debug shows the evidence.
+			slog.Debug("stream chunk unparsed", "err", err, "payload", textutil.OneLine(payload, 240))
 			continue
 		}
 		if len(ch.Choices) > 0 {
@@ -432,7 +462,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 					cur.Name = tc.Function.Name
 				}
 				if tc.Function.Arguments != "" {
-					cur.Arguments += tc.Function.Arguments
+					cur.Arguments += string(tc.Function.Arguments)
 					progress()
 				}
 			}
@@ -523,8 +553,8 @@ type streamChunk struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id"`
 				Function struct {
-					Name      string `json:"name"`
-					Arguments string `json:"arguments"`
+					Name      string    `json:"name"`
+					Arguments argString `json:"arguments"`
 				} `json:"function"`
 			} `json:"tool_calls"`
 		} `json:"delta"`
@@ -567,7 +597,7 @@ func toWire(m Message) wireMessage {
 		wtc.ID = tc.ID
 		wtc.Type = "function"
 		wtc.Function.Name = tc.Name
-		wtc.Function.Arguments = tc.Arguments
+		wtc.Function.Arguments = argString(tc.Arguments)
 		w.ToolCalls = append(w.ToolCalls, wtc)
 	}
 	return w
@@ -576,7 +606,7 @@ func toWire(m Message) wireMessage {
 func fromWire(w wireMessage) Message {
 	m := Message{Role: w.Role, Content: w.Content, ToolCallID: w.ToolCallID, Name: w.Name}
 	for _, tc := range w.ToolCalls {
-		m.ToolCalls = append(m.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: validArgs(tc.Function.Arguments)})
+		m.ToolCalls = append(m.ToolCalls, ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: validArgs(string(tc.Function.Arguments))})
 	}
 	return m
 }

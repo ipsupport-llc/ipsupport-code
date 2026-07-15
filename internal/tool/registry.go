@@ -71,6 +71,16 @@ func (r *Registry) Dispatch(ctx context.Context, name, action string, params map
 		if len(acts) == 0 {
 			return Err(name + ": this tool has no actions")
 		}
+		// Some models violate the required+enum schema and omit "action". If the
+		// params clearly imply a READ-ONLY action, run it — a wrong guess can't
+		// mutate and self-corrects. Otherwise show the shape and the action list.
+		if inf, ok := t.(interface {
+			InferAction(map[string]any) string
+		}); ok {
+			if a := inf.InferAction(params); a != "" && contains(acts, a) {
+				return t.Call(ctx, a, params)
+			}
+		}
 		// Lead with the full action list (so a model that meant "edit" isn't nudged
 		// toward the first action), then a shape example.
 		return Err(fmt.Sprintf(`%s: no action given — set "action" to one of: %s. Shape: {"action":"<one of those>","params":{...}}`,

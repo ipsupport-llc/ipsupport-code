@@ -312,3 +312,30 @@ func TestFileList(t *testing.T) {
 		t.Errorf("list = %+v, want to include todo.txt", r)
 	}
 }
+
+// A model that omits "action" (violating the required+enum schema) still gets a
+// READ-ONLY intent recovered from the params — but never a guessed mutation.
+func TestDispatchInfersReadOnlyAction(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "hello.txt"), []byte("hi there"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRegistry(fileToolFor(t, dir, "allow", yes()))
+
+	// No action + a path → inferred read.
+	if res := r.Dispatch(context.Background(), "file", "", map[string]any{"path": "hello.txt"}); res.IsError || !strings.Contains(res.Content, "hi there") {
+		t.Errorf("empty action + path should infer read: %+v", res)
+	}
+	// No action + a query → inferred search (read-only).
+	if res := r.Dispatch(context.Background(), "file", "", map[string]any{"query": "hi"}); res.IsError || !strings.Contains(res.Content, "hello.txt") {
+		t.Errorf("empty action + query should infer search: %+v", res)
+	}
+	// No action + content → must NOT guess a write; and nothing is written.
+	res := r.Dispatch(context.Background(), "file", "", map[string]any{"path": "new.txt", "content": "x"})
+	if !res.IsError || !strings.Contains(res.Content, "no action given") {
+		t.Errorf("empty action + content must not infer a mutation: %+v", res)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new.txt")); err == nil {
+		t.Error("a file was written from an inferred (guessed) action")
+	}
+}

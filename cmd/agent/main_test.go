@@ -298,12 +298,59 @@ func TestInitCloudProviderPath(t *testing.T) {
 	}
 }
 
-// Three bad provider names in a row fall back to the default rather than
-// looping forever (matters for a piped/non-interactive invocation, where every
-// read after EOF would otherwise repeat the same invalid empty answer).
-func TestInitCloudProviderFallsBackAfterBadTries(t *testing.T) {
+// A name that ISN'T a built-in template is a CUSTOM OpenAI-compatible endpoint
+// (a self-hosted gateway, LiteLLM, a proxy…) — setup additionally asks for its
+// Base URL, exactly mirroring the runtime rule `/ai add` already applies.
+// This is the operator's actual bug: picking the "openai" TEMPLATE silently
+// pinned the real api.openai.com with no chance to point it at their own
+// gateway; typing any other name now gets asked for a URL instead of guessing.
+func TestInitCloudProviderCustomEndpoint(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	reader := bufio.NewReader(strings.NewReader("nope1\nnope2\nnope3\nsk-x\ngpt-4o-mini\n"))
+	reader := bufio.NewReader(strings.NewReader("mygateway\nhttps://airllm.example.com/v1\nair_prod_key\ncoding\n"))
+	initCloudProvider(reader, config.Default())
+
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "mygateway" {
+		t.Fatalf("provider = %q, want mygateway", cfg.Provider)
+	}
+	l, ok := config.ResolveProvider(cfg, "mygateway")
+	if !ok {
+		t.Fatal("mygateway did not resolve")
+	}
+	if l.BaseURL != "https://airllm.example.com/v1" {
+		t.Errorf("BaseURL = %q, want the custom gateway URL — NOT api.openai.com", l.BaseURL)
+	}
+	if l.APIKey != "air_prod_key" || l.Model != "coding" {
+		t.Errorf("resolved = %+v, want the entered key/model", l)
+	}
+}
+
+// A KNOWN template name (e.g. "openai") is never treated as custom — it must
+// keep pointing at the real vendor endpoint, with no Base URL prompt at all.
+func TestInitCloudProviderTemplateStaysPinned(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	reader := bufio.NewReader(strings.NewReader("openai\nsk-real\ngpt-4o-mini\n"))
+	initCloudProvider(reader, config.Default())
+
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, ok := config.ResolveProvider(cfg, "openai")
+	if !ok || l.BaseURL != "https://api.openai.com/v1" {
+		t.Fatalf("openai template BaseURL = %+v, ok=%v — must stay the real endpoint", l, ok)
+	}
+}
+
+// "local" is reserved for the local-model slot — typing it here (confusion
+// about which setup branch to use) must not create a broken "local" provider
+// entry; it falls back to the default cloud provider instead.
+func TestInitCloudProviderRejectsLocalAsCustomName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	reader := bufio.NewReader(strings.NewReader("local\nsk-x\ngpt-4o-mini\n"))
 	initCloudProvider(reader, config.Default())
 
 	cfg, err := config.Load(t.TempDir())
@@ -311,7 +358,7 @@ func TestInitCloudProviderFallsBackAfterBadTries(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Provider != "openai" {
-		t.Fatalf("provider = %q, want the openai fallback", cfg.Provider)
+		t.Fatalf("provider = %q, want the openai fallback (not a broken 'local' entry)", cfg.Provider)
 	}
 }
 

@@ -255,9 +255,12 @@ model (LM Studio on localhost) keeps working. `/offline off` re-enables it.
    next step asks.
 2. First interactive run asks whether you have a local model server running. If
    yes, it walks you through the server URL, API key (blank for LM Studio), and
-   model, and confirms the connection. If no, it walks you through picking a
-   built-in cloud provider (`openai`, `anthropic`, `grok`, `groq`, `openrouter`,
-   `zai`) and its key instead. Either way it saves to
+   model, and confirms the connection. If no, it asks for a provider name — a
+   built-in (`openai`, `anthropic`, `grok`, `groq`, `openrouter`, `zai`) uses that
+   vendor's real endpoint with just a key; **any other name** is treated as your
+   own OpenAI-compatible endpoint (a self-hosted gateway, LiteLLM, a proxy…) and
+   additionally asks for its Base URL — so a custom endpoint is never silently
+   pinned to the wrong vendor's URL. Either way it saves to
    `~/.config/ipsupport-code/config.json` (re-run with `-init`).
 3. Run a one-shot task, or open the REPL:
 

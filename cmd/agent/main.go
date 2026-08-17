@@ -3618,6 +3618,18 @@ func maybeInit(reader *bufio.Reader, force bool) {
 		def = cur
 	}
 	fmt.Println("Setup — connect your model (press Enter to keep the current value).")
+	hasLocal := def.Provider == "" || def.Provider == "local" // an already-configured cloud provider flips the default
+	if askYN(reader, "Local model server running (LM Studio / Ollama / vLLM)?", hasLocal) {
+		initLocalModel(reader, def)
+	} else {
+		initCloudProvider(reader, def)
+	}
+}
+
+// initLocalModel configures the built-in "local" provider — LM Studio by
+// default, but any OpenAI-compatible local server (Ollama, vLLM…) works the
+// same way by pointing the URL at it.
+func initLocalModel(reader *bufio.Reader, def config.Config) {
 	fmt.Println("  In LM Studio: load a tool-calling model and start the local server (Developer tab).")
 	url := ask(reader, "Server URL", def.LLM.BaseURL)
 	key := ask(reader, "API key (blank for LM Studio)", def.LLM.APIKey)
@@ -3654,6 +3666,60 @@ func maybeInit(reader *bufio.Reader, force bool) {
 	} else {
 		fmt.Printf("  ✓ connected — using %s\n", l.Model)
 	}
+	finishInit()
+}
+
+// initCloudProvider configures a built-in cloud provider — the path for a
+// machine with no local model server at all (the common case on a plain VPS
+// or a fresh laptop without LM Studio installed).
+func initCloudProvider(reader *bufio.Reader, def config.Config) {
+	names := config.KnownProviders()
+	defName := def.Provider
+	if defName == "" || defName == "local" {
+		defName = "openai"
+	}
+	fmt.Printf("  Providers: %s\n", strings.Join(names, ", "))
+	name := ""
+	for i := 0; i < 3 && name == ""; i++ {
+		got := ask(reader, "Provider", defName)
+		if _, ok := config.ProviderTemplates[got]; ok {
+			name = got
+		} else {
+			fmt.Printf("  unknown provider %q — pick one of: %s\n", got, strings.Join(names, ", "))
+		}
+	}
+	if name == "" { // 3 bad tries (or piped input) — fall back rather than loop forever
+		name = defName
+		fmt.Printf("  using %s\n", name)
+	}
+
+	tmpl := config.ProviderTemplates[name]
+	existing, _ := config.ResolveProvider(def, name) // any already-saved key/model, or the env var
+	key := ask(reader, "API key", existing.APIKey)
+	if key == "" {
+		fmt.Printf("  ⚠ no key set — add one later with: /ai key %s <token>\n", name)
+	}
+	defModel := existing.Model
+	if defModel == "" {
+		defModel = tmpl.Model
+	}
+	model := ask(reader, "Model", defModel)
+
+	providers := def.Providers
+	if providers == nil {
+		providers = map[string]config.LLM{}
+	}
+	providers[name] = config.LLM{APIKey: key, Model: model}
+	if err := config.SaveProviders(name, providers); err != nil {
+		slog.Warn("could not save config", "err", err)
+		return
+	}
+	fmt.Printf("Saved to %s\n", config.GlobalPath())
+	fmt.Printf("  → using %s · model %s\n", name, model)
+	finishInit()
+}
+
+func finishInit() {
 	fmt.Println("Setup done — type a task to begin, or /help for commands.")
 	fmt.Println()
 }
@@ -3672,6 +3738,30 @@ func ask(r *bufio.Reader, label, def string) string {
 		return v
 	}
 	return def
+}
+
+// askYN asks a yes/no question; Enter (or unreadable input, e.g. piped EOF)
+// keeps defYes.
+func askYN(r *bufio.Reader, label string, defYes bool) bool {
+	hint := "y/N"
+	if defYes {
+		hint = "Y/n"
+	}
+	fmt.Printf("  %s [%s]: ", label, hint)
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return defYes
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "":
+		return defYes
+	case "y", "yes":
+		return true
+	case "n", "no":
+		return false
+	default:
+		return defYes
+	}
 }
 
 func isTTY() bool { return term.IsTerminal(int(os.Stdin.Fd())) }

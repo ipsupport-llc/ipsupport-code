@@ -247,6 +247,117 @@ func TestRedirectLogToFile(t *testing.T) {
 	}
 }
 
+func TestAskYN(t *testing.T) {
+	ask := func(input string, defYes bool) bool {
+		return askYN(bufio.NewReader(strings.NewReader(input)), "q", defYes)
+	}
+	if !ask("\n", true) {
+		t.Error("blank input should keep defYes=true")
+	}
+	if ask("\n", false) {
+		t.Error("blank input should keep defYes=false")
+	}
+	if !ask("y\n", false) || !ask("Y\n", false) || !ask("yes\n", false) {
+		t.Error("y/Y/yes should be true regardless of default")
+	}
+	if ask("n\n", true) || ask("no\n", true) {
+		t.Error("n/no should be false regardless of default")
+	}
+	// Unreadable input (EOF, e.g. piped/closed stdin) keeps the default rather
+	// than erroring — setup must not crash on a non-interactive invocation.
+	if !ask("", true) {
+		t.Error("EOF should keep defYes=true")
+	}
+}
+
+// A machine with no local model server: answering "n" routes to picking a
+// built-in cloud provider and saves ITS key/model — not a Server URL prompt
+// that doesn't apply (the operator's exact complaint: "локальной модели тут
+// нет и не будет").
+func TestInitCloudProviderPath(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	reader := bufio.NewReader(strings.NewReader("grok\nxai-testkey\ngrok-2-latest\n"))
+	initCloudProvider(reader, config.Default())
+
+	cfg, err := config.Load(t.TempDir()) // a fresh, unrelated workspace
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "grok" {
+		t.Fatalf("provider = %q, want grok", cfg.Provider)
+	}
+	l, ok := config.ResolveProvider(cfg, "grok")
+	if !ok {
+		t.Fatal("grok provider did not resolve")
+	}
+	if l.APIKey != "xai-testkey" || l.Model != "grok-2-latest" {
+		t.Errorf("resolved = %+v, want key/model from setup", l)
+	}
+	if l.BaseURL != "https://api.x.ai/v1" {
+		t.Errorf("resolved BaseURL = %q, want the grok template's — NOT localhost", l.BaseURL)
+	}
+}
+
+// Three bad provider names in a row fall back to the default rather than
+// looping forever (matters for a piped/non-interactive invocation, where every
+// read after EOF would otherwise repeat the same invalid empty answer).
+func TestInitCloudProviderFallsBackAfterBadTries(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	reader := bufio.NewReader(strings.NewReader("nope1\nnope2\nnope3\nsk-x\ngpt-4o-mini\n"))
+	initCloudProvider(reader, config.Default())
+
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "openai" {
+		t.Fatalf("provider = %q, want the openai fallback", cfg.Provider)
+	}
+}
+
+// An already-configured cloud provider (re-running -init) is picked up as the
+// default, and any existing key/model prefill — not silently discarded.
+func TestInitCloudProviderPrefillsFromExisting(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	def := config.Default()
+	def.Provider = "openai"
+	def.Providers = map[string]config.LLM{"openai": {APIKey: "sk-old", Model: "gpt-4o"}}
+
+	reader := bufio.NewReader(strings.NewReader("\n\n\n")) // accept every default
+	initCloudProvider(reader, def)
+
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, ok := config.ResolveProvider(cfg, "openai")
+	if !ok || l.APIKey != "sk-old" || l.Model != "gpt-4o" {
+		t.Errorf("existing key/model not preserved as defaults: %+v, ok=%v", l, ok)
+	}
+}
+
+// The "have a local model?" gate defaults to Yes for a brand-new install (the
+// existing behavior, unchanged) but to No once a cloud provider is already
+// configured — so re-running -init doesn't flip someone back to the local
+// prompt they don't use.
+func TestMaybeInitDefaultsFollowExistingProvider(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	// Fresh (no config yet): defaults to the local-model path — answering blank
+	// keeps it local and prompts for Server URL/model (unchanged behavior).
+	reader := bufio.NewReader(strings.NewReader("\n\n\nqwen-test\n"))
+	maybeInit(reader, true)
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "" {
+		t.Errorf("fresh install defaulted away from local: provider=%q", cfg.Provider)
+	}
+	if cfg.LLM.Model != "qwen-test" {
+		t.Errorf("local model not saved: %+v", cfg.LLM)
+	}
+}
+
 func TestParseLoop(t *testing.T) {
 	// interval + task, no count cap
 	if iv, max, g, ok := parseLoop("5m build it"); !ok || iv != 5*time.Minute || max != 0 || g != "build it" {

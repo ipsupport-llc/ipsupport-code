@@ -251,9 +251,13 @@ model (LM Studio on localhost) keeps working. `/offline off` re-enables it.
 ## Quick start
 
 1. In LM Studio, load a **tool-calling** model (e.g. `qwen2.5-7b-instruct`) and
-   start the local server on port `1234`.
-2. First interactive run walks you through the server URL, API key (blank for LM
-   Studio), and model, confirms the connection, and saves to
+   start the local server on port `1234`. **No local model?** Skip this — the
+   next step asks.
+2. First interactive run asks whether you have a local model server running. If
+   yes, it walks you through the server URL, API key (blank for LM Studio), and
+   model, and confirms the connection. If no, it walks you through picking a
+   built-in cloud provider (`openai`, `anthropic`, `grok`, `groq`, `openrouter`,
+   `zai`) and its key instead. Either way it saves to
    `~/.config/ipsupport-code/config.json` (re-run with `-init`).
 3. Run a one-shot task, or open the REPL:
 

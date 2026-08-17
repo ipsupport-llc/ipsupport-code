@@ -1,5 +1,10 @@
 /dist/
 *.out
-.agent/knowledge.json
 .DS_Store
-.agent/session.json
+
+# .agent/ is the agent's per-workspace runtime state (goal/history/sessions/
+# facts/traces/seeded skills) — dogfooding the binary from this repo's own
+# checkout writes it right here. None of it is source; ignore all of it except
+# the checked-in example config.
+.agent/*
+!.agent/config.example.json

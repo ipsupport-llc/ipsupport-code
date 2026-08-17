@@ -3669,53 +3669,57 @@ func initLocalModel(reader *bufio.Reader, def config.Config) {
 	finishInit()
 }
 
-// initCloudProvider configures a built-in cloud provider — the path for a
-// machine with no local model server at all (the common case on a plain VPS
-// or a fresh laptop without LM Studio installed).
+// initCloudProvider configures a cloud provider — the path for a machine with
+// no local model server at all (the common case on a plain VPS or a fresh
+// laptop without LM Studio installed). A name matching a built-in template
+// (openai, anthropic, …) uses that vendor's real endpoint; any other name is a
+// CUSTOM OpenAI-compatible endpoint (your own gateway, LiteLLM, a proxy…) and
+// additionally asks for its Base URL — mirroring `/ai add`'s existing runtime
+// rule exactly, so picking "openai" always means the real api.openai.com and
+// anything else is never silently bound to it.
 func initCloudProvider(reader *bufio.Reader, def config.Config) {
 	names := config.KnownProviders()
 	defName := def.Provider
 	if defName == "" || defName == "local" {
 		defName = "openai"
 	}
-	fmt.Printf("  Providers: %s\n", strings.Join(names, ", "))
-	name := ""
-	for i := 0; i < 3 && name == ""; i++ {
-		got := ask(reader, "Provider", defName)
-		if _, ok := config.ProviderTemplates[got]; ok {
-			name = got
-		} else {
-			fmt.Printf("  unknown provider %q — pick one of: %s\n", got, strings.Join(names, ", "))
-		}
-	}
-	if name == "" { // 3 bad tries (or piped input) — fall back rather than loop forever
+	fmt.Printf("  Built-in providers: %s — or type any other name for your OWN OpenAI-compatible endpoint (a self-hosted gateway, LiteLLM, a proxy…).\n", strings.Join(names, ", "))
+	name := ask(reader, "Provider", defName)
+	if name == "local" { // reserved for the local-model slot — that's the OTHER branch of setup
+		fmt.Println(`  "local" is reserved for a local model server — restart setup and answer "Y" to the first question instead. Using ` + defName + " for now.")
 		name = defName
-		fmt.Printf("  using %s\n", name)
 	}
 
-	tmpl := config.ProviderTemplates[name]
+	_, isTemplate := config.ProviderTemplates[name]
 	existing, _ := config.ResolveProvider(def, name) // any already-saved key/model, or the env var
+	l := config.LLM{}
+	if !isTemplate {
+		fmt.Printf("  %q isn't a built-in — setting it up as a custom OpenAI-compatible endpoint (built-ins: %s).\n", name, strings.Join(names, ", "))
+		url := ask(reader, "Base URL", existing.BaseURL)
+		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
+			fmt.Printf("  ⚠ that doesn't look like a URL (want http:// or https://) — fix it later with: /ai add %s <base_url>\n", name)
+		}
+		l.BaseURL = strings.TrimRight(url, "/")
+	}
 	key := ask(reader, "API key", existing.APIKey)
 	if key == "" {
 		fmt.Printf("  ⚠ no key set — add one later with: /ai key %s <token>\n", name)
 	}
-	defModel := existing.Model
-	if defModel == "" {
-		defModel = tmpl.Model
-	}
-	model := ask(reader, "Model", defModel)
+	l.APIKey = key
+	l.Model = ask(reader, "Model", existing.Model)
 
 	providers := def.Providers
 	if providers == nil {
 		providers = map[string]config.LLM{}
 	}
-	providers[name] = config.LLM{APIKey: key, Model: model}
+	providers[name] = l
 	if err := config.SaveProviders(name, providers); err != nil {
 		slog.Warn("could not save config", "err", err)
 		return
 	}
 	fmt.Printf("Saved to %s\n", config.GlobalPath())
-	fmt.Printf("  → using %s · model %s\n", name, model)
+	resolved, _ := config.ResolveProvider(config.Config{Provider: name, Providers: providers}, name)
+	fmt.Printf("  → using %s · %s · model %s\n", name, resolved.BaseURL, resolved.Model)
 	finishInit()
 }
 

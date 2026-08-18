@@ -127,8 +127,8 @@ func (m *tuiModel) configAddKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			*field = string(r[:len(r)-1])
 		}
 	default:
-		if len(k.String()) == 1 { // printable
-			*field += k.String()
+		if s, ok := insertedText(k); ok { // typed or pasted
+			*field += s
 		}
 	}
 	return m, nil
@@ -138,10 +138,16 @@ func (m *tuiModel) configAddKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 // and, when a key was given, stores it too — then returns to the panel list.
 func (m *tuiModel) configAddSave() {
 	d := m.cfgDraft
-	arg := strings.TrimSpace(strings.TrimSpace(d.name) + " " + strings.TrimSpace(d.url) + " " + strings.TrimSpace(d.model))
+	name := strings.TrimSpace(d.name)
+	arg := strings.TrimSpace(name + " " + strings.TrimSpace(d.url) + " " + strings.TrimSpace(d.model))
 	lines := m.app.addProvider(arg)
-	if key := strings.TrimSpace(d.key); key != "" && strings.Contains(strings.Join(lines, " "), "saved") {
-		lines = append(lines, m.app.setProviderKey(strings.TrimSpace(d.name), key)...)
+	// Check the REAL outcome (did addProvider actually create the entry) rather
+	// than string-matching its human-readable message — that broke silently
+	// once addProvider's wording changed to "added" (it used to say "saved").
+	if key := strings.TrimSpace(d.key); key != "" {
+		if _, ok := m.app.cfg.Providers[name]; ok {
+			lines = append(lines, m.app.setProviderKey(name, key)...)
+		}
 	}
 	m.pushLines(lines)
 	m.cfgPhase = cfgPhaseList

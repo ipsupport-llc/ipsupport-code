@@ -1086,6 +1086,83 @@ func TestConfigAddProviderFlow(t *testing.T) {
 	}
 }
 
+// insertedText is the shared helper the hand-rolled single-line fields (config
+// panel, agents panel, reverse-search) use instead of the textarea widget. A
+// bracketed paste arrives as ONE KeyMsg carrying every pasted rune, wrapped in
+// "[...]" by k.String() (so it can't match key bindings) — the old
+// `len(k.String()) == 1` gate silently dropped every paste, and even a single
+// non-ASCII typed rune (len() counts bytes, not runes).
+func TestInsertedText(t *testing.T) {
+	// A normal single ASCII keystroke: typing must keep working.
+	if s, ok := insertedText(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}); !ok || s != "a" {
+		t.Errorf("typed 'a' = %q, %v", s, ok)
+	}
+	// A single NON-ASCII keystroke (multi-byte in UTF-8) — the byte-length gate
+	// would have silently dropped this too.
+	if s, ok := insertedText(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'ы'}}); !ok || s != "ы" {
+		t.Errorf("typed 'ы' = %q, %v", s, ok)
+	}
+	// A multi-character PASTE (the operator's exact bug): the whole burst must
+	// come through, not get silently dropped.
+	key := "0ff775ae59909cbbb5ba6188fd5f98d8"
+	if s, ok := insertedText(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key), Paste: true}); !ok || s != key {
+		t.Errorf("pasted key = %q, %v, want %q", s, ok, key)
+	}
+	// A non-printable key (e.g. an arrow) must not be treated as text.
+	if _, ok := insertedText(tea.KeyMsg{Type: tea.KeyUp}); ok {
+		t.Error("KeyUp should not be insertable text")
+	}
+	// An alt-held rune is a shortcut, not text — preserved from the old gate.
+	if _, ok := insertedText(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}, Alt: true}); ok {
+		t.Error("alt+x should not be insertable text")
+	}
+}
+
+// The agents-panel profile-name field is another hand-rolled input that used
+// the same byte-length gate — a pasted name must land whole, not vanish.
+func TestAgentsNameKeyAcceptsPaste(t *testing.T) {
+	m := &tuiModel{}
+	m.agentsNameKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("code-reviewer"), Paste: true})
+	if m.agDraft.name != "code-reviewer" {
+		t.Errorf("pasted profile name = %q, want %q", m.agDraft.name, "code-reviewer")
+	}
+}
+
+// Regression for the operator's exact report: pasting an API key (or Base URL)
+// into the /config add-provider form must land in full, not silently vanish.
+func TestConfigAddProviderAcceptsPastedKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := &tuiModel{state: stConfig, width: 100, input: textarea.New(),
+		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	for i, k := range cfgKeys() {
+		if k == "addprovider" {
+			m.cfgCursor = i
+		}
+	}
+	paste := func(s string) {
+		m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s), Paste: true})
+	}
+	enter := func() { m.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) }
+
+	m.configActivate()
+	paste("mygateway")
+	enter()
+	paste("https://airllm.example.com/v1") // pasted Base URL, not typed
+	enter()
+	enter()                                            // model: optional, skip
+	paste("air_prod_0ff775ae59909cbbb5ba6188fd5f98d8") // pasted API key
+	enter()
+
+	p, ok := m.app.cfg.Providers["mygateway"]
+	if !ok || p.BaseURL != "https://airllm.example.com/v1" {
+		t.Fatalf("pasted Base URL lost: %+v ok=%v", p, ok)
+	}
+	if p.APIKey != "air_prod_0ff775ae59909cbbb5ba6188fd5f98d8" {
+		t.Errorf("pasted API key lost: got %q", p.APIKey)
+	}
+}
+
 // ctxMeter thresholds: empty without data, dim under 50%, warn at ≥50%, red⚠ at
 // the auto-compact line (the styles degrade to plain text in tests).
 func TestCtxMeterFor(t *testing.T) {

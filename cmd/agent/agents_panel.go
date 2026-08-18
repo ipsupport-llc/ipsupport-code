@@ -198,8 +198,8 @@ func (m *tuiModel) agentsModelKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.agCursor = 0
 		}
 	default:
-		if len(k.String()) == 1 { // type to filter the (often long) model list
-			m.agFilter += k.String()
+		if s, ok := insertedText(k); ok { // type (or paste) to filter the (often long) model list
+			m.agFilter += s
 			m.agCursor = 0
 		}
 	}
@@ -225,8 +225,8 @@ func (m *tuiModel) agentsNameKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.agDraft.name = string(r[:len(r)-1])
 		}
 	default:
-		if len(k.String()) == 1 {
-			m.agDraft.name += k.String()
+		if s, ok := insertedText(k); ok {
+			m.agDraft.name += s
 		}
 	}
 	return m, nil

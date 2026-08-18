@@ -606,6 +606,23 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// insertedText returns the text a hand-rolled single-line field (one that
+// doesn't use the textarea widget) should insert for k, or ok=false if k isn't
+// printable input. A bracketed paste arrives as ONE KeyMsg of Type KeyRunes
+// carrying every pasted rune — but k.String() wraps a paste in "[...]" (so it
+// can't match key bindings) and is BYTE length, not rune count, so the old
+// `len(k.String()) == 1` gate silently dropped every paste (any length) and
+// even a single non-ASCII typed character (multi-byte in UTF-8). Reading
+// k.Runes directly handles a single keystroke, a non-ASCII character, and a
+// paste of any length uniformly. Alt-held runes are excluded — those are
+// shortcuts, not text (matches the old gate's behavior for that case).
+func insertedText(k tea.KeyMsg) (string, bool) {
+	if k.Type != tea.KeyRunes || k.Alt {
+		return "", false
+	}
+	return string(k.Runes), true
+}
+
 func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch k.String() {
 	case "ctrl+c":
@@ -749,8 +766,8 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.searchIdx = m.searchFrom(len(m.app.promptHist) - 1)
 			}
 		default:
-			if len(k.String()) == 1 { // narrow the search
-				m.searchQuery += k.String()
+			if s, ok := insertedText(k); ok { // narrow the search (typed or pasted)
+				m.searchQuery += s
 				m.searchIdx = m.searchFrom(len(m.app.promptHist) - 1)
 			}
 		}

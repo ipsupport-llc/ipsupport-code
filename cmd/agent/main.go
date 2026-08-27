@@ -1028,6 +1028,15 @@ func (a *app) launchGoalText(rest string) (string, bool) {
 	return rest, true
 }
 
+// clearGoal drops the standing goal and its persisted file. Goal state is
+// workspace-scoped, not session-scoped (goalPath has no session/agent-name
+// component) — so anything that starts a genuinely NEW session must call this,
+// or the old session's goal silently attaches to the fresh, unrelated thread.
+func (a *app) clearGoal() {
+	a.goal = goalState{}
+	os.Remove(a.goalPath())
+}
+
 // setGoal records a new standing goal (active) and persists it.
 func (a *app) setGoal(text string) {
 	a.goal = goalState{Text: strings.TrimSpace(text), Status: "active"}
@@ -1083,8 +1092,7 @@ func (a *app) goalCommand(arg string) []string {
 	switch verb {
 	case "clear", "drop", "done":
 		had := a.goal.Text
-		a.goal = goalState{}
-		os.Remove(a.goalPath())
+		a.clearGoal()
 		if had == "" {
 			return []string{"no standing goal to clear"}
 		}
@@ -1903,6 +1911,7 @@ func (a *app) newNamedSession(name string, persist bool) error {
 	}
 	a.ag.Reset()          // fresh — don't load name's prior thread
 	a.resetSessionAllow() // a new session shouldn't inherit "allow all this session"
+	a.clearGoal()         // a new session shouldn't inherit the old one's standing goal either
 	return nil
 }
 

@@ -201,11 +201,14 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	m.histIdx = len(a.promptHist) // start "not browsing": first ↑ recalls the most recent prompt
 	act := a.activeLLM()
 	m.history = bannerLines(name, version, a.providerName(), act.Model, a.workspace, act.ContextWindow, m.accent)
-	// Surface an unfinished standing goal AT MOST ONCE per restart: after we offer
-	// it, mark it offered so it doesn't re-nag on every subsequent start (a done
-	// goal is cleared outright; engaging it again re-arms one offer).
-	firstGoalOffer := a.goal.Text != "" && (a.goal.Status == "active" || a.goal.Status == "incomplete") && !a.goal.Offered
-	if firstGoalOffer && a.goal.Status == "active" {
+	// Surface an unfinished standing goal AT MOST ONCE per restart: the passive
+	// banner line below is shown here (cheap, no side effect); the interactive
+	// offer — and marking it offered so it doesn't re-nag — happens wherever
+	// offerGoalResume() actually ends up firing (directly below when idle, or
+	// later in chooseActivate once the user picks/opens a session), never both,
+	// never neither.
+	showBanner := a.goal.Text != "" && a.goal.Status == "active" && !a.goal.Offered
+	if showBanner {
 		m.history = append(m.history, cDim.Render("◎ standing goal: "+oneLine(a.goal.Text, 60)+"  — /goal go to resume"))
 	}
 	switch {
@@ -217,23 +220,26 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 			m.state = stChooseSession
 		}
 	}
-	if m.state == stIdle && firstGoalOffer {
-		m.offerGoalResume() // an unfinished goal? offer to pick it back up — once
-	}
-	if firstGoalOffer {
-		a.markGoalOffered()
+	if m.state == stIdle {
+		m.offerGoalResume() // no chooser is intervening — offer right away (once)
 	}
 	return m, nil
 }
 
-// goalPending reports whether there's a standing goal worth resuming.
+// goalPending reports whether there's a standing goal worth resuming that
+// hasn't been offered yet.
 func (m *tuiModel) goalPending() bool {
 	g := m.app.goal
-	return g.Text != "" && (g.Status == "active" || g.Status == "incomplete")
+	return g.Text != "" && (g.Status == "active" || g.Status == "incomplete") && !g.Offered
 }
 
-// offerGoalResume, when a standing goal is unfinished, prompts to resume it instead
-// of dropping straight to an empty prompt.
+// offerGoalResume, when a standing goal is unfinished and hasn't been offered
+// yet, prompts to resume it instead of dropping straight to an empty prompt,
+// then marks it offered so it won't nag again this or any later restart (until
+// re-engaged or a new goal is set). This is the ONLY place that marks a goal
+// offered, so every call site — the direct-idle startup path, or after a
+// session is chosen from the startup chooser — gets correct once-only
+// semantics for free, regardless of which path the user's session took.
 func (m *tuiModel) offerGoalResume() {
 	if !m.goalPending() {
 		return
@@ -241,6 +247,7 @@ func (m *tuiModel) offerGoalResume() {
 	m.state = stGoalResume
 	m.push("  " + m.attention("◎ RESUME GOAL") + " " + oneLine(m.app.goal.Text, 60) +
 		"  — enter: resume · esc: not now")
+	m.app.markGoalOffered()
 }
 
 // sessionRecap renders the tail of a restored session as log lines, so the screen
@@ -290,8 +297,8 @@ func (m *tuiModel) chooseActivate() (tea.Model, tea.Cmd) {
 		m.app.cfg.Name = m.app.autoSessionName()
 		m.app.ag.Reset()
 		m.app.ag.SetSystem(m.app.systemPrompt())
+		m.app.clearGoal() // an explicit fresh session must not inherit the old one's standing goal
 		m.push(cDim.Render("  — new session: " + m.app.cfg.Name + " —"))
-		m.offerGoalResume()
 		return m, nil
 	}
 	name := m.chooseRows[m.chooseCursor].name

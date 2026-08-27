@@ -973,11 +973,118 @@ func TestGoalResumeOffer(t *testing.T) {
 	if m.state != stIdle || m.app.goal.Text != "ship it" {
 		t.Errorf("esc → state=%v goal=%q; want idle + goal kept", m.state, m.app.goal.Text)
 	}
-
+	// offerGoalResume only ever offers ONCE (esc doesn't re-arm it — that's the
+	// whole point of the once-only fix); a real re-offer needs a fresh restart or
+	// re-engaging the goal, simulated here by clearing Offered directly.
+	if !m.app.goal.Offered {
+		t.Error("offering the goal should mark it offered")
+	}
+	if m.offerGoalResume(); m.state != stIdle {
+		t.Error("a second offer of an already-offered goal must be a no-op")
+	}
+	m.app.goal.Offered = false // simulate testing the Enter path as its own fresh presentation
 	m.offerGoalResume()
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) // resume
 	if m.state != stRunning || m.app.goal.Status != "active" {
 		t.Errorf("resume → state=%v status=%q; want running + active", m.state, m.app.goal.Status)
+	}
+}
+
+// Operator report: starting a NEW session from the startup chooser must not
+// carry over the old session's standing goal — goal.json is workspace-scoped
+// (no session-name component), so without an explicit clear it silently
+// attaches to the fresh, unrelated thread.
+func TestChooseNewSessionClearsGoal(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.setGoal("finish the old thing")
+	if err := a.saveGoal(); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &tuiModel{app: a, input: textarea.New(), accent: lipgloss.Color("13")}
+	m.chooseRows = []sessionMeta{{name: "some-old-session"}}
+	m.chooseCursor = len(m.chooseRows) // the "start new" row
+
+	m.chooseActivate()
+
+	if a.goal.Text != "" {
+		t.Errorf("goal survived starting a new session: %+v", a.goal)
+	}
+	if _, err := os.Stat(a.goalPath()); err == nil {
+		t.Error("goal.json should be removed when starting a new session")
+	}
+}
+
+// Regression found while fixing the above: reopening an EXISTING session via
+// the startup chooser must still respect the once-only offer (it must not
+// re-nag every time the workspace's session chooser fires, which happens
+// whenever ANY saved session exists).
+func TestChooseExistingSessionRespectsOfferedOnce(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.goal = goalState{Text: "finish the thing", Status: "incomplete"} // already offered once before
+
+	m := &tuiModel{app: a, input: textarea.New(), accent: lipgloss.Color("13")}
+	m.chooseRows = []sessionMeta{{name: slugName(a.cfg.Name)}} // the current (only) session
+	m.chooseCursor = 0
+
+	m.chooseActivate()
+	if m.state != stGoalResume {
+		t.Fatalf("first open of an unoffered goal → %v, want stGoalResume", m.state)
+	}
+	if !a.goal.Offered {
+		t.Fatal("opening the session should have marked the goal offered")
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc}) // not now
+
+	// Simulate a second restart: same workspace, same saved session, chooser
+	// fires again, user reopens the same session.
+	m.state = stIdle
+	m.chooseActivate()
+	if m.state == stGoalResume {
+		t.Error("re-opening the session re-offered an already-offered goal — the nag-every-restart bug")
+	}
+}
+
+// The mid-session /new command (newNamedSession) must also not carry the old
+// session's standing goal into the fresh one — same bug, same fix, different
+// entry point than the startup chooser.
+func TestNewNamedSessionClearsGoal(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.setGoal("finish the old thing")
+	if err := a.saveGoal(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.newNamedSession("fresh-thread", false); err != nil {
+		t.Fatal(err)
+	}
+
+	if a.goal.Text != "" {
+		t.Errorf("goal survived /new: %+v", a.goal)
+	}
+	if _, err := os.Stat(a.goalPath()); err == nil {
+		t.Error("goal.json should be removed by /new")
 	}
 }
 

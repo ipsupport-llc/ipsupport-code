@@ -1611,7 +1611,7 @@ func (m *tuiModel) View() string {
 	case m.state == stConfig:
 		switch { // /config is the one panel that can sit over a live task
 		case m.pending != nil:
-			status = cToolCall.Render("⚠ approval waiting behind this panel") + cDim.Render(" — esc, then answer it")
+			status = m.attention("⚠ APPROVAL WAITING") + cDim.Render(" behind this panel — esc, then answer it")
 		case m.cancel != nil:
 			status = cDim.Render("settings — view-only while the task runs · esc back to it")
 		default:
@@ -1632,8 +1632,10 @@ func (m *tuiModel) View() string {
 	case m.state == stApprove:
 		status = m.approvePrompt()
 	case m.pending != nil:
-		// An approval is waiting but you can keep typing; y/n answers it (↑ opens Yes/No).
-		status = cToolCall.Render("⚠ approval needed") + cDim.Render(" — y approve · n deny · a allow-session · ↑ Yes/No · or keep typing")
+		// Waiting for a keypress (though you can keep typing) — same unmissable
+		// badge as RESUME GOAL / PLAN READY, not a dim line indistinguishable from
+		// the routine "⚙ run shell" / "⚙ file write" tool-call chatter above it.
+		status = m.attention("⚠ APPROVAL NEEDED") + cDim.Render(" — y approve · n deny · a allow-session · ↑ Yes/No · or keep typing")
 	case m.state == stRunning:
 		if m.retry != nil {
 			remain := time.Until(m.retry.until).Truncate(100 * time.Millisecond)
@@ -1727,7 +1729,7 @@ func (m *tuiModel) approvePrompt() string {
 	} else {
 		no = cErr.Bold(true).Render("  ▸No  ")
 	}
-	return cToolCall.Render("⚠ approve "+detail+"  ") + yes + no + cDim.Render("  (a = allow all this session)")
+	return m.attention("⚠ APPROVE") + " " + detail + "  " + yes + no + cDim.Render("  (a = allow all this session)")
 }
 
 // modeLine is the bottom indicator: auto (executes) or plan (proposes only),

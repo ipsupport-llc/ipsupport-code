@@ -244,9 +244,11 @@ the session at your project — relative file/run/git paths resolve there, and
 sub-agents inherit it as their default `dir`, so you set the path once instead of
 repeating it. It stays inside the workspace jail.
 
-**Offline?** `/offline on` cuts all internet egress — the web tool refuses with a
-clear "no internet" message and the startup update check is skipped. Your local
-model (LM Studio on localhost) keeps working. `/offline off` re-enables it.
+**Offline?** `/offline on` cuts the agent's OWN internet use — the web tool
+refuses with a clear "no internet" message and the startup update check is
+skipped. Your configured model connection is untouched either way — if it's
+LM Studio on localhost that needs no network anyway; if you pointed it at a
+remote endpoint, that traffic still goes out. `/offline off` re-enables it.
 
 ## Quick start
 

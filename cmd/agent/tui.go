@@ -1189,6 +1189,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		if name == "" {
 			name, persist = m.app.autoSessionName(), false // scratch thread; don't drift the default name
 		}
+		hadContent := m.app.ag.SessionLen() > 0 // an empty session isn't saved — don't claim it's in /sessions
 		if err := m.app.newNamedSession(name, persist); err != nil {
 			m.push(cErr.Render("could not start session: " + err.Error()))
 			return m, nil
@@ -1197,7 +1198,11 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		if m.ready {
 			m.vp.SetContent("")
 		}
-		m.push(cDim.Render("started a new session “" + m.app.cfg.Name + "” — the previous one is in /sessions"))
+		msg := "started a new session “" + m.app.cfg.Name + "”"
+		if hadContent {
+			msg += " — the previous one is in /sessions"
+		}
+		m.push(cDim.Render(msg))
 		return m, m.detectWindowCmd()
 	case "/clear", "/reset": // wipe THIS thread + the screen
 		m.app.ag.Reset()
@@ -1841,7 +1846,7 @@ func (m *tuiModel) queuedView() []string {
 			out = append(out, cDim.Render(fmt.Sprintf("  … +%d more", len(m.queued)-max)))
 			break
 		}
-		out = append(out, cYou.Render("  ⟳ ")+q)
+		out = append(out, cYou.Render("  ▹ ")+q) // NOT ⟳ — that's the live network-retry status; a queued item isn't retrying anything
 	}
 	return out
 }

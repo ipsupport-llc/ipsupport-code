@@ -2317,6 +2317,12 @@ func TestQueuedViewPinsMessages(t *testing.T) {
 	if got := (&tuiModel{}).queuedView(); len(got) != 0 {
 		t.Errorf("empty queue should pin nothing, got %v", got)
 	}
+	// ⟳ is the live network-retry status icon (see the retry-status line) — a
+	// queued item must not reuse it, or it visually reads as "this is retrying"
+	// right next to actual retry backoff lines (the operator's exact confusion).
+	if strings.Contains(out, "⟳") {
+		t.Errorf("queued items must not use the retry icon ⟳:\n%s", out)
+	}
 }
 
 // A sub-agent's observation (LLM final / external CLI report) renders as

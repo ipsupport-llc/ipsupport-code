@@ -2516,10 +2516,13 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		if name == "" {
 			name, persist = a.autoSessionName(), false
 		}
+		hadContent := a.ag.SessionLen() > 0 // an empty session isn't saved — don't claim it's in /sessions
 		if err := a.newNamedSession(name, persist); err != nil {
 			fmt.Println("could not start session:", err)
-		} else {
+		} else if hadContent {
 			fmt.Printf("started a new session %q — the previous one is in /sessions\n", a.cfg.Name)
+		} else {
+			fmt.Printf("started a new session %q\n", a.cfg.Name)
 		}
 	case "/reset", "/clear": // wipe THIS thread
 		a.ag.Reset()

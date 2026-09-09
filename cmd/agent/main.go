@@ -916,7 +916,9 @@ func (a *app) cdCommand(arg string) []string {
 }
 
 // offlineCommand toggles offline mode (no internet egress) and persists it. The
-// web tool refuses, startup/`/update` skip GitHub — local model calls still work.
+// web tool refuses, startup/`/update` skip GitHub — the model connection itself
+// (whether that's actually localhost or a remote endpoint you configured) is
+// untouched either way, so "offline" doesn't guarantee no network traffic at all.
 func (a *app) offlineCommand(arg string) []string {
 	switch strings.TrimSpace(arg) {
 	case "on", "yes", "true":
@@ -925,7 +927,7 @@ func (a *app) offlineCommand(arg string) []string {
 		a.cfg.Offline = false
 	case "":
 		return []string{"offline mode is " + onOff(a.cfg.Offline) + " — /offline on|off",
-			"  on = no internet: web tool + update checks off (your local model still works)"}
+			"  on = no internet: web tool + update checks off (your model connection is untouched — local or remote)"}
 	default:
 		return []string{"usage: /offline on|off"}
 	}
@@ -936,7 +938,7 @@ func (a *app) offlineCommand(arg string) []string {
 		return []string{"error: " + err.Error()}
 	}
 	if a.cfg.Offline {
-		return []string{"offline mode → on (web + update checks disabled; local model still works)"}
+		return []string{"offline mode → on (web + update checks disabled; your model connection is untouched)"}
 	}
 	return []string{"offline mode → off (internet re-enabled)"}
 }

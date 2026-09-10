@@ -84,7 +84,7 @@ type OpenAIClient struct {
 	promptTk     int
 	complTk      int
 	lastPromptTk int             // prompt size of the most recent request (context fullness)
-	reasoning    strings.Builder // the current (or most recent) call's reasoning/thinking text, live
+	live         strings.Builder // the current (or most recent) call's live output — reasoning text if the model streams any, else the answer text as it's generated
 }
 
 // deadlineConn arms a fresh read deadline before every Read, so a single read
@@ -326,7 +326,7 @@ func (e *runawayError) Error() string {
 // send makes one attempt; the bool reports whether the failure is worth a retry.
 func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bool) {
 	c.mu.Lock()
-	c.reasoning.Reset() // this attempt's own reasoning text, not a dropped attempt's leftovers
+	c.live.Reset() // this attempt's own live output, not a dropped attempt's leftovers
 	c.mu.Unlock()
 
 	reqCtx, cancel := context.WithCancel(ctx)
@@ -449,20 +449,30 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 			d := ch.Choices[0].Delta
 			if d.Content != "" {
 				content.WriteString(d.Content)
+				// Also buffer into the live-output view (see Live) — a plain
+				// model with no separate reasoning phase (most local models,
+				// e.g. gemma) never sends reasoning_content/reasoning at all, so
+				// the live view has to fall back to the actual answer text as it
+				// streams, or it would show nothing while tokens are visibly
+				// still ticking up (reported live: "counter grows, screen empty
+				// — Open WebUI shows what it's doing" for exactly this model).
+				c.mu.Lock()
+				c.live.WriteString(d.Content)
+				c.mu.Unlock()
 				progress()
 			}
 			// Count reasoning deltas toward live progress (reconciled to the
 			// server's real total by the usage chunk), and buffer the text itself
-			// so a UI tick can show it live (see Reasoning) — never sent to the
-			// model or included in the final Message, just for display.
+			// so a UI tick can show it live (see Live) — never sent to the model
+			// or included in the final Message, just for display.
 			if rc := d.ReasoningContent; rc != "" {
 				c.mu.Lock()
-				c.reasoning.WriteString(rc)
+				c.live.WriteString(rc)
 				c.mu.Unlock()
 				progress()
 			} else if rc := d.Reasoning; rc != "" {
 				c.mu.Lock()
-				c.reasoning.WriteString(rc)
+				c.live.WriteString(rc)
 				c.mu.Unlock()
 				progress()
 			}
@@ -625,16 +635,19 @@ func (c *OpenAIClient) Usage() (prompt, completion int) {
 	return c.promptTk, c.complTk
 }
 
-// Reasoning returns the reasoning/thinking text streamed so far for the most
-// recent call — live, so a caller can poll it on a UI tick to show what a
-// reasoning model is currently doing while it's still generating. It's reset
-// at the start of every send attempt, so a retry doesn't mix a dropped
-// attempt's partial text into the next one's. Empty when the model/provider
-// doesn't stream reasoning content at all.
-func (c *OpenAIClient) Reasoning() string {
+// Live returns the output streamed so far for the most recent call — live, so
+// a caller can poll it on a UI tick to show what the model is currently doing
+// while it's still generating. This is reasoning text for a model that
+// streams a separate reasoning phase (reasoning_content/reasoning); for a
+// plain model with no such phase (most local models), it's the answer text
+// itself as it's generated — otherwise the live view would show nothing while
+// tokens are visibly still ticking up. Reset at the start of every send
+// attempt, so a retry doesn't mix a dropped attempt's partial text into the
+// next one's.
+func (c *OpenAIClient) Live() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.reasoning.String()
+	return c.live.String()
 }
 
 // SeedUsage carries the running token totals from a previous client, so

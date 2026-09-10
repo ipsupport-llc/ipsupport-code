@@ -124,9 +124,10 @@ Switching keeps your session, tokens, and mode. Keys live in
 env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`,
 `OPENROUTER_API_KEY`, `ZAI_API_KEY`).
 `/config` opens an interactive settings panel: **↑↓** to move, **Enter** to
-cycle a value in place (provider, mode, permissions, run timeout, color, channel)
-or jump to the right flow (model, key, rename), **esc** to close — changes apply
-and save as you make them, no hand-editing JSON.
+cycle a value in place (provider, mode, permissions, run timeout, memory,
+compact threshold, color, channel) or jump to the right flow (model, key,
+rename), **esc** to close — changes apply and save as you make them, no
+hand-editing JSON.
 
 ## Sub-agents
 
@@ -589,7 +590,8 @@ Cross-task memory: once the context window fills past `compact_threshold`
 (default `0.75`), the session is folded into an LLM-written recap to free
 headroom — `memory raw` turns that off entirely, keeping turns verbatim and
 only dropping the oldest ones outright (no paraphrase) once there are too many:
-`ipsupport-code config set memory raw` / `config set compact_threshold 0.85`.
+`ipsupport-code config set memory raw` / `config set compact_threshold 0.85`,
+or toggle/cycle both live from the `/config` panel.
 
 Permissions for `run` and `file` resolve per action: a **deny** glob blocks, an
 **allow** glob runs without asking, otherwise the **default** (`ask`/`allow`/`deny`)

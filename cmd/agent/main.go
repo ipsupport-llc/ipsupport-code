@@ -1942,14 +1942,33 @@ func compactThreshold(cfgVal float64) float64 {
 	return autoCompactRatio
 }
 
+// minCompactHeadroom is the smallest headroom, in tokens, auto-compact will
+// ever leave regardless of the configured ratio. A flat percentage scales
+// badly across wildly different context windows: 15% headroom is ~19k tokens
+// on a 128k window (plenty), but only ~600 tokens on a tiny 4k-token local
+// model's window — barely enough room for one more tool result before the
+// next request risks silently overflowing it. Caught live: a compact_threshold
+// of 0.85 (reachable via the /config panel's cycle-on-enter) on a 4.1k-window
+// model left so little headroom that auto-compact effectively never fired
+// again, and dozens of near-duplicate turns piled up uncompacted.
+const minCompactHeadroom = 1500
+
 // autoCompactNeeded decides whether to fold the session into a summary: the last
-// prompt is past ratio and there's enough history to be worth it. A zero
-// window disables it.
+// prompt is past ratio (or would leave less than minCompactHeadroom tokens of
+// room, whichever triggers earlier) and there's enough history to be worth it.
+// A zero window disables it.
 func autoCompactNeeded(ctxTokens, window, sessionLen int, ratio float64) bool {
 	if window <= 0 || sessionLen < 4 {
 		return false
 	}
-	return ctxTokens >= int(float64(window)*ratio)
+	trigger := int(float64(window) * ratio)
+	if floor := window - minCompactHeadroom; floor < trigger {
+		trigger = floor
+	}
+	if trigger < 0 {
+		trigger = 0
+	}
+	return ctxTokens >= trigger
 }
 
 // shouldAutoCompact reports whether the running session should fold into a

@@ -107,3 +107,49 @@ func TestSaveOpenRoundTrip(t *testing.T) {
 		t.Errorf("round-trip mismatch: %+v", all)
 	}
 }
+
+// Two separate ipsupport-code processes can share the same global KB. Each
+// opens its own *KB from the same file; a naive "overwrite with my in-memory
+// snapshot" Save would let whichever one saves last silently discard the
+// other's learned lesson. Save must instead merge its own pending Add()s onto
+// a fresh re-read of the file (codex review finding #22).
+func TestSaveMergesConcurrentProcessesInsteadOfClobbering(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k.json")
+	a, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Add(Pitfall{Domain: "file", ErrorPattern: "from a", ProvenFix: "x"})
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second process opens the same file (sees a's lesson) and adds its own.
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Add(Pitfall{Domain: "file", ErrorPattern: "from b", ProvenFix: "y"})
+
+	// Back on the first process: it learns another lesson and saves again —
+	// without ever having seen b's addition.
+	a.Add(Pitfall{Domain: "file", ErrorPattern: "from a again", ProvenFix: "z"})
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now b saves. A blind overwrite would erase a's second lesson; the merge
+	// must fold b's own pending add onto the fresh file instead.
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	final, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := final.All()
+	if len(all) != 3 {
+		t.Fatalf("merged lessons = %+v, want 3 (nothing clobbered)", all)
+	}
+}

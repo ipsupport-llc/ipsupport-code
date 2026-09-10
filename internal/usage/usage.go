@@ -29,6 +29,14 @@ type Store struct {
 	mu      sync.Mutex
 	path    string
 	entries []Entry
+	// pending holds the Add() deltas not yet folded into the on-disk file — Save
+	// replays them onto a freshly re-read copy of the file instead of blindly
+	// overwriting it with entries, so a separate ipsupport-code process sharing
+	// the same global usage store can't have its update silently lost. overwrite
+	// (set by Purge/Clear) skips that merge: those are a deliberate replace of
+	// the whole ledger, not a delta.
+	pending   []Entry
+	overwrite bool
 }
 
 // Open loads the ledger, or starts empty if the file is absent. A blank path
@@ -60,26 +68,69 @@ func (s *Store) Add(date, provider, model string, prompt, completion int) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for i := range s.entries {
-		e := &s.entries[i]
+	addEntry(&s.entries, date, provider, model, prompt, completion)
+	addEntry(&s.pending, date, provider, model, prompt, completion)
+}
+
+// addEntry folds (date, provider, model, prompt, completion) into an existing
+// bucket in list, or appends a new one.
+func addEntry(list *[]Entry, date, provider, model string, prompt, completion int) {
+	for i := range *list {
+		e := &(*list)[i]
 		if e.Date == date && e.Provider == provider && e.Model == model {
 			e.Prompt += prompt
 			e.Completion += completion
 			return
 		}
 	}
-	s.entries = append(s.entries, Entry{date, provider, model, prompt, completion})
+	*list = append(*list, Entry{date, provider, model, prompt, completion})
 }
 
-// Save writes the ledger (no-op for an in-memory store). The lock is held across
-// the write, and the write is atomic (temp + rename), so concurrent Saves from
-// parallel sub-agents can't interleave, lose an update, or truncate the file.
+// readEntries loads the ledger at path without mutating a Store — a missing
+// file is an empty ledger, not an error.
+func readEntries(path string) ([]Entry, error) {
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		var out []Entry
+		if err := json.Unmarshal(data, &out); err != nil {
+			return nil, err
+		}
+		return out, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil
+	default:
+		return nil, err
+	}
+}
+
+// Save writes the ledger (no-op for an in-memory store). Before writing, it
+// re-reads the file and replays this Store's own pending Add() deltas onto
+// that fresh copy instead of blindly overwriting it with entries — otherwise
+// two separate ipsupport-code processes sharing the same global usage store
+// could have one's update silently lost to the other's last write (the mutex
+// only protects against races WITHIN one process). Purge/Clear set overwrite,
+// skipping the merge: those are a deliberate replace of the whole ledger. The
+// write itself is atomic (temp + rename) so a crash mid-write can't truncate
+// the file either.
 func (s *Store) Save() error {
 	if s.path == "" {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.overwrite && len(s.pending) > 0 {
+		if onDisk, err := readEntries(s.path); err == nil {
+			for _, p := range s.pending {
+				addEntry(&onDisk, p.Date, p.Provider, p.Model, p.Prompt, p.Completion)
+			}
+			s.entries = onDisk
+		}
+		// on a read error, fall back to writing our own in-memory state — no
+		// worse than the previous unconditional-overwrite behavior.
+	}
+	s.pending = nil
+	s.overwrite = false
 	data, err := json.MarshalIndent(s.entries, "", "  ")
 	if err != nil {
 		return err
@@ -139,6 +190,8 @@ func (s *Store) Purge(cutoff string) int {
 		kept = append(kept, e)
 	}
 	s.entries = kept
+	s.pending = nil
+	s.overwrite = true
 	return removed
 }
 
@@ -147,6 +200,8 @@ func (s *Store) Clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entries = nil
+	s.pending = nil
+	s.overwrite = true
 }
 
 // ByDay returns per-day totals, most recent day first.

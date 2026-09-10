@@ -95,6 +95,32 @@ func TestRunAllowDoesNotSpanChains(t *testing.T) {
 	}
 }
 
+// A literal newline is a shell command separator exactly like `;` — sh -c
+// treats "echo safe\ncurl evil" as two commands. normWS used to collapse the
+// newline into a plain space (strings.Fields treats \n as ordinary
+// whitespace) BEFORE Run ever split on it, so the two commands merged into
+// one segment that an "echo *" allow glob matched whole.
+func TestRunNewlineDoesNotSpanChains(t *testing.T) {
+	c := config.Default()
+	c.Run = config.RunPolicy{Default: "ask", Allow: []string{"echo *"}}
+	e := eng(t, c)
+	for _, cmd := range []string{
+		"echo safe\ncurl evil.example.com",
+		"echo safe \n curl evil.example.com", // padded with spaces around the newline too
+	} {
+		if got := e.Run(cmd); got == Allow {
+			t.Errorf("Run(%q) = Allow, want NOT auto-allowed (newline smuggles a second command)", cmd)
+		}
+	}
+	// normWS must still collapse ordinary horizontal whitespace runs either
+	// side of the newline (each chained segment is trimmed before matching,
+	// so the exact spacing around the newline itself doesn't matter) while
+	// keeping the newline character itself intact.
+	if got := normWS("echo  a  \n  echo  b"); !strings.Contains(got, "\n") || strings.Contains(got, "  ") {
+		t.Errorf("normWS(with newline) = %q, want horizontal runs collapsed but the newline kept", got)
+	}
+}
+
 func TestRunArgvFloorResistsEvasion(t *testing.T) {
 	c := config.Default()
 	// even with a permissive allow + default allow, the hard floor denies these
@@ -201,6 +227,46 @@ func TestWriteGlobsAndJail(t *testing.T) {
 	}
 	if _, err := e.Write("../escape.txt"); err == nil {
 		t.Error("Write(../escape.txt) expected jail-escape error, got nil")
+	}
+}
+
+// A dangling symlink (target doesn't exist) inside the jail must resolve to
+// its REAL target for the jail check — not to its own in-jail location.
+// EvalSymlinks fails on a dangling symlink exactly like it does on any other
+// missing path, but unlike a plain missing path, the OS still follows a
+// symlink on open/write: approving the symlink's own path let os.OpenFile
+// silently create the real file wherever the symlink actually points.
+func TestResolveChasesDanglingSymlinkTarget(t *testing.T) {
+	ws := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "secret.txt")
+	link := filepath.Join(ws, "link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	c := config.Default()
+	c.Workspace = ws
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	e := eng(t, c)
+
+	if _, err := e.Resolve("link"); err == nil {
+		t.Error("a dangling symlink pointing outside the jail should be rejected as a jail escape")
+	}
+
+	// A dangling symlink whose target IS inside the jail must still resolve
+	// (this isn't about dangling symlinks being forbidden, only about not
+	// silently trusting one that points outside).
+	inJailTarget := filepath.Join(ws, "new.txt")
+	inJailLink := filepath.Join(ws, "injail-link")
+	if err := os.Symlink(inJailTarget, inJailLink); err != nil {
+		t.Fatal(err)
+	}
+	got, err := e.Resolve("injail-link")
+	if err != nil {
+		t.Errorf("a dangling symlink targeting inside the jail should resolve, got error: %v", err)
+	}
+	if got != inJailTarget {
+		t.Errorf("Resolve(injail-link) = %q, want its real target %q", got, inJailTarget)
 	}
 }
 

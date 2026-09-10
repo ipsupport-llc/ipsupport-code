@@ -287,12 +287,34 @@ func expandTilde(p string) string {
 	return p
 }
 
+// maxSymlinkChase bounds resolveSymlinks' own-target chase (see below) against
+// a symlink cycle (a -> b -> a) looping forever.
+const maxSymlinkChase = 20
+
 // resolveSymlinks follows symlinks in abs. For a not-yet-existing path it
 // resolves the nearest existing ancestor and re-appends the missing tail, so a
-// symlinked directory several levels up can't smuggle the path out of the jail.
-func resolveSymlinks(abs string) string {
+// symlinked directory several levels up can't smuggle the path out of the
+// jail. abs being ITSELF a symlink whose target doesn't exist (a "dangling"
+// symlink) hits that same EvalSymlinks failure — but unlike an ordinary
+// missing path, this one's own name isn't what the ancestor-walk should
+// reconstruct: without following it first, the walk just reassembles abs's
+// own (in-jail) location, the jail check approves it, and os.OpenFile then
+// follows the symlink at the OS level and writes through it to wherever it
+// points, jail or no jail. So a dangling symlink's own target is chased
+// (possibly through a chain of them) before falling back to the ancestor walk.
+func resolveSymlinks(abs string) string { return resolveSymlinksChase(abs, 0) }
+
+func resolveSymlinksChase(abs string, depth int) string {
 	if real, err := filepath.EvalSymlinks(abs); err == nil {
 		return real
+	}
+	if depth < maxSymlinkChase {
+		if target, err := os.Readlink(abs); err == nil {
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(abs), target)
+			}
+			return resolveSymlinksChase(filepath.Clean(target), depth+1)
+		}
 	}
 	var missing []string
 	cur := abs
@@ -385,6 +407,16 @@ func anyMatch(res []*regexp.Regexp, s string) bool {
 	return false
 }
 
-// normWS collapses runs of whitespace to single spaces so "rm  -rf" and
-// "rm -rf" compare equal.
-func normWS(s string) string { return strings.Join(strings.Fields(s), " ") }
+// normWS collapses runs of horizontal whitespace (space/tab) to a single
+// space so "rm  -rf" and "rm -rf" compare equal. It deliberately does NOT
+// touch newlines — strings.Fields would, since it treats \n as ordinary
+// whitespace, which used to erase the newline BEFORE Run's shellOps.Split
+// ever saw it: "echo safe\ncurl evil" collapsed to one "echo safe curl evil"
+// segment, matching an "echo *" allow glob whole, while `sh -c` still ran
+// both as separate commands (a real shell treats a bare newline exactly like
+// `;`). Run must split on shellOps BEFORE normalizing, and normalizing must
+// leave that split's newlines alone.
+func normWS(s string) string {
+	fields := strings.FieldsFunc(s, func(r rune) bool { return r == ' ' || r == '\t' })
+	return strings.Join(fields, " ")
+}

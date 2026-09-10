@@ -1446,6 +1446,40 @@ func TestGoalDoneWithJudgeOff(t *testing.T) {
 // Fire-and-forget: agent.run(background=true) returns an ack at once, the job
 // runs detached, /jobs tracks it, and injectJobResults folds the result into the
 // conversation at the next turn boundary.
+// A background job's config resolution must happen synchronously, BEFORE its
+// goroutine starts — not lazily inside it. a.cfg.Agents is a map: resolving it
+// concurrently with a config-mutating command (e.g. /ai add, simulated here)
+// is a Go runtime panic, not just a stale read; -race must also see no data
+// race on it.
+func TestSpawnAgentBackgroundResolvesBeforeGoroutine(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.Agents = map[string]config.AgentProfile{
+		"echo": {Kind: "external", Command: "echo", Args: []string{"ok:", "{task}"}},
+	}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := a.spawnAgentBackground(context.Background(), "echo", "race me", ""); err != nil {
+		t.Fatal(err)
+	}
+	// This must be safe the instant spawnAgentBackground returns — its
+	// resolution already happened synchronously above, so the job's own
+	// goroutine never touches a.cfg.Agents again.
+	a.cfg.Agents["new-one"] = config.AgentProfile{Kind: "external", Command: "true"}
+
+	for i := 0; i < 100 && a.jobsPending() > 0; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if list := strings.Join(a.jobsCommand(""), "\n"); !strings.Contains(list, "✓ #1") {
+		t.Fatalf("job not finished ok:\n%s", list)
+	}
+}
+
 func TestBackgroundJobLifecycle(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
@@ -2807,6 +2841,39 @@ func TestAutoCompactNeeded(t *testing.T) {
 	// A custom (lower) threshold from config.CompactThreshold fires earlier.
 	if !autoCompactNeeded(4200, 8192, 4, 0.5) {
 		t.Error("51% of the window should trigger at a configured 0.5 threshold")
+	}
+}
+
+// startCompact must set m.cancel exactly like startTask does — every
+// "is something running behind this" guard (the /config panel's closePanel/
+// configActivate) keys off m.cancel != nil. Without it, /config then esc
+// dropped straight to idle while Compact's goroutine kept mutating
+// a.history in the background, racing whatever a NEW task did meanwhile.
+func TestStartCompactSetsCancelForConfigGuards(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	m := &tuiModel{app: a, ctx: context.Background(), input: textarea.New()}
+
+	cmd := m.startCompact(false)
+	if m.cancel == nil {
+		t.Fatal("startCompact should set m.cancel immediately, before the async compact even runs")
+	}
+
+	m.state = stConfig
+	if _, _ = m.closePanel(); m.state != stRunning {
+		t.Errorf("closePanel during a compact = state %v, want stRunning (compact still running)", m.state)
+	}
+
+	msg := cmd() // run the compact (a.ag has no history yet, so it's a fast no-op)
+	m.Update(msg)
+	if m.cancel != nil {
+		t.Error("m.cancel should be cleared once the compact finishes")
 	}
 }
 

@@ -260,6 +260,41 @@ func TestParseStreamTicksOnlyOnProgress(t *testing.T) {
 	}
 }
 
+// stripChannelTokens must remove leaked Harmony-style control tokens — both
+// well-formed and the leading-pipe-dropped form a quantized local model was
+// observed to emit — without touching ordinary prose.
+func TestStripChannelTokens(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"hello world", "hello world"},                                       // no tokens — untouched
+		{"<channel|>I'll help you build this.", "I'll help you build this."}, // observed leak (dropped leading pipe)
+		// Well-formed pair: both bracketed tokens are stripped. The bare
+		// channel name ("final") sitting between them is plain text, not a
+		// bracketed token, and isn't touched — a known, accepted gap, since
+		// there's no safe way to tell it apart from ordinary prose.
+		{"<|channel|>final<|message|>the answer is 4", "finalthe answer is 4"},
+		{"a |> b", "a |> b"}, // "|>" alone, no known token name — untouched
+	}
+	for _, c := range cases {
+		if got := stripChannelTokens(c.in); got != c.want {
+			t.Errorf("stripChannelTokens(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// A quantized local model was observed emitting a leaked, malformed channel
+// tag directly in front of its real answer. The client must not show it.
+func TestParseStreamStripsLeakedChannelToken(t *testing.T) {
+	cl := NewOpenAIClient(config.LLM{Model: "x"})
+	sse := `data: {"choices":[{"delta":{"content":"<channel|>I'll help you build this."}}]}` + "\n\ndata: [DONE]\n\n"
+	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Content != "I'll help you build this." {
+		t.Errorf("content = %q, want the leaked tag stripped", msg.Content)
+	}
+}
+
 // Some gateways (an Anthropic→OpenAI converter passing tool_use.input through)
 // emit tool-call "arguments" as a raw JSON OBJECT instead of the spec's string.
 // That must not drop the arguments — the raw JSON text must reach the tool call.

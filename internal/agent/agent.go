@@ -68,7 +68,22 @@ type Agent struct {
 	// question gets a one-turn, no-tools answer (the /btw side-channel) without
 	// derailing the task.
 	asides func() []string
+	// archiver, if set, durably records every entry remember() commits to
+	// history — see Archiver.
+	archiver Archiver
 }
+
+// Archiver durably records every (goal, final answer + actions digest) pair
+// remember() commits to session history — the same text that goes into the
+// live session memory, but never trimmed or folded by Compact, so the
+// `history` tool can always recover something a compaction summary has since
+// shortened. Nil (the default) just means there's nothing to recall from.
+type Archiver interface {
+	Archive(goal, entry string)
+}
+
+// SetArchiver wires a durable record of session memory (see Archiver).
+func (a *Agent) SetArchiver(ar Archiver) { a.archiver = ar }
 
 // New builds an Agent. maxSteps <= 0 defaults to 12.
 func New(l llm.Chatter, reg *tool.Registry, kb *knowledge.KB, tr trace.Tracer, system string, maxSteps int) *Agent {
@@ -230,7 +245,11 @@ func (a *Agent) remember(goal, final string, msgs []llm.Message) {
 	if a.detached.Load() {
 		return
 	}
-	a.history = append(a.history, llm.User(goal), llm.Message{Role: "assistant", Content: final + actionsDigest(msgs)})
+	entry := final + actionsDigest(msgs)
+	if a.archiver != nil {
+		a.archiver.Archive(goal, entry)
+	}
+	a.history = append(a.history, llm.User(goal), llm.Message{Role: "assistant", Content: entry})
 	if a.maxHistory > 0 && len(a.history) > a.maxHistory {
 		a.history = append([]llm.Message(nil), a.history[len(a.history)-a.maxHistory:]...)
 	}

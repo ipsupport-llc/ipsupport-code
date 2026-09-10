@@ -440,7 +440,12 @@ The status bar shows `ctx 4.1k/8k` — the size of the last prompt vs. the model
 context window. The window is **auto-detected** from LM Studio's
 `/api/v0/models`; set `llm.context_window` to override (0 disables auto-compact).
 When the prompt passes ~75% of the window the session is **auto-compacted** into
-a short summary to free room (run it any time with `/compact`).
+a short summary to free room (run it any time with `/compact`; the threshold and
+whether it summarizes at all are configurable — see `memory`/`compact_threshold`
+below). Every task's goal and outcome is also archived in full, never
+summarized, to `.agent/sessions/<name>.archive.jsonl` — once there's something
+in it, the model gets a `history` tool to recall or search past tasks that a
+compaction summary has since shortened.
 
 ## REPL commands
 
@@ -599,7 +604,7 @@ to stderr.
 cmd/agent          CLI, plain REPL, the Bubble Tea TUI, external CLI-agent runner
 internal/llm        LM Studio client (streaming, retry, context detection)
 internal/agent      the reason → act → observe loop (+ plan mode, goal judge)
-internal/tool       fat tools: file, run, git, web, calc, agent, mcp, skill, help
+internal/tool       fat tools: file, run, git, web, calc, agent, mcp, skill, help, history
 internal/skill      downloadable, toggleable instruction packs
 internal/policy     workspace permission engine (+ jail, deny floor)
 internal/knowledge  persistent pitfall store

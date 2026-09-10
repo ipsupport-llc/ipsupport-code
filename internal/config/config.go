@@ -685,6 +685,24 @@ func Load(workspace string) (Config, error) {
 	if err := mergeFile(&cfg, GlobalPath()); err != nil {
 		return cfg, err
 	}
+	// The workspace file is repo-controlled — untrusted checkouts merge it too
+	// (see below) — while the global file is the user's own machine-level
+	// config. The model CONNECTION and its credentials must stay a USER
+	// decision: a workspace must never be able to redirect llm.base_url (or
+	// add its own provider preset) while a real, globally-configured api_key
+	// keeps getting sent to it. Snapshot the trusted values now and restore
+	// them after the workspace merge below — everything else (run/file/spawn
+	// policy, MCP servers, etc.) is fine as a per-project override.
+	//
+	// Providers is a map, so it must be DEEP-copied here: json.Unmarshal
+	// reuses (mutates in place) an already-non-nil destination map rather
+	// than allocating a fresh one, so a bare `:=` copy would still alias the
+	// same map mergeFile is about to write "evil" into below.
+	trustedLLM := cfg.LLM
+	trustedProviders := make(map[string]LLM, len(cfg.Providers))
+	for name, l := range cfg.Providers {
+		trustedProviders[name] = l
+	}
 
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
@@ -693,6 +711,7 @@ func Load(workspace string) (Config, error) {
 	if err := mergeFile(&cfg, filepath.Join(abs, ".agent", "config.json")); err != nil {
 		return cfg, err
 	}
+	cfg.LLM, cfg.Providers = trustedLLM, trustedProviders
 
 	cfg.Workspace = abs
 	cfg.Run.Deny = union(cfg.Run.Deny, runDenyFloor)

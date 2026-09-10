@@ -331,11 +331,18 @@ func TestE2E_Binary(t *testing.T) {
 
 	ws := t.TempDir()
 	mustWrite(t, filepath.Join(ws, ".agent", "config.json"),
-		`{"llm":{"base_url":"`+url+`/v1","model":"fake","max_steps":4},`+
-			`"run":{"default":"allow"},"file":{"default":"allow","jail":"."}}`)
+		`{"run":{"default":"allow"},"file":{"default":"allow","jail":"."}}`)
+
+	// The LLM connection is GLOBAL-only (a workspace's .agent/config.json
+	// can't redirect it — see TestLoadWorkspaceCannotOverrideCredentials in
+	// internal/config), so the fake server URL has to go in the fake HOME's
+	// global config, not the workspace one.
+	home := t.TempDir()
+	mustWrite(t, filepath.Join(home, ".config", "ipsupport-code", "config.json"),
+		`{"llm":{"base_url":"`+url+`/v1","model":"fake","max_steps":4}}`)
 
 	cmd := exec.Command(bin, "-C", ws, "use calc to compute 2+2")
-	cmd.Env = append(os.Environ(), "HOME="+t.TempDir()) // no global config
+	cmd.Env = append(os.Environ(), "HOME="+home)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, out)

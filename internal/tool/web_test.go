@@ -31,6 +31,28 @@ func TestWebSearch(t *testing.T) {
 	}
 }
 
+// cmd/agent wires the web tool with a nil client (not http.DefaultClient) so
+// that NewWeb's own 30s-timeout fallback applies — a task context has no
+// deadline of its own, so a slow/hostile server could otherwise hang fetch
+// indefinitely. This confirms the nil path is wired correctly and still
+// works end to end for the normal case.
+func TestWebFetchWithNilClientUsesTimeoutFallback(t *testing.T) {
+	webAllowPrivate = true
+	t.Cleanup(func() { webAllowPrivate = false })
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `<html><body><article><p>hello from a nil-client fetch</p></article></body></html>`)
+	}))
+	defer srv.Close()
+
+	r := NewWeb(nil, false).Call(context.Background(), "fetch", map[string]any{"url": srv.URL})
+	if r.IsError {
+		t.Fatalf("fetch with nil client errored: %s", r.Content)
+	}
+	if !strings.Contains(r.Content, "hello from a nil-client fetch") {
+		t.Errorf("fetch content = %q", r.Content)
+	}
+}
+
 func TestWebFetch(t *testing.T) {
 	webAllowPrivate = true // the test server is on loopback
 	t.Cleanup(func() { webAllowPrivate = false })

@@ -2598,7 +2598,17 @@ const (
 // stripped, letting our green/red show through.
 var ansiBG = regexp.MustCompile("\x1b\\[(4[0-9]|48;5;[0-9]+|49)m")
 
+// tabToSpaces expands raw tabs (gofmt's indentation char) to spaces before a
+// line is measured/padded to a fixed terminal width. lipgloss.Width counts a
+// tab as a single column, but a real terminal expands it to its next tab
+// stop (up to 8 columns) — left as a raw byte, that mismatch understates how
+// wide the row actually renders, so a background-filled row with an indented
+// line silently overflows the intended width and wraps, showing up as a
+// spurious blank line when the output is copied.
+func tabToSpaces(s string) string { return strings.ReplaceAll(s, "\t", "    ") }
+
 func diffAddRow(no int, code, path string, width int) string {
+	code = tabToSpaces(code)
 	hl := ansiBG.ReplaceAllString(highlightCode(code, path), "")
 	hl = strings.ReplaceAll(strings.TrimRight(hl, "\r\n"), allOff, fgReset)
 	content := fmt.Sprintf(" %4d +  ", no) + hl
@@ -2609,7 +2619,7 @@ func diffAddRow(no int, code, path string, width int) string {
 }
 
 func diffDelRow(no int, code string, width int) string {
-	content := fmt.Sprintf(" %4d -  %s", no, code)
+	content := fmt.Sprintf(" %4d -  %s", no, tabToSpaces(code))
 	if pad := width - lipgloss.Width(content); pad > 0 {
 		content += strings.Repeat(" ", pad)
 	}

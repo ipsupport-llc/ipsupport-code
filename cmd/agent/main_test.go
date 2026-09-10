@@ -702,9 +702,11 @@ func TestThinkingPanelCapsLineWidthForDegenerateOutput(t *testing.T) {
 		app: &app{cfg: config.Default()}, showThinking: true}
 	m.app.client = llm.NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
 
-	if _, err := m.app.client.Chat(context.Background(), []llm.Message{llm.User("hi")}, nil); err != nil {
-		t.Fatal(err)
-	}
+	// internal/llm's own degenerate-repetition detector aborts a run like this
+	// one on its own — expected here (and desirable: the real fix for this
+	// class of bug). This test is specifically about the panel's width cap on
+	// whatever got buffered before that abort, not about Chat's return value.
+	_, _ = m.app.client.Chat(context.Background(), []llm.Message{llm.User("hi")}, nil)
 	for _, line := range m.thinkingView() {
 		if w := lipgloss.Width(line); w > m.width {
 			t.Errorf("thinkingView line width = %d, want capped to the terminal width %d: %q", w, m.width, line)

@@ -183,11 +183,22 @@ func (a *Agent) SetHistory(h []llm.Message) { a.history = append([]llm.Message(n
 // Compact summarizes the session so far into a short recap and replaces the
 // history with it, freeing context while keeping continuity. Returns how many
 // messages were compacted (0 if there was nothing worth compacting).
+//
+// The deterministic action digests actionsDigest already baked into each
+// remembered entry — file paths touched, commands run, and WHY a command
+// failed — are preserved verbatim alongside the LLM's own prose summary, not
+// left to its retelling alone. Caught live: a weak model asked to summarize
+// many near-identical retries into a few sentences blurred or dropped a
+// specific fact like "go.mod already exists" — the compacted history read
+// like a fresh start, and the very next task blindly repeated the exact
+// command that had already failed every time.
 func (a *Agent) Compact(ctx context.Context) (int, error) {
 	if len(a.history) < 2 {
 		return 0, nil
 	}
 	var b strings.Builder
+	var digests []string
+	seenDigest := map[string]bool{}
 	for _, m := range a.history {
 		switch m.Role {
 		case "user":
@@ -195,6 +206,10 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 		case "assistant":
 			if strings.TrimSpace(m.Content) != "" {
 				b.WriteString("Assistant: " + m.Content + "\n")
+			}
+			if d := extractActionsDigest(m.Content); d != "" && !seenDigest[d] {
+				seenDigest[d] = true
+				digests = append(digests, d)
 			}
 		}
 	}
@@ -206,11 +221,27 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	n := len(a.history)
+	summary := "[Summary of earlier conversation]\n" + reply.Content
+	if len(digests) > 0 {
+		summary += "\n\n(exact record of actions across those turns, kept verbatim regardless of the summary above — do not repeat a command marked FAILED, it will fail the same way again:\n" +
+			strings.Join(digests, "\n") + ")"
+	}
 	a.history = []llm.Message{
-		{Role: "user", Content: "[Summary of earlier conversation]\n" + reply.Content},
+		{Role: "user", Content: summary},
 		{Role: "assistant", Content: "Got it — I have that context."},
 	}
 	return n, nil
+}
+
+// extractActionsDigest pulls the "(actions this turn — ...)" suffix
+// actionsDigest appends to a remembered entry's content, or "" if it has none.
+func extractActionsDigest(content string) string {
+	const marker = "\n\n(actions this turn"
+	i := strings.Index(content, marker)
+	if i < 0 {
+		return ""
+	}
+	return strings.TrimSpace(content[i:])
 }
 
 // stopNote describes a run that stopped before a clean answer, so the next turn

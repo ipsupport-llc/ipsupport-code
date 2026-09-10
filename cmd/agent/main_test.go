@@ -3109,6 +3109,34 @@ func TestAutoCompactNeeded(t *testing.T) {
 	}
 }
 
+// Live case: compact_threshold=0.85 on a 4.1k-token window model left only
+// ~615 tokens of headroom — auto-compact never fired again once ctx plateaued
+// at 2900 (71%, below the raw 85% trigger of ~3485), and dozens of
+// near-duplicate turns piled up uncompacted. The minimum-headroom floor must
+// trigger compaction earlier regardless of how high the configured ratio is,
+// for a window this small.
+func TestAutoCompactNeededEnforcesMinimumHeadroomOnTinyWindows(t *testing.T) {
+	const window = 4100
+	if !autoCompactNeeded(2900, window, 4, 0.85) {
+		t.Errorf("the minimum-headroom floor should have triggered compaction by 2900/%d tokens even at a 0.85 ratio", window)
+	}
+	// A large window is unaffected — 15% headroom there already exceeds the floor.
+	if got, want := autoCompactTriggerFor(128000, 0.85), int(float64(128000)*0.85); got != want {
+		t.Errorf("a large window's trigger should be unaffected by the floor: got %d, want %d", got, want)
+	}
+}
+
+// autoCompactTriggerFor exposes the resolved trigger point for a direct
+// assertion, without duplicating autoCompactNeeded's floor logic in the test.
+func autoCompactTriggerFor(window int, ratio float64) int {
+	for ctx := 0; ctx <= window; ctx++ {
+		if autoCompactNeeded(ctx, window, 4, ratio) {
+			return ctx
+		}
+	}
+	return -1
+}
+
 // startCompact must set m.cancel exactly like startTask does — every
 // "is something running behind this" guard (the /config panel's closePanel/
 // configActivate) keys off m.cancel != nil. Without it, /config then esc

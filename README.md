@@ -562,7 +562,10 @@ Settings merge over safe defaults from two JSON files:
   (server URL, model, key, `context_window`). Written by first-run setup.
 - **`<workspace>/.agent/config.json`** — per-project: the permission policy (see
   [`.agent/config.example.json`](.agent/config.example.json)). Wins over the user
-  file.
+  file for everything EXCEPT the `llm` connection and `providers` — a workspace
+  is a checkout you might not fully trust, so it can tighten or loosen what the
+  agent may do, but it can't redirect your model endpoint or add a provider
+  preset while your real API key still gets sent wherever it points.
 
 Edit either file from a script with the `config` subcommand — no interactive
 session needed:

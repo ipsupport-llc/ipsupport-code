@@ -212,8 +212,6 @@ func stopNote(msgs []llm.Message, cancelled bool, err error) string {
 		". Those changes/outputs are kept — say 'continue' or what to do next.)"
 }
 
-// remember appends the goal and its final answer to the session, trimming to the
-// most recent maxHistory messages.
 // Detach orphans the agent: its emit and remember become no-ops, so a wedged
 // run that later unblocks can't scribble on the UI or the (now fresh) session.
 func (a *Agent) Detach() { a.detached.Store(true) }
@@ -221,14 +219,62 @@ func (a *Agent) Detach() { a.detached.Store(true) }
 // Reattach undoes Detach (used only if the agent swap it was part of failed).
 func (a *Agent) Reattach() { a.detached.Store(false) }
 
-func (a *Agent) remember(goal, final string) {
+// remember appends the goal and its final answer to the session, trimming to
+// the most recent maxHistory messages. msgs is the full turn just finished
+// (all tool calls/results) — actionsDigest pulls a short, deterministic list of
+// files touched and commands run out of it and appends that to the STORED
+// assistant text (not to final, which is what the user already saw), so the
+// next task's context — and a later summary of it — knows what really
+// happened on disk instead of relying on the model's own final-answer prose.
+func (a *Agent) remember(goal, final string, msgs []llm.Message) {
 	if a.detached.Load() {
 		return
 	}
-	a.history = append(a.history, llm.User(goal), llm.Message{Role: "assistant", Content: final})
+	a.history = append(a.history, llm.User(goal), llm.Message{Role: "assistant", Content: final + actionsDigest(msgs)})
 	if a.maxHistory > 0 && len(a.history) > a.maxHistory {
 		a.history = append([]llm.Message(nil), a.history[len(a.history)-a.maxHistory:]...)
 	}
+}
+
+// actionsDigest scans a finished turn's tool calls for a short, deterministic
+// record of what actually changed: file paths touched (write/edit/append/mkdir)
+// and top-level shell commands run. Empty when nothing mutating happened.
+func actionsDigest(msgs []llm.Message) string {
+	var files, cmds []string
+	seenFile, seenCmd := map[string]bool{}, map[string]bool{}
+	for _, m := range msgs {
+		for _, tc := range m.ToolCalls {
+			action, params := parseArgs(tc.Arguments)
+			switch tc.Name {
+			case "file":
+				if action == "read" || action == "list" || action == "find" || action == "search" {
+					continue // read-only — not something the next task needs to be told "already happened"
+				}
+				if p, _ := params["path"].(string); p != "" && !seenFile[p] {
+					seenFile[p] = true
+					files = append(files, p)
+				}
+			case "run":
+				if c, _ := params["command"].(string); c != "" && !seenCmd[c] {
+					seenCmd[c] = true
+					cmds = append(cmds, clip(c, 60))
+				}
+			}
+		}
+	}
+	if len(files) == 0 && len(cmds) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n(actions this turn —")
+	if len(files) > 0 {
+		fmt.Fprintf(&b, " files touched: %s;", strings.Join(files, ", "))
+	}
+	if len(cmds) > 0 {
+		fmt.Fprintf(&b, " commands run: %s;", strings.Join(cmds, "; "))
+	}
+	b.WriteString(")")
+	return b.String()
 }
 
 // DefaultSystemPrompt is the baseline instruction given to the model. Kept tight
@@ -319,7 +365,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 				tr.Final = stopNote(msgs, cancelled, err)
 				a.emit("final", map[string]any{"text": tr.Final})
 				if acted {
-					a.remember(goal, tr.Final)
+					a.remember(goal, tr.Final, msgs)
 				}
 				return tr, nil
 			}
@@ -402,7 +448,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 			tr.Messages = msgs
 			tr.Returns, tr.GoalMet = returns, goalMet
 			a.emit("final", map[string]any{"text": clean, "suggest": suggest})
-			a.remember(goal, clean)
+			a.remember(goal, clean, msgs)
 			return tr, nil
 		}
 
@@ -437,7 +483,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 					tr.Returns = returns
 					tr.Messages = msgs
 					a.emit("final", map[string]any{"text": msg, "suggest": stuckSuggest, "exhausted": true})
-					a.remember(goal, msg)
+					a.remember(goal, msg, msgs)
 					return tr, nil
 				}
 			}
@@ -456,7 +502,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	clean, suggest := splitSuggestion(lastAssistantContent(msgs))
 	tr.Final = clean
 	a.emit("final", map[string]any{"text": clean, "suggest": suggest, "exhausted": true})
-	a.remember(goal, clean)
+	a.remember(goal, clean, msgs)
 	return tr, nil
 }
 

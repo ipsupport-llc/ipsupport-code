@@ -575,6 +575,12 @@ sitting at its zero default (e.g. `offline` when off) prints nothing, like
 `run.timeout_seconds` caps how long a shell command may run (default 60s); raise
 it for slow builds/test suites, or let the model pass a larger per-call `timeout`.
 
+Cross-task memory: once the context window fills past `compact_threshold`
+(default `0.75`), the session is folded into an LLM-written recap to free
+headroom — `memory raw` turns that off entirely, keeping turns verbatim and
+only dropping the oldest ones outright (no paraphrase) once there are too many:
+`ipsupport-code config set memory raw` / `config set compact_threshold 0.85`.
+
 Permissions for `run` and `file` resolve per action: a **deny** glob blocks, an
 **allow** glob runs without asking, otherwise the **default** (`ask`/`allow`/`deny`)
 applies. Run-command deny globs match *anywhere* in the command (so `rm -rf*`

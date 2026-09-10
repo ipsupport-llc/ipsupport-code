@@ -2712,18 +2712,23 @@ func outputLines(content, marker string, style lipgloss.Style) []string {
 // half, warn as it approaches the auto-compact threshold, red once it will compact.
 // Empty when there's no window or nothing sent yet.
 func (m *tuiModel) ctxMeter() string {
-	return ctxMeterFor(m.app.client.Context(), m.app.activeLLM().ContextWindow)
+	if m.app.cfg.Memory == "raw" {
+		return ctxMeterFor(m.app.client.Context(), m.app.activeLLM().ContextWindow, 0) // no auto-compact threshold to warn toward
+	}
+	return ctxMeterFor(m.app.client.Context(), m.app.activeLLM().ContextWindow, compactThreshold(m.app.cfg.CompactThreshold))
 }
 
-// ctxMeterFor is the pure part of the meter, split out for tests.
-func ctxMeterFor(used, win int) string {
+// ctxMeterFor is the pure part of the meter, split out for tests. ratio <= 0
+// means no auto-compact threshold applies (memory "raw") — the meter still
+// shows fill level but never turns red.
+func ctxMeterFor(used, win int, ratio float64) string {
 	if win <= 0 || used <= 0 {
 		return ""
 	}
 	pct := used * 100 / win
 	s := fmt.Sprintf("ctx %d%%", pct)
 	switch {
-	case float64(used) >= float64(win)*autoCompactRatio:
+	case ratio > 0 && float64(used) >= float64(win)*ratio:
 		return cErr.Render(s + "⚠") // at/over the auto-compact threshold
 	case pct >= ctxWarnPercent:
 		return cToolCall.Render(s)

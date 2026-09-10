@@ -140,6 +140,57 @@ func TestSessionMemoryCarriesAcrossRuns(t *testing.T) {
 	}
 }
 
+func TestActionsDigest(t *testing.T) {
+	msgs := []llm.Message{
+		toolCallReply("c1", "file", `{"action":"write","params":{"path":"world.go","content":"package main"}}`),
+		{Role: "tool", Content: "ok"},
+		toolCallReply("c2", "file", `{"action":"read","params":{"path":"world.go"}}`), // read-only — must be skipped
+		{Role: "tool", Content: "package main"},
+		toolCallReply("c3", "run", `{"action":"shell","params":{"command":"go build ./..."}}`),
+		{Role: "tool", Content: "ok"},
+	}
+	got := actionsDigest(msgs)
+	if strings.Count(got, "world.go") != 1 {
+		t.Errorf("digest should list the written file exactly once (read must be skipped): %q", got)
+	}
+	if !strings.Contains(got, "go build ./...") {
+		t.Errorf("digest missing the command run: %q", got)
+	}
+	if got := actionsDigest([]llm.Message{{Role: "assistant", Content: "just talk, no tools"}}); got != "" {
+		t.Errorf("no mutating tool calls → want empty digest, got %q", got)
+	}
+}
+
+// The whole point of the digest: cross-run memory must know which files were
+// actually created, not just whatever the model chose to say in its one-line
+// final answer.
+func TestActionsDigestCarriesAcrossRuns(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "file", `{"action":"write","params":{"path":"world.go","content":"package main"}}`),
+		{Role: "assistant", Content: "created world.go"}, // run 1 final — doesn't restate the path
+		{Role: "assistant", Content: "yes, it exists"},   // run 2 final
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+
+	if _, err := a.Run(context.Background(), "build the world module"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Run(context.Background(), "did you create world.go?"); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawDigest bool
+	for _, m := range fake.lastMsgs {
+		if strings.Contains(m.Content, "world.go") && strings.Contains(m.Content, "actions this turn") {
+			sawDigest = true
+		}
+	}
+	if !sawDigest {
+		t.Errorf("2nd run's prompt is missing the files-touched digest from run 1: %+v", fake.lastMsgs)
+	}
+}
+
 type recTracer struct {
 	kinds        []string
 	finalSuggest string

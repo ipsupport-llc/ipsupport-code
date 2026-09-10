@@ -1810,22 +1810,39 @@ func (a *app) reconfigure() error {
 	return nil
 }
 
-// autoCompactRatio is the fraction of the context window at which the session is
-// auto-compacted, leaving headroom for the next task.
+// autoCompactRatio is the default fraction of the context window at which the
+// session is auto-compacted, leaving headroom for the next task. Overridable
+// per config via compactThreshold.
 const autoCompactRatio = 0.75
 
+// compactThreshold resolves the configured CompactThreshold override, falling
+// back to the built-in default when unset (0).
+func compactThreshold(cfgVal float64) float64 {
+	if cfgVal > 0 {
+		return cfgVal
+	}
+	return autoCompactRatio
+}
+
 // autoCompactNeeded decides whether to fold the session into a summary: the last
-// prompt is past the threshold and there's enough history to be worth it. A zero
+// prompt is past ratio and there's enough history to be worth it. A zero
 // window disables it.
-func autoCompactNeeded(ctxTokens, window, sessionLen int) bool {
+func autoCompactNeeded(ctxTokens, window, sessionLen int, ratio float64) bool {
 	if window <= 0 || sessionLen < 4 {
 		return false
 	}
-	return ctxTokens >= int(float64(window)*autoCompactRatio)
+	return ctxTokens >= int(float64(window)*ratio)
 }
 
+// shouldAutoCompact reports whether the running session should fold into a
+// summary right now. Memory "raw" (see Config.Memory) opts out entirely — the
+// session stays verbatim and only trims via the plain FIFO cap in
+// Agent.remember, never through an LLM-written recap.
 func (a *app) shouldAutoCompact() bool {
-	return autoCompactNeeded(a.client.Context(), a.activeLLM().ContextWindow, a.ag.SessionLen())
+	if a.cfg.Memory == "raw" {
+		return false
+	}
+	return autoCompactNeeded(a.client.Context(), a.activeLLM().ContextWindow, a.ag.SessionLen(), compactThreshold(a.cfg.CompactThreshold))
 }
 
 // Session memory persists per workspace AND per agent name, so each named agent

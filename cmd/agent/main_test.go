@@ -1273,19 +1273,23 @@ func TestConfigAddProviderAcceptsPastedKey(t *testing.T) {
 // ctxMeter thresholds: empty without data, dim under 50%, warn at ≥50%, red⚠ at
 // the auto-compact line (the styles degrade to plain text in tests).
 func TestCtxMeterFor(t *testing.T) {
-	if got := ctxMeterFor(0, 1000); got != "" {
+	if got := ctxMeterFor(0, 1000, 0.75); got != "" {
 		t.Errorf("no usage → %q, want empty", got)
 	}
-	if got := ctxMeterFor(500, 0); got != "" {
+	if got := ctxMeterFor(500, 0, 0.75); got != "" {
 		t.Errorf("no window → %q, want empty", got)
 	}
 	for _, c := range []struct {
 		used int
 		want string
 	}{{300, "ctx 30%"}, {600, "ctx 60%"}, {800, "ctx 80%⚠"}} {
-		if got := ctxMeterFor(c.used, 1000); !strings.Contains(got, c.want) {
+		if got := ctxMeterFor(c.used, 1000, 0.75); !strings.Contains(got, c.want) {
 			t.Errorf("used=%d → %q, want it to contain %q", c.used, got, c.want)
 		}
+	}
+	// memory "raw" passes ratio<=0 — fill still shows, but never turns red.
+	if got := ctxMeterFor(950, 1000, 0); strings.Contains(got, "⚠") {
+		t.Errorf("ratio<=0 (raw memory) → %q, want no auto-compact warning", got)
 	}
 }
 
@@ -2536,17 +2540,39 @@ func TestActiveLLM(t *testing.T) {
 }
 
 func TestAutoCompactNeeded(t *testing.T) {
-	if !autoCompactNeeded(6200, 8192, 4) {
+	if !autoCompactNeeded(6200, 8192, 4, 0.75) {
 		t.Error("76% of the window with history should trigger compaction")
 	}
-	if autoCompactNeeded(4000, 8192, 4) {
+	if autoCompactNeeded(4000, 8192, 4, 0.75) {
 		t.Error("49% is well under the threshold")
 	}
-	if autoCompactNeeded(7000, 8192, 2) {
+	if autoCompactNeeded(7000, 8192, 2, 0.75) {
 		t.Error("too little history to bother compacting")
 	}
-	if autoCompactNeeded(7000, 0, 4) {
+	if autoCompactNeeded(7000, 0, 4, 0.75) {
 		t.Error("a zero window disables auto-compact")
+	}
+	// A custom (lower) threshold from config.CompactThreshold fires earlier.
+	if !autoCompactNeeded(4200, 8192, 4, 0.5) {
+		t.Error("51% of the window should trigger at a configured 0.5 threshold")
+	}
+}
+
+func TestCompactThreshold(t *testing.T) {
+	if got := compactThreshold(0); got != autoCompactRatio {
+		t.Errorf("unset override → %v, want the built-in default %v", got, autoCompactRatio)
+	}
+	if got := compactThreshold(0.9); got != 0.9 {
+		t.Errorf("configured override → %v, want 0.9", got)
+	}
+}
+
+// Memory "raw" opts out of auto-compact entirely, regardless of how full the
+// context window is.
+func TestShouldAutoCompactRawMemory(t *testing.T) {
+	a := &app{cfg: config.Config{Memory: "raw"}}
+	if a.shouldAutoCompact() {
+		t.Error("memory=raw should never auto-compact")
 	}
 }
 

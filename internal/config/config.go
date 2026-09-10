@@ -170,7 +170,17 @@ type Config struct {
 	// spec. Empty = the mcp tool isn't offered.
 	McpServers map[string]mcp.Server `json:"mcp_servers,omitempty"`
 	SkillsPath string                `json:"skills_path,omitempty"`
-	Workspace  string                `json:"-"` // resolved absolute workspace root
+	// Memory selects the cross-task session-memory strategy: "" / "summary"
+	// (default) folds older turns into an LLM-written recap once the context
+	// window passes CompactThreshold; "raw" never summarizes — turns stay
+	// verbatim, and only the oldest ones are dropped outright (no paraphrase)
+	// once there are too many to keep. An unrecognized value falls back to
+	// "summary".
+	Memory string `json:"memory,omitempty"`
+	// CompactThreshold overrides the fraction of the context window at which
+	// "summary" memory folds history into a recap. 0 = built-in default (0.75).
+	CompactThreshold float64 `json:"compact_threshold,omitempty"`
+	Workspace        string  `json:"-"` // resolved absolute workspace root
 }
 
 // ProviderTemplates are built-in OpenAI-compatible providers: base URL (and a

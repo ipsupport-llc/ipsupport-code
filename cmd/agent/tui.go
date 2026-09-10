@@ -491,10 +491,8 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case approvalMsg:
 		req := approvalReq(msg)
 		m.pending = &req
-		// Don't steal the keyboard: stay running so the input remains editable
-		// (finish your message). The user presses ↑ to switch to answering. Do NOT
-		// fetch the next approval yet — that would overwrite m.pending and orphan
-		// this one's reply channel (a hang when the model batches calls).
+		// Do NOT fetch the next approval yet — that would overwrite m.pending and
+		// orphan this one's reply channel (a hang when the model batches calls).
 		// Multi-line: the head on the ⚠ line, extra detail lines (e.g. the FULL
 		// task of a sub-agent/external launch) pushed raw so they soft-wrap, and
 		// the keys on their own line — nothing is truncated out of sight.
@@ -502,6 +500,15 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.push(cToolCall.Render("  ⚠ approve "+req.kind+": ") + lines[0])
 		m.pushLines(lines[1:])
 		m.push(cDim.Render("    y approve · n deny · a allow all " + categoryLabel(approvalCategory(req.kind)) + " this session · ↑ Yes/No · or keep typing"))
+		// Go modal by default: a bare y/n/a/enter answers it, and nothing else
+		// leaks half-typed into the chat input while it's waiting. esc drops back
+		// to typing if you want to steer/queue something instead (the approval
+		// stays pending either way). Only from the plain running view — a
+		// dedicated panel (config/agents/rewind/...) already shows its own
+		// "approval waiting behind this" indicator and keeps its own state.
+		if m.state == stRunning {
+			m.state = stApprove
+		}
 		return m, nil
 
 	case taskDoneMsg:

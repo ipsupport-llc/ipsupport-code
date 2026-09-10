@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
@@ -45,7 +46,7 @@ type Lessons struct {
 const reflectPrompt = `You review a finished run by a tool-using agent and extract two things for next time, as ONE JSON object:
 {"pitfalls": [...], "facts": [...]}
 
-"pitfalls" — environment-general tool lessons. Each: {"domain" (file|run|web|calc), "error_pattern" (short substring of the error), "context", "proven_fix" (the concrete fix that worked)}. Include ONE only where an error was hit AND a later action fixed it. EXCLUDE anything specific to this project/path.
+"pitfalls" — environment-general tool lessons. Each: {"domain" (file|run|web|calc), "error_pattern" (a substring SPECIFIC enough that only errors like this one contain it — never a generic wrapper like an exit code alone, e.g. "exit 1", which every failed command has regardless of cause), "context", "proven_fix" (the concrete fix that worked)}. Include ONE only where an error was hit AND a later action fixed it. EXCLUDE anything specific to this project/path.
 
 "facts" — short, durable, reusable facts about THIS project worth remembering next time: build/test/run commands, where things live, conventions, gotchas. Solid reusable facts only, not one-off details.
 
@@ -132,6 +133,15 @@ var validDomain = map[string]bool{
 	"calc": true, "agent": true, "mcp": true, "skill": true,
 }
 
+// genericErrorPattern matches an error_pattern that's pure tool-wrapper noise
+// rather than anything about the actual failure — "exit 1" is the run tool's
+// own generic prefix on EVERY failed command (`fmt.Sprintf("exit %d\n%s", ...`),
+// so a lesson keyed on it alone would "match" (and mislead on) any unrelated
+// failure. A weak reflecting model reaches for it because it's the first,
+// most prominent line of the error, despite the prompt asking for something
+// more specific.
+var genericErrorPattern = regexp.MustCompile(`(?i)^exit \d+$`)
+
 func parseLessons(content string) Lessons {
 	for _, candidate := range jsonObjectCandidates(content) {
 		var raw struct {
@@ -149,14 +159,18 @@ func parseLessons(content string) Lessons {
 		var out Lessons
 		for _, p := range raw.Pitfalls {
 			domain := strings.ToLower(strings.TrimSpace(p.Domain))
+			pattern := strings.TrimSpace(p.ErrorPattern)
 			if domain == "" || strings.TrimSpace(p.ProvenFix) == "" {
 				continue
 			}
 			if !validDomain[domain] {
 				continue // a domain the KB can never match on is dead weight that still ages toward pruning
 			}
+			if genericErrorPattern.MatchString(pattern) {
+				continue // "exit N" alone can't discriminate this failure from any other
+			}
 			out.Pitfalls = append(out.Pitfalls, knowledge.Pitfall{
-				Domain: domain, ErrorPattern: p.ErrorPattern, Context: p.Context, ProvenFix: p.ProvenFix,
+				Domain: domain, ErrorPattern: pattern, Context: p.Context, ProvenFix: p.ProvenFix,
 			})
 		}
 		for _, f := range raw.Facts {

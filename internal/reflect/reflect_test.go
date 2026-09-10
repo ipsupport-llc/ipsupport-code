@@ -65,6 +65,25 @@ func TestReflectDropsUnknownDomain(t *testing.T) {
 	}
 }
 
+// "exit 1" is the run tool's own generic wrapper prefix on EVERY failed
+// command (see run.go's `fmt.Sprintf("exit %d\n%s", ...)`) — a lesson keyed on
+// it alone can't discriminate this failure from any other, so it's dropped
+// even though it otherwise has a valid domain and a proven fix. A pattern
+// that's actually specific to the failure is kept.
+func TestReflectDropsGenericExitCodePattern(t *testing.T) {
+	reply := `{"pitfalls":[` +
+		`{"domain":"run","error_pattern":"exit 1","context":"a python module missing a dependency","proven_fix":"install the required system library"},` +
+		`{"domain":"run","error_pattern":"go.mod already exists","context":"go mod init on an existing module","proven_fix":"skip init, cd into the existing module"}` +
+		`],"facts":[]}`
+	l, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if len(l.Pitfalls) != 1 || l.Pitfalls[0].ErrorPattern != "go.mod already exists" {
+		t.Errorf("pitfalls = %+v, want only the specific (non-generic) pattern kept", l.Pitfalls)
+	}
+}
+
 func TestReflectParsesObjectAfterBraceProse(t *testing.T) {
 	// Prose contains a braced phrase that isn't JSON before the real object.
 	reply := "The lessons {for this run} are below:\n" +

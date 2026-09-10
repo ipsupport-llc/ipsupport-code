@@ -77,3 +77,14 @@ func TestRegistryMutates(t *testing.T) {
 		t.Error("unknown tool should be non-mutating")
 	}
 }
+
+func TestRegistryActions(t *testing.T) {
+	ft := &fakeTool{name: "file", actions: []string{"read", "write", "edit"}}
+	r := NewRegistry(ft)
+	if got := r.Actions("file"); len(got) != 3 {
+		t.Errorf("Actions(file) = %v, want 3 entries", got)
+	}
+	if got := r.Actions("nope"); got != nil {
+		t.Errorf("Actions(unknown tool) = %v, want nil", got)
+	}
+}

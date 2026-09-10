@@ -1951,6 +1951,7 @@ func (a *app) newNamedSession(name string, persist bool) error {
 	a.ag.Reset()          // fresh — don't load name's prior thread
 	a.resetSessionAllow() // a new session shouldn't inherit "allow all this session"
 	a.clearGoal()         // a new session shouldn't inherit the old one's standing goal either
+	a.resetCheckpoints()  // a checkpoint's histLen indexes the OLD thread — meaningless here
 	return nil
 }
 
@@ -2096,7 +2097,8 @@ func (a *app) switchSession(name string) error {
 		return err
 	}
 	a.ag.Reset()
-	a.loadSession() // replace with the target name's thread
+	a.loadSession()      // replace with the target name's thread
+	a.resetCheckpoints() // a checkpoint's histLen indexes the OLD thread — meaningless here
 	return nil
 }
 
@@ -2420,8 +2422,8 @@ func (a *app) runOne(ctx context.Context, goal string) {
 		return
 	}
 	a.injectJobResults() // finished background jobs land before the model thinks
-	a.beginCheckpoint(goal)
-	defer a.endCheckpoint()
+	cp := a.beginCheckpoint(goal)
+	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
 	tr, err := a.ag.Run(ctx, goal)
 	if err != nil {
@@ -2460,8 +2462,8 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 		return
 	}
 	a.injectJobResults() // finished background jobs land before the model thinks
-	a.beginCheckpoint(goal)
-	defer a.endCheckpoint()
+	cp := a.beginCheckpoint(goal)
+	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
 	tr, err := a.ag.Run(ctx, goal)
 	if a.taskEpoch.Load() != epoch {

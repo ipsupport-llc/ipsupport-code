@@ -155,6 +155,70 @@ func TestChatDoesNotFlagOrdinaryRepeatedCharacters(t *testing.T) {
 	}
 }
 
+// A model stuck re-emitting the same SENTENCE (not a single character) is a
+// different collapse than the one degenerateRunThreshold catches — observed
+// live: the exact same ~90-byte sentence about a "hero's path" simulation
+// repeating back to back, dozens of times, in a model's live output.
+func TestChatAbortsOnPhraseRepetition(t *testing.T) {
+	sentence := `The user wants to build a "hero's path" simulation in Go with visible learning/weights. `
+	var chunks []string
+	for i := 0; i < 6; i++ {
+		chunks = append(chunks, fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, sentence))
+	}
+	cl := NewOpenAIClient(config.LLM{BaseURL: sseServer(t, chunks...), Model: "fake"})
+	_, err := cl.Chat(context.Background(), []Message{User("go")}, nil)
+	if err == nil || !strings.Contains(err.Error(), "looping") {
+		t.Errorf("expected a phrase-repetition abort, got %v", err)
+	}
+	var pe *phraseRepeatError
+	if !errors.As(err, &pe) {
+		t.Fatalf("error = %v, want a *phraseRepeatError", err)
+	}
+}
+
+// A realistic, short repeated code idiom (the same error-handling boilerplate
+// appearing more than once in generated Go code) must NOT trip the detector —
+// it's shorter than phraseRepeatMatchLen and/or spaced further apart than
+// phraseRepeatWindow in real content, unlike a genuine back-to-back collapse.
+func TestChatDoesNotFlagOrdinaryRepeatedCodeIdiom(t *testing.T) {
+	idiom := "if err != nil {\n\treturn nil, err\n}\n"
+	// Varied (not a single repeated character or a periodic pattern) filler,
+	// long enough to push the idiom's 2nd copy outside the lookback window —
+	// a homogeneous filler would itself risk tripping the OTHER detector.
+	var fb strings.Builder
+	for i := 0; fb.Len() < phraseRepeatWindow+50; i++ {
+		fmt.Fprintf(&fb, "// unrelated comment line %d with some varying content\n", i)
+	}
+	filler := fb.String()
+	cl := NewOpenAIClient(config.LLM{BaseURL: sseServer(t,
+		fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, "func A() (int, error) {\n"+idiom),
+		fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, filler),
+		fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, "func B() (int, error) {\n"+idiom+"done"),
+	), Model: "fake"})
+	msg, err := cl.Chat(context.Background(), []Message{User("go")}, nil)
+	if err != nil {
+		t.Fatalf("a short, widely-spaced repeated idiom should not abort: %v", err)
+	}
+	if !strings.HasSuffix(msg.Content, "done") {
+		t.Errorf("content = %q, want it to finish normally", msg.Content)
+	}
+}
+
+// DisableLoopDetection (per-connection, config.LLM) opts a provider out of
+// both repetition detectors entirely — a capable hosted provider (Claude,
+// OpenAI) that a user trusts not to need this can turn it off, while it stays
+// on by default for everyone, including a local connection prone to it.
+func TestDisableLoopDetectionOptsOutOfBothDetectors(t *testing.T) {
+	var chunks []string
+	for i := 0; i < degenerateRunThreshold+10; i++ {
+		chunks = append(chunks, `{"choices":[{"delta":{"content":"0"}}]}`)
+	}
+	cl := NewOpenAIClient(config.LLM{BaseURL: sseServer(t, chunks...), Model: "fake", DisableLoopDetection: true})
+	if _, err := cl.Chat(context.Background(), []Message{User("go")}, nil); err != nil {
+		t.Errorf("character repetition should be ignored when disabled: %v", err)
+	}
+}
+
 func TestReasoningEffortSent(t *testing.T) {
 	seen := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

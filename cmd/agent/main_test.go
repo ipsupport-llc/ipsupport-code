@@ -534,6 +534,37 @@ func TestConfigPanelMemoryToggleAndCompactThresholdCycle(t *testing.T) {
 	}
 }
 
+// The repetition detectors are on by default everywhere but must be
+// toggleable per-connection from /config — e.g. off for a trusted, capable
+// hosted provider (Claude, OpenAI), on for a local model prone to looping.
+func TestConfigPanelLoopDetectionToggle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveGlobal writes the global config
+	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	cursorFor := func(key string) int {
+		for i, k := range cfgKeys() {
+			if k == key {
+				return i
+			}
+		}
+		t.Fatalf("no %q row in the config panel", key)
+		return -1
+	}
+
+	m.cfgCursor = cursorFor("loop_detection")
+	if m.app.cfg.LLM.DisableLoopDetection {
+		t.Fatal("default DisableLoopDetection = true, want false (on by default)")
+	}
+	m.configActivate()
+	if !m.app.cfg.LLM.DisableLoopDetection {
+		t.Error("after toggle, DisableLoopDetection = false, want true")
+	}
+	m.configActivate()
+	if m.app.cfg.LLM.DisableLoopDetection {
+		t.Error("second toggle should turn it back on (DisableLoopDetection=false)")
+	}
+}
+
 func TestResolveModelArg(t *testing.T) {
 	ids := []string{"openai/gpt-4o", "openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "x-ai/grok-4.3"}
 	// exact id → switch

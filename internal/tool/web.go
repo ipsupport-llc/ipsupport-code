@@ -47,8 +47,12 @@ type webTool struct {
 // network timeout.
 const offlineMsg = "offline mode is ON — the web is disabled right now (no internet). This is temporary: run /offline off when you're back online."
 
-// NewWeb returns the web tool. A nil client uses http.DefaultClient. When offline
-// is true, every action refuses with offlineMsg instead of touching the network.
+// NewWeb returns the web tool. A nil client builds one with a 30s timeout —
+// task contexts have no deadline of their own, so without this a slow/hostile
+// server could hang fetch/search/stackexchange indefinitely; pass http.
+// DefaultClient explicitly if you really want that (unbounded). When offline
+// is true, every action refuses with offlineMsg instead of touching the
+// network.
 func NewWeb(hc *http.Client, offline bool) Tool {
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second} // a hostile/slow server must not hang fetch forever

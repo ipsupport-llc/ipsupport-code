@@ -2195,6 +2195,69 @@ func TestSpawnAgentLocalRuns(t *testing.T) {
 	}
 }
 
+// build() must apply a -session name to cfg.Name BEFORE calling wire() — wire()
+// bakes the session name into the archiver/history tool paths once, at
+// construction time (codex review finding #24). This proves it end-to-end: a
+// pre-existing archive under the SESSION name (not the default) must make
+// wire() register the history tool, which only happens once hasArchivedHistory
+// sees the right file — observable in the actual tools list sent to the LLM.
+func TestBuildAppliesSessionNameBeforeWire(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	var gotTools []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		data, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(data, &body)
+		for _, tl := range body.Tools {
+			gotTools = append(gotTools, tl.Function.Name)
+		}
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"hi"}}]}`)
+	}))
+	defer srv.Close()
+
+	if err := config.SaveGlobal("", config.LLM{BaseURL: srv.URL + "/v1", Type: "openai"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ws := t.TempDir()
+	archiveDir := filepath.Join(ws, ".agent", "sessions")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Seed history ONLY under the session name build() is given — not the
+	// default name config.Load(ws) would otherwise produce.
+	if err := os.WriteFile(filepath.Join(archiveDir, slugName("myname")+".archive.jsonl"),
+		[]byte(`{"time":"2026-01-01T00:00:00Z","goal":"g","entry":"e"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a, cleanup, err := build(ws, "myname", bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if _, err := a.ag.Run(context.Background(), "say hi"); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, name := range gotTools {
+		if name == "history" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("tools sent to the LLM = %v, want \"history\" present — wire() must have seen cfg.Name=%q (with its pre-existing archive), not the default", gotTools, "myname")
+	}
+}
+
 func TestAgentsPanelBuild(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveAgents writes the global config

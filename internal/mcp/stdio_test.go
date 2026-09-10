@@ -44,3 +44,27 @@ func TestStdioTimeoutDoesNotCorruptNextCall(t *testing.T) {
 		t.Errorf("second call result = %s, want it to contain ok", raw)
 	}
 }
+
+// A blocked stdin write must not defeat the call's context. io.Pipe has no
+// internal buffering — unlike a real OS pipe — so a Write blocks until
+// something Reads it; leaving reqR undrained here deterministically
+// reproduces "the child stopped reading stdin, the pipe write hangs forever"
+// without needing to actually fill a real kernel pipe buffer.
+func TestStdioRoundTripCancelsBlockedWrite(t *testing.T) {
+	reqR, reqW := io.Pipe()
+	respR, respW := io.Pipe()
+	tr := newStdio(reqW, respR, func() { reqW.Close(); respW.Close() })
+	_ = reqR // deliberately never drained/closed — the write must hang on it
+
+	id := 1
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := tr.roundTrip(ctx, rpcMsg{ID: &id, Method: "m"})
+	if err == nil {
+		t.Fatal("expected a context-deadline error")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("roundTrip took %s to return — the blocked write defeated ctx", elapsed)
+	}
+}

@@ -101,8 +101,20 @@ func (t *stdioTransport) close() {
 	}
 }
 
-func (t *stdioTransport) notify(_ context.Context, msg rpcMsg) error {
-	return t.write(msg)
+func (t *stdioTransport) notify(ctx context.Context, msg rpcMsg) error {
+	// Same reasoning as roundTrip: t.write can't be cancelled once called
+	// directly, so run it on its own goroutine and let ctx/t.done still win
+	// if the pipe is stuck (a stopped-reading child, a full OS buffer).
+	writeErr := make(chan error, 1)
+	go func() { writeErr <- t.write(msg) }()
+	select {
+	case err := <-writeErr:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.done:
+		return io.EOF
+	}
 }
 
 func (t *stdioTransport) roundTrip(ctx context.Context, msg rpcMsg) (json.RawMessage, error) {
@@ -120,28 +132,49 @@ func (t *stdioTransport) roundTrip(ctx context.Context, msg rpcMsg) (json.RawMes
 		t.mu.Unlock()
 	}
 
-	if err := t.write(msg); err != nil {
-		unregister()
-		return nil, err
-	}
-	select {
-	case <-ctx.Done():
-		unregister()
-		return nil, ctx.Err()
-	case <-t.done:
-		unregister()
-		t.mu.Lock()
-		err := t.readErr
-		t.mu.Unlock()
-		if err == nil {
-			err = io.EOF
+	// t.write is a blocking pipe write with no cancellation support (Go's
+	// os.File/pipe writes can't be interrupted by a context) — if the child
+	// stops reading stdin and the OS pipe buffer fills, a synchronous write
+	// here would hang forever regardless of ctx, defeating the caller's whole
+	// timeout. Do it on its own goroutine instead: writeErr is buffered so
+	// that goroutine can always deliver and exit even after this call has
+	// already returned via ctx.Done()/t.done below (it then leaks only until
+	// the pipe itself unblocks or closes — no worse than an abandoned
+	// synchronous write would have been).
+	writeErr := make(chan error, 1)
+	go func() { writeErr <- t.write(msg) }()
+
+	// pending starts as writeErr; once that case fires with a nil error, it's
+	// set to nil so the loop's next iteration blocks only on ctx/done/ch (a
+	// nil channel is never selectable) — i.e. "wait for the write to
+	// succeed, THEN wait for the response", either phase interruptible.
+	pending := writeErr
+	for {
+		select {
+		case err := <-pending:
+			if err != nil {
+				unregister()
+				return nil, err
+			}
+			pending = nil
+		case <-ctx.Done():
+			unregister()
+			return nil, ctx.Err()
+		case <-t.done:
+			unregister()
+			t.mu.Lock()
+			err := t.readErr
+			t.mu.Unlock()
+			if err == nil {
+				err = io.EOF
+			}
+			return nil, fmt.Errorf("%s: transport closed: %w", msg.Method, err)
+		case m := <-ch:
+			if m.Error != nil {
+				return nil, fmt.Errorf("%s: %s", msg.Method, m.Error.Message)
+			}
+			return m.Result, nil
 		}
-		return nil, fmt.Errorf("%s: transport closed: %w", msg.Method, err)
-	case m := <-ch:
-		if m.Error != nil {
-			return nil, fmt.Errorf("%s: %s", msg.Method, m.Error.Message)
-		}
-		return m.Result, nil
 	}
 }
 

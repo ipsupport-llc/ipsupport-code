@@ -2106,12 +2106,12 @@ func TestRewindRestoresFiles(t *testing.T) {
 	newAbs := filepath.Join(ws, "b.txt")
 	os.WriteFile(abs, []byte("original"), 0o644)
 
-	a.beginCheckpoint("edit stuff")
+	cp := a.beginCheckpoint("edit stuff")
 	a.snapFile(abs) // the file tool calls this before each change; mimic it here
 	os.WriteFile(abs, []byte("changed"), 0o644)
 	a.snapFile(newAbs)
 	os.WriteFile(newAbs, []byte("brand new"), 0o644)
-	a.endCheckpoint()
+	a.endCheckpoint(cp)
 
 	rows := a.rewindRows()
 	if len(rows) != 1 {
@@ -2143,12 +2143,12 @@ func TestRewindPreview(t *testing.T) {
 	}
 	abs, newAbs := filepath.Join(ws, "a.txt"), filepath.Join(ws, "b.txt")
 	os.WriteFile(abs, []byte("old\n"), 0o644)
-	a.beginCheckpoint("edit")
+	cp := a.beginCheckpoint("edit")
 	a.snapFile(abs)
 	os.WriteFile(abs, []byte("new\n"), 0o644)
 	a.snapFile(newAbs)
 	os.WriteFile(newAbs, []byte("created\n"), 0o644)
-	a.endCheckpoint()
+	a.endCheckpoint(cp)
 
 	items, _ := a.rewindPreview(0)
 	var restore, del bool
@@ -2162,6 +2162,113 @@ func TestRewindPreview(t *testing.T) {
 	}
 	if !restore || !del {
 		t.Errorf("preview = %+v; want a restore (a.txt) + a delete (b.txt)", items)
+	}
+}
+
+// A stat/read failure that ISN'T "file doesn't exist" (permission, I/O) must
+// not be recorded as "created" — rewind would otherwise delete a file that
+// was already there before the turn even started.
+func TestSnapFileTreatsUnreadableAsExistingNotCreated(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(ws, "locked.txt")
+	if err := os.WriteFile(abs, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(abs, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(abs, 0o644) // let TempDir cleanup remove it
+
+	cp := a.beginCheckpoint("touch a locked file")
+	a.snapFile(abs)
+	a.endCheckpoint(cp)
+
+	snap := cp.files[abs]
+	if !snap.existed {
+		t.Error("an unreadable (not missing) file must be recorded as existed:true")
+	}
+	if !snap.tooBig {
+		t.Error("an unreadable file can't be snapshotted — want the skip-on-restore marker")
+	}
+}
+
+// A rewind that fails to restore/delete a file must keep the checkpoint
+// (retryable) instead of discarding the only copy of the prior content.
+func TestApplyRewindKeepsCheckpointOnRestoreFailure(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores file permissions")
+	}
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.File = config.FilePolicy{Default: "allow", Jail: "."}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	abs := filepath.Join(ws, "a.txt")
+	if err := os.WriteFile(abs, []byte("original"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cp := a.beginCheckpoint("edit then get blocked")
+	a.snapFile(abs)
+	os.WriteFile(abs, []byte("changed"), 0o644)
+	a.endCheckpoint(cp)
+
+	// Make the restore write fail: no write permission on the file itself.
+	if err := os.Chmod(abs, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(abs, 0o644)
+
+	rows := a.rewindRows()
+	out := a.applyRewind(rows[0].idx)
+
+	if len(a.checkpoints) != 1 {
+		t.Errorf("checkpoints = %d, want 1 (kept for retry after a failed restore)", len(a.checkpoints))
+	}
+	joined := strings.Join(out, "\n")
+	if !strings.Contains(joined, "failed to restore") {
+		t.Errorf("output = %q, want it to report the failed restore instead of claiming success", joined)
+	}
+}
+
+// A checkpoint's histLen indexes a specific session's conversation — starting
+// or switching to a different named session must drop it, or a later /rewind
+// could apply the old session's history-length index to the new one.
+func TestNewNamedSessionResetsCheckpoints(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.beginCheckpoint("do something")
+	if len(a.checkpoints) != 1 {
+		t.Fatal("checkpoint not recorded")
+	}
+	if err := a.newNamedSession("other", false); err != nil {
+		t.Fatal(err)
+	}
+	if len(a.checkpoints) != 0 || a.curCkpt != nil {
+		t.Errorf("checkpoints = %d, curCkpt = %v; want both cleared after switching sessions", len(a.checkpoints), a.curCkpt)
 	}
 }
 

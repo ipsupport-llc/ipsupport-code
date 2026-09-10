@@ -655,6 +655,34 @@ func TestThinkingPanelTogglesAndAutoHides(t *testing.T) {
 	}
 }
 
+// Reported live: with a model that has no separate reasoning phase at all
+// (most local models — gemma in the operator's case), the token counter kept
+// climbing but the thinking panel stayed empty, unlike e.g. Open WebUI, which
+// shows the answer text itself as it streams. The panel must fall back to
+// plain content deltas when there's no reasoning_content/reasoning at all.
+func TestThinkingPanelShowsPlainContentWhenNoReasoningPhase(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"building the plan now\"}}]}\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	m := &tuiModel{state: stRunning, width: 80, accent: lipgloss.Color("13"), input: textarea.New(),
+		app: &app{cfg: config.Default()}, showThinking: true}
+	m.app.client = llm.NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+
+	if _, err := m.app.client.Chat(context.Background(), []llm.Message{llm.User("hi")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	out := strings.Join(m.thinkingView(), "\n")
+	if !strings.Contains(out, "building the plan now") {
+		t.Errorf("thinkingView with no reasoning phase = %q, want the streamed content text", out)
+	}
+}
+
 // gofmt indents Go source with tabs. A real terminal expands a tab to its next
 // tab stop (up to 8 columns), but lipgloss.Width counts it as a single column
 // — so a raw tab left in a diff row that's padded to an exact terminal width

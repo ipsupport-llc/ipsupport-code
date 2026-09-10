@@ -298,11 +298,13 @@ func TestParseStreamTicksOnlyOnProgress(t *testing.T) {
 	}
 }
 
-// Reasoning() lets the TUI show a reasoning model's live "thinking" text —
-// buffered as it streams in, never sent back to the model or included in the
-// returned Message. Both the OpenAI-style "reasoning_content" key and
-// OpenRouter's "reasoning" key must accumulate.
-func TestParseStreamAccumulatesReasoningContent(t *testing.T) {
+// Live() lets the TUI show what the model is currently doing while it's still
+// generating — buffered as it streams in, never sent back to the model. Both
+// the OpenAI-style "reasoning_content" key and OpenRouter's "reasoning" key
+// must accumulate, AND plain content deltas must too: a model with no
+// separate reasoning phase at all (most local models — gemma reported live:
+// token counter climbing but the panel empty) has nothing else to show.
+func TestParseStreamAccumulatesLiveOutput(t *testing.T) {
 	cl := NewOpenAIClient(config.LLM{Model: "x"})
 	sse := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"let me \"}}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n" +
@@ -312,31 +314,39 @@ func TestParseStreamAccumulatesReasoningContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := cl.Reasoning(); got != "let me think" {
-		t.Errorf("Reasoning() = %q, want %q", got, "let me think")
+	if got := cl.Live(); got != "let me thinkthe answer" {
+		t.Errorf("Live() = %q, want %q (reasoning then content, in stream order)", got, "let me thinkthe answer")
 	}
 	if msg.Content != "the answer" {
-		t.Errorf("reasoning text leaked into the final Message.Content: %q", msg.Content)
-	}
-	if strings.Contains(msg.Content, "think") {
-		t.Errorf("Message.Content must not include reasoning text: %q", msg.Content)
+		t.Errorf("Message.Content = %q, want just the answer (reasoning text must not leak in)", msg.Content)
 	}
 
-	// OpenRouter's alternate key.
+	// OpenRouter's alternate reasoning key.
 	cl2 := NewOpenAIClient(config.LLM{Model: "x"})
 	sse2 := "data: {\"choices\":[{\"delta\":{\"reasoning\":\"pondering\"}}]}\n\ndata: [DONE]\n\n"
 	if _, err := cl2.parseStream(strings.NewReader(sse2), func() {}, 0); err != nil {
 		t.Fatal(err)
 	}
-	if got := cl2.Reasoning(); got != "pondering" {
-		t.Errorf("Reasoning() (OpenRouter key) = %q, want %q", got, "pondering")
+	if got := cl2.Live(); got != "pondering" {
+		t.Errorf("Live() (OpenRouter key) = %q, want %q", got, "pondering")
+	}
+
+	// A model with no reasoning phase at all: plain content deltas alone must
+	// still populate Live() — this is the case that was reported empty live.
+	cl3 := NewOpenAIClient(config.LLM{Model: "x"})
+	sse3 := "data: {\"choices\":[{\"delta\":{\"content\":\"plain answer\"}}]}\n\ndata: [DONE]\n\n"
+	if _, err := cl3.parseStream(strings.NewReader(sse3), func() {}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := cl3.Live(); got != "plain answer" {
+		t.Errorf("Live() (no reasoning phase) = %q, want %q", got, "plain answer")
 	}
 }
 
-// A retry (or a fresh Chat call) must not mix a dropped attempt's reasoning
-// text into the next one's — the live view would show a confusing blend of
-// two unrelated trains of thought otherwise.
-func TestReasoningResetsOnEachSend(t *testing.T) {
+// A retry (or a fresh Chat call) must not mix a dropped attempt's live output
+// into the next one's — the live view would show a confusing blend of two
+// unrelated turns otherwise.
+func TestLiveResetsOnEachSend(t *testing.T) {
 	var n int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		n++
@@ -360,14 +370,14 @@ func TestReasoningResetsOnEachSend(t *testing.T) {
 	if _, err := cl.Chat(context.Background(), []Message{User("hi")}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := cl.Reasoning(); got != "first call thinking" {
-		t.Errorf("after call 1, Reasoning() = %q, want %q", got, "first call thinking")
+	if got := cl.Live(); got != "first call thinkingfirst answer" {
+		t.Errorf("after call 1, Live() = %q, want %q", got, "first call thinkingfirst answer")
 	}
 	if _, err := cl.Chat(context.Background(), []Message{User("hi again")}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := cl.Reasoning(); got != "second call thinking" {
-		t.Errorf("after call 2, Reasoning() = %q, want %q (must not carry over call 1's text)", got, "second call thinking")
+	if got := cl.Live(); got != "second call thinkingsecond answer" {
+		t.Errorf("after call 2, Live() = %q, want %q (must not carry over call 1's text)", got, "second call thinkingsecond answer")
 	}
 }
 

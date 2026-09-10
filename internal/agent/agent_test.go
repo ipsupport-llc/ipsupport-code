@@ -96,12 +96,37 @@ func TestHintsRequireErrorPatternMatch(t *testing.T) {
 	a := New(&scriptLLM{}, tool.NewRegistry(tool.NewCalc()), kb, nil, "", 5)
 
 	// An unrelated error (e.g. "no action") must NOT surface the path pitfall.
-	if h := a.hints("file", `file: no action given — set "action" to one of: read, write`); h != "" {
+	if h := a.hints("file", "", `file: no action given — set "action" to one of: read, write`); h != "" {
 		t.Errorf("irrelevant hint injected: %q", h)
 	}
-	// The same error recurring does.
-	if h := a.hints("file", "edit failed: missing required param(s): path"); !strings.Contains(h, "include the path param") {
+	// The same error recurring, for the SAME action it was learned on, does.
+	if h := a.hints("file", "edit", "edit failed: missing required param(s): path"); !strings.Contains(h, "include the path param") {
 		t.Errorf("relevant hint not injected: %q", h)
+	}
+}
+
+// A domain often reuses the exact same generic validation text across
+// different actions (file's "missing required param(s): path" fires for
+// write, edit, AND append alike) — a lesson learned on one action must not
+// surface as guidance for a different action's identical error, or it
+// actively misleads (e.g. pointing a failed "write" at edit's find/replace
+// params, which don't exist on write).
+func TestHintsDontCrossActionsWithSharedErrorText(t *testing.T) {
+	kb, _ := knowledge.Open(filepath.Join(t.TempDir(), "k.json"))
+	kb.Add(knowledge.Pitfall{
+		Domain: "file", ErrorPattern: "missing required param(s): path",
+		Context: "file: edit", ProvenFix: "include the path param in the edit action",
+	})
+	reg := tool.NewRegistry(tool.NewFile(nil, nil, nil))
+	a := New(&scriptLLM{}, reg, kb, nil, "", 5)
+
+	// A write hitting the identical generic error must NOT get the edit-specific hint.
+	if h := a.hints("file", "write", "missing required param(s): path"); h != "" {
+		t.Errorf("edit's hint leaked into a write failure: %q", h)
+	}
+	// The same lesson, for the action it was actually learned on, still fires.
+	if h := a.hints("file", "edit", "missing required param(s): path"); !strings.Contains(h, "include the path param in the edit action") {
+		t.Errorf("hint not shown for its own action: %q", h)
 	}
 }
 

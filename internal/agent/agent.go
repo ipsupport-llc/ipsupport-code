@@ -818,7 +818,7 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool)
 				extra = append(extra, c.Name+" usage:\n"+u)
 			}
 		}
-		if hints := a.hints(c.Name, res.Content); hints != "" {
+		if hints := a.hints(c.Name, action, res.Content); hints != "" {
 			extra = append(extra, hints)
 		}
 		if len(extra) > 0 {
@@ -835,18 +835,27 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool)
 	return llm.ToolResult(c.ID, c.Name, content), res.IsError
 }
 
-// hints pulls matching learned pitfalls for a failed tool call. A pitfall is only
-// surfaced when its error pattern actually occurs in THIS error — otherwise a
-// loosely keyword-matched lesson (e.g. a "missing path" fix shown on a "no
-// action" error) just misleads a weak model.
-func (a *Agent) hints(domain, errText string) string {
+// hints pulls matching learned pitfalls for a failed tool call. A pitfall is
+// only surfaced when its error pattern actually occurs in THIS error —
+// otherwise a loosely keyword-matched lesson (e.g. a "missing path" fix shown
+// on a "no action" error) just misleads a weak model. Many domains reuse the
+// exact same generic validation text across different actions (file's
+// "missing required param(s): path" fires for write, edit, AND append alike),
+// so a lesson recorded under one action's Context (free text written by the
+// reflecting LLM, e.g. "file: edit") must not surface for a DIFFERENT action's
+// identical error — see contextMatchesAction.
+func (a *Agent) hints(domain, action, errText string) string {
 	if a.kb == nil {
 		return ""
 	}
 	low := strings.ToLower(errText)
+	knownActions := a.reg.Actions(domain)
 	var b strings.Builder
 	for _, p := range a.kb.Query(domain, errText, 3) {
 		if p.ErrorPattern == "" || !strings.Contains(low, strings.ToLower(p.ErrorPattern)) {
+			continue
+		}
+		if !contextMatchesAction(p.Context, action, knownActions) {
 			continue
 		}
 		if b.Len() == 0 {
@@ -855,6 +864,28 @@ func (a *Agent) hints(domain, errText string) string {
 		fmt.Fprintf(&b, "\n- when you saw %q while %s, this worked: %s", p.ErrorPattern, p.Context, p.ProvenFix)
 	}
 	return b.String()
+}
+
+// contextMatchesAction rejects a pitfall whose freeform Context clearly names
+// a DIFFERENT action of the same domain than the one that just failed (e.g.
+// Context "file: edit" when the current action is "write"). Context isn't a
+// structured field — it's free text a reflecting LLM wrote — so this can only
+// reject a clear mismatch; a Context naming no action at all (or the current
+// one) is always kept, since there's no reliable signal it's wrong.
+func contextMatchesAction(context, action string, knownActions []string) bool {
+	if action == "" || len(knownActions) < 2 {
+		return true // nothing to disambiguate against
+	}
+	low := strings.ToLower(context)
+	for _, other := range knownActions {
+		if strings.EqualFold(other, action) {
+			continue
+		}
+		if strings.Contains(low, strings.ToLower(other)) {
+			return false
+		}
+	}
+	return true
 }
 
 // usageError reports whether an error message indicates the model misused a

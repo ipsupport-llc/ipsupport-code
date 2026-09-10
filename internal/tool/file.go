@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 
 	udiff "github.com/aymanbagabas/go-udiff"
 	"github.com/bmatcuk/doublestar/v4"
@@ -21,6 +22,19 @@ import (
 )
 
 const maxReadBytes = 200_000
+
+// fileMu serializes the actual read-modify-write filesystem work in write/
+// append/edit/mkdir — NOT the approval prompt before it (that can wait
+// arbitrarily long on the user, and would otherwise block an unrelated
+// parallel sub-agent's approval prompt from even showing). Parallel
+// sub-agents share a workspace by default (a fan-out of `agent` calls with no
+// explicit dir all get the SAME registry), so two of them editing the same
+// file is a real, unlocked read-then-write race: each reads the original,
+// computes its own edit, and the later write silently discards the earlier
+// one — both report success. One process-wide lock is enough; file I/O isn't
+// the bottleneck next to the LLM calls around it, so per-path locking would
+// be unneeded complexity.
+var fileMu sync.Mutex
 
 // Snapshotter is called with the absolute path of a file about to be modified,
 // BEFORE the change, so a checkpoint can capture its prior content (for /rewind).
@@ -205,6 +219,9 @@ func (f *fileTool) writeFile(action string, a Args, appendMode bool) Result {
 		}
 	}
 
+	fileMu.Lock()
+	defer fileMu.Unlock()
+
 	abs, err := f.pol.Resolve(path)
 	if err != nil {
 		return Err(err.Error())
@@ -330,6 +347,10 @@ func (f *fileTool) edit(_ context.Context, a Args) Result {
 			return Err("edit " + path + " denied by user")
 		}
 	}
+
+	fileMu.Lock()
+	defer fileMu.Unlock()
+
 	abs, err := f.pol.Resolve(path)
 	if err != nil {
 		return Err(err.Error())
@@ -454,6 +475,10 @@ func (f *fileTool) mkdir(_ context.Context, a Args) Result {
 			return Err("mkdir " + path + " denied by user")
 		}
 	}
+
+	fileMu.Lock()
+	defer fileMu.Unlock()
+
 	abs, err := f.pol.Resolve(path)
 	if err != nil {
 		return Err(err.Error())

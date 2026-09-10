@@ -83,7 +83,8 @@ type OpenAIClient struct {
 	mu           sync.Mutex
 	promptTk     int
 	complTk      int
-	lastPromptTk int // prompt size of the most recent request (context fullness)
+	lastPromptTk int             // prompt size of the most recent request (context fullness)
+	reasoning    strings.Builder // the current (or most recent) call's reasoning/thinking text, live
 }
 
 // deadlineConn arms a fresh read deadline before every Read, so a single read
@@ -324,6 +325,10 @@ func (e *runawayError) Error() string {
 
 // send makes one attempt; the bool reports whether the failure is worth a retry.
 func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bool) {
+	c.mu.Lock()
+	c.reasoning.Reset() // this attempt's own reasoning text, not a dropped attempt's leftovers
+	c.mu.Unlock()
+
 	reqCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	tick := c.startIdleWatchdog(reqCtx, cancel)
@@ -447,8 +452,18 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 				progress()
 			}
 			// Count reasoning deltas toward live progress (reconciled to the
-			// server's real total by the usage chunk) — but don't show them.
-			if d.ReasoningContent != "" || d.Reasoning != "" {
+			// server's real total by the usage chunk), and buffer the text itself
+			// so a UI tick can show it live (see Reasoning) — never sent to the
+			// model or included in the final Message, just for display.
+			if rc := d.ReasoningContent; rc != "" {
+				c.mu.Lock()
+				c.reasoning.WriteString(rc)
+				c.mu.Unlock()
+				progress()
+			} else if rc := d.Reasoning; rc != "" {
+				c.mu.Lock()
+				c.reasoning.WriteString(rc)
+				c.mu.Unlock()
 				progress()
 			}
 			for _, tc := range d.ToolCalls {
@@ -608,6 +623,18 @@ func (c *OpenAIClient) Usage() (prompt, completion int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.promptTk, c.complTk
+}
+
+// Reasoning returns the reasoning/thinking text streamed so far for the most
+// recent call — live, so a caller can poll it on a UI tick to show what a
+// reasoning model is currently doing while it's still generating. It's reset
+// at the start of every send attempt, so a retry doesn't mix a dropped
+// attempt's partial text into the next one's. Empty when the model/provider
+// doesn't stream reasoning content at all.
+func (c *OpenAIClient) Reasoning() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.reasoning.String()
 }
 
 // SeedUsage carries the running token totals from a previous client, so

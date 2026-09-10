@@ -601,6 +601,60 @@ func TestRenderDiff(t *testing.T) {
 	}
 }
 
+// ctrl+t toggles a live view of the model's reasoning/thinking text while a
+// task runs; it must auto-hide once the task ends rather than leaving a stale
+// trace behind, and reflect whatever the client is currently streaming.
+func TestThinkingPanelTogglesAndAutoHides(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"pondering the go.mod problem\"}}]}\n\n")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	m := &tuiModel{state: stRunning, width: 80, accent: lipgloss.Color("13"), input: textarea.New(),
+		app: &app{cfg: config.Default()}}
+	m.app.client = llm.NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+
+	if v := m.thinkingView(); v != nil {
+		t.Errorf("thinkingView before toggling on = %v, want nil", v)
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlT})
+	if !m.showThinking {
+		t.Fatal("ctrl+t should turn the panel on")
+	}
+	if v := m.thinkingView(); v == nil {
+		t.Error("thinkingView after toggling on (running, no stream yet) should show a placeholder, got nil")
+	}
+
+	if _, err := m.app.client.Chat(context.Background(), []llm.Message{llm.User("hi")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	out := strings.Join(m.thinkingView(), "\n")
+	if !strings.Contains(out, "pondering the go.mod problem") {
+		t.Errorf("thinkingView missing the streamed reasoning text: %q", out)
+	}
+
+	// Once the task ends, the panel must disappear on its own even though the
+	// toggle itself is still on (so it silently reappears for the next task).
+	m.state = stIdle
+	if v := m.thinkingView(); v != nil {
+		t.Errorf("thinkingView after the task ended = %v, want nil (auto-hide)", v)
+	}
+	if !m.showThinking {
+		t.Error("the ctrl+t toggle itself should persist across tasks")
+	}
+
+	m.state = stRunning
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlT})
+	if m.showThinking {
+		t.Error("a second ctrl+t should turn the panel back off")
+	}
+}
+
 // gofmt indents Go source with tabs. A real terminal expands a tab to its next
 // tab stop (up to 8 columns), but lipgloss.Width counts it as a single column
 // — so a raw tab left in a diff row that's padded to an exact terminal width

@@ -124,6 +124,15 @@ func (r *Registry) Mutates(name, action string) bool {
 	return false
 }
 
+// Actions returns a tool's action names, or nil if no such tool — used to
+// scope a past-run hint to the action it was actually learned for.
+func (r *Registry) Actions(name string) []string {
+	if t, ok := r.tools[name]; ok {
+		return t.Actions()
+	}
+	return nil
+}
+
 func contains(ss []string, s string) bool {
 	for _, x := range ss {
 		if x == s {

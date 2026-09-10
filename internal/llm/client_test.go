@@ -298,6 +298,79 @@ func TestParseStreamTicksOnlyOnProgress(t *testing.T) {
 	}
 }
 
+// Reasoning() lets the TUI show a reasoning model's live "thinking" text —
+// buffered as it streams in, never sent back to the model or included in the
+// returned Message. Both the OpenAI-style "reasoning_content" key and
+// OpenRouter's "reasoning" key must accumulate.
+func TestParseStreamAccumulatesReasoningContent(t *testing.T) {
+	cl := NewOpenAIClient(config.LLM{Model: "x"})
+	sse := "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"let me \"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"the answer\"}}]}\n\n" +
+		"data: [DONE]\n\n"
+	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cl.Reasoning(); got != "let me think" {
+		t.Errorf("Reasoning() = %q, want %q", got, "let me think")
+	}
+	if msg.Content != "the answer" {
+		t.Errorf("reasoning text leaked into the final Message.Content: %q", msg.Content)
+	}
+	if strings.Contains(msg.Content, "think") {
+		t.Errorf("Message.Content must not include reasoning text: %q", msg.Content)
+	}
+
+	// OpenRouter's alternate key.
+	cl2 := NewOpenAIClient(config.LLM{Model: "x"})
+	sse2 := "data: {\"choices\":[{\"delta\":{\"reasoning\":\"pondering\"}}]}\n\ndata: [DONE]\n\n"
+	if _, err := cl2.parseStream(strings.NewReader(sse2), func() {}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if got := cl2.Reasoning(); got != "pondering" {
+		t.Errorf("Reasoning() (OpenRouter key) = %q, want %q", got, "pondering")
+	}
+}
+
+// A retry (or a fresh Chat call) must not mix a dropped attempt's reasoning
+// text into the next one's — the live view would show a confusing blend of
+// two unrelated trains of thought otherwise.
+func TestReasoningResetsOnEachSend(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		if n == 1 {
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"first call thinking\"}}]}\n\n")
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"first answer\"}}]}\n\n")
+			io.WriteString(w, "data: [DONE]\n\n")
+			fl.Flush()
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"second call thinking\"}}]}\n\n")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"second answer\"}}]}\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+	if _, err := cl.Chat(context.Background(), []Message{User("hi")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := cl.Reasoning(); got != "first call thinking" {
+		t.Errorf("after call 1, Reasoning() = %q, want %q", got, "first call thinking")
+	}
+	if _, err := cl.Chat(context.Background(), []Message{User("hi again")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := cl.Reasoning(); got != "second call thinking" {
+		t.Errorf("after call 2, Reasoning() = %q, want %q (must not carry over call 1's text)", got, "second call thinking")
+	}
+}
+
 // stripChannelTokens must remove leaked Harmony-style control tokens — both
 // well-formed and the leading-pipe-dropped form a quantized local model was
 // observed to emit — without touching ordinary prose.

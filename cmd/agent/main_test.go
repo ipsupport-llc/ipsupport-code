@@ -2631,6 +2631,31 @@ func TestShouldAutoCompactRawMemory(t *testing.T) {
 	}
 }
 
+// wire() must raise the Agent's trim cap for memory=raw — otherwise the FIFO
+// cut (which breaks a local server's KV-cache prefix reuse just like a
+// summary compact does) fires on every turn past the default cap instead of
+// being the rare backstop raw mode is supposed to give you.
+func TestWireRaisesMaxHistoryForRawMemory(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.ag.MaxHistory(); got != 16 {
+		t.Errorf("default memory: MaxHistory() = %d, want the built-in default 16", got)
+	}
+
+	a.cfg.Memory = "raw"
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.ag.MaxHistory(); got != rawMemoryMaxHistory {
+		t.Errorf("memory=raw: MaxHistory() = %d, want %d", got, rawMemoryMaxHistory)
+	}
+}
+
 // The pipe-through-script smoke test can't reliably confirm quit semantics, so
 // verify the exit path directly: /exit must yield tea.Quit.
 func TestExitCommandQuits(t *testing.T) {

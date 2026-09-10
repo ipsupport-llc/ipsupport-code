@@ -104,19 +104,18 @@ func main() {
 	}
 	maybeInit(reader, doInit)
 
-	app, cleanup, err := build(workspace, reader)
+	// -session selects a named thread for this run (its own saved file); passed
+	// into build() so it's applied to cfg.Name BEFORE wire() runs — wire() bakes
+	// the session name into the archiver/history tool paths once, at
+	// construction time, so applying it after wire() (as a prior version of
+	// this code did) left those two pointed at the previous name's archive for
+	// the whole run even though the session file itself picked up the change.
+	app, cleanup, err := build(workspace, sessionName, reader)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 	defer cleanup()
-
-	// -session selects a named thread for this run (its own saved file); the
-	// agent's identity in the prompt follows the name.
-	if sessionName != "" {
-		app.cfg.Name = sessionName
-		app.ag.SetSystem(app.systemPrompt())
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -290,10 +289,13 @@ type app struct {
 	lastPrompt, lastCompl   int // client usage snapshot for per-task ledger deltas
 }
 
-func build(workspace string, reader *bufio.Reader) (*app, func(), error) {
+func build(workspace, sessionName string, reader *bufio.Reader) (*app, func(), error) {
 	cfg, err := config.Load(workspace)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load config: %w", err)
+	}
+	if sessionName != "" { // must land before wire() — see the call site in main()
+		cfg.Name = sessionName
 	}
 	kb, err := knowledge.Open(cfg.KBPath)
 	if err != nil {

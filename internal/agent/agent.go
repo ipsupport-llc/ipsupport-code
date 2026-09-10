@@ -754,6 +754,14 @@ func (a *Agent) runToolCalls(ctx context.Context, calls []llm.ToolCall) ([]llm.M
 	concurrent := len(calls) > 1 && (!a.anyMutating(calls) || a.allAgentCalls(calls))
 	if !concurrent {
 		for i, c := range calls {
+			// A cancellation mid-batch (esc during a multi-call turn) must stop
+			// the REST of the batch too — execOne only sees ctx on its own
+			// call, so without this check a cancelled run still dispatched
+			// every remaining mutation in the batch before returning.
+			if ctx.Err() != nil {
+				out[i], errs[i] = llm.ToolResult(c.ID, c.Name, "cancelled — not run"), true
+				continue
+			}
 			out[i], errs[i] = a.execOne(ctx, c)
 		}
 	} else {

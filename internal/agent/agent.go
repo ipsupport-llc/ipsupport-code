@@ -275,17 +275,23 @@ func (a *Agent) remember(goal, final string, msgs []llm.Message) {
 // the command was "run", never that it failed or why — so a weak model has no
 // signal to avoid blindly repeating it and has to rediscover the same failure
 // from scratch. Empty when nothing mutating happened.
+//
+// A call's result is found by POSITION, not by ToolCall.ID: runToolCalls
+// always appends a turn's results immediately after its assistant message, in
+// the same order as its ToolCalls, so the message right after an assistant
+// message's Nth tool call is always that call's own result — regardless of
+// what (if anything) the model/gateway put in the ID field. A weak local
+// model's OpenAI-compat endpoint often leaves tool_call ids empty or reuses
+// the same one across calls, which silently broke ID-based lookups on some
+// turns but not others.
 func actionsDigest(msgs []llm.Message) string {
-	results := map[string]string{} // tool-call ID → its result content
-	for _, m := range msgs {
-		if m.Role == "tool" && m.ToolCallID != "" {
-			results[m.ToolCallID] = m.Content
-		}
-	}
 	var files, cmds []string
 	seenFile, seenCmd := map[string]bool{}, map[string]bool{}
-	for _, m := range msgs {
-		for _, tc := range m.ToolCalls {
+	for i, m := range msgs {
+		if len(m.ToolCalls) == 0 {
+			continue
+		}
+		for j, tc := range m.ToolCalls {
 			action, params := parseArgs(tc.Arguments)
 			switch tc.Name {
 			case "file":
@@ -299,9 +305,11 @@ func actionsDigest(msgs []llm.Message) string {
 			case "run":
 				if c, _ := params["command"].(string); c != "" && !seenCmd[c] {
 					seenCmd[c] = true
-					entry := clip(c, 60)
-					if reason := runFailureReason(results[tc.ID]); reason != "" {
-						entry += " — FAILED: " + reason
+					entry := clip(c, 100) // long enough that a compound "mkdir && cd && go mod init X" isn't cut before the part that actually identifies it
+					if k := i + 1 + j; k < len(msgs) && msgs[k].Role == "tool" {
+						if reason := runFailureReason(msgs[k].Content); reason != "" {
+							entry += " — FAILED: " + reason
+						}
 					}
 					cmds = append(cmds, entry)
 				}

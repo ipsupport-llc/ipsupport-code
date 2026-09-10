@@ -508,6 +508,34 @@ func UnsetFileValue(path string, perm os.FileMode, dotted string) error {
 	return writeObject(path, perm, root)
 }
 
+// LookupPathInFile returns the value at a dotted path in the raw JSON object
+// at path — no defaults, no merge with the other config layer. Used to check
+// whether ONE specific file defines a key, independent of what's effective
+// (e.g. so `config set` can warn when the OTHER layer — global vs workspace —
+// also defines it and would win the merge, making the write have no visible
+// effect). A missing/unreadable file just means "no keys", not an error.
+func LookupPathInFile(path, dotted string) (any, bool) {
+	segs, err := splitPath(dotted)
+	if err != nil {
+		return nil, false
+	}
+	root, err := readObject(path)
+	if err != nil {
+		return nil, false
+	}
+	var cur any = root
+	for _, s := range segs {
+		obj, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if cur, ok = obj[s]; !ok {
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
 // LookupPath returns the effective value at a dotted path in cfg (its marshaled
 // view), and whether that path exists.
 func LookupPath(cfg Config, dotted string) (any, bool) {

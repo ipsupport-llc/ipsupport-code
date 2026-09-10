@@ -1370,21 +1370,30 @@ func TestCtxMeterFor(t *testing.T) {
 	}
 }
 
+// tailWriter builds a BoundedTailWriter pre-loaded with s, for tests that call
+// externalResult directly (it takes writers, not strings, since they're
+// bounded as output streams in).
+func tailWriter(max int, s string) *textutil.BoundedTailWriter {
+	w := textutil.NewBoundedTailWriter(max)
+	w.Write([]byte(s))
+	return w
+}
+
 // externalResult keeps the parent's context lean: stdout tail always, stderr only
 // on failure, diff summary with the /diff pointer.
 func TestExternalResult(t *testing.T) {
-	ok := externalResult("codex", "did the thing", "warn noise", "1 file changed", nil)
+	ok := externalResult("codex", tailWriter(maxExternalStdout, "did the thing"), tailWriter(maxExternalStderr, "warn noise"), "1 file changed", nil)
 	if !strings.Contains(ok, "did the thing") || strings.Contains(ok, "warn noise") {
 		t.Errorf("success must include stdout, not stderr:\n%s", ok)
 	}
 	if !strings.Contains(ok, "1 file changed") || !strings.Contains(ok, "/diff") {
 		t.Errorf("diff summary + /diff pointer missing:\n%s", ok)
 	}
-	bad := externalResult("codex", "partial", "boom", "", fmt.Errorf("exit 1"))
+	bad := externalResult("codex", tailWriter(maxExternalStdout, "partial"), tailWriter(maxExternalStderr, "boom"), "", fmt.Errorf("exit 1"))
 	if !strings.Contains(bad, "boom") {
 		t.Errorf("failure must include the stderr tail:\n%s", bad)
 	}
-	long := externalResult("codex", strings.Repeat("x", maxExternalStdout+500), "", "", nil)
+	long := externalResult("codex", tailWriter(maxExternalStdout, strings.Repeat("x", maxExternalStdout+500)), tailWriter(maxExternalStderr, ""), "", nil)
 	if !strings.Contains(long, "…") {
 		t.Error("oversized stdout should be tail-clipped with a marker")
 	}

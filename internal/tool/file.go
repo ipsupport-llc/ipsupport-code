@@ -1,11 +1,13 @@
 package tool
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -93,38 +95,75 @@ func (f *fileTool) read(_ context.Context, a Args) Result {
 	if err != nil {
 		return Err(err.Error())
 	}
+	// Optional line window: stream a slice of a big file instead of loading the
+	// whole thing into memory, to keep the context lean (offset is 1-based;
+	// limit 0 = to the end).
+	if offset, limit := a.Int("offset", 0), a.Int("limit", 0); offset > 0 || limit > 0 {
+		return f.readWindow(abs, path, offset, limit)
+	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		return Err("cannot read " + path + ": " + err.Error())
 	}
-	content := string(data)
-	// Optional line window: read a slice of a big file instead of the whole thing,
-	// to keep the context lean (offset is 1-based; limit 0 = to the end).
-	if offset, limit := a.Int("offset", 0), a.Int("limit", 0); offset > 0 || limit > 0 {
-		lines := strings.Split(content, "\n")
-		start := offset - 1
-		if start < 0 {
-			start = 0
-		}
-		if start > len(lines) {
-			start = len(lines)
-		}
-		end := len(lines)
-		if limit > 0 && start+limit < end {
-			end = start + limit
-		}
-		hdr := fmt.Sprintf("(lines %d–%d of %d)\n", start+1, end, len(lines))
-		out, truncated := textutil.Clip(strings.Join(lines[start:end], "\n"), maxReadBytes)
-		if truncated {
-			out += "\n…[truncated]"
-		}
-		return Ok(hdr + out)
-	}
-	out, truncated := textutil.Clip(content, maxReadBytes)
+	out, truncated := textutil.Clip(string(data), maxReadBytes)
 	if truncated {
 		out += fmt.Sprintf("\n…[truncated; %d bytes total]", len(data))
 	}
 	return Ok(out)
+}
+
+// readWindow returns lines [offset, offset+limit) of the file at abs, streamed
+// line by line so a huge file never has to sit fully in memory just to serve a
+// small window near the end of it — only the requested lines (plus a running
+// line count) are held. Splitting semantics match strings.Split(content, "\n")
+// exactly, including its trailing empty element for content ending in "\n".
+func (f *fileTool) readWindow(abs, path string, offset, limit int) Result {
+	file, err := os.Open(abs)
+	if err != nil {
+		return Err("cannot read " + path + ": " + err.Error())
+	}
+	defer file.Close()
+
+	start := offset - 1
+	if start < 0 {
+		start = 0
+	}
+	end := -1 // unknown until total is known; -1 means "to the end"
+	if limit > 0 {
+		end = start + limit
+	}
+
+	br := bufio.NewReader(file)
+	var window []string
+	total := 0
+	for {
+		line, rerr := br.ReadString('\n')
+		if rerr != nil && rerr != io.EOF {
+			return Err("cannot read " + path + ": " + rerr.Error())
+		}
+		line = strings.TrimSuffix(line, "\n")
+		if total >= start && (end < 0 || total < end) {
+			window = append(window, line)
+		}
+		total++
+		if rerr == io.EOF {
+			break
+		}
+	}
+
+	if start > total {
+		start = total
+	}
+	winEnd := end
+	if winEnd < 0 || winEnd > total {
+		winEnd = total
+	}
+	hdr := fmt.Sprintf("(lines %d–%d of %d)\n", start+1, winEnd, total)
+	out, truncated := textutil.Clip(strings.Join(window, "\n"), maxReadBytes)
+	if truncated {
+		out += "\n…[truncated]"
+	}
+	return Ok(hdr + out)
 }
 
 // search greps the workspace for a regex (literal if it doesn't compile), under

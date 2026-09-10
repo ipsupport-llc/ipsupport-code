@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -245,6 +246,43 @@ func TestFileReadWindow(t *testing.T) {
 	}
 	if !strings.Contains(r.Content, "lines 2") || !strings.Contains(r.Content, "of 5") {
 		t.Errorf("missing range header: %q", r.Content)
+	}
+}
+
+// The windowed read streams the file line by line instead of loading it whole
+// (codex review finding #19); this must still reproduce strings.Split(content,
+// "\n") semantics exactly, including its trailing empty element for content
+// that ends in "\n".
+func TestFileReadWindowMatchesStringsSplitOnTrailingNewline(t *testing.T) {
+	tl := fileToolFor(t, t.TempDir(), "allow", yes())
+	ctx := context.Background()
+	tl.Call(ctx, "write", map[string]any{"path": "f.txt", "content": "a\nb\nc\n"})
+	r := tl.Call(ctx, "read", map[string]any{"path": "f.txt", "offset": 1, "limit": 0})
+	if r.IsError || !strings.Contains(r.Content, "of 4") {
+		t.Errorf("windowed read of trailing-newline file = %q, want total 4 (matches strings.Split)", r.Content)
+	}
+}
+
+// A window near the end of a large file must not require the whole file in
+// memory at once — the reader streams to the offset and stops collecting
+// lines once past the limit, only counting the rest.
+func TestFileReadWindowNearEndOfLargeFile(t *testing.T) {
+	tl := fileToolFor(t, t.TempDir(), "allow", yes())
+	ctx := context.Background()
+	var b strings.Builder
+	for i := 1; i <= 5000; i++ {
+		fmt.Fprintf(&b, "line%d\n", i)
+	}
+	tl.Call(ctx, "write", map[string]any{"path": "big.txt", "content": b.String()})
+	r := tl.Call(ctx, "read", map[string]any{"path": "big.txt", "offset": 4990, "limit": 5})
+	if r.IsError {
+		t.Fatalf("read error: %s", r.Content)
+	}
+	if !strings.Contains(r.Content, "line4990") || !strings.Contains(r.Content, "line4994") || strings.Contains(r.Content, "line4995") {
+		t.Errorf("windowed read near EOF of a large file = %q", r.Content)
+	}
+	if !strings.Contains(r.Content, "of 5001") { // 5000 real lines + trailing empty split element
+		t.Errorf("missing/incorrect total in header: %q", r.Content)
 	}
 }
 

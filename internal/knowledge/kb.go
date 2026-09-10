@@ -37,7 +37,15 @@ type KB struct {
 	mu       sync.Mutex
 	path     string
 	pitfalls []Pitfall
-	now      func() time.Time // overridable clock for tests
+	// pending is the raw log of Add() calls not yet folded into the on-disk
+	// file — Save replays them (via mergeOne, same as Add itself) onto a
+	// freshly re-read copy of the file instead of blindly overwriting it, so a
+	// separate ipsupport-code process sharing the same global KB can't have its
+	// lessons silently lost. overwrite (set by Purge/Clear) skips that merge:
+	// those are a deliberate replace of the whole store, not a delta.
+	pending   []Pitfall
+	overwrite bool
+	now       func() time.Time // overridable clock for tests
 }
 
 // Open loads the store at path. A missing file is an empty store, not an error.
@@ -82,16 +90,25 @@ func (k *KB) Add(p Pitfall) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	today := k.today()
+	isNew := mergeOne(&k.pitfalls, p, today)
+	k.pending = append(k.pending, p) // replayed onto fresh on-disk state at Save
+	return isNew
+}
+
+// mergeOne merges p into a pitfalls list by dedupeKey — a duplicate bumps Hits
+// and back-fills any empty ProvenFix/Context, an original starts at Hits>=1.
+// Returns true only when p was a genuinely new lesson, not a duplicate.
+func mergeOne(list *[]Pitfall, p Pitfall, today string) bool {
 	key := dedupeKey(p)
-	for i := range k.pitfalls {
-		if dedupeKey(k.pitfalls[i]) == key {
-			k.pitfalls[i].Hits++
-			k.pitfalls[i].LastSeen = today // recurred → keep it fresh
-			if k.pitfalls[i].ProvenFix == "" {
-				k.pitfalls[i].ProvenFix = p.ProvenFix
+	for i := range *list {
+		if dedupeKey((*list)[i]) == key {
+			(*list)[i].Hits++
+			(*list)[i].LastSeen = today // recurred → keep it fresh
+			if (*list)[i].ProvenFix == "" {
+				(*list)[i].ProvenFix = p.ProvenFix
 			}
-			if k.pitfalls[i].Context == "" {
-				k.pitfalls[i].Context = p.Context
+			if (*list)[i].Context == "" {
+				(*list)[i].Context = p.Context
 			}
 			return false
 		}
@@ -100,7 +117,7 @@ func (k *KB) Add(p Pitfall) bool {
 		p.Hits = 1
 	}
 	p.Added, p.LastSeen = today, today
-	k.pitfalls = append(k.pitfalls, p)
+	*list = append(*list, p)
 	return true
 }
 
@@ -125,6 +142,8 @@ func (k *KB) Purge(maxAgeDays int) int {
 		kept = append(kept, p)
 	}
 	k.pitfalls = kept
+	k.pending = nil
+	k.overwrite = true
 	return dropped
 }
 
@@ -134,6 +153,8 @@ func (k *KB) Clear() int {
 	defer k.mu.Unlock()
 	n := len(k.pitfalls)
 	k.pitfalls = nil
+	k.pending = nil
+	k.overwrite = true
 	return n
 }
 
@@ -192,12 +213,49 @@ func (k *KB) Query(domain, errText string, limit int) []Pitfall {
 	return res
 }
 
-// Save writes the store to disk as pretty JSON, creating the parent directory. The
-// write is atomic (temp + rename) so a crash mid-write can't truncate the lessons
-// file — this is the agent's persistent memory.
+// readPitfalls loads the store at path without mutating a KB — a missing file
+// is an empty store, not an error.
+func readPitfalls(path string) ([]Pitfall, error) {
+	data, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		var out []Pitfall
+		if err := json.Unmarshal(data, &out); err != nil {
+			return nil, err
+		}
+		return out, nil
+	case errors.Is(err, fs.ErrNotExist):
+		return nil, nil
+	default:
+		return nil, err
+	}
+}
+
+// Save writes the store to disk as pretty JSON, creating the parent directory.
+// Before writing, it re-reads the file and replays this KB's own pending Add()
+// lessons onto that fresh copy instead of blindly overwriting it with
+// pitfalls — otherwise two separate ipsupport-code processes sharing the same
+// global KB could have one's learned lesson silently lost to the other's last
+// write (the mutex only protects against races WITHIN one process). Purge/
+// Clear set overwrite, skipping the merge: those are a deliberate replace of
+// the whole store. The write itself is atomic (temp + rename) so a crash
+// mid-write can't truncate the lessons file either.
 func (k *KB) Save() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if !k.overwrite && len(k.pending) > 0 {
+		if onDisk, err := readPitfalls(k.path); err == nil {
+			today := k.today()
+			for _, p := range k.pending {
+				mergeOne(&onDisk, p, today)
+			}
+			k.pitfalls = onDisk
+		}
+		// on a read error, fall back to writing our own in-memory state — no
+		// worse than the previous unconditional-overwrite behavior.
+	}
+	k.pending = nil
+	k.overwrite = false
 	data, err := json.MarshalIndent(k.pitfalls, "", "  ")
 	if err != nil {
 		return &KnowledgeError{Op: "marshal", Path: k.path, Err: err}

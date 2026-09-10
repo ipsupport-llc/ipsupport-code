@@ -2414,14 +2414,10 @@ func TestApprovalSerializedNoPrefetch(t *testing.T) {
 	if m.pending == nil {
 		t.Fatal("approval not recorded")
 	}
-	if m.state == stApprove {
-		t.Error("approval must not steal focus — stays running until ↑")
+	if m.state != stApprove {
+		t.Error("an approval arriving over the plain running view should go modal immediately")
 	}
 
-	// ↑ switches to answering (the input text is left untouched).
-	if _, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyUp}); m.state != stApprove {
-		t.Fatalf("↑ did not enter answer mode: state=%v", m.state)
-	}
 	_, cmd = m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	if !<-req.reply {
 		t.Error("approval not granted on 'y'")
@@ -2434,22 +2430,41 @@ func TestApprovalSerializedNoPrefetch(t *testing.T) {
 	}
 }
 
-// The pending approval must not capture keystrokes — typing keeps editing the
-// input until the user deliberately presses ↑ to answer.
-func TestApprovalKeepsInputEditable(t *testing.T) {
+// A pending approval goes modal by default: it doesn't capture y/n/a/enter/esc,
+// but every OTHER key is ignored outright rather than leaking into the chat
+// input half-typed. esc is the deliberate escape hatch back to typing — the
+// approval stays pending either way.
+func TestApprovalGoesModalAndIgnoresOtherKeys(t *testing.T) {
 	m := &tuiModel{bridge: newBridge(), input: textarea.New(), state: stRunning}
 	m.input.Focus()
 	req := approvalReq{kind: "write", detail: "a.txt", reply: make(chan bool, 1)}
 	m.Update(approvalMsg(req))
+	if m.state != stApprove {
+		t.Fatalf("state = %v, want stApprove immediately", m.state)
+	}
 
-	// 'h' 'i' should land in the input, not answer the approval.
+	// 'h' 'i' must be ignored — not answer the approval, not land in the input.
 	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
-	if m.input.Value() != "hi" {
-		t.Errorf("input = %q, want 'hi' (approval shouldn't eat keystrokes)", m.input.Value())
+	if m.input.Value() != "" {
+		t.Errorf("input = %q, want empty — a pending approval shouldn't leak other keys into the chat", m.input.Value())
 	}
 	if m.pending == nil {
 		t.Error("approval should still be pending, unanswered")
+	}
+
+	// esc drops back to typing WITHOUT resolving the approval.
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.state != stRunning {
+		t.Errorf("state after esc = %v, want stRunning", m.state)
+	}
+	if m.pending == nil {
+		t.Error("esc must not resolve the pending approval, only stop showing the modal")
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'i'}})
+	if m.input.Value() != "hi" {
+		t.Errorf("after esc, input = %q, want 'hi' — typing past the approval is the whole point of esc", m.input.Value())
 	}
 }
 

@@ -306,10 +306,14 @@ mode live).
 
 ## Permissions
 
-Mutating actions ask for approval by default. The prompt **doesn't steal your
-input** — keep typing, then answer with **`y`** (approve) / **`n`** (deny), or
-**↑** for the explicit Yes/No. A non-overridable deny floor (`rm -rf`, `sudo`,
-secrets, `.git`, `.env`, …) is always enforced.
+Mutating actions ask for approval by default. The prompt goes **modal**:
+**`y`** approves, **`n`** denies, **`a`** allows the whole session (see below),
+**↑/↓** toggle the explicit Yes/No, and every other key is ignored outright —
+nothing leaks half-typed into the chat while it's waiting. **esc** drops back
+to typing (to steer or queue something else first); the approval stays
+pending either way, and answering it always lands you back where you were. A
+non-overridable deny floor (`rm -rf`, `sudo`, secrets, `.git`, `.env`, …) is
+always enforced.
 
 **Grant it for the session.** Press **`a`** on any prompt to stop asking about
 that whole *kind* of action (file changes, shell, git, sub-agent spawns, MCP) for
@@ -494,11 +498,12 @@ the input and drained in order when the task finishes (deferred commands are no
 longer dropped). **↑** on an empty input pulls the last queued message back to
 edit or drop, and **esc** cancels.
 
-**Approvals.** When the agent asks to approve a file write or shell command, just
-press **y** (approve), **n** (deny) or **a** — allow every action of that kind
-(file/shell/git/spawn/external) for the rest of the session; `/permissions`
-shows what you allowed and `/permissions reset` revokes it. You can keep typing
-your next message meanwhile, and **↑** still opens the explicit Yes/No prompt.
+**Approvals.** When the agent asks to approve a file write or shell command, it
+takes over the keys: press **y** (approve), **n** (deny) or **a** — allow every
+action of that kind (file/shell/git/spawn/external) for the rest of the
+session; `/permissions` shows what you allowed and `/permissions reset` revokes
+it. **↑/↓** toggle the explicit Yes/No prompt; **esc** backs out to keep typing
+(queue a message first) without answering — the approval just keeps waiting.
 
 **Shell.** `/shell` (or `!`) drops you into an
 interactive shell in the workspace — do things by hand, exit to return. `!cmd`

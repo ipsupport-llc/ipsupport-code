@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -252,6 +253,43 @@ func TestActionsDigestIncludesFailureReason(t *testing.T) {
 	}
 	if strings.Contains(got, "go build ./... — FAILED") {
 		t.Errorf("a SUCCESSFUL command must not be tagged as failed: %q", got)
+	}
+}
+
+// Caught live: the FAILED tag showed up on some retries of the exact same
+// failure but not others. Root cause — a weak local model's OpenAI-compat
+// endpoint often leaves ToolCall.ID empty, or reuses the same one across
+// calls in a batch; the original ID-based result lookup silently found
+// nothing (or the wrong result) whenever that happened. Correlation must work
+// by POSITION — the message right after an assistant tool call is always its
+// own result — regardless of what's in the ID field.
+func TestActionsDigestFindsFailureReasonWithoutReliableToolCallIDs(t *testing.T) {
+	msgs := []llm.Message{
+		// Every call below shares the same (empty) ID, exactly like a weak
+		// local model that never fills in tool_call ids.
+		toolCallReply("", "run", `{"action":"shell","params":{"command":"go mod init rl_hero_go"}}`),
+		llm.ToolResult("", "run", "exit 1\ngo: /Users/roman220/rl_hero_go/go.mod already exists"),
+		toolCallReply("", "run", `{"action":"shell","params":{"command":"go mod init rl_hero_go"}}`), // repeated verbatim, same empty ID
+		llm.ToolResult("", "run", "exit 1\ngo: /Users/roman220/rl_hero_go/go.mod already exists"),
+	}
+	got := actionsDigest(msgs)
+	if !strings.Contains(got, "FAILED") || !strings.Contains(got, "go.mod already exists") {
+		t.Errorf("digest missing the failure reason when tool-call IDs are all empty: %q", got)
+	}
+}
+
+// Live case: "mkdir -p rl_hero_go && cd rl_hero_go && go mod init rl_hero_go"
+// (62 bytes) was cut to "...go mod init rl_hero_" by the old 60-byte clip —
+// losing the "go" that's the only thing distinguishing this command from any
+// other "go mod init" call.
+func TestActionsDigestDoesNotTruncateTheDistinguishingPartOfACommand(t *testing.T) {
+	cmd := "mkdir -p rl_hero_go && cd rl_hero_go && go mod init rl_hero_go"
+	msgs := []llm.Message{
+		toolCallReply("c1", "run", fmt.Sprintf(`{"action":"shell","params":{"command":%q}}`, cmd)),
+		llm.ToolResult("c1", "run", "exit 1\ngo: /Users/roman220/rl_hero_go/go.mod already exists"),
+	}
+	if got := actionsDigest(msgs); !strings.Contains(got, cmd) {
+		t.Errorf("digest truncated the command before its distinguishing suffix: %q", got)
 	}
 }
 

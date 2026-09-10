@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
@@ -133,15 +132,6 @@ var validDomain = map[string]bool{
 	"calc": true, "agent": true, "mcp": true, "skill": true,
 }
 
-// genericErrorPattern matches an error_pattern that's pure tool-wrapper noise
-// rather than anything about the actual failure — "exit 1" is the run tool's
-// own generic prefix on EVERY failed command (`fmt.Sprintf("exit %d\n%s", ...`),
-// so a lesson keyed on it alone would "match" (and mislead on) any unrelated
-// failure. A weak reflecting model reaches for it because it's the first,
-// most prominent line of the error, despite the prompt asking for something
-// more specific.
-var genericErrorPattern = regexp.MustCompile(`(?i)^exit \d+$`)
-
 func parseLessons(content string) Lessons {
 	for _, candidate := range jsonObjectCandidates(content) {
 		var raw struct {
@@ -166,7 +156,7 @@ func parseLessons(content string) Lessons {
 			if !validDomain[domain] {
 				continue // a domain the KB can never match on is dead weight that still ages toward pruning
 			}
-			if genericErrorPattern.MatchString(pattern) {
+			if knowledge.IsGenericErrorPattern(pattern) {
 				continue // "exit N" alone can't discriminate this failure from any other
 			}
 			out.Pitfalls = append(out.Pitfalls, knowledge.Pitfall{

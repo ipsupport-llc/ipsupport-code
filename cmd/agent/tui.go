@@ -546,6 +546,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(detect, m.input.Focus())
 
 	case compactDoneMsg:
+		m.cancel = nil
 		switch {
 		case msg.err != nil:
 			m.push(cErr.Render("compact failed: " + msg.err.Error()))
@@ -1511,7 +1512,16 @@ func (m *tuiModel) startCompact(auto bool) tea.Cmd {
 	if auto {
 		m.push(cDim.Render("  ⓘ context near limit — auto-compacting to free room"))
 	}
-	ctx := m.ctx
+	// A cancelable context + m.cancel set, exactly like startTask: every
+	// "is something running behind this" guard (the /config panel's, esc's
+	// own busyMsg-can't-cancel check) keys off m.cancel != nil, and without
+	// this a compact left them thinking nothing was running — /config, then
+	// esc, dropped straight to idle while Compact's goroutine kept mutating
+	// a.history in the background, racing whatever a NEW task did meanwhile.
+	// This also makes esc able to interrupt a runaway compact, which it
+	// couldn't before (Compact(ctx) already forwards ctx into its LLM call).
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.cancel = cancel
 	return func() tea.Msg {
 		n, err := m.app.ag.Compact(ctx)
 		return compactDoneMsg{n: n, err: err}

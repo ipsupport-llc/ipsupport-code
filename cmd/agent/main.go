@@ -367,24 +367,60 @@ func (a *app) spawnAgent(ctx context.Context, profile, task, dir string) (string
 	return a.spawnAgentTapped(ctx, profile, task, dir, nil)
 }
 
-// spawnAgentTapped runs a sub-agent, optionally forwarding an external agent's
-// output lines to onLine (used by background jobs to show live progress).
+// spawnAgentTapped resolves profile/dir against the CURRENT app config and
+// runs it. Must be called synchronously — from the goroutine that owns a's
+// config — never from a background job's own goroutine, which races the
+// foreground's /cd, /ai add, /permissions, and wire(). spawnAgentBackground
+// resolves via resolveSpawn on the safe side of that boundary instead; see
+// spawnPlan.
 func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, onLine func(string)) (string, error) {
 	if strings.TrimSpace(task) == "" {
 		return "", fmt.Errorf("task is required")
 	}
+	plan, external, extP, err := a.resolveSpawn(profile, dir)
+	if err != nil {
+		return "", err
+	}
+	if external { // a local CLI agent, not one of our LLM sub-agents
+		return a.spawnExternalAgent(ctx, plan.profile, extP, task, dir, onLine)
+	}
+	return a.runSpawnPlan(ctx, plan, task, onLine)
+}
+
+// spawnPlan is everything runSpawnPlan needs, resolved up front against the
+// live app config — so a background job's goroutine (launched well after
+// resolveSpawn returns) only ever touches these captured values afterward,
+// never a.cfg/a.subReg/a.workdir/a.planMode live. a.cfg.Agents in particular
+// is a map: a concurrent read (here) racing a concurrent write (/ai add from
+// the foreground) is a Go runtime panic, not just a stale value.
+type spawnPlan struct {
+	profile      string
+	provider     string
+	llmCfg       config.LLM
+	rolePrompt   string
+	subReg       *tool.Registry
+	subWorkspace string
+	planMode     bool
+	spawnDefault string
+}
+
+// resolveSpawn resolves profile/dir into a spawnPlan (or, for an external CLI
+// agent profile, its own config.AgentProfile — spawnExternalAgent takes that
+// directly rather than re-reading a.cfg.Agents itself). Must be called
+// synchronously; see spawnPlan.
+func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentProfile, error) {
 	profile = strings.TrimSpace(profile)
 	if profile == "" {
-		return "", fmt.Errorf("profile is required — configured: %s", a.profilesOrHint())
+		return spawnPlan{}, false, config.AgentProfile{}, fmt.Errorf("profile is required — configured: %s", a.profilesOrHint())
 	}
 	resolved, ok := a.resolveProfileName(profile)
 	if !ok {
-		return "", fmt.Errorf("unknown profile %q — configured: %s", profile, a.profilesOrHint())
+		return spawnPlan{}, false, config.AgentProfile{}, fmt.Errorf("unknown profile %q — configured: %s", profile, a.profilesOrHint())
 	}
 	profile = resolved
 	p := a.cfg.Agents[profile]
-	if p.Kind == "external" { // a local CLI agent, not one of our LLM sub-agents
-		return a.spawnExternalAgent(ctx, profile, p, task, dir, onLine)
+	if p.Kind == "external" {
+		return spawnPlan{profile: profile}, true, p, nil
 	}
 	provider := p.Provider
 	if provider == "" {
@@ -398,10 +434,10 @@ func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, o
 	} else {
 		rp, rok := config.ResolveProvider(a.cfg, provider)
 		if !rok {
-			return "", fmt.Errorf("profile %q: unknown provider %q", profile, provider)
+			return spawnPlan{}, false, p, fmt.Errorf("profile %q: unknown provider %q", profile, provider)
 		}
 		if rp.APIKey == "" {
-			return "", fmt.Errorf("profile %q: %s has no API key — add one with /ai key %s <token>", profile, provider, provider)
+			return spawnPlan{}, false, p, fmt.Errorf("profile %q: %s has no API key — add one with /ai key %s <token>", profile, provider, provider)
 		}
 		llmCfg = rp
 	}
@@ -416,28 +452,39 @@ func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, o
 	if d := strings.TrimSpace(dir); d != "" {
 		root, err := a.resolveSpawnDir(d)
 		if err != nil {
-			return "", err
+			return spawnPlan{}, false, p, err
 		}
 		if fi, statErr := os.Stat(root); statErr != nil || !fi.IsDir() {
-			return "", fmt.Errorf("dir %q is not a directory", dir)
+			return spawnPlan{}, false, p, fmt.Errorf("dir %q is not a directory", dir)
 		}
 		subCfg := a.cfg
 		subCfg.Workspace = root
 		subCfg.File.Jail = "." // keep the jail — confine the sub-agent to its own dir
 		subPol, pErr := policy.New(subCfg)
 		if pErr != nil {
-			return "", pErr
+			return spawnPlan{}, false, p, pErr
 		}
 		subReg, subWorkspace = a.buildSubReg(subPol, root), root
 	}
+	return spawnPlan{
+		profile: profile, provider: provider, llmCfg: llmCfg, rolePrompt: p.Prompt,
+		subReg: subReg, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default,
+	}, false, p, nil
+}
 
+// runSpawnPlan runs an already-resolved plan — safe to call from a background
+// job's own goroutine, since it only touches plan (captured up front by
+// resolveSpawn) and state that's already concurrency-safe on its own
+// (a.emit, a.usage, a.addSessionCost all have their own synchronization;
+// a.kb/a.tracer are stable pointers once wire() has run).
+func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onLine func(string)) (string, error) {
 	// Ask before spawning unless the policy is relaxed. "ask" (default) guards
 	// every spawn — even local ones still cost compute, and a runaway main model
 	// could fan out endlessly. Serialize the prompt so parallel fan-out spawns ask
 	// one at a time instead of racing on the approver.
-	if a.cfg.Spawn.Default != "allow" {
+	if plan.spawnDefault != "allow" {
 		a.spawnMu.Lock()
-		approved := a.approveGated("spawn agent", fmt.Sprintf("%s · %s · %s\n  task: %s", profile, llmCfg.Model, subWorkspace, task))
+		approved := a.approveGated("spawn agent", fmt.Sprintf("%s · %s · %s\n  task: %s", plan.profile, plan.llmCfg.Model, plan.subWorkspace, task))
 		a.spawnMu.Unlock()
 		if !approved {
 			return "", fmt.Errorf("spawn denied by user")
@@ -445,20 +492,20 @@ func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, o
 	}
 
 	id := fmt.Sprintf("sub%d", a.spawnSeq.Add(1)) // groups this sub-agent's UI events
-	client := llm.NewOpenAIClient(a.withReasoning(llmCfg, provider, ""))
-	sub := agent.New(client, subReg, a.kb, a.tracer, a.subAgentPrompt(subWorkspace, p.Prompt), llmCfg.MaxSteps)
-	sub.SetPlanMode(a.planMode) // inherit the current mode
+	client := llm.NewOpenAIClient(a.withReasoning(plan.llmCfg, plan.provider, ""))
+	sub := agent.New(client, plan.subReg, a.kb, a.tracer, a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt), plan.llmCfg.MaxSteps)
+	sub.SetPlanMode(plan.planMode)
 	sub.SetLabel(id)
-	a.emit("subagent", map[string]any{"agent": id, "profile": profile, "provider": provider, "model": llmCfg.Model, "dir": subWorkspace, "task": oneLine(task, 80)})
+	a.emit("subagent", map[string]any{"agent": id, "profile": plan.profile, "provider": plan.provider, "model": plan.llmCfg.Model, "dir": plan.subWorkspace, "task": oneLine(task, 80)})
 
 	tr, err := sub.Run(ctx, task)
 	if a.usage != nil { // the sub-agent's spend counts too
 		pt, ct := client.Usage()
-		a.usage.Add(today(), provider, llmCfg.Model, pt, ct)
-		a.addSessionCost(llmCfg.Model, pt, ct) // sub-agent spend counts toward /budget too
+		a.usage.Add(today(), plan.provider, plan.llmCfg.Model, pt, ct)
+		a.addSessionCost(plan.llmCfg.Model, pt, ct) // sub-agent spend counts toward /budget too
 		_ = a.usage.Save()
 	}
-	done := map[string]any{"agent": id, "profile": profile, "ok": err == nil}
+	done := map[string]any{"agent": id, "profile": plan.profile, "ok": err == nil}
 	if err != nil {
 		done["error"] = oneLine(err.Error(), 60)
 	}

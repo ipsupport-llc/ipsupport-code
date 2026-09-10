@@ -54,10 +54,18 @@ func (a *app) spawnAgentBackground(_ context.Context, profile, task, dir string)
 	if strings.TrimSpace(task) == "" {
 		return "", fmt.Errorf("task is required")
 	}
-	resolved, ok := a.resolveProfileName(strings.TrimSpace(profile))
-	if !ok {
-		return "", fmt.Errorf("unknown profile %q — configured: %s", profile, a.profilesOrHint())
+	// Resolve HERE, synchronously, against the live config — not inside the
+	// goroutine below. The goroutine can run long after this call returns,
+	// racing whatever the foreground does meanwhile (/cd, /ai add, wire());
+	// a.cfg.Agents in particular is a map, so a resolve running concurrently
+	// with a config-mutating command is a Go runtime panic, not just a stale
+	// read. plan/external/extP are plain values captured now — the goroutine
+	// never touches a.cfg/a.subReg/a.workdir/a.planMode itself.
+	plan, external, extP, err := a.resolveSpawn(profile, dir)
+	if err != nil {
+		return "", err
 	}
+	resolved := plan.profile // set on both branches of resolveSpawn
 	// Detached lifetime: the job survives its parent task (and esc). Cancelled
 	// only via /jobs kill — or process exit.
 	jctx, cancel := context.WithCancel(context.Background())
@@ -73,16 +81,23 @@ func (a *app) spawnAgentBackground(_ context.Context, profile, task, dir string)
 		defer cancel()
 		// Tap the external agent's output so /jobs shows a live "last line" — a
 		// stuck job stops updating while a working one keeps ticking.
-		out, err := a.spawnAgentTapped(jctx, resolved, task, dir, func(line string) { a.setJobProgress(id, line) })
+		onLine := func(line string) { a.setJobProgress(id, line) }
+		var out string
+		var runErr error
+		if external {
+			out, runErr = a.spawnExternalAgent(jctx, resolved, extP, task, dir, onLine)
+		} else {
+			out, runErr = a.runSpawnPlan(jctx, plan, task, onLine)
+		}
 		a.jobMu.Lock()
 		j.done, j.finished = true, time.Now()
-		if err != nil {
-			j.result = "error: " + err.Error()
+		if runErr != nil {
+			j.result = "error: " + runErr.Error()
 		} else {
 			j.ok, j.result = true, out
 		}
 		a.jobMu.Unlock()
-		a.emit("job_done", map[string]any{"job": id, "profile": resolved, "ok": err == nil})
+		a.emit("job_done", map[string]any{"job": id, "profile": resolved, "ok": runErr == nil})
 	}()
 	return fmt.Sprintf("background job #%d started (%s). Its result will be delivered to you at the start of a later turn — continue with other work; don't wait or poll.", id, resolved), nil
 }

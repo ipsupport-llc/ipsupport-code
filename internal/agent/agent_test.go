@@ -441,6 +441,38 @@ func TestCompactSummarizesSession(t *testing.T) {
 	}
 }
 
+// Caught live: a weak model asked to summarize many retries of the same
+// failing command blurred or dropped the specific failure reason — the
+// compacted history read like a fresh start, and the very next task blindly
+// repeated the exact command that had already failed every time. The
+// deterministic actions-digest facts (see actionsDigest/TestActionsDigest*)
+// must survive Compact verbatim, regardless of what the LLM's own summary
+// says — even a summary that says nothing useful at all.
+func TestCompactPreservesActionDigestsVerbatim(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "run", `{"action":"shell","params":{"command":"go mod init rl_hero_go"}}`),
+		{Role: "assistant", Content: "Stopped — it kept repeating the same tool calls."}, // run 1 final
+		{Role: "assistant", Content: "a summary that mentions nothing about go.mod"},     // Compact's own (lossy) summary
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	a.Run(context.Background(), "по плану идем")
+
+	if _, err := a.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	for _, m := range a.history {
+		got += m.Content
+	}
+	if !strings.Contains(got, "go mod init rl_hero_go") {
+		t.Errorf("compacted history lost the action digest entirely: %q", got)
+	}
+	if !strings.Contains(got, "a summary that mentions nothing about go.mod") {
+		t.Errorf("compacted history should still include the LLM's own summary: %q", got)
+	}
+}
+
 func TestSplitSuggestion(t *testing.T) {
 	clean, sug := splitSuggestion("Wrote hello.sh and ran it.\nNEXT: add a test")
 	if clean != "Wrote hello.sh and ran it." {

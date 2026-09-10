@@ -1180,8 +1180,12 @@ func (a *app) loadPromptHist() {
 }
 
 // addPromptHist appends a submitted line (skipping a consecutive duplicate), caps
-// the ring, and persists it so ↑ recall survives a restart.
+// the ring, and persists it so ↑ recall survives a restart. What's PERSISTED
+// (and what ↑ recall shows back) is redacted (see redactSecrets); the line
+// actually dispatched to run the command is untouched — this only affects
+// what lands on disk.
 func (a *app) addPromptHist(line string) {
+	line = redactSecrets(line)
 	if n := len(a.promptHist); n > 0 && a.promptHist[n-1] == line {
 		return
 	}
@@ -1193,6 +1197,37 @@ func (a *app) addPromptHist(line string) {
 	if err := atomicfile.Write(a.promptHistPath(), data, 0o644); err != nil {
 		slog.Warn("prompt history not saved", "err", err)
 	}
+}
+
+// redactSecrets masks a raw credential out of a line before it's persisted to
+// prompt history: `/ai key <name> <token>` and `/ai add ... key=<token>` are
+// the two shapes that carry one in plain text. The history file (0644, not a
+// designated secret store) isn't covered by the file tool's secret-read
+// exclusions, so an unredacted key there is readable back out via file.read.
+func redactSecrets(line string) string {
+	fields := strings.Fields(line)
+	if len(fields) < 2 || fields[0] != "/ai" {
+		return line
+	}
+	switch fields[1] {
+	case "key":
+		if len(fields) >= 4 { // /ai key <name> <token>
+			fields[len(fields)-1] = "***"
+			return strings.Join(fields, " ")
+		}
+	case "add":
+		redacted := false
+		for i, f := range fields {
+			if strings.HasPrefix(f, "key=") {
+				fields[i] = "key=***"
+				redacted = true
+			}
+		}
+		if redacted {
+			return strings.Join(fields, " ")
+		}
+	}
+	return line
 }
 
 // historyCommand lists recent prompts (newest first), optionally filtered by a

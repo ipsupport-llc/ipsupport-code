@@ -811,6 +811,42 @@ func TestInputHistoryRecallAndPersist(t *testing.T) {
 	}
 }
 
+// /ai key and /ai add key=<token> both carry a raw credential in plain text —
+// they must not be persisted verbatim to .agent/history (0644, readable back
+// via file.read; not a designated secret store).
+func TestRedactSecrets(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"/ai key openrouter sk-abc123", "/ai key openrouter ***"},
+		{"/ai add myproxy http://host/v1 gpt-4o key=sk-abc123", "/ai add myproxy http://host/v1 gpt-4o key=***"},
+		{"/ai add myproxy http://host/v1 key=sk-abc123", "/ai add myproxy http://host/v1 key=***"},
+		{"/ai openrouter", "/ai openrouter"},                       // switching providers — nothing to redact
+		{"/ai key openrouter", "/ai key openrouter"},               // missing token — nothing to redact
+		{"do something with key=abc", "do something with key=abc"}, // not an /ai command at all
+	}
+	for _, c := range cases {
+		if got := redactSecrets(c.in); got != c.want {
+			t.Errorf("redactSecrets(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestAddPromptHistRedactsSecrets(t *testing.T) {
+	ws := t.TempDir()
+	a := &app{cfg: config.Default(), workspace: ws}
+	a.addPromptHist("/ai key openrouter sk-real-secret-token")
+
+	if strings.Contains(a.promptHist[0], "sk-real-secret-token") {
+		t.Errorf("promptHist = %v, want the token redacted", a.promptHist)
+	}
+	data, err := os.ReadFile(a.promptHistPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "sk-real-secret-token") {
+		t.Errorf("persisted history file contains the raw token: %s", data)
+	}
+}
+
 func TestIsCommandLine(t *testing.T) {
 	for _, c := range []struct {
 		in   string

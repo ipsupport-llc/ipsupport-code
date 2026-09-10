@@ -567,6 +567,44 @@ func TestRunConcurrentToolCallsStayOrdered(t *testing.T) {
 	}
 }
 
+// A cancellation mid-batch (esc during a multi-call turn) must stop the REST
+// of a SEQUENTIAL batch too — the loop only checked ctx on each individual
+// execOne call, so a run cancelled after call 1 still dispatched every
+// remaining mutation in that batch before returning.
+func TestSequentialBatchStopsAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ran := 0
+	mutTool := tool.NewDomain(tool.DomainSpec{
+		Name: "file", Summary: "files",
+		Actions: []tool.Action{
+			{Name: "write", Mutates: true, Run: func(context.Context, tool.Args) tool.Result {
+				ran++
+				cancel() // simulate esc landing right as call 1 finishes
+				return tool.Ok("wrote")
+			}},
+		},
+	})
+	reg := tool.NewRegistry(mutTool)
+	twoWrites := llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{
+		{ID: "c1", Name: "file", Arguments: `{"action":"write","params":{}}`},
+		{ID: "c2", Name: "file", Arguments: `{"action":"write","params":{}}`},
+	}}
+	fake := &scriptLLM{replies: []llm.Message{twoWrites, {Role: "assistant", Content: "done"}}}
+	a := New(fake, reg, nil, nil, "", 5)
+
+	tr, _ := a.Run(ctx, "two writes")
+	obs := toolObservation(tr.Messages)
+	if len(obs) != 2 {
+		t.Fatalf("observations = %d, want 2", len(obs))
+	}
+	if !strings.Contains(obs[1].Content, "cancelled") {
+		t.Errorf("second observation = %+v, want it short-circuited as cancelled", obs[1])
+	}
+	if ran != 1 {
+		t.Errorf("the mutating tool actually ran %d time(s), want exactly 1 (the second call must be skipped, not executed)", ran)
+	}
+}
+
 // planFileTool is a minimal file-like tool with one read-only and one mutating
 // action, for exercising the plan-mode gate.
 func planFileTool() tool.Tool {

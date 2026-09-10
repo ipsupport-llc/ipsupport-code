@@ -234,6 +234,27 @@ func TestActionsDigest(t *testing.T) {
 	}
 }
 
+// A digest that only says a command was "run" — never that it failed, or why
+// — gives the NEXT task no signal to avoid blindly repeating it; that's
+// exactly what let a stuck-loop task's failure repeat itself one task later
+// (live case: "go mod init" kept re-running across tasks because nothing ever
+// told the model "go.mod already exists").
+func TestActionsDigestIncludesFailureReason(t *testing.T) {
+	msgs := []llm.Message{
+		toolCallReply("c1", "run", `{"action":"shell","params":{"command":"go mod init rl_hero_go"}}`),
+		llm.ToolResult("c1", "run", "exit 1\ngo: /Users/roman220/rl_hero_go/go.mod already exists"),
+		toolCallReply("c2", "run", `{"action":"shell","params":{"command":"go build ./..."}}`),
+		llm.ToolResult("c2", "run", "exit 0\nbuild ok"),
+	}
+	got := actionsDigest(msgs)
+	if !strings.Contains(got, "go mod init rl_hero_go") || !strings.Contains(got, "FAILED") || !strings.Contains(got, "go.mod already exists") {
+		t.Errorf("digest missing the failure reason for the failed command: %q", got)
+	}
+	if strings.Contains(got, "go build ./... — FAILED") {
+		t.Errorf("a SUCCESSFUL command must not be tagged as failed: %q", got)
+	}
+}
+
 // The whole point of the digest: cross-run memory must know which files were
 // actually created, not just whatever the model chose to say in its one-line
 // final answer.

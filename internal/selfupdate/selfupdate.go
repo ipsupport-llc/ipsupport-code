@@ -95,18 +95,19 @@ func Apply(ctx context.Context, rel Release, hc *http.Client) (string, error) {
 	if runtime.GOOS == "windows" {
 		return "", fmt.Errorf("self-update isn't supported on Windows yet; download the .zip from the Releases page")
 	}
+	if rel.SumsURL == "" {
+		return "", fmt.Errorf("release %s has no checksums.txt asset — refusing to install an unverified binary", rel.Version)
+	}
 	data, err := get(ctx, hc, rel.AssetURL)
 	if err != nil {
 		return "", err
 	}
-	if rel.SumsURL != "" {
-		sums, err := get(ctx, hc, rel.SumsURL)
-		if err != nil {
-			return "", fmt.Errorf("fetch checksums: %w", err) // never install an unverified binary
-		}
-		if err := verifyChecksum(data, string(sums), rel.AssetName); err != nil {
-			return "", err
-		}
+	sums, err := get(ctx, hc, rel.SumsURL)
+	if err != nil {
+		return "", fmt.Errorf("fetch checksums: %w", err) // never install an unverified binary
+	}
+	if err := verifyChecksum(data, string(sums), rel.AssetName); err != nil {
+		return "", err
 	}
 	bin, err := extractBinary(data, "ipsupport-code")
 	if err != nil {

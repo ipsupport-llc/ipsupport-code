@@ -32,6 +32,21 @@ func TestApplyRefusesWhenChecksumsUnavailable(t *testing.T) {
 	}
 }
 
+// An incomplete/broken release with no checksums.txt asset at all (SumsURL
+// left empty by Latest) must refuse to install rather than silently skip
+// verification — the old `if rel.SumsURL != ""` guard let this through.
+func TestApplyRefusesWhenChecksumsAssetMissing(t *testing.T) {
+	mux := http.NewServeMux()
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	mux.HandleFunc("/asset", func(w http.ResponseWriter, _ *http.Request) { io.WriteString(w, "not-an-archive") })
+
+	rel := Release{Version: "v9", AssetName: "a.tar.gz", AssetURL: srv.URL + "/asset"} // no SumsURL
+	if _, err := Apply(context.Background(), rel, srv.Client()); err == nil || !strings.Contains(err.Error(), "checksum") {
+		t.Fatalf("Apply err = %v, want a refusal for a missing checksums.txt (never install unverified)", err)
+	}
+}
+
 func makeTarGz(t *testing.T, name string, data []byte) []byte {
 	t.Helper()
 	var buf bytes.Buffer

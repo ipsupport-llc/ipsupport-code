@@ -98,6 +98,7 @@ type tuiModel struct {
 	inputLines    int        // current input box height in rows (grows with content)
 	busyMsg       string     // status label while running non-task work (update/compact/model); "" = a model task ("thinking")
 	subs          []*liveSub // sub-agents running right now, one live status line each
+	showThinking  bool       // ctrl+t toggled: show the model's live reasoning text while stRunning
 
 	// sub-agent profile manager (stAgents): a list + a provider→model→name builder
 	agPhase     agentPhase
@@ -898,6 +899,10 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if strings.HasPrefix(m.input.Value(), "/") {
 				m.completeCommand() // complete /commands while a task runs, too
 			}
+			return m, nil
+		case "ctrl+t":
+			m.showThinking = !m.showThinking // live reasoning panel, see thinkingView
+			m.syncViewport()
 			return m, nil
 		case "up":
 			// Changed your mind about a queued message? With an empty input, Up
@@ -1702,7 +1707,7 @@ func (m *tuiModel) View() string {
 	case m.pending != nil:
 		bottom = m.modeLine() + cDim.Render("  · ↑ to answer the approval")
 	case m.state == stRunning:
-		bottom += cDim.Render("  · esc cancels")
+		bottom += cDim.Render("  · esc cancels · ctrl+t thinking")
 	case m.state == stAgents:
 		bottom = cDim.Render(m.agentsHint())
 	case m.state == stRewind:
@@ -1726,8 +1731,9 @@ func (m *tuiModel) View() string {
 		parts = append(parts, sub)
 	}
 	parts = append(parts, status)
-	parts = append(parts, m.steerView()...)  // /btw asides, pinned above the input
-	parts = append(parts, m.queuedView()...) // pinned just above the input
+	parts = append(parts, m.thinkingView()...) // ctrl+t: the model's live reasoning text
+	parts = append(parts, m.steerView()...)    // /btw asides, pinned above the input
+	parts = append(parts, m.queuedView()...)   // pinned just above the input
 	parts = append(parts, m.topRule(frame), m.input.View(), frame.Render(strings.Repeat("─", m.width)), bottom)
 	return strings.Join(parts, "\n")
 }
@@ -1836,6 +1842,32 @@ func (m *tuiModel) addSteer(note string) {
 	m.syncViewport()
 }
 
+// thinkingView renders the model's live reasoning/thinking text when toggled
+// on with ctrl+t — a look into what a reasoning model is doing while it's
+// still generating, not a transcript to scroll back through. Only shown while
+// a task is actually running, so it disappears on its own once the task ends
+// rather than leaving a stale trace behind; the ctrl+t toggle itself persists
+// across tasks. Capped to the last few lines: it's a peek, not a pager.
+func (m *tuiModel) thinkingView() []string {
+	if !m.showThinking || m.state != stRunning {
+		return nil
+	}
+	text := strings.TrimSpace(m.app.client.Reasoning())
+	if text == "" {
+		return []string{cDim.Render("  ◌ thinking (ctrl+t to hide) — no reasoning text from this model yet")}
+	}
+	const maxLines = 12
+	lines := strings.Split(text, "\n")
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
+	out := []string{cDim.Render("  ◌ thinking (ctrl+t to hide):")}
+	for _, l := range lines {
+		out = append(out, cDim.Render("  │ "+l))
+	}
+	return out
+}
+
 // steerView renders the pinned /btw block just above the input: the asides that
 // will fold into the running task on its next step. Same pinned treatment as the
 // queued-task view, so it stays put instead of scrolling into history.
@@ -1931,6 +1963,7 @@ var keyHelp = [][2]string{
 	{"!cmd  ·  !", "run one shell command · bare ! drops to a shell"},
 	{"ctrl+u", "clear the input · ctrl+l clear the screen · PgUp/PgDn scroll the log"},
 	{"esc", "cancel the running task, or back out of a panel"},
+	{"ctrl+t", "while a task runs: toggle a live view of the model's reasoning/thinking text"},
 	{"ctrl+c", "quit"},
 }
 

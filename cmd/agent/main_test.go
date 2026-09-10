@@ -601,6 +601,32 @@ func TestRenderDiff(t *testing.T) {
 	}
 }
 
+// gofmt indents Go source with tabs. A real terminal expands a tab to its next
+// tab stop (up to 8 columns), but lipgloss.Width counts it as a single column
+// — so a raw tab left in a diff row that's padded to an exact terminal width
+// understates how wide the row actually renders, silently overflowing past
+// the intended width. On a real terminal that overflow wraps the row's
+// background-filled tail onto a second, visually blank line (reported live:
+// every indented added/removed line in a Go diff showed a spurious blank line
+// after it, non-indented lines didn't).
+func TestDiffRowsExpandTabsBeforeWidthMath(t *testing.T) {
+	add := diffAddRow(1, "\tgrid := make([][]EntityType, height)", "world.go", 80)
+	if strings.Contains(add, "\t") {
+		t.Errorf("diffAddRow leaked a raw tab into the rendered row: %q", add)
+	}
+	if w := lipgloss.Width(add); w != 80 {
+		t.Errorf("diffAddRow width = %d, want exactly 80 (must match what the terminal renders)", w)
+	}
+
+	del := diffDelRow(1, "\tgrid := make([][]EntityType, height)", 80)
+	if strings.Contains(del, "\t") {
+		t.Errorf("diffDelRow leaked a raw tab into the rendered row: %q", del)
+	}
+	if w := lipgloss.Width(del); w != 80 {
+		t.Errorf("diffDelRow width = %d, want exactly 80 (must match what the terminal renders)", w)
+	}
+}
+
 // A restored session must survive opening the TUI. newTUIModel re-wires the
 // stack to install its bridge, which rebuilds the agent; if that rebuild drops
 // the loaded history, every launch starts from a clean slate (the reported bug).

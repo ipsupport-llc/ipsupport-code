@@ -191,6 +191,45 @@ func TestActionsDigestCarriesAcrossRuns(t *testing.T) {
 	}
 }
 
+type fakeArchiver struct{ goals, entries []string }
+
+func (f *fakeArchiver) Archive(goal, entry string) {
+	f.goals = append(f.goals, goal)
+	f.entries = append(f.entries, entry)
+}
+
+// The archiver must see every entry remember() commits — including its
+// digest — so a "history" tool built on it can recall what a later Compact
+// has since folded away, and it must NOT fire for a detached (orphaned) agent.
+func TestArchiverReceivesEveryRememberedTurn(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "file", `{"action":"write","params":{"path":"world.go","content":"package main"}}`),
+		{Role: "assistant", Content: "created world.go"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	ar := &fakeArchiver{}
+	a.SetArchiver(ar)
+
+	if _, err := a.Run(context.Background(), "build the world module"); err != nil {
+		t.Fatal(err)
+	}
+	if len(ar.goals) != 1 || ar.goals[0] != "build the world module" {
+		t.Fatalf("archiver goals = %+v", ar.goals)
+	}
+	if !strings.Contains(ar.entries[0], "world.go") {
+		t.Errorf("archived entry missing the digest: %q", ar.entries[0])
+	}
+
+	a.Detach()
+	if _, err := a.Run(context.Background(), "second task"); err != nil {
+		t.Fatal(err)
+	}
+	if len(ar.goals) != 1 {
+		t.Errorf("a detached agent must not archive: goals = %+v", ar.goals)
+	}
+}
+
 type recTracer struct {
 	kinds        []string
 	finalSuggest string

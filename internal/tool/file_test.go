@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
@@ -286,6 +287,49 @@ func TestFileEditReplaceAll(t *testing.T) {
 	tl.Call(ctx, "edit", map[string]any{"path": "f.txt", "find": "x", "replace": "y", "replace_all": true})
 	if data, _ := os.ReadFile(filepath.Join(dir, "f.txt")); string(data) != "y y y" {
 		t.Errorf("replace_all = %q, want 'y y y'", data)
+	}
+}
+
+// Parallel sub-agents share a workspace by default (a fan-out of `agent`
+// calls with no explicit dir all get the SAME file tool instance), so two of
+// them editing the same file concurrently is real — an unlocked read-then-
+// write there lets a later write silently discard an earlier one, with both
+// calls reporting success. Every concurrent edit here targets a disjoint
+// substring, so none should ever be lost.
+func TestFileEditConcurrentEditsAllApply(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+	tl.Call(ctx, "write", map[string]any{"path": "f.txt", "content": "A B C D"})
+
+	const n = 4
+	markers := []string{"A", "B", "C", "D"}
+	var wg sync.WaitGroup
+	results := make([]Result, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			results[i] = tl.Call(ctx, "edit", map[string]any{
+				"path": "f.txt", "find": markers[i], "replace": markers[i] + "1",
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	for i, r := range results {
+		if r.IsError {
+			t.Errorf("edit %d failed: %s", i, r.Content)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "f.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range markers {
+		if !strings.Contains(string(data), m+"1") {
+			t.Errorf("final content = %q, missing replacement for %q (a concurrent edit was lost)", data, m)
+		}
 	}
 }
 

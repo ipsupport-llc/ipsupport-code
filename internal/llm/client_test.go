@@ -232,6 +232,44 @@ func TestChatRetriesOnMidStreamDrop(t *testing.T) {
 	}
 }
 
+// A stream that closes CLEANLY (a normal EOF, not a transport error) before
+// "[DONE]" ever arrived is a truncated response, not a completed one — a
+// proxy or the server itself cutting the connection mid-generation. Without
+// treating this as retriable, whatever partial content had accumulated so
+// far was silently accepted as a full, successful answer.
+func TestChatRetriesOnPrematureCleanEOF(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		if n < 2 {
+			// A normal (non-hijacked) handler return closes the body cleanly —
+			// no [DONE], no transport error, just EOF.
+			io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")
+			fl.Flush()
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\n")
+		fl.Flush()
+		io.WriteString(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+	msg, err := cl.Chat(context.Background(), []Message{User("hi")}, nil)
+	if err != nil {
+		t.Fatalf("Chat should retry past a premature clean EOF: %v", err)
+	}
+	if msg.Content != "recovered" {
+		t.Errorf("content = %q, want recovered (the truncated first attempt must be discarded, not accepted)", msg.Content)
+	}
+	if n < 2 {
+		t.Errorf("attempts = %d, want at least 2 (a retry)", n)
+	}
+}
+
 // The idle watchdog must be reset ONLY by real token progress — SSE heartbeats,
 // comments, and empty deltas (which proxies emit) must not, or a stalled stream
 // that keeps heartbeating would "think" forever without producing a token.
@@ -241,7 +279,7 @@ func TestParseStreamTicksOnlyOnProgress(t *testing.T) {
 	tick := func() { ticks++ }
 
 	// A comment/heartbeat, a blank data line, and an empty delta — no progress.
-	heartbeats := ": ping\n\ndata: \n\ndata: {\"choices\":[{\"delta\":{}}]}\n\n"
+	heartbeats := ": ping\n\ndata: \n\ndata: {\"choices\":[{\"delta\":{}}]}\n\ndata: [DONE]\n\n"
 	if _, err := cl.parseStream(strings.NewReader(heartbeats), tick, 0); err != nil {
 		t.Fatal(err)
 	}

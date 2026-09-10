@@ -493,6 +493,46 @@ func TestConfigPanelNav(t *testing.T) {
 	}
 }
 
+// The memory/compact_threshold rows exist so this is reachable without the
+// CLI: toggle summary⇄raw, cycle the compact threshold through presets, and
+// persist each change (mirrors how offline/timeout already work).
+func TestConfigPanelMemoryToggleAndCompactThresholdCycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveMemory/SaveCompactThreshold write the global config
+	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	cursorFor := func(key string) int {
+		for i, k := range cfgKeys() {
+			if k == key {
+				return i
+			}
+		}
+		t.Fatalf("no %q row in the config panel", key)
+		return -1
+	}
+
+	m.cfgCursor = cursorFor("memory")
+	if m.app.cfg.Memory != "" {
+		t.Fatalf("default memory = %q, want empty (summary)", m.app.cfg.Memory)
+	}
+	m.configActivate()
+	if m.app.cfg.Memory != "raw" {
+		t.Errorf("after toggle, memory = %q, want raw", m.app.cfg.Memory)
+	}
+	m.configActivate()
+	if m.app.cfg.Memory != "" {
+		t.Errorf("second toggle should go back to summary (empty), got %q", m.app.cfg.Memory)
+	}
+
+	m.cfgCursor = cursorFor("compact_threshold")
+	if got := compactThreshold(m.app.cfg.CompactThreshold); got != autoCompactRatio {
+		t.Fatalf("default compact_threshold resolves to %v, want the built-in default %v", got, autoCompactRatio)
+	}
+	m.configActivate() // 0.75 (resolved default) → next preset, 0.85
+	if m.app.cfg.CompactThreshold != 0.85 {
+		t.Errorf("after cycling from the default, compact_threshold = %v, want 0.85", m.app.cfg.CompactThreshold)
+	}
+}
+
 func TestResolveModelArg(t *testing.T) {
 	ids := []string{"openai/gpt-4o", "openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "x-ai/grok-4.3"}
 	// exact id → switch

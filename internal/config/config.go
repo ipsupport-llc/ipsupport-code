@@ -408,6 +408,16 @@ func SaveSpawn(s SpawnPolicy) error { return mergeGlobalKeys(map[string]any{"spa
 // SaveOffline persists the offline-mode flag globally.
 func SaveOffline(off bool) error { return mergeGlobalKeys(map[string]any{"offline": off}) }
 
+// SaveMemory persists the cross-task memory strategy globally ("" = summary
+// default, "raw" = never auto-compact — see Config.Memory).
+func SaveMemory(mode string) error { return mergeGlobalKeys(map[string]any{"memory": mode}) }
+
+// SaveCompactThreshold persists the auto-compact fill-level override globally
+// (see Config.CompactThreshold).
+func SaveCompactThreshold(t float64) error {
+	return mergeGlobalKeys(map[string]any{"compact_threshold": t})
+}
+
 // SaveReflectCfg persists the reflection flag + profile globally.
 func SaveReflectCfg(disabled bool, profile string) error {
 	return mergeGlobalKeys(map[string]any{"reflect_disabled": disabled, "reflect_profile": profile})

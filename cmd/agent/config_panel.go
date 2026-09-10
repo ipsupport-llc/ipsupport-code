@@ -37,6 +37,8 @@ var configRows = []cfgRow{
 	{key: "timeout"},
 	{key: "budget"},
 	{key: "offline"},
+	{key: "memory"},
+	{key: "compact_threshold"},
 	{header: "Sub-agents"},
 	{key: "agents"},
 	{key: "spawn"},
@@ -244,6 +246,15 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		return "spend cap", v, "enter: set via /budget"
 	case "offline":
 		return "offline", onOff(m.app.cfg.Offline), "enter: toggle (no internet egress)"
+	case "memory":
+		v := "summary"
+		if m.app.cfg.Memory == "raw" {
+			v = "raw (never summarize)"
+		}
+		return "memory", v, "enter: toggle summary/raw"
+	case "compact_threshold":
+		v := fmt.Sprintf("%.0f%% of context", compactThreshold(m.app.cfg.CompactThreshold)*100)
+		return "compact at", v, "enter: cycle (only used in summary memory)"
 	case "agents":
 		return "profiles", fmt.Sprintf("%d configured", len(m.app.cfg.Agents)), "enter: add (provider → model)"
 	case "spawn":
@@ -306,6 +317,17 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		m.input.CursorEnd()
 	case "offline": // toggle internet egress
 		m.pushLines(m.app.offlineCommand(map[bool]string{true: "off", false: "on"}[m.app.cfg.Offline]))
+	case "memory": // toggle summary ⇄ raw
+		next := "raw"
+		if m.app.cfg.Memory == "raw" {
+			next = ""
+		}
+		m.app.cfg.Memory = next
+		if err := config.SaveMemory(next); err != nil {
+			m.push(cErr.Render("  could not persist: " + err.Error()))
+		}
+	case "compact_threshold":
+		m.cycleCompactThreshold()
 	case "reasoning": // cycle the active model's reasoning effort off→high
 		provider, model := m.app.providerName(), m.app.activeLLM().Model
 		next := nextReasoning(m.app.reasoningLevel(provider, model))
@@ -386,6 +408,28 @@ func nextInt(cur int, cycle []int) int {
 		}
 	}
 	return cycle[0]
+}
+
+// nextFloat is nextStr for float64 presets (exact match — the cycle only ever
+// contains our own preset values, never a user-typed one).
+func nextFloat(cur float64, cycle []float64) float64 {
+	for i, v := range cycle {
+		if v == cur {
+			return cycle[(i+1)%len(cycle)]
+		}
+	}
+	return cycle[0]
+}
+
+var compactThresholdCycle = []float64{0.5, 0.65, 0.75, 0.85, 0.95}
+
+// cycleCompactThreshold advances the auto-compact threshold through preset
+// fill levels, persists, and re-wires so autoCompactNeeded picks it up.
+func (m *tuiModel) cycleCompactThreshold() {
+	m.app.cfg.CompactThreshold = nextFloat(compactThreshold(m.app.cfg.CompactThreshold), compactThresholdCycle)
+	if err := config.SaveCompactThreshold(m.app.cfg.CompactThreshold); err != nil {
+		m.push(cErr.Render("  could not persist: " + err.Error()))
+	}
 }
 
 // toggleChannel flips stable ⇄ nightly and persists it.

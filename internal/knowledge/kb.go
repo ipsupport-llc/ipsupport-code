@@ -182,6 +182,9 @@ func (k *KB) Query(domain, errText string, limit int) []Pitfall {
 		if p.Domain != domain {
 			continue
 		}
+		if IsGenericErrorPattern(p.ErrorPattern) {
+			continue // e.g. "exit 1" — matches (and misleads on) any unrelated failure
+		}
 		if len(toks) == 0 {
 			out = append(out, scored{p, 0})
 			continue

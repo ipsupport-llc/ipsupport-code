@@ -130,6 +130,25 @@ func TestHintsDontCrossActionsWithSharedErrorText(t *testing.T) {
 	}
 }
 
+// A pitfall keyed on a bare "exit N" pattern (the run tool's own generic
+// wrapper prefix on every failed command) must never surface as a hint — it
+// "matches" (and misleads on) any unrelated failure. Live case that surfaced
+// this: a stale KB entry learned from a python dependency error kept showing
+// up on an unrelated "go.mod already exists" failure.
+func TestHintsNeverSurfacesGenericExitCodePattern(t *testing.T) {
+	kb, _ := knowledge.Open(filepath.Join(t.TempDir(), "k.json"))
+	kb.Add(knowledge.Pitfall{
+		Domain: "run", ErrorPattern: "exit 1",
+		Context: "a python module missing a dependency", ProvenFix: "install the required system library",
+	})
+	reg := tool.NewRegistry(tool.NewCalc())
+	a := New(&scriptLLM{}, reg, kb, nil, "", 5)
+
+	if h := a.hints("run", "shell", "exit 1\ngo: /Users/roman220/rl_hero_go/go.mod already exists"); h != "" {
+		t.Errorf("generic exit-code pitfall leaked into an unrelated go.mod failure: %q", h)
+	}
+}
+
 // SetMaxHistory overrides the default trim cap (16) — memory "raw" callers
 // raise it a lot so the FIFO cut, which breaks a local server's KV-cache
 // prefix just like a summary compact does, stays a rare backstop instead of

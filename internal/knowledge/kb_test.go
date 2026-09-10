@@ -89,6 +89,23 @@ func TestQueryRankAndDomain(t *testing.T) {
 	}
 }
 
+// A pitfall keyed on a bare "exit N" pattern (the run tool's own generic
+// wrapper prefix on every failed command) must never surface — it "matches"
+// (and misleads on) any unrelated failure. internal/reflect already refuses
+// to STORE one, but a KB that already had one from before that guard existed
+// (this test bypasses Add's caller entirely, mirroring a pitfall loaded
+// straight off disk by Open) must still not SURFACE it.
+func TestQuerySkipsGenericErrorPattern(t *testing.T) {
+	kb := &KB{pitfalls: []Pitfall{
+		{Domain: "run", ErrorPattern: "exit 1", Context: "a python module missing a dependency", ProvenFix: "install the required system library"},
+		{Domain: "run", ErrorPattern: "go.mod already exists", Context: "go mod init on an existing module", ProvenFix: "skip init, cd into the existing module"},
+	}}
+	got := kb.Query("run", "go: /Users/roman220/rl_hero_go/go.mod already exists", 5)
+	if len(got) != 1 || got[0].ErrorPattern != "go.mod already exists" {
+		t.Errorf("Query = %+v, want only the specific (non-generic) pattern", got)
+	}
+}
+
 func TestSaveOpenRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "knowledge.json") // exercises mkdir

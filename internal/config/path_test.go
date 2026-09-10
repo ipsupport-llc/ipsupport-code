@@ -138,3 +138,23 @@ func TestLookupPathAndFlatten(t *testing.T) {
 		}
 	}
 }
+
+// LookupPathInFile reads ONE file's raw keys — no defaults, no merge with any
+// other layer — so callers can tell whether a specific layer defines a key,
+// independent of what's actually in effect after both layers merge.
+func TestLookupPathInFile(t *testing.T) {
+	isolate(t)
+	path := GlobalPath()
+	if err := SetFileValue(path, 0o600, "file.default", "deny"); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := LookupPathInFile(path, "file.default"); !ok || v != "deny" {
+		t.Errorf("LookupPathInFile = %v, %v; want \"deny\", true", v, ok)
+	}
+	if _, ok := LookupPathInFile(path, "file.jail"); ok {
+		t.Error("LookupPathInFile should miss a key this file never set (it's not asking for the default)")
+	}
+	if _, ok := LookupPathInFile("/no/such/file.json", "file.default"); ok {
+		t.Error("a missing file should report no keys, not an error")
+	}
+}

@@ -581,7 +581,11 @@ is a literal string. `set` writes the global user file by default (`--local`
 targets `<workspace>/.agent/config.json`); a wrong type or a misspelled key is
 rejected rather than saved. `get`/`list` show the effective, merged value — a key
 sitting at its zero default (e.g. `offline` when off) prints nothing, like
-`git config --get`.
+`git config --get`. The workspace file always wins over the global one — e.g.
+the interactive `/config` panel's file/run permission rows persist to the
+*workspace* file (they're a per-project concern), so setting the same key
+globally afterward has no visible effect; `set`/`unset` warn on stderr when
+that's about to bite you.
 
 `run.timeout_seconds` caps how long a shell command may run (default 60s); raise
 it for slow builds/test suites, or let the model pass a larger per-call `timeout`.

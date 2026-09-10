@@ -114,8 +114,12 @@ const (
 	maxCheckpoints = 50      // keep the most recent N turns
 )
 
-// beginCheckpoint opens a checkpoint for a new turn (call before the agent runs).
-func (a *app) beginCheckpoint(goal string) {
+// beginCheckpoint opens a checkpoint for a new turn (call before the agent
+// runs) and returns it, so the caller's endCheckpoint can only ever close its
+// OWN checkpoint (see endCheckpoint) — a force-detached task's deferred close
+// firing late must not wipe curCkpt out from under a different task that
+// started in the meantime.
+func (a *app) beginCheckpoint(goal string) *checkpoint {
 	a.ckptMu.Lock()
 	defer a.ckptMu.Unlock()
 	cp := &checkpoint{goal: oneLine(goal, 60), histLen: a.ag.SessionLen(), files: map[string]fileSnap{}}
@@ -124,11 +128,27 @@ func (a *app) beginCheckpoint(goal string) {
 		a.checkpoints = a.checkpoints[len(a.checkpoints)-maxCheckpoints:]
 	}
 	a.curCkpt = cp
+	return cp
 }
 
-// endCheckpoint closes the running turn's checkpoint.
-func (a *app) endCheckpoint() {
+// endCheckpoint closes cp — but ONLY if it's still the live one. A detached
+// (orphaned) task's goroutine can return long after a new task has begun its
+// own checkpoint; without this check its deferred close would clear the NEW
+// task's curCkpt, silently stopping snapFile from recording its edits.
+func (a *app) endCheckpoint(cp *checkpoint) {
 	a.ckptMu.Lock()
+	if a.curCkpt == cp {
+		a.curCkpt = nil
+	}
+	a.ckptMu.Unlock()
+}
+
+// resetCheckpoints drops all checkpoints and closes any open one — a
+// checkpoint's histLen indexes a specific session's conversation, so it's
+// meaningless once /new or /sessions switches to a different thread.
+func (a *app) resetCheckpoints() {
+	a.ckptMu.Lock()
+	a.checkpoints = nil
 	a.curCkpt = nil
 	a.ckptMu.Unlock()
 }
@@ -147,7 +167,15 @@ func (a *app) snapFile(abs string) {
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		cp.files[abs] = fileSnap{existed: false} // file is being created
+		if os.IsNotExist(err) {
+			cp.files[abs] = fileSnap{existed: false} // file is being created
+		} else {
+			// Some other stat failure (permission, I/O) — the file may well
+			// already exist. Treat it like "too big to snapshot" so rewind
+			// leaves it alone instead of risking deleting a file that was
+			// already there before this turn.
+			cp.files[abs] = fileSnap{existed: true, tooBig: true}
+		}
 		return
 	}
 	if info.Size() > maxSnapBytes {
@@ -156,7 +184,9 @@ func (a *app) snapFile(abs string) {
 	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
-		cp.files[abs] = fileSnap{existed: false}
+		// Stat just succeeded, so the file definitely exists — a read
+		// failure here means "can't snapshot", not "doesn't exist".
+		cp.files[abs] = fileSnap{existed: true, tooBig: true}
 		return
 	}
 	cp.files[abs] = fileSnap{existed: true, content: data}
@@ -197,21 +227,25 @@ func (a *app) applyRewind(idx int) []string {
 		}
 	}
 	histLen := a.checkpoints[idx].histLen
-	a.checkpoints = a.checkpoints[:idx]
 	a.ckptMu.Unlock()
 
 	restored, deleted, skipped := 0, 0, 0
+	var failed []string
 	for p, s := range seen {
 		switch {
 		case s.tooBig:
 			skipped++
 		case s.existed:
-			if os.WriteFile(p, s.content, 0o644) == nil {
+			if err := os.WriteFile(p, s.content, 0o644); err == nil {
 				restored++
+			} else {
+				failed = append(failed, p)
 			}
 		default: // created from the target turn onward → remove it
-			if os.Remove(p) == nil {
+			if err := os.Remove(p); err == nil || os.IsNotExist(err) {
 				deleted++
+			} else {
+				failed = append(failed, p)
 			}
 		}
 	}
@@ -222,9 +256,23 @@ func (a *app) applyRewind(idx int) []string {
 	a.ag.SetHistory(hist[:histLen])
 	a.saveSession()
 
+	// Only discard the checkpoint once its file changes actually applied — a
+	// failure partway through (disk full, permissions) should stay retryable
+	// instead of silently vanishing along with the only copy of the prior
+	// file content.
+	if len(failed) == 0 {
+		a.ckptMu.Lock()
+		a.checkpoints = a.checkpoints[:idx]
+		a.ckptMu.Unlock()
+	}
+
 	out := []string{fmt.Sprintf("rewound — restored %d file(s), removed %d, trimmed the conversation", restored, deleted)}
 	if skipped > 0 {
 		out = append(out, fmt.Sprintf("  (%d file(s) too large to snapshot were left as-is)", skipped))
+	}
+	if len(failed) > 0 {
+		sort.Strings(failed)
+		out = append(out, fmt.Sprintf("  ⚠ %d file(s) failed to restore, checkpoint kept for retry: %s", len(failed), strings.Join(failed, ", ")))
 	}
 	out = append(out, "  ⚠ shell commands, git, and network actions were NOT undone")
 	return out

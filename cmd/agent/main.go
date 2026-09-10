@@ -1753,6 +1753,12 @@ func (a *app) wire() error {
 	if len(a.cfg.McpServers) > 0 {
 		tools = append(tools, tool.NewMCP(a.mcpList, a.mcpCall, a.mcpSchema))
 	}
+	// The history tool only earns its catalog space once there's something
+	// durably archived to recall (see hasArchivedHistory) — a brand-new session
+	// has nothing to look back on yet.
+	if a.hasArchivedHistory() {
+		tools = append(tools, tool.NewHistory(historySource{path: a.archivePath()}))
+	}
 	reg = tool.NewRegistry(tools...)
 	a.tracer = trace.Multi(a.fileTracer, a.uiTracer)
 	// Carry the session's running token total into the rebuilt client so a
@@ -1779,6 +1785,7 @@ func (a *app) wire() error {
 	a.ag.SetPlanMode(a.planMode)     // carry the mode into the rebuilt agent
 	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
+	a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
 	return nil
 }
 

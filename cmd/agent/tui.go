@@ -1842,19 +1842,24 @@ func (m *tuiModel) addSteer(note string) {
 	m.syncViewport()
 }
 
-// thinkingView renders the model's live reasoning/thinking text when toggled
-// on with ctrl+t — a look into what a reasoning model is doing while it's
-// still generating, not a transcript to scroll back through. Only shown while
-// a task is actually running, so it disappears on its own once the task ends
-// rather than leaving a stale trace behind; the ctrl+t toggle itself persists
-// across tasks. Capped to the last few lines: it's a peek, not a pager.
+// thinkingView renders the model's live output when toggled on with ctrl+t —
+// a look into what it's doing while it's still generating, not a transcript
+// to scroll back through. This is reasoning text for a model that streams a
+// separate reasoning phase; for a plain model with no such phase (most local
+// models — reported live: token counter climbing but the panel empty, unlike
+// e.g. Open WebUI, for exactly this case) it falls back to the answer text
+// itself as it's generated, via the same live buffer (see OpenAIClient.Live).
+// Only shown while a task is actually running, so it disappears on its own
+// once the task ends rather than leaving a stale trace behind; the ctrl+t
+// toggle itself persists across tasks. Capped to the last few lines: it's a
+// peek, not a pager.
 func (m *tuiModel) thinkingView() []string {
 	if !m.showThinking || m.state != stRunning {
 		return nil
 	}
-	text := strings.TrimSpace(m.app.client.Reasoning())
+	text := strings.TrimSpace(m.app.client.Live())
 	if text == "" {
-		return []string{cDim.Render("  ◌ thinking (ctrl+t to hide) — no reasoning text from this model yet")}
+		return []string{cDim.Render("  ◌ thinking (ctrl+t to hide) — nothing streamed yet")}
 	}
 	const maxLines = 12
 	lines := strings.Split(text, "\n")

@@ -683,6 +683,37 @@ func TestThinkingPanelShowsPlainContentWhenNoReasoningPhase(t *testing.T) {
 	}
 }
 
+// Reported live: a degenerate model looping on a single character streams one
+// logical line with no newlines at all ("0000....") — without a width cap,
+// that single line would flood the screen with an uncontrolled terminal wrap
+// instead of the intended "peek, not a pager" panel.
+func TestThinkingPanelCapsLineWidthForDegenerateOutput(t *testing.T) {
+	long := strings.Repeat("0", 5000)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		io.WriteString(w, fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", long))
+		io.WriteString(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	m := &tuiModel{state: stRunning, width: 80, accent: lipgloss.Color("13"), input: textarea.New(),
+		app: &app{cfg: config.Default()}, showThinking: true}
+	m.app.client = llm.NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+
+	// internal/llm's own degenerate-repetition detector aborts a run like this
+	// one on its own — expected here (and desirable: the real fix for this
+	// class of bug). This test is specifically about the panel's width cap on
+	// whatever got buffered before that abort, not about Chat's return value.
+	_, _ = m.app.client.Chat(context.Background(), []llm.Message{llm.User("hi")}, nil)
+	for _, line := range m.thinkingView() {
+		if w := lipgloss.Width(line); w > m.width {
+			t.Errorf("thinkingView line width = %d, want capped to the terminal width %d: %q", w, m.width, line)
+		}
+	}
+}
+
 // gofmt indents Go source with tabs. A real terminal expands a tab to its next
 // tab stop (up to 8 columns), but lipgloss.Width counts it as a single column
 // — so a raw tab left in a diff row that's padded to an exact terminal width

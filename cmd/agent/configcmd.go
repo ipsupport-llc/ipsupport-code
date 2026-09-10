@@ -78,6 +78,9 @@ func runConfig(workspace string, args []string) {
 			fatal(err)
 		}
 		fmt.Printf("set %s  (%s)\n", rest[1], path) // don't echo the value — it may be a secret
+		if w := shadowWarning(workspace, *local, rest[1]); w != "" {
+			fmt.Fprintln(os.Stderr, w)
+		}
 
 	case "unset":
 		if len(rest) != 2 {
@@ -88,6 +91,9 @@ func runConfig(workspace string, args []string) {
 			fatal(err)
 		}
 		fmt.Printf("unset %s  (%s)\n", rest[1], path)
+		if w := shadowWarning(workspace, *local, rest[1]); w != "" {
+			fmt.Fprintln(os.Stderr, w)
+		}
 
 	case "list":
 		cfg, err := config.Load(workspace)
@@ -103,6 +109,24 @@ func runConfig(workspace string, args []string) {
 		configUsage()
 		os.Exit(2)
 	}
+}
+
+// shadowWarning returns a note (or "" for none) for when the key just changed
+// is ALSO defined in the OTHER config layer, which would win the merge — so
+// the change that just wrote successfully has no visible effect until it's
+// also changed there. The workspace file always wins over the global one, so
+// this only fires the direction that can actually be silently shadowed: a
+// global set/unset (wroteLocal=false) while the workspace file also defines
+// the key. The reverse (a --local write) is never shadowed.
+func shadowWarning(workspace string, wroteLocal bool, key string) string {
+	if wroteLocal {
+		return ""
+	}
+	wsPath := filepath.Join(workspace, ".agent", "config.json")
+	if _, ok := config.LookupPathInFile(wsPath, key); ok {
+		return fmt.Sprintf("note: %s is ALSO set in %s, which takes precedence over the global config — that value is what's actually in effect. Use --local to change it there instead.", key, wsPath)
+	}
+	return ""
 }
 
 func configUsage() {

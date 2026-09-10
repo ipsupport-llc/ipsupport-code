@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -480,7 +481,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 	if err := sc.Err(); err != nil {
 		return Message{}, err
 	}
-	msg := Message{Role: "assistant", Content: content.String()}
+	msg := Message{Role: "assistant", Content: stripChannelTokens(content.String())}
 	for _, idx := range order {
 		c := *calls[idx]
 		c.Arguments = validArgs(c.Arguments)
@@ -516,7 +517,9 @@ func (c *OpenAIClient) parseJSON(r io.Reader) (Message, error) {
 		c.lastPromptTk = out.Usage.PromptTokens
 	}
 	c.mu.Unlock()
-	return fromWire(out.Choices[0].Message), nil
+	msg := fromWire(out.Choices[0].Message)
+	msg.Content = stripChannelTokens(msg.Content)
+	return msg, nil
 }
 
 func (c *OpenAIClient) bumpToken() {
@@ -537,6 +540,26 @@ func (c *OpenAIClient) setCompletionCount(n int) {
 	c.mu.Lock()
 	c.complTk = n
 	c.mu.Unlock()
+}
+
+// channelTokenPattern matches OpenAI Harmony-style control tokens
+// (<|start|>, <|end|>, <|message|>, <|channel|>, <|constrain|>, <|return|>,
+// <|call|>, <|refusal|>) — including the leading-pipe-dropped form some
+// quantized local models emit (e.g. "<channel|>" instead of "<|channel|>").
+// A server/template that properly separates the model's reasoning/final
+// channels never puts these in the plain content field; one that doesn't
+// leaks them verbatim into what the user sees. The vocabulary is small and
+// fixed and never occurs in ordinary prose, so stripping it can't eat real
+// content.
+var channelTokenPattern = regexp.MustCompile(`<\|?(start|end|message|channel|constrain|return|call|refusal)\|>`)
+
+// stripChannelTokens removes leaked Harmony-style control tokens from model
+// output. See channelTokenPattern.
+func stripChannelTokens(s string) string {
+	if !strings.Contains(s, "|>") {
+		return s // fast path: this exact substring never appears in normal prose
+	}
+	return channelTokenPattern.ReplaceAllString(s, "")
 }
 
 type streamChunk struct {

@@ -183,6 +183,32 @@ func TestFileSearchSkipsSymlinks(t *testing.T) {
 	}
 }
 
+// os.MkdirAll is a silent no-op on an existing directory — mkdir must tell
+// the model that explicitly instead of always saying "created", which reads
+// as a fresh start and hides the one fact (this already exists) that would
+// let a stuck model skip a step it doesn't need to repeat.
+func TestFileMkdirReportsAlreadyExists(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+
+	r1 := tl.Call(ctx, "mkdir", map[string]any{"path": "rl_hero_go"})
+	if r1.IsError || !strings.Contains(r1.Content, "created directory") {
+		t.Fatalf("first mkdir = %+v, want a 'created' result", r1)
+	}
+
+	r2 := tl.Call(ctx, "mkdir", map[string]any{"path": "rl_hero_go"})
+	if r2.IsError {
+		t.Errorf("mkdir on an existing directory should not be an error: %+v", r2)
+	}
+	if !strings.Contains(r2.Content, "already exists") {
+		t.Errorf("second mkdir = %q, want it to say the directory already exists", r2.Content)
+	}
+	if strings.Contains(r2.Content, "created directory") {
+		t.Errorf("second mkdir must not claim it was created: %q", r2.Content)
+	}
+}
+
 func TestFileJailEscape(t *testing.T) {
 	tl := fileToolFor(t, t.TempDir(), "allow", yes())
 	r := tl.Call(context.Background(), "write", map[string]any{"path": "../evil.txt", "content": "x"})

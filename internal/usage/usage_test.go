@@ -91,6 +91,54 @@ func TestPricing(t *testing.T) {
 	}
 }
 
+// Two separate ipsupport-code processes can share the same global usage store.
+// Each opens its own *Store from the same file; a naive "overwrite with my
+// in-memory snapshot" Save would let whichever one saves last silently discard
+// the other's update. Save must instead merge its own delta onto a fresh
+// re-read of the file (codex review finding #22).
+func TestStoreSaveMergesConcurrentProcessesInsteadOfClobbering(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	a, _ := Open(path)
+	a.Add("2026-06-27", "grok", "grok-4.3", 100, 100)
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second process opens the same file (sees a's entry) and adds its own.
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Add("2026-06-27", "openai", "gpt-4o", 50, 50)
+
+	// Back on the first process: it adds more of its own and saves again —
+	// without ever having seen b's update.
+	a.Add("2026-06-27", "grok", "grok-4.3", 10, 10)
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Now b saves. A blind overwrite would erase a's second Add (and a's own
+	// row would still be present since b loaded it at Open, but a's newest 10+10
+	// would be lost); the merge must fold b's own delta onto the fresh file
+	// instead, preserving what a already persisted.
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	final, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := final.Total().Tokens(); got != 320 { // (100+10)*2 + 50*2 = 220+100
+		t.Errorf("merged total = %d, want 320 (a's two adds + b's add, nothing clobbered)", got)
+	}
+	models := final.ByModel()
+	if len(models) != 2 {
+		t.Fatalf("ByModel = %+v, want 2 rows (grok survives, openai survives)", models)
+	}
+}
+
 func TestStorePersist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.json")
 	s, _ := Open(path)

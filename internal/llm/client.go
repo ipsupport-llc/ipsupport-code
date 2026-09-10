@@ -414,6 +414,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 		c.bumpToken()
 		tick()
 	}
+	done := false // only set at a real "[DONE]" — see the check after the loop
 	for sc.Scan() {
 		// reqCompl counts stream deltas, not true tokens (there's no per-chunk token
 		// count mid-stream). LM Studio sends ~1 token/chunk so the cap is accurate
@@ -429,6 +430,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 		}
 		payload := strings.TrimSpace(line[len("data:"):])
 		if payload == "[DONE]" {
+			done = true
 			break
 		}
 		var ch streamChunk
@@ -480,6 +482,18 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 	}
 	if err := sc.Err(); err != nil {
 		return Message{}, err
+	}
+	if !done {
+		// The connection closed cleanly (bufio.Scanner's own EOF, not an error)
+		// before a "[DONE]" ever arrived — a proxy or the server itself cut the
+		// stream mid-generation. Without this check, whatever partial content/
+		// tool-call arguments had accumulated so far was returned as a normal,
+		// complete answer: a truncated final message, or a half-formed tool
+		// call argument string, executed as if the model had actually finished.
+		// The caller's retry classification (client.go's roundTrip) already
+		// treats a plain error like this as a transient, retriable mid-stream
+		// failure — same bucket as a connection reset.
+		return Message{}, fmt.Errorf("llm stream ended without completing (no [DONE])")
 	}
 	msg := Message{Role: "assistant", Content: stripChannelTokens(content.String())}
 	for _, idx := range order {

@@ -95,6 +95,69 @@ func TestGitRejectsLeadingDashRef(t *testing.T) {
 	}
 }
 
+// "checkout -- ref" made ref a PATHSPEC, not a revision — a real branch name
+// always failed with "pathspec did not match any files", so checkout could
+// never switch branches at all.
+func TestGitCheckoutSwitchesBranch(t *testing.T) {
+	dir := initRepo(t)
+	if out, err := exec.Command("git", "-C", dir, "commit", "--allow-empty", "-m", "root").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", dir, "branch", "feature").CombinedOutput(); err != nil {
+		t.Fatalf("branch: %v\n%s", err, out)
+	}
+	tl := gitToolFor(t, dir, yes())
+	if r := tl.Call(context.Background(), "checkout", map[string]any{"ref": "feature"}); r.IsError {
+		t.Fatalf("checkout feature: %s", r.Content)
+	}
+	out, err := exec.Command("git", "-C", dir, "branch", "--show-current").CombinedOutput()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "feature" {
+		t.Errorf("current branch = %q, want feature", got)
+	}
+}
+
+// git show/diff read a path's content directly (at a given revision, or a
+// working-tree diff) — the same jail/secret-file checks file.read enforces
+// on that path must apply here too, or they're a wide-open bypass.
+func TestGitShowDiffRespectFilePolicy(t *testing.T) {
+	dir := initRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("API_KEY=hunter2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", ".env").CombinedOutput(); err != nil {
+		t.Fatalf("add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "add env").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+	tl := gitToolFor(t, dir, yes())
+	ctx := context.Background()
+
+	if r := tl.Call(ctx, "show", map[string]any{"ref": "HEAD:.env"}); !r.IsError || strings.Contains(r.Content, "hunter2") {
+		t.Errorf("show HEAD:.env = %+v, want blocked as a secret, not the raw content", r)
+	}
+	// A blob reference for an ordinary tracked file must still work.
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", "main.go").CombinedOutput(); err != nil {
+		t.Fatalf("add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "add main.go").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+	if r := tl.Call(ctx, "show", map[string]any{"ref": "HEAD:main.go"}); r.IsError || !strings.Contains(r.Content, "package main") {
+		t.Errorf("show HEAD:main.go = %+v, want the file content", r)
+	}
+
+	if r := tl.Call(ctx, "diff", map[string]any{"path": ".env"}); !r.IsError {
+		t.Errorf("diff --path .env = %+v, want blocked as a secret", r)
+	}
+}
+
 func TestGitMutatingDeniedByUser(t *testing.T) {
 	dir := initRepo(t)
 	tl := gitToolFor(t, dir, no())

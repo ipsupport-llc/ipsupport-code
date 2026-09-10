@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
+	"github.com/ipsupport-llc/ipsupport-code/internal/procgroup"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
@@ -53,9 +54,27 @@ func (g *gitTool) diff(ctx context.Context, a Args) Result {
 		args = append(args, "--staged")
 	}
 	if p := a.Str("path"); p != "" {
+		if err := g.checkPathPolicy(p); err != nil {
+			return Err(err.Error())
+		}
 		args = append(args, "--", p)
 	}
 	return g.run(ctx, "diff", false, args...)
+}
+
+// checkPathPolicy applies the SAME jail + secret-file checks file.read does to
+// a path git is about to read the (possibly historical) content of — git's
+// own argv access has no separate confinement, so show/diff would otherwise
+// read straight through file.read's restrictions on the identical path.
+func (g *gitTool) checkPathPolicy(path string) error {
+	abs, err := g.pol.Resolve(path)
+	if err != nil {
+		return err
+	}
+	if g.pol.IsSecret(abs) {
+		return errors.New("reading " + path + " is blocked (it looks like a secrets/credentials file)")
+	}
+	return nil
 }
 
 func (g *gitTool) log(ctx context.Context, a Args) Result {
@@ -73,6 +92,15 @@ func (g *gitTool) show(ctx context.Context, a Args) Result {
 	}
 	if strings.HasPrefix(ref, "-") { // a leading dash would be read as a git flag
 		return Err("invalid ref (leading dash): " + ref)
+	}
+	if _, path, ok := strings.Cut(ref, ":"); ok && path != "" {
+		// <rev>:<path> blob/tree syntax returns the file's raw content at that
+		// revision — --stat has no effect on a blob reference, so this is a
+		// direct read of the path's content and must respect the same jail +
+		// secret-file checks file.read enforces on the identical path.
+		if err := g.checkPathPolicy(path); err != nil {
+			return Err(err.Error())
+		}
 	}
 	return g.run(ctx, "show", false, "show", "--stat", ref)
 }
@@ -100,7 +128,13 @@ func (g *gitTool) checkout(ctx context.Context, a Args) Result {
 	if strings.HasPrefix(ref, "-") { // e.g. "-f" → "git checkout -f" force-discards changes
 		return Err("invalid ref (leading dash): " + ref)
 	}
-	return g.run(ctx, "checkout", true, "checkout", "--", ref)
+	// NOT "checkout -- ref": everything after "--" is a pathspec, not a
+	// revision, so that always failed to switch branches at all (or, worse,
+	// if a tracked file happened to share the branch's name, silently
+	// discarded that file's uncommitted changes instead). The leading-dash
+	// guard above already fully defends against flag injection, so "--"
+	// bought no safety here, only breakage.
+	return g.run(ctx, "checkout", true, "checkout", ref)
 }
 
 func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ...string) Result {
@@ -116,6 +150,12 @@ func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ..
 	defer cancel()
 	cmd := exec.CommandContext(cctx, "git", args...)
 	cmd.Dir = dir
+	// Kill the WHOLE process group on timeout/cancel, and bound Wait so a
+	// hook, pager, or external diff/merge tool that outlives git itself (and
+	// keeps holding the shared stdout/stderr pipe) can't hang this call past
+	// its timeout — the same class of wedge the run tool already guards
+	// against (internal/procgroup).
+	procgroup.Set(cmd)
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	runErr := cmd.Run()
@@ -128,6 +168,11 @@ func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ..
 	if runErr != nil {
 		var ee *exec.ExitError
 		switch {
+		case errors.Is(runErr, exec.ErrWaitDelay):
+			// git itself exited fine; we just stopped waiting on a lingering
+			// child (hook/pager) still holding the output pipe. What we
+			// captured is git's complete output — treat it as success.
+			runErr = nil
 		case cctx.Err() == context.DeadlineExceeded:
 			return Err("git " + action + " timed out")
 		case errors.As(runErr, &ee):

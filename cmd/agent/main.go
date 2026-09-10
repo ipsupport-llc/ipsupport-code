@@ -1055,11 +1055,8 @@ func (a *app) loadGoal() {
 }
 
 func (a *app) saveGoal() error {
-	if err := os.MkdirAll(filepath.Dir(a.goalPath()), 0o755); err != nil {
-		return err
-	}
 	data, _ := json.MarshalIndent(a.goal, "", "  ")
-	return os.WriteFile(a.goalPath(), data, 0o644)
+	return atomicfile.Write(a.goalPath(), data, 0o644)
 }
 
 // launchGoalText reports the goal to set-and-pursue, or ("", false) when the
@@ -2085,11 +2082,8 @@ func humanizeAgo(t time.Time) string {
 }
 
 func (a *app) saveSession() {
-	if err := os.MkdirAll(filepath.Dir(a.sessionPath()), 0o755); err != nil {
-		return
-	}
 	if data, err := json.Marshal(a.ag.History()); err == nil {
-		_ = os.WriteFile(a.sessionPath(), data, 0o644)
+		_ = atomicfile.Write(a.sessionPath(), data, 0o644)
 	}
 }
 
@@ -2259,9 +2253,8 @@ func (a *app) addFacts(facts []string) []string {
 		a.facts = append([]string(nil), a.facts[len(a.facts)-maxFacts:]...)
 	}
 	if len(added) > 0 {
-		_ = os.MkdirAll(filepath.Dir(a.factsPath()), 0o755)
 		if data, err := json.Marshal(a.facts); err == nil {
-			_ = os.WriteFile(a.factsPath(), data, 0o644)
+			_ = atomicfile.Write(a.factsPath(), data, 0o644)
 		}
 	}
 	return added

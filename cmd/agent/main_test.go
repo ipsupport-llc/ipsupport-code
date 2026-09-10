@@ -1099,6 +1099,60 @@ func TestChooseNewSessionClearsGoal(t *testing.T) {
 	}
 }
 
+// Session/goal/facts persistence must go through atomicfile (temp+rename), not
+// a raw os.WriteFile that truncates the destination before writing the new
+// content — a crash or kill between truncation and the new bytes landing would
+// silently destroy the previously saved conversation/goal/facts. This can't
+// directly simulate a kill mid-write, but it can prove the atomic path was
+// actually taken: no ".tmp-*" sibling is ever left behind, and existing
+// content round-trips correctly.
+func TestSessionGoalFactsPersistViaAtomicWrite(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	assertNoTempFiles := func(path string) {
+		t.Helper()
+		entries, err := os.ReadDir(filepath.Dir(path))
+		if err != nil {
+			t.Fatalf("ReadDir: %v", err)
+		}
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), ".tmp-") {
+				t.Errorf("stray temp file left behind: %s (atomicfile.Write should always rename it away)", e.Name())
+			}
+		}
+	}
+
+	a.saveSession()
+	if _, err := os.Stat(a.sessionPath()); err != nil {
+		t.Fatalf("session file missing after saveSession: %v", err)
+	}
+	assertNoTempFiles(a.sessionPath())
+
+	a.setGoal("do the thing")
+	if err := a.saveGoal(); err != nil {
+		t.Fatalf("saveGoal: %v", err)
+	}
+	assertNoTempFiles(a.goalPath())
+	data, err := os.ReadFile(a.goalPath())
+	if err != nil || !strings.Contains(string(data), "do the thing") {
+		t.Errorf("goal.json = %q, %v, want it to contain the saved goal text", data, err)
+	}
+
+	a.addFacts([]string{"remember this"})
+	assertNoTempFiles(a.factsPath())
+	data, err = os.ReadFile(a.factsPath())
+	if err != nil || !strings.Contains(string(data), "remember this") {
+		t.Errorf("facts.json = %q, %v, want it to contain the saved fact", data, err)
+	}
+}
+
 // Regression found while fixing the above: reopening an EXISTING session via
 // the startup chooser must still respect the once-only offer (it must not
 // re-nag every time the workspace's session chooser fires, which happens

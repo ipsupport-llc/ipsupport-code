@@ -114,15 +114,19 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 	cmd := exec.CommandContext(cctx, command, expandTaskArgs(p.Args, task)...)
 	cmd.Dir = root
 	procgroup.Set(cmd) // cancel/timeout kills the whole process tree, not just the child
-	var stdout, stderr bytes.Buffer
+	// Bounded tail writers, not bytes.Buffer: only the tail is ever reported back
+	// (see externalResult), so a runaway/chatty CLI agent shouldn't make this
+	// process buffer its entire output before throwing most of it away.
+	stdout := textutil.NewBoundedTailWriter(maxExternalStdout)
+	stderr := textutil.NewBoundedTailWriter(maxExternalStderr)
 	if onLine != nil {
 		// Still accumulate for the final report, but also tap each output line so a
 		// background job can surface its progress in /jobs. Separate taps per stream
 		// keep their line buffers race-free under concurrent stdout/stderr copies.
-		cmd.Stdout = io.MultiWriter(&stdout, &lineTap{onLine: onLine})
-		cmd.Stderr = io.MultiWriter(&stderr, &lineTap{onLine: onLine})
+		cmd.Stdout = io.MultiWriter(stdout, &lineTap{onLine: onLine})
+		cmd.Stderr = io.MultiWriter(stderr, &lineTap{onLine: onLine})
 	} else {
-		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		cmd.Stdout, cmd.Stderr = stdout, stderr
 	}
 	runErr := cmd.Run()
 	if errors.Is(runErr, exec.ErrWaitDelay) {
@@ -132,7 +136,7 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 		runErr = fmt.Errorf("timed out after %s — use the CLI's non-interactive mode (exec / -p / --message) so it can't sit waiting for input", timeout)
 	}
 
-	body := externalResult(command, stdout.String(), stderr.String(), strings.TrimSpace(mustGit(root, "diff", "--stat")), runErr)
+	body := externalResult(command, stdout, stderr, strings.TrimSpace(mustGit(root, "diff", "--stat")), runErr)
 	done := map[string]any{"agent": id, "profile": profile, "ok": runErr == nil}
 	if runErr != nil {
 		done["error"] = oneLine(runErr.Error(), 60)
@@ -167,15 +171,22 @@ func expandTaskArgs(args []string, task string) []string {
 // externalResult assembles what the parent model gets back: the TAIL of stdout (a
 // CLI agent's final answer is at the end; the start is progress noise), a stderr
 // tail on failure, and a git diff --stat summary — never the full patch, which can
-// be thousands of tokens (the user reviews it with /diff).
-func externalResult(command, stdout, stderr, diffStat string, runErr error) string {
+// be thousands of tokens (the user reviews it with /diff). stdout/stderr are
+// already tail-bounded by BoundedTailWriter as they streamed in.
+func externalResult(command string, stdout, stderr *textutil.BoundedTailWriter, diffStat string, runErr error) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "external agent `%s` finished.\n", command)
-	if out := textutil.Tail(strings.TrimSpace(stdout), maxExternalStdout); out != "" {
+	if out := strings.TrimSpace(stdout.String()); out != "" {
+		if stdout.Truncated {
+			out = "…" + out
+		}
 		b.WriteString("\n--- output (tail) ---\n" + out + "\n")
 	}
 	if runErr != nil {
-		if errOut := textutil.Tail(strings.TrimSpace(stderr), maxExternalStderr); errOut != "" {
+		if errOut := strings.TrimSpace(stderr.String()); errOut != "" {
+			if stderr.Truncated {
+				errOut = "…" + errOut
+			}
 			b.WriteString("\n--- stderr (tail) ---\n" + errOut + "\n")
 		}
 	}

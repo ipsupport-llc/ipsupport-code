@@ -1,7 +1,6 @@
 package tool
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"os/exec"
@@ -156,13 +155,13 @@ func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ..
 	// its timeout — the same class of wedge the run tool already guards
 	// against (internal/procgroup).
 	procgroup.Set(cmd)
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
+	out := textutil.NewBoundedWriter(maxRunOutput)
+	cmd.Stdout, cmd.Stderr = out, out
 	runErr := cmd.Run()
 
 	body := strings.TrimRight(out.String(), "\n")
-	if clipped, truncated := textutil.Clip(body, maxRunOutput); truncated {
-		body = clipped + "\n…[truncated]"
+	if out.Truncated {
+		body += "\n…[truncated]"
 	}
 
 	if runErr != nil {

@@ -1,7 +1,6 @@
 package tool
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -101,14 +100,14 @@ func (r *runTool) shell(ctx context.Context, a Args) Result {
 	// that outlives the shell while holding the output pipe (a dev server, a
 	// backgrounded process) can't hang this tool call forever.
 	procgroup.Set(cmd)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	out := textutil.NewBoundedWriter(maxRunOutput)
+	cmd.Stdout = out
+	cmd.Stderr = out
 	runErr := cmd.Run()
 
 	body := strings.TrimRight(out.String(), "\n")
-	if clipped, truncated := textutil.Clip(body, maxRunOutput); truncated {
-		body = clipped + "\n…[truncated]"
+	if out.Truncated {
+		body += "\n…[truncated]"
 	}
 
 	exit := 0

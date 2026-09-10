@@ -80,6 +80,12 @@ type OpenAIClient struct {
 	// stream for many minutes. Derived from the context window at construction.
 	maxRespTk int
 
+	// disableLoopDetection turns off the degenerate-repetition detectors
+	// (config.LLM.DisableLoopDetection) — set once at construction. The
+	// token-count runaway cap (maxRespTk) is unaffected; this only covers the
+	// character- and phrase-repetition checks.
+	disableLoopDetection bool
+
 	mu           sync.Mutex
 	promptTk     int
 	complTk      int
@@ -143,8 +149,9 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 				ResponseHeaderTimeout: idle, // no response headers within the idle window → abort
 			},
 		},
-		idle:      idle,
-		maxRespTk: maxResponseTokens(c.ContextWindow),
+		idle:                 idle,
+		maxRespTk:            maxResponseTokens(c.ContextWindow),
+		disableLoopDetection: c.DisableLoopDetection,
 	}
 }
 
@@ -346,6 +353,74 @@ func (e *degenerateOutputError) Error() string {
 	return fmt.Sprintf("the model got stuck repeating the same character (%q) %d times in a row instead of making progress — it's looping, not thinking. Try a stronger model, or rephrase the task", e.r, e.n)
 }
 
+// phraseRepeatMatchLen/phraseRepeatWindow catch a DIFFERENT collapse than
+// degenerateRunThreshold: a model stuck re-emitting the same SENTENCE or
+// phrase, not a single repeated character. Observed live: the same ~150-byte
+// sentence ("We decided to use Q-Learning (Reinforcement Learning) instead
+// of a simple Perceptron...") repeating back to back in the live output. An
+// exact match this long, found this close to where it just occurred, is
+// essentially never legitimate — a genuinely repeated code idiom or prose
+// phrase is either much shorter than this or spaced much further apart in
+// real content; requiring the match to be found within a short, IMMEDIATE
+// trailing window (not just "somewhere earlier in the whole response") is
+// what tells a true degenerate loop apart from normal reuse.
+const (
+	phraseRepeatMatchLen = 80
+	phraseRepeatWindow   = 400
+)
+
+// phraseRepeatError marks the model looping on a repeated phrase/sentence.
+// Like runawayError and degenerateOutputError, retrying won't help.
+type phraseRepeatError struct{ phrase string }
+
+func (e *phraseRepeatError) Error() string {
+	shown, _ := textutil.Clip(e.phrase, 60)
+	return fmt.Sprintf("the model got stuck repeating the same phrase over and over instead of making progress — it's looping, not thinking (%q…). Try a stronger model, or rephrase the task", shown)
+}
+
+// checkPhraseRepeat reports a degenerate loop when the trailing
+// phraseRepeatMatchLen bytes of the model's full live output so far also
+// occur earlier within the preceding phraseRepeatWindow bytes.
+func checkPhraseRepeat(all string) error {
+	if len(all) < phraseRepeatMatchLen*2 {
+		return nil
+	}
+	tail := all[len(all)-phraseRepeatMatchLen:]
+	if isSingleRune(tail) {
+		// A run of one repeated character (a dashed separator, a row of "=")
+		// trivially "matches" any earlier same-length window of itself — that's
+		// not a repeated PHRASE, and it's already degenerateRunThreshold's job
+		// to catch it (at its own, much higher bar) if it's actually a loop.
+		return nil
+	}
+	winStart := len(all) - phraseRepeatMatchLen - phraseRepeatWindow
+	if winStart < 0 {
+		winStart = 0
+	}
+	haystack := all[winStart : len(all)-phraseRepeatMatchLen]
+	if strings.Contains(haystack, tail) {
+		return &phraseRepeatError{tail}
+	}
+	return nil
+}
+
+// isSingleRune reports whether s consists of a single rune repeated
+// throughout (or is empty).
+func isSingleRune(s string) bool {
+	var first rune
+	set := false
+	for _, r := range s {
+		if !set {
+			first, set = r, true
+			continue
+		}
+		if r != first {
+			return false
+		}
+	}
+	return true
+}
+
 // send makes one attempt; the bool reports whether the failure is worth a retry.
 func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bool) {
 	c.mu.Lock()
@@ -403,8 +478,9 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bo
 		if err != nil {
 			var re *runawayError
 			var de *degenerateOutputError
+			var pe *phraseRepeatError
 			switch {
-			case errors.As(err, &re), errors.As(err, &de):
+			case errors.As(err, &re), errors.As(err, &de), errors.As(err, &pe):
 				return m, err, false // model looping — a retry won't help
 			case stalled():
 				return Message{}, fmt.Errorf("llm stream stalled (no data for %s)", c.idle), true
@@ -499,9 +575,15 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 				// — Open WebUI shows what it's doing" for exactly this model).
 				c.mu.Lock()
 				c.live.WriteString(d.Content)
+				all := c.live.String()
 				c.mu.Unlock()
-				if err := checkDegenerate(d.Content); err != nil {
-					return Message{}, err
+				if !c.disableLoopDetection {
+					if err := checkDegenerate(d.Content); err != nil {
+						return Message{}, err
+					}
+					if err := checkPhraseRepeat(all); err != nil {
+						return Message{}, err
+					}
 				}
 				progress()
 			}
@@ -512,17 +594,29 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 			if rc := d.ReasoningContent; rc != "" {
 				c.mu.Lock()
 				c.live.WriteString(rc)
+				all := c.live.String()
 				c.mu.Unlock()
-				if err := checkDegenerate(rc); err != nil {
-					return Message{}, err
+				if !c.disableLoopDetection {
+					if err := checkDegenerate(rc); err != nil {
+						return Message{}, err
+					}
+					if err := checkPhraseRepeat(all); err != nil {
+						return Message{}, err
+					}
 				}
 				progress()
 			} else if rc := d.Reasoning; rc != "" {
 				c.mu.Lock()
 				c.live.WriteString(rc)
+				all := c.live.String()
 				c.mu.Unlock()
-				if err := checkDegenerate(rc); err != nil {
-					return Message{}, err
+				if !c.disableLoopDetection {
+					if err := checkDegenerate(rc); err != nil {
+						return Message{}, err
+					}
+					if err := checkPhraseRepeat(all); err != nil {
+						return Message{}, err
+					}
 				}
 				progress()
 			}

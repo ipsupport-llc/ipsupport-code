@@ -3105,6 +3105,25 @@ func (a *app) setModel(name string) []string {
 	return []string{"model → " + name}
 }
 
+// toggleLoopDetection flips DisableLoopDetection for the CURRENTLY ACTIVE
+// provider's connection and persists it — same local-vs-named-provider
+// branching as setModel. On by default everywhere; lets a trusted, capable
+// hosted provider (Claude, OpenAI) opt out of the local-model-oriented
+// repetition detectors per-connection.
+func (a *app) toggleLoopDetection() error {
+	if a.isLocal() {
+		a.cfg.LLM.DisableLoopDetection = !a.cfg.LLM.DisableLoopDetection
+		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
+	}
+	if a.cfg.Providers == nil {
+		a.cfg.Providers = map[string]config.LLM{}
+	}
+	p := a.cfg.Providers[a.cfg.Provider]
+	p.DisableLoopDetection = !p.DisableLoopDetection
+	a.cfg.Providers[a.cfg.Provider] = p
+	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+}
+
 // configOverview is the control panel: current settings + the command to change
 // each, so the config file never needs hand-editing.
 func (a *app) configOverview() []string {

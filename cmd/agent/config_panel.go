@@ -30,6 +30,7 @@ var configRows = []cfgRow{
 	{key: "model"},
 	{key: "apikey"},
 	{key: "reasoning"},
+	{key: "loop_detection"},
 	{header: "Behavior"},
 	{key: "mode"},
 	{key: "perm_files"},
@@ -226,6 +227,8 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		return "api key", v, "enter: add/set a provider key"
 	case "reasoning":
 		return "reasoning", m.app.reasoningLevel(m.app.providerName(), act.Model), "enter: cycle off→high (trims a thinking model)"
+	case "loop_detection":
+		return "loop detection", onOff(!act.DisableLoopDetection), "enter: toggle (aborts a model stuck repeating itself)"
 	case "mode":
 		v := "⏵⏵ auto"
 		if m.app.planMode {
@@ -334,6 +337,12 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		next := nextReasoning(m.app.reasoningLevel(provider, model))
 		if _, ok := m.app.applyReasoning(provider+"/"+model, provider, next); !ok {
 			m.push(cDim.Render("  " + provider + " reasoning must be set raw in config.json (key " + provider + "/" + model + ")"))
+		}
+	case "loop_detection": // toggle the active connection's repetition detectors
+		if err := m.app.toggleLoopDetection(); err != nil {
+			m.push(cErr.Render("  could not persist: " + err.Error()))
+		} else if err := m.app.wire(); err != nil {
+			m.push(cErr.Render("  " + err.Error()))
 		}
 	case "model": // needs the live model list — hand off to /model
 		m.state = stIdle

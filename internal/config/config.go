@@ -39,6 +39,13 @@ type LLM struct {
 	// data before it's aborted and retried. 0 uses the default (90s). Raise it for a
 	// hosted reasoning model that can think silently (no streamed deltas) for longer.
 	IdleTimeoutSeconds int `json:"idle_timeout_seconds,omitempty"`
+	// DisableLoopDetection turns off the degenerate-repetition detectors (a
+	// single character, or a whole phrase, repeating back to back) for this
+	// connection. Enabled by default everywhere — a capable hosted model
+	// essentially never trips these thresholds — but a weak local model prone
+	// to this failure mode is exactly what it exists for, so a strong provider
+	// (e.g. a hosted Claude/OpenAI connection) can opt out per-connection.
+	DisableLoopDetection bool `json:"disable_loop_detection,omitempty"`
 	// Extra is resolved per request (NOT persisted here): extra top-level body
 	// params merged into the chat request — used for per-model reasoning controls
 	// (see Config.Reasoning), whose shape varies by provider.

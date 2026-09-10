@@ -1786,8 +1786,21 @@ func (a *app) wire() error {
 	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
 	a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
+	if a.cfg.Memory == "raw" {
+		// A local server's KV-cache only helps while the prompt PREFIX stays
+		// identical between requests; remember()'s trim cuts from the front,
+		// which breaks that just like a summary compact would. Raw mode's whole
+		// point is fewer surprises, not a cache-breaking cut on every turn past
+		// the default cap — so make it a rare backstop instead.
+		a.ag.SetMaxHistory(rawMemoryMaxHistory)
+	}
 	return nil
 }
+
+// rawMemoryMaxHistory is memory "raw"'s message cap — high enough that the
+// silent FIFO trim in Agent.remember is a safety backstop against a truly
+// runaway session, not something a normal session ever reaches.
+const rawMemoryMaxHistory = 500
 
 // setMode switches between plan (investigate + propose) and auto (execute) and
 // returns a one-line confirmation.

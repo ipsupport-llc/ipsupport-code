@@ -130,6 +130,35 @@ func TestHintsDontCrossActionsWithSharedErrorText(t *testing.T) {
 	}
 }
 
+// SetMaxHistory overrides the default trim cap (16) — memory "raw" callers
+// raise it a lot so the FIFO cut, which breaks a local server's KV-cache
+// prefix just like a summary compact does, stays a rare backstop instead of
+// firing on every turn.
+func TestSetMaxHistoryOverridesTrimCap(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "answer 1"},
+		{Role: "assistant", Content: "answer 2"},
+		{Role: "assistant", Content: "answer 3"},
+		{Role: "assistant", Content: "answer 4"},
+		{Role: "assistant", Content: "answer 5"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	a.SetMaxHistory(4) // 2 turns' worth (goal + final each)
+	if a.MaxHistory() != 4 {
+		t.Fatalf("MaxHistory() = %d, want 4", a.MaxHistory())
+	}
+
+	for i := range fake.replies {
+		if _, err := a.Run(context.Background(), fake.replies[i].Content+" goal"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if a.SessionLen() != 4 {
+		t.Errorf("SessionLen = %d, want 4 (cap enforced at the overridden value, not the default 16)", a.SessionLen())
+	}
+}
+
 func TestSessionMemoryCarriesAcrossRuns(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
 	fake := &scriptLLM{replies: []llm.Message{

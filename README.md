@@ -589,9 +589,14 @@ it for slow builds/test suites, or let the model pass a larger per-call `timeout
 Cross-task memory: once the context window fills past `compact_threshold`
 (default `0.75`), the session is folded into an LLM-written recap to free
 headroom — `memory raw` turns that off entirely, keeping turns verbatim and
-only dropping the oldest ones outright (no paraphrase) once there are too many:
-`ipsupport-code config set memory raw` / `config set compact_threshold 0.85`,
-or toggle/cycle both live from the `/config` panel.
+only dropping the oldest ones outright (no paraphrase) once there are too many
+(500 messages — high enough that it's a rare backstop, not routine): `ipsupport-code
+config set memory raw` / `config set compact_threshold 0.85`, or toggle/cycle
+both live from the `/config` panel. Either kind of cut — an LLM recap or the
+plain drop — changes the front of the prompt, which breaks a local server's
+KV-cache reuse for it (matched only on an identical prefix) just as much as
+the other; `raw`'s high cap exists so that cost stays rare instead of hitting
+on every turn once a session runs long.
 
 Permissions for `run` and `file` resolve per action: a **deny** glob blocks, an
 **allow** glob runs without asking, otherwise the **default** (`ask`/`allow`/`deny`)

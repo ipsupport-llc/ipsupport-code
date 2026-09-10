@@ -103,6 +103,15 @@ func (a *Agent) Reset() { a.history = nil }
 // so the next run uses it without a full re-wire.
 func (a *Agent) SetSystem(s string) { a.system = s }
 
+// SetMaxHistory overrides how many recent session messages remember() keeps
+// verbatim before silently cutting the oldest ones — no LLM recap, no chance
+// to preserve anything (default 16, set in New). Cutting the front of the
+// prompt breaks a local server's KV-cache prefix reuse exactly like a summary
+// compact does, so a low cap makes that happen on every single turn once a
+// session runs long. Memory "raw" callers raise this a lot, turning the trim
+// into a rare safety backstop instead of everyday routine.
+func (a *Agent) SetMaxHistory(n int) { a.maxHistory = n }
+
 // SetGoalLoop configures goal pursuit: when the model finalizes, a judge decides
 // whether the goal is met; if not, re-feed the goal and keep going, up to
 // maxReturns times (a TTL). 0 disables it — one run, the model's finish stands.
@@ -161,6 +170,9 @@ func (a *Agent) PlanMode() bool { return a.planMode }
 
 // SessionLen reports how many remembered messages are in the current session.
 func (a *Agent) SessionLen() int { return len(a.history) }
+
+// MaxHistory reports the current trim cap (see SetMaxHistory).
+func (a *Agent) MaxHistory() int { return a.maxHistory }
 
 // History returns a copy of the session conversation (for persistence).
 func (a *Agent) History() []llm.Message { return append([]llm.Message(nil), a.history...) }

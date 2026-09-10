@@ -326,6 +326,7 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		if err := config.SaveMemory(next); err != nil {
 			m.push(cErr.Render("  could not persist: " + err.Error()))
 		}
+		_ = m.app.wire() // raw needs a much higher history cap (see wire) — apply it now
 	case "compact_threshold":
 		m.cycleCompactThreshold()
 	case "reasoning": // cycle the active model's reasoning effort off→high

@@ -428,7 +428,7 @@ func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, o
 		if pErr != nil {
 			return "", pErr
 		}
-		subReg, subWorkspace = a.buildSubReg(subPol), root
+		subReg, subWorkspace = a.buildSubReg(subPol, root), root
 	}
 
 	// Ask before spawning unless the policy is relaxed. "ask" (default) guards
@@ -560,14 +560,15 @@ func (a *app) resolveSpawnDir(dir string) (string, error) {
 	return filepath.Clean(dir), nil
 }
 
-// buildSubReg builds a sub-agent's tool registry against a given policy: the host
+// buildSubReg builds a sub-agent's tool registry against a given policy (and
+// its jail root, for the sandbox wrapper — see sandboxWrapperFor): the host
 // tools except `agent` (so sub-agents can't recurse) and except help (a usage
 // helper they don't need). The run (shell) tool is included only when spawn.exec
 // is on — the sharpest capability to hand an autonomous sub-agent.
-func (a *app) buildSubReg(pol *policy.Engine) *tool.Registry {
+func (a *app) buildSubReg(pol *policy.Engine, root string) *tool.Registry {
 	tools := []tool.Tool{tool.NewFile(pol, gatedApprover{a}, a.snapFile)}
 	if a.cfg.Spawn.Exec {
-		tools = append(tools, tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second))
+		tools = append(tools, tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.sandboxWrapperFor(root)))
 	}
 	tools = append(tools, tool.NewGit(pol, gatedApprover{a}), tool.NewWeb(http.DefaultClient, a.cfg.Offline), tool.NewCalc())
 	if a.skills != nil && a.skills.HasEnabled() {
@@ -1682,19 +1683,16 @@ func (a *app) detectContextWindow() {
 // system prompt. Called at startup and after any setting that changes what the
 // agent is allowed to do or talk to. NOT safe while a task goroutine is running
 // (the running agent's history would race) — callers gate on that.
-// sandboxWrapper builds the OS-sandbox command wrapper for the run tool from the
-// current config (mode + jail + offline), or nil when sandboxing is off or the
-// platform can't confine (then commands run as before). Writes are confined to
-// the workspace jail; the network follows offline mode.
+// sandboxWrapper builds the OS-sandbox command wrapper for the HOST's run
+// tool from the current config (mode + jail + offline). See sandboxWrapperFor
+// for the root-parameterized core a sub-agent with its own jail also uses.
 func (a *app) sandboxWrapper() tool.CmdWrapper {
-	mode := a.cfg.Sandbox
-	if mode == "" || mode == sandbox.Off {
-		return nil
-	}
-	if !sandbox.Available(mode) {
-		slog.Warn("sandbox not available on this platform — running commands unconfined", "mode", mode)
-		return nil
-	}
+	return a.sandboxWrapperFor(a.hostSandboxRoot())
+}
+
+// hostSandboxRoot is the host's own jail root: the workspace, or its
+// configured Jail subdirectory if one is set.
+func (a *app) hostSandboxRoot() string {
 	root := a.cfg.Workspace
 	if j := strings.TrimSpace(a.cfg.File.Jail); j != "" && j != "." {
 		if filepath.IsAbs(j) {
@@ -1702,6 +1700,25 @@ func (a *app) sandboxWrapper() tool.CmdWrapper {
 		} else {
 			root = filepath.Join(a.cfg.Workspace, j)
 		}
+	}
+	return root
+}
+
+// sandboxWrapperFor builds the OS-sandbox command wrapper confined to root, or
+// nil when sandboxing is off or the platform can't confine (then commands run
+// as before). root is parameterized rather than always the host's own jail so
+// a sub-agent spawned with its OWN jail (a different directory entirely) gets
+// a wrapper confined to THAT root — otherwise a sandboxed host could still
+// hand an unconfined sub-agent the run tool. The network follows offline mode
+// either way, since that's a whole-process setting, not per-jail.
+func (a *app) sandboxWrapperFor(root string) tool.CmdWrapper {
+	mode := a.cfg.Sandbox
+	if mode == "" || mode == sandbox.Off {
+		return nil
+	}
+	if !sandbox.Available(mode) {
+		slog.Warn("sandbox not available on this platform — running commands unconfined", "mode", mode)
+		return nil
 	}
 	roots := []string{root}
 	// Build tooling writes caches outside the workspace (go → ~/.cache/go-build,
@@ -1742,7 +1759,7 @@ func (a *app) wire() error {
 	}
 	// Sub-agents get their own registry: no `agent` tool (no recursion) and no run
 	// tool unless spawn.exec is on. buildSubReg is the single source of truth.
-	a.subReg = a.buildSubReg(pol)
+	a.subReg = a.buildSubReg(pol, a.hostSandboxRoot())
 	// The `agent` tool is only worth its catalog space when there is a profile to
 	// delegate to; with no profiles configured, the tool is hidden entirely.
 	if a.hasSubagentTargets() {

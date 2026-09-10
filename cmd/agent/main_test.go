@@ -28,6 +28,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
+	"github.com/ipsupport-llc/ipsupport-code/internal/sandbox"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 	"github.com/ipsupport-llc/ipsupport-code/internal/usage"
@@ -1945,6 +1946,59 @@ func TestSubagentTargetsAndDepthCap(t *testing.T) {
 	if !subRegHasTool(a.subReg, "run") {
 		t.Error("spawn.exec on → sub-agents should have the run tool")
 	}
+}
+
+// A sandboxed host must not hand a sub-agent (spawn.exec=true) an UNCONFINED
+// run tool — buildSubReg used to build tool.NewRun with no wrap argument at
+// all, so Seatbelt/Landlock never applied to a delegated sub-agent's shell
+// commands even when the operator had sandboxing turned on. A sub-agent
+// pointed at its OWN directory must also get a wrapper rooted at THAT
+// directory, not the host's.
+func TestSubAgentGetsOwnSandboxRoot(t *testing.T) {
+	if !sandbox.Available("landlock") {
+		t.Skip("landlock not available on this host")
+	}
+	hostWs, subWs := t.TempDir(), t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = hostWs
+	cfg.Sandbox = "landlock"
+	cfg.Spawn.Exec = true
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: hostWs, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	hostWrap := a.sandboxWrapper()
+	if hostWrap == nil {
+		t.Fatal("expected a non-nil host sandbox wrapper")
+	}
+	if _, args := hostWrap("true", nil); !argsContain(args, hostWs) {
+		t.Errorf("host wrapper args = %v, want it to embed the host root %q", args, hostWs)
+	}
+
+	// This is what buildSubReg now wires for a sub-agent pointed at its own dir.
+	subWrap := a.sandboxWrapperFor(subWs)
+	if subWrap == nil {
+		t.Fatal("expected a non-nil sub-agent sandbox wrapper")
+	}
+	_, subArgs := subWrap("true", nil)
+	if !argsContain(subArgs, subWs) {
+		t.Errorf("sub-agent wrapper args = %v, want it to embed its own root %q", subArgs, subWs)
+	}
+	if argsContain(subArgs, hostWs) {
+		t.Errorf("sub-agent wrapper args = %v, must NOT embed the host's root", subArgs)
+	}
+}
+
+func argsContain(args []string, needle string) bool {
+	for _, a := range args {
+		if strings.Contains(a, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func subRegHasTool(reg *tool.Registry, name string) bool {

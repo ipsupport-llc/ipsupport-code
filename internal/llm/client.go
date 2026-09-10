@@ -323,6 +323,29 @@ func (e *runawayError) Error() string {
 	return fmt.Sprintf("the model generated over %d tokens in one turn without finishing — it's looping in its own reasoning, not making progress. Try a stronger model, give it more context, or rephrase the task", e.max)
 }
 
+// degenerateRunThreshold is how many times the SAME rune must repeat back to
+// back in the model's live output before it's treated as a stuck, degenerate
+// loop rather than legitimate content — high enough that real output
+// (a dashed separator, repeated braces/whitespace in code, ASCII art)
+// essentially never crosses it, but far below runawayError's much larger
+// token-count cap, catching it in seconds instead of the many minutes a
+// model can spend looping on one character before that cap ever fires
+// (observed live: 14m52s and 11.2k tokens in, still short of a 32k cap).
+const degenerateRunThreshold = 300
+
+// degenerateOutputError marks the model looping on a single repeated
+// character — obviously worthless output from the very first run of
+// repeats, not a legitimate long generation. Like runawayError, retrying
+// won't help.
+type degenerateOutputError struct {
+	r rune
+	n int
+}
+
+func (e *degenerateOutputError) Error() string {
+	return fmt.Sprintf("the model got stuck repeating the same character (%q) %d times in a row instead of making progress — it's looping, not thinking. Try a stronger model, or rephrase the task", e.r, e.n)
+}
+
 // send makes one attempt; the bool reports whether the failure is worth a retry.
 func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bool) {
 	c.mu.Lock()
@@ -379,8 +402,9 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bo
 		m, err := c.parseStream(resp.Body, tick, c.maxRespTk)
 		if err != nil {
 			var re *runawayError
+			var de *degenerateOutputError
 			switch {
-			case errors.As(err, &re):
+			case errors.As(err, &re), errors.As(err, &de):
 				return m, err, false // model looping — a retry won't help
 			case stalled():
 				return Message{}, fmt.Errorf("llm stream stalled (no data for %s)", c.idle), true
@@ -418,6 +442,23 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 		reqCompl++
 		c.bumpToken()
 		tick()
+	}
+	// degenerate-repetition detector, shared across content and reasoning text
+	// (whichever the model is currently emitting) — see degenerateRunThreshold.
+	var lastRune rune
+	var runLen int
+	checkDegenerate := func(s string) error {
+		for _, r := range s {
+			if r == lastRune {
+				runLen++
+			} else {
+				lastRune, runLen = r, 1
+			}
+			if runLen >= degenerateRunThreshold {
+				return &degenerateOutputError{lastRune, runLen}
+			}
+		}
+		return nil
 	}
 	done := false // only set at a real "[DONE]" — see the check after the loop
 	for sc.Scan() {
@@ -459,6 +500,9 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 				c.mu.Lock()
 				c.live.WriteString(d.Content)
 				c.mu.Unlock()
+				if err := checkDegenerate(d.Content); err != nil {
+					return Message{}, err
+				}
 				progress()
 			}
 			// Count reasoning deltas toward live progress (reconciled to the
@@ -469,11 +513,17 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 				c.mu.Lock()
 				c.live.WriteString(rc)
 				c.mu.Unlock()
+				if err := checkDegenerate(rc); err != nil {
+					return Message{}, err
+				}
 				progress()
 			} else if rc := d.Reasoning; rc != "" {
 				c.mu.Lock()
 				c.live.WriteString(rc)
 				c.mu.Unlock()
+				if err := checkDegenerate(rc); err != nil {
+					return Message{}, err
+				}
 				progress()
 			}
 			for _, tc := range d.ToolCalls {

@@ -1851,8 +1851,12 @@ func (m *tuiModel) addSteer(note string) {
 // itself as it's generated, via the same live buffer (see OpenAIClient.Live).
 // Only shown while a task is actually running, so it disappears on its own
 // once the task ends rather than leaving a stale trace behind; the ctrl+t
-// toggle itself persists across tasks. Capped to the last few lines: it's a
-// peek, not a pager.
+// toggle itself persists across tasks. Capped to the last few lines AND the
+// last few columns of each one: a degenerate model looping on a single
+// character (reported live: a wall of "0000...") produces one logical line
+// with no newlines at all, which without a width cap would flood the screen
+// with an unbroken, uncontrolled terminal wrap instead of the intended "peek,
+// not a pager" panel.
 func (m *tuiModel) thinkingView() []string {
 	if !m.showThinking || m.state != stRunning {
 		return nil
@@ -1866,9 +1870,15 @@ func (m *tuiModel) thinkingView() []string {
 	if len(lines) > maxLines {
 		lines = lines[len(lines)-maxLines:]
 	}
+	// -4 for the "  │ " prefix, -1 more for Tail's own "…" marker when it
+	// truncates, so the total never exceeds the terminal width.
+	maxWidth := m.width - 5
+	if maxWidth < 20 {
+		maxWidth = 20
+	}
 	out := []string{cDim.Render("  ◌ thinking (ctrl+t to hide):")}
 	for _, l := range lines {
-		out = append(out, cDim.Render("  │ "+l))
+		out = append(out, cDim.Render("  │ "+textutil.Tail(l, maxWidth)))
 	}
 	return out
 }

@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -108,6 +109,49 @@ func TestChatRunawayCapped(t *testing.T) {
 	cl.maxRespTk = 10 // small cap so the 50-token stream trips the runaway guard
 	if _, err := cl.Chat(context.Background(), []Message{User("go")}, nil); err == nil || !strings.Contains(err.Error(), "looping") {
 		t.Errorf("expected a runaway abort, got %v", err)
+	}
+}
+
+// A model stuck repeating a single character produces obviously worthless
+// output well before the general token-count runaway cap ever fires —
+// observed live: 14m52s and 11.2k tokens into a loop that was still short of
+// a 32k-token cap. The degenerate-repetition detector catches this in a
+// fraction of a second instead.
+func TestChatAbortsOnDegenerateRepetition(t *testing.T) {
+	var chunks []string
+	for i := 0; i < degenerateRunThreshold+10; i++ {
+		chunks = append(chunks, `{"choices":[{"delta":{"content":"0"}}]}`)
+	}
+	cl := NewOpenAIClient(config.LLM{BaseURL: sseServer(t, chunks...), Model: "fake"})
+	_, err := cl.Chat(context.Background(), []Message{User("go")}, nil)
+	if err == nil || !strings.Contains(err.Error(), "looping") {
+		t.Errorf("expected a degenerate-repetition abort, got %v", err)
+	}
+	var de *degenerateOutputError
+	if !errors.As(err, &de) {
+		t.Fatalf("error = %v, want a *degenerateOutputError", err)
+	}
+	if de.r != '0' {
+		t.Errorf("detected rune = %q, want '0'", de.r)
+	}
+}
+
+// Legitimate content that happens to repeat a character — a dashed separator,
+// repeated braces/indentation in code — must NOT trip the detector as long as
+// it stays under the threshold and isn't the ENTIRE output.
+func TestChatDoesNotFlagOrdinaryRepeatedCharacters(t *testing.T) {
+	dashes := strings.Repeat("-", degenerateRunThreshold-1)
+	cl := NewOpenAIClient(config.LLM{BaseURL: sseServer(t,
+		`{"choices":[{"delta":{"content":"a table separator: "}}]}`,
+		fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, dashes),
+		`{"choices":[{"delta":{"content":" done"}}]}`,
+	), Model: "fake"})
+	msg, err := cl.Chat(context.Background(), []Message{User("go")}, nil)
+	if err != nil {
+		t.Fatalf("ordinary repeated characters should not abort: %v", err)
+	}
+	if !strings.HasSuffix(msg.Content, " done") {
+		t.Errorf("content = %q, want it to finish normally", msg.Content)
 	}
 }
 

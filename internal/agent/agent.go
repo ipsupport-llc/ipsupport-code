@@ -269,8 +269,19 @@ func (a *Agent) remember(goal, final string, msgs []llm.Message) {
 
 // actionsDigest scans a finished turn's tool calls for a short, deterministic
 // record of what actually changed: file paths touched (write/edit/append/mkdir)
-// and top-level shell commands run. Empty when nothing mutating happened.
+// and top-level shell commands run — each command tagged with why it failed,
+// if it did. Without that, a stuck-loop task that stops after repeating a
+// failing command leaves the NEXT task's cross-task memory saying only that
+// the command was "run", never that it failed or why — so a weak model has no
+// signal to avoid blindly repeating it and has to rediscover the same failure
+// from scratch. Empty when nothing mutating happened.
 func actionsDigest(msgs []llm.Message) string {
+	results := map[string]string{} // tool-call ID → its result content
+	for _, m := range msgs {
+		if m.Role == "tool" && m.ToolCallID != "" {
+			results[m.ToolCallID] = m.Content
+		}
+	}
 	var files, cmds []string
 	seenFile, seenCmd := map[string]bool{}, map[string]bool{}
 	for _, m := range msgs {
@@ -288,7 +299,11 @@ func actionsDigest(msgs []llm.Message) string {
 			case "run":
 				if c, _ := params["command"].(string); c != "" && !seenCmd[c] {
 					seenCmd[c] = true
-					cmds = append(cmds, clip(c, 60))
+					entry := clip(c, 60)
+					if reason := runFailureReason(results[tc.ID]); reason != "" {
+						entry += " — FAILED: " + reason
+					}
+					cmds = append(cmds, entry)
 				}
 			}
 		}
@@ -306,6 +321,27 @@ func actionsDigest(msgs []llm.Message) string {
 	}
 	b.WriteString(")")
 	return b.String()
+}
+
+// runFailureReason extracts a short, concrete reason a run.shell call failed —
+// the run tool's own result content is "exit N\n<output>" (see internal/tool/
+// run.go), so the first line of output after a non-zero exit is normally the
+// actual error message. Returns "" for a successful call ("exit 0"), an
+// untracked call (no matching result, or a shape this can't parse), so the
+// digest entry stays exactly as it was before this function existed.
+func runFailureReason(content string) string {
+	if content == "" || strings.HasPrefix(content, "exit 0") {
+		return ""
+	}
+	_, body, ok := strings.Cut(content, "\n")
+	if !ok {
+		return ""
+	}
+	line, _, _ := strings.Cut(body, "\n")
+	if line = strings.TrimSpace(line); line != "" {
+		return clip(line, 80)
+	}
+	return ""
 }
 
 // DefaultSystemPrompt is the baseline instruction given to the model. Kept tight

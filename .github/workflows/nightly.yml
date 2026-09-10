@@ -50,10 +50,24 @@ jobs:
             gh release create nightly --prerelease --target "$GITHUB_SHA" --title "Nightly build" --notes "$NOTES"
           fi
 
-          # Replace the assets (their names carry the date+sha, so clear the stale
-          # set first, then upload today's). The release itself stays published
-          # throughout, so `update` never sees a 404.
+          # Replace the assets — but upload TODAY's first and only delete the
+          # PREVIOUS run's afterward. Doing it the other way (delete-then-
+          # upload, as this used to) leaves a window with no matching asset
+          # for a platform at all: `update` matches a release asset by
+          # filename SUFFIX (e.g. "_linux-arm64.tar.gz"), and a client that
+          # polls during that window 404s outright — this is exactly the
+          # failure reported live: "update" resolved a target version from
+          # the release metadata, then 404'd fetching the one platform file
+          # that hadn't been re-uploaded yet. Since today's names carry the
+          # date+sha, they never collide with yesterday's (checksums.txt is
+          # the one exception — --clobber overwrites it in place; a client
+          # mid-download of the previous checksums.txt in that instant would
+          # see a mismatch and retry, which is far cheaper than a hard 404 on
+          # the binary itself).
+          gh release upload nightly dist/*.tar.gz dist/*.zip dist/checksums.txt --clobber
           for a in $(gh release view nightly --json assets -q '.assets[].name'); do
+            case "$a" in
+              *"$(git rev-parse --short HEAD)"*|checksums.txt) continue ;; # keep today's
+            esac
             gh release delete-asset nightly "$a" --yes
           done
-          gh release upload nightly dist/*.tar.gz dist/*.zip dist/checksums.txt

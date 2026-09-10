@@ -522,8 +522,19 @@ func (f *fileTool) mkdir(_ context.Context, a Args) Result {
 	if err != nil {
 		return Err(err.Error())
 	}
+	// os.MkdirAll is a silent no-op when the directory already exists — check
+	// first so the model is TOLD it already existed instead of always seeing
+	// "created", which reads as a fresh start and hides the one fact (this
+	// isn't new) that would let it skip a step it doesn't need to repeat.
+	existed := false
+	if info, statErr := os.Stat(abs); statErr == nil && info.IsDir() {
+		existed = true
+	}
 	if err := os.MkdirAll(abs, 0o755); err != nil {
 		return Fail("file", "mkdir", "mkdir "+path+" failed", err)
+	}
+	if existed {
+		return Ok(path + " already exists — nothing to do")
 	}
 	return Ok("created directory " + path)
 }

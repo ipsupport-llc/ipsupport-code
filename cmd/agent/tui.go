@@ -855,7 +855,7 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.resolveApproval(m.approveChoice)
 			return m, m.waitApproval()
 		case "esc":
-			m.state = stRunning // back to typing; the approval stays pending
+			m.state = m.preApprove // back to typing; the approval stays pending
 			return m, nil
 		}
 		return m, nil // ignore other keys; keep showing the prompt

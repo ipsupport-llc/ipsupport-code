@@ -354,6 +354,21 @@ func SaveGlobal(name string, l LLM) error {
 	return mergeGlobalKeys(map[string]any{"name": name, "llm": l})
 }
 
+// SaveLocalModel is SaveGlobal plus marking "local" as the active provider.
+// Use this (not SaveGlobal) wherever choosing the local connection must ALSO
+// make it the active one — the setup wizard's local-model path, which needs
+// to flip Provider away from any previously configured cloud provider (see
+// SaveProviders, the cloud path's equivalent). Plain SaveGlobal callers
+// (/rename, /model on local, …) must NOT touch Provider: they run regardless
+// of which provider is currently active, and forcing it to "local" there
+// would silently switch a cloud-provider user back to local.
+func SaveLocalModel(name string, l LLM) error {
+	if name == "" {
+		name = "ipsupport-code"
+	}
+	return mergeGlobalKeys(map[string]any{"name": name, "llm": l, "provider": "local"})
+}
+
 // SaveWorkspacePolicy persists the run/file permission policy to the workspace
 // config (<workspace>/.agent/config.json) so /permissions changes survive a
 // restart. Any other keys already in that file are preserved.

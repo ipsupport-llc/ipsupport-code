@@ -418,8 +418,45 @@ func TestMaybeInitDefaultsFollowExistingProvider(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Provider != "" {
+	if cfg.Provider != "" && cfg.Provider != "local" { // both mean "local" (see isLocal())
 		t.Errorf("fresh install defaulted away from local: provider=%q", cfg.Provider)
+	}
+	if cfg.LLM.Model != "qwen-test" {
+		t.Errorf("local model not saved: %+v", cfg.LLM)
+	}
+}
+
+// Re-running setup and explicitly choosing the local-model path must switch
+// the ACTIVE provider back to "local" — not just save the connection while
+// leaving a previously configured cloud provider active. Concrete bug: cfg
+// was on "openai" (a prior setup run or /ai openai); the operator reruns
+// setup and picks local — the connection saves fine, but Provider stayed
+// "openai", so the app kept using the OLD cloud provider afterward.
+func TestInitLocalModelSwitchesActiveProvider(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	// A prior setup run (or /ai openai) already persisted "openai" as the active
+	// provider on disk — this is the state the wizard reruns against.
+	providers := map[string]config.LLM{"openai": {APIKey: "sk-old", Model: "gpt-4o"}}
+	if err := config.SaveProviders("openai", providers); err != nil {
+		t.Fatal(err)
+	}
+	def, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def.Provider != "openai" {
+		t.Fatalf("setup precondition: provider = %q, want openai", def.Provider)
+	}
+
+	reader := bufio.NewReader(strings.NewReader("\n\nqwen-test\n")) // accept URL/key defaults, name the model
+	initLocalModel(reader, def)
+
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider != "local" {
+		t.Fatalf("provider = %q, want local", cfg.Provider)
 	}
 	if cfg.LLM.Model != "qwen-test" {
 		t.Errorf("local model not saved: %+v", cfg.LLM)

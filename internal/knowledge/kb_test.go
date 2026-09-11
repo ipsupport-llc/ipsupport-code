@@ -435,3 +435,41 @@ func TestNoopPurgeDoesNotPoisonMergeSafety(t *testing.T) {
 		t.Error("concurrent process's lesson was clobbered — a no-op Purge left overwrite stuck true, so the next Save skipped its merge-read")
 	}
 }
+
+// A no-op Purge cleared pending unconditionally, even though it only sets
+// overwrite when it actually removed something. So an Add's lesson, still
+// only pending (not yet Saved), was wiped by a Purge that removed nothing —
+// leaving overwrite=false and pending=nil. The next Save (correctly, per the
+// empty-pending skip above) then saw nothing of its own to persist and wrote
+// nothing at all: the lesson survived only in k.pitfalls in memory, and the
+// store file was never even created.
+func TestNoopPurgeDoesNotDiscardEarlierAddLesson(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k.json")
+	kb, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb.Add(Pitfall{Domain: "file", ErrorPattern: "from kb", ProvenFix: "x"}) // lesson not yet saved
+
+	// Retention check runs before the caller gets around to Save — everything
+	// was just added, so nothing is old enough to drop, a no-op purge.
+	if n := kb.Purge(3650); n != 0 {
+		t.Fatalf("Purge = %d, want 0 (no-op)", n)
+	}
+
+	if err := kb.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("store file was never created — the Add's lesson was lost: %v", err)
+	}
+	final, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := final.All()
+	if len(all) != 1 || all[0].Domain != "file" {
+		t.Errorf("on-disk lessons = %+v, want the one Add'd lesson from before the no-op Purge to survive", all)
+	}
+}

@@ -215,8 +215,14 @@ func (s *Store) Purge(cutoff string) int {
 		kept = append(kept, e)
 	}
 	s.entries = kept
-	s.pending = nil
 	if removed > 0 {
+		// A deliberate replace: clear pending too, since s.entries above already
+		// reflects every pending delta (Add keeps them in lockstep) and overwrite
+		// makes Save write s.entries directly. On a no-op purge, leave pending
+		// alone — otherwise an earlier Add's not-yet-saved delta would be wiped
+		// here with neither overwrite nor pending left to tell Save there's
+		// anything of ours to persist, silently losing it.
+		s.pending = nil
 		s.overwrite = true
 	}
 	return removed

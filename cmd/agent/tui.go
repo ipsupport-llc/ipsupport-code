@@ -2059,8 +2059,14 @@ func (m *tuiModel) addSteer(note string) {
 // with no newlines at all, which without a width cap would flood the screen
 // with an unbroken, uncontrolled terminal wrap instead of the intended "peek,
 // not a pager" panel.
+//
+// busyMsg gates this too: stRunning is shared with non-task busy work
+// (/update, /compact, listing models) — that path never streams into the
+// same Live() buffer, so without this check it would show the LAST real
+// task's leftover reasoning text, stale and unrelated to what's actually
+// happening (reported: /update showing the model's final "thinking").
 func (m *tuiModel) thinkingView() []string {
-	if !m.showThinking || m.state != stRunning {
+	if !m.showThinking || m.state != stRunning || m.busyMsg != "" {
 		return nil
 	}
 	text := strings.TrimSpace(m.app.client.Live())

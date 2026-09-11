@@ -158,6 +158,58 @@ func TestGitShowDiffRespectFilePolicy(t *testing.T) {
 	}
 }
 
+// diff with no path (the whole repo) or path "." both used to bypass the
+// secret-file check entirely: checkPathPolicy only ran when "path" was a
+// literal file name, so an omitted path skipped it outright and "." resolved
+// to the repo root DIRECTORY, which IsSecret never matches — either way the
+// raw content of an uncommitted-modified .env came back in the diff. Each
+// changed file must now be checked individually and secret ones excluded,
+// while an ordinary changed file still comes through.
+func TestGitDiffExcludesSecretFilesFromWholeRepoDiff(t *testing.T) {
+	dir := initRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("API_KEY=old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", ".env", "main.go").CombinedOutput(); err != nil {
+		t.Fatalf("add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "initial").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+	// Modify both, uncommitted, so a plain "git diff" covers each.
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("API_KEY=hunter2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tl := gitToolFor(t, dir, yes())
+	ctx := context.Background()
+
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"no path", map[string]any{}},
+		{`path "."`, map[string]any{"path": "."}},
+	} {
+		r := tl.Call(ctx, "diff", tc.args)
+		if r.IsError {
+			t.Fatalf("diff (%s) = %+v, want ok", tc.name, r)
+		}
+		if strings.Contains(r.Content, "hunter2") {
+			t.Errorf("diff (%s) = %+v, want the .env secret excluded, not leaked", tc.name, r)
+		}
+		if !strings.Contains(r.Content, "func main") {
+			t.Errorf("diff (%s) = %+v, want main.go's ordinary diff still included", tc.name, r)
+		}
+	}
+}
+
 func TestGitMutatingDeniedByUser(t *testing.T) {
 	dir := initRepo(t)
 	tl := gitToolFor(t, dir, no())

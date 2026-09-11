@@ -85,7 +85,7 @@ func (a *app) spawnAgentBackground(_ context.Context, profile, task, dir string)
 		var out string
 		var runErr error
 		if external {
-			out, runErr = a.spawnExternalAgent(jctx, resolved, extP, task, dir, onLine)
+			out, runErr = a.spawnExternalAgent(jctx, resolved, extP, task, plan.subWorkspace, onLine)
 		} else {
 			out, runErr = a.runSpawnPlan(jctx, plan, task, onLine)
 		}

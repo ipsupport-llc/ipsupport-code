@@ -4262,10 +4262,20 @@ func (s *stdinApprover) Approve(_ context.Context, kind, detail string) bool {
 // pickRecipient), mirroring the TUI's own modal "approval takes the keys"
 // behavior: a background job asking the operator something right now takes
 // priority over whatever the next typed command would have been.
+// The reader goroutine starts lazily, on the first actual request (see start):
+// build() constructs a stdinOwner unconditionally, before the caller knows
+// whether this run will end up in the TUI or the plain REPL. In TUI mode
+// a.approver is replaced with the TUI's own channel-based approver (see
+// tui.go) before any request can reach this one, so readCmdLine/readApproveLine
+// are never called there — but an eagerly-started run() doesn't know that: it
+// would sit forever in ReadString on the process's real os.Stdin, racing
+// bubbletea's own raw-mode reader for the same bytes and silently stealing
+// keystrokes the TUI never sees.
 type stdinOwner struct {
 	r          *bufio.Reader
 	cmdReq     chan chan lineResult
 	approveReq chan chan lineResult
+	once       sync.Once
 }
 
 // lineResult is one ReadString('\n') outcome, delivered to whichever request
@@ -4276,9 +4286,12 @@ type lineResult struct {
 }
 
 func newStdinOwner(r *bufio.Reader) *stdinOwner {
-	o := &stdinOwner{r: r, cmdReq: make(chan chan lineResult, 1), approveReq: make(chan chan lineResult, 1)}
-	go o.run()
-	return o
+	return &stdinOwner{r: r, cmdReq: make(chan chan lineResult, 1), approveReq: make(chan chan lineResult, 1)}
+}
+
+// start launches the sole reader goroutine on first use; a no-op thereafter.
+func (o *stdinOwner) start() {
+	o.once.Do(func() { go o.run() })
 }
 
 // run is the sole goroutine that touches r, for the life of the process.
@@ -4313,6 +4326,7 @@ func (o *stdinOwner) readCmdLine() (string, error) { return o.readVia(o.cmdReq) 
 func (o *stdinOwner) readApproveLine() (string, error) { return o.readVia(o.approveReq) }
 
 func (o *stdinOwner) readVia(req chan chan lineResult) (string, error) {
+	o.start()
 	reply := make(chan lineResult, 1)
 	req <- reply
 	res := <-reply

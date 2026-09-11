@@ -237,6 +237,7 @@ type app struct {
 	usage     *usage.Store
 	skills    *skill.Store
 	reader    *bufio.Reader
+	stdin     *stdinOwner // the sole owner of reader's actual reads (see stdinOwner)
 
 	fileTracer trace.Tracer  // JSONL dataset
 	uiTracer   trace.Tracer  // live TUI (nil in plain mode)
@@ -327,7 +328,8 @@ func build(workspace, sessionName string, reader *bufio.Reader) (*app, func(), e
 	}
 
 	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader}
-	a.approver = &stdinApprover{r: reader, app: a}       // set after: it references the app for session-allow
+	a.stdin = newStdinOwner(reader)                      // sole reader of `reader`'s actual bytes from here on (see stdinOwner)
+	a.approver = &stdinApprover{stdin: a.stdin, app: a}  // set after: it references the app for session-allow
 	cleanup := func() { a.shutdownJobs(); a.closeMCP() } // cancel background jobs (killing external-agent subprocesses too) and shut down any launched MCP servers on exit
 	a.applyUsageRetention()                              // honor usage_retention_days on startup
 	a.applyKnowledgeRetention()                          // honor knowledge_retention_days on startup
@@ -2758,7 +2760,7 @@ func (a *app) repl(ctx context.Context) {
 	}
 	for {
 		fmt.Print("\n> ")
-		line, err := a.reader.ReadString('\n')
+		line, err := a.stdin.readCmdLine()
 		if err != nil {
 			fmt.Println()
 			return
@@ -4199,21 +4201,24 @@ func (g gatedApprover) Approve(ctx context.Context, kind, detail string) bool {
 }
 
 // stdinApprover prompts the operator on stderr for a policy "ask" decision. The
-// mutex serializes prompts so concurrent tool-call approvals never read the
-// shared stdin reader at the same time. `a` grants the kind's category for the
-// whole session (via the app's session-allow set). ctx is unused: this is the
-// plain (non-TUI) prompt, a synchronous stdin read with no way to interrupt it.
+// mutex serializes prompts so concurrent tool-call approvals never read a line
+// meant for each other; `stdin` (a *stdinOwner, shared with the plain REPL's
+// command loop) additionally keeps this from ever racing the loop's OWN read
+// of the same underlying reader — see stdinOwner. `a` grants the kind's
+// category for the whole session (via the app's session-allow set). ctx is
+// unused: this is the plain (non-TUI) prompt, a synchronous stdin read with no
+// way to interrupt it.
 type stdinApprover struct {
-	mu  sync.Mutex
-	r   *bufio.Reader
-	app *app
+	mu    sync.Mutex
+	stdin *stdinOwner
+	app   *app
 }
 
 func (s *stdinApprover) Approve(_ context.Context, kind, detail string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fmt.Fprintf(os.Stderr, "\n[approve %s] %s\n  allow? [y/N/a=all %s this session] ", kind, detail, categoryLabel(approvalCategory(kind)))
-	line, err := s.r.ReadString('\n')
+	line, err := s.stdin.readApproveLine()
 	if err != nil {
 		return false
 	}
@@ -4227,6 +4232,80 @@ func (s *stdinApprover) Approve(_ context.Context, kind, detail string) bool {
 		return true
 	}
 	return false
+}
+
+// stdinOwner is the ONLY goroutine ever allowed to call ReadString on the
+// process's shared plain-mode stdin reader. Two independent call sites need a
+// line from it: the plain REPL's command loop (readCmdLine, ~repl()'s main
+// loop) and stdinApprover's y/n prompt (readApproveLine), which a detached
+// background job's own goroutine can trigger at any time — including the exact
+// moment the REPL loop is itself blocked waiting for the next command. Two
+// goroutines calling ReadString on the same *bufio.Reader concurrently is a
+// data race on its internal buffer (undefined behavior — the read meant for
+// one caller can be silently handed to the other, or worse); routing both
+// through this owner means at most one goroutine ever touches the reader.
+//
+// run reads one line, THEN picks a recipient — so a request that only shows up
+// mid-read still gets first crack at that line once it completes. Between the
+// two, an approval always wins over a merely-queued command read (see
+// pickRecipient), mirroring the TUI's own modal "approval takes the keys"
+// behavior: a background job asking the operator something right now takes
+// priority over whatever the next typed command would have been.
+type stdinOwner struct {
+	r          *bufio.Reader
+	cmdReq     chan chan lineResult
+	approveReq chan chan lineResult
+}
+
+// lineResult is one ReadString('\n') outcome, delivered to whichever request
+// (command or approval) wins that read.
+type lineResult struct {
+	line string
+	err  error
+}
+
+func newStdinOwner(r *bufio.Reader) *stdinOwner {
+	o := &stdinOwner{r: r, cmdReq: make(chan chan lineResult, 1), approveReq: make(chan chan lineResult, 1)}
+	go o.run()
+	return o
+}
+
+// run is the sole goroutine that touches r, for the life of the process.
+func (o *stdinOwner) run() {
+	for {
+		line, err := o.r.ReadString('\n')
+		o.pickRecipient() <- lineResult{line, err}
+	}
+}
+
+// pickRecipient blocks until the command loop or a pending approval wants the
+// line just read, favoring an approval whenever both are waiting at once.
+func (o *stdinOwner) pickRecipient() chan lineResult {
+	select {
+	case reply := <-o.approveReq:
+		return reply
+	default:
+	}
+	select {
+	case reply := <-o.approveReq:
+		return reply
+	case reply := <-o.cmdReq:
+		return reply
+	}
+}
+
+// readCmdLine reads the plain REPL's next command line.
+func (o *stdinOwner) readCmdLine() (string, error) { return o.readVia(o.cmdReq) }
+
+// readApproveLine reads a background job's approval answer, taking priority
+// over a command line the REPL loop may be waiting on (see pickRecipient).
+func (o *stdinOwner) readApproveLine() (string, error) { return o.readVia(o.approveReq) }
+
+func (o *stdinOwner) readVia(req chan chan lineResult) (string, error) {
+	reply := make(chan lineResult, 1)
+	req <- reply
+	res := <-reply
+	return res.line, res.err
 }
 
 // logLevel is the log threshold: warnings and up by default (so retries/errors

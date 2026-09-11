@@ -1698,10 +1698,12 @@ func (a *app) mcpServerNames(servers map[string]mcp.Server) []string {
 // for the rest of the session.
 func (a *app) mcpClient(ctx context.Context, servers map[string]mcp.Server, name string) (*mcp.Client, error) {
 	a.mcpMu.Lock()
-	defer a.mcpMu.Unlock()
 	if c, ok := a.mcpClients[name]; ok {
+		a.mcpMu.Unlock()
 		return c, nil
 	}
+	a.mcpMu.Unlock()
+
 	srv, ok := servers[name]
 	if !ok {
 		return nil, fmt.Errorf("unknown MCP server %q (configured: %s)", name, strings.Join(a.mcpServerNames(servers), ", "))
@@ -1713,6 +1715,16 @@ func (a *app) mcpClient(ctx context.Context, servers map[string]mcp.Server, name
 	case srv.URL != "":
 		detail = fmt.Sprintf("%s: %s", name, srv.URL)
 	}
+	// Approval and the dial itself run WITHOUT mcpMu held: both can block
+	// indefinitely (approveGated waits on the user; Connect waits on the
+	// network/subprocess), and holding the cache lock across either would let
+	// any concurrent mcpMu.Lock() block right along with it — including
+	// invalidateStaleMCP, which /login and /init call synchronously from
+	// bubbletea's single event-loop goroutine. If THAT lock stalls on the
+	// event-loop goroutine, Update() never returns; and since the approval
+	// pending here can only be answered by Update() processing the next
+	// keystroke, the whole TUI deadlocks permanently. See
+	// TestMCPClientLockNotHeldDuringApproval.
 	approved := a.approveGated(ctx, "mcp launch", detail)
 	if !approved {
 		return nil, fmt.Errorf("mcp server %q launch denied by user", name)
@@ -1722,6 +1734,21 @@ func (a *app) mcpClient(ctx context.Context, servers map[string]mcp.Server, name
 	c, err := mcp.Connect(cctx, name, srv)
 	if err != nil {
 		return nil, err
+	}
+
+	a.mcpMu.Lock()
+	defer a.mcpMu.Unlock()
+	// Another goroutine may have raced in and cached a client for this same
+	// server while we were unlocked approving/dialing — reuse it and close
+	// the redundant one we just built, rather than leaking a duplicate
+	// connection or leaving two different Client objects in use for the same
+	// server. We don't re-check here whether the server's config changed
+	// underneath us during that window: invalidateStaleMCP already evicts a
+	// changed server's cached client on reconfigure, and racing a config edit
+	// against this rare first-connect window isn't worth reconciling further.
+	if existing, ok := a.mcpClients[name]; ok {
+		c.Close()
+		return existing, nil
 	}
 	if a.mcpClients == nil {
 		a.mcpClients = map[string]*mcp.Client{}

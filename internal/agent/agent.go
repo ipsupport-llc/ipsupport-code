@@ -167,10 +167,14 @@ func (a *Agent) askAside(ctx context.Context, base []llm.Message, question strin
 	return strings.TrimSpace(reply.Content)
 }
 
-// AnswerAside answers a side question when no task is running, using the committed
-// session history as context.
-func (a *Agent) AnswerAside(ctx context.Context, question string) string {
-	base := append([]llm.Message{llm.System(a.system)}, a.history...)
+// AnswerAside answers a side question when no task is running, against base —
+// a snapshot of the session (system prompt + history) the caller must capture
+// synchronously (e.g. via System()+History()) BEFORE calling this, rather than
+// having it read a.system/a.history itself: those fields have no lock, and a
+// caller that answers the aside on its own goroutine (so the UI stays
+// responsive) could otherwise race a concurrent Reset/SetHistory/SetSystem
+// call mutating them from the main goroutine while no task is running.
+func (a *Agent) AnswerAside(ctx context.Context, base []llm.Message, question string) string {
 	return a.askAside(ctx, base, question)
 }
 

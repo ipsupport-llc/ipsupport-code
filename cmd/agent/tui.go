@@ -1310,7 +1310,12 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/btw": // idle: no running task — answer the side question right away
 		if q := strings.TrimSpace(rest); q != "" {
 			m.push(cDim.Render("  ✦ by the way — asking on the side…"))
-			go func() { m.app.emit("aside", map[string]any{"q": q, "a": m.app.ag.AnswerAside(m.ctx, q)}) }()
+			// Snapshot the session HERE, synchronously, before launching the
+			// goroutine — a /clear or session switch run from the idle prompt
+			// while the goroutine is still in flight mutates a.history/a.system
+			// with no lock, so the goroutine must never read them live.
+			base := append([]llm.Message{llm.System(m.app.ag.System())}, m.app.ag.History()...)
+			go func() { m.app.emit("aside", map[string]any{"q": q, "a": m.app.ag.AnswerAside(m.ctx, base, q)}) }()
 		} else {
 			m.push(cDim.Render("  usage: /btw <question> — a quick answer, no tools"))
 		}

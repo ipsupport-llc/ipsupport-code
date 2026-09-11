@@ -27,6 +27,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/sandbox"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
@@ -1093,6 +1094,62 @@ func TestSessionAllowGate(t *testing.T) {
 	a.approveGated("write", "w")
 	if inner.calls != 3 {
 		t.Errorf("after reset, write must hit the prompt again; calls=%d", inner.calls)
+	}
+}
+
+// mcpList/mcpSchema carry no Mutates flag (they look like safe reads), but the
+// first call to either one launches the configured server. Launching must be
+// gated by approval — separately from mcpCall's own per-invocation approval —
+// so a workspace config can't make the model exec an arbitrary command just by
+// calling the innocuous-looking "list" or "schema" action.
+func TestMCPClientGatesLaunchApproval(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			ID     *int   `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+		if req.ID == nil { // a notification (initialized) → just accept it
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		result := `{}`
+		if req.Method == "tools/list" {
+			result = `{"tools":[]}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":%s}`, *req.ID, result)
+	}))
+	defer srv.Close()
+
+	inner := &countingApprover{reply: false}
+	a := &app{cfg: config.Default(), approver: inner}
+	a.cfg.McpServers = map[string]mcp.Server{"test": {URL: srv.URL}}
+
+	if _, err := a.mcpClient(context.Background(), "test"); err == nil {
+		t.Fatal("mcpClient should be denied by the approver before launching the server")
+	}
+	if inner.calls != 1 {
+		t.Fatalf("launching a server must ask for approval, calls=%d", inner.calls)
+	}
+	if len(a.mcpClients) != 0 {
+		t.Error("a denied launch must not be cached as a live connection")
+	}
+
+	inner.reply = true
+	if _, err := a.mcpClient(context.Background(), "test"); err != nil {
+		t.Fatalf("mcpClient after approval: %v", err)
+	}
+	if inner.calls != 2 {
+		t.Fatalf("an approved launch should hit the approver exactly once, calls=%d", inner.calls)
+	}
+
+	if _, err := a.mcpClient(context.Background(), "test"); err != nil {
+		t.Fatalf("second call to an already-launched server: %v", err)
+	}
+	if inner.calls != 2 {
+		t.Errorf("an already-launched (cached) server must not re-ask for approval, calls=%d", inner.calls)
 	}
 }
 

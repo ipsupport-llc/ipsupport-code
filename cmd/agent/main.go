@@ -1598,7 +1598,13 @@ func (a *app) mcpServerNames() []string {
 }
 
 // mcpClient returns a connected client for a server, launching + caching it on
-// first use (lazy — servers aren't spawned until something needs them).
+// first use (lazy — servers aren't spawned until something needs them). The
+// launch itself is approval-gated, separately from mcpCall's per-invocation
+// approval: list/schema carry no Mutates flag and look like safe reads, but the
+// first call to either one would otherwise launch the server (a workspace
+// config can name an arbitrary command) with no approval at all. Once
+// approved, the cached client short-circuits both the connect and the prompt
+// for the rest of the session.
 func (a *app) mcpClient(ctx context.Context, name string) (*mcp.Client, error) {
 	a.mcpMu.Lock()
 	defer a.mcpMu.Unlock()
@@ -1608,6 +1614,19 @@ func (a *app) mcpClient(ctx context.Context, name string) (*mcp.Client, error) {
 	srv, ok := a.cfg.McpServers[name]
 	if !ok {
 		return nil, fmt.Errorf("unknown MCP server %q (configured: %s)", name, strings.Join(a.mcpServerNames(), ", "))
+	}
+	detail := name
+	switch {
+	case srv.Command != "":
+		detail = fmt.Sprintf("%s: %s %s", name, srv.Command, strings.Join(srv.Args, " "))
+	case srv.URL != "":
+		detail = fmt.Sprintf("%s: %s", name, srv.URL)
+	}
+	a.spawnMu.Lock()
+	approved := a.approveGated("mcp launch", detail)
+	a.spawnMu.Unlock()
+	if !approved {
+		return nil, fmt.Errorf("mcp server %q launch denied by user", name)
 	}
 	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()

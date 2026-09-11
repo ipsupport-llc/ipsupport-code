@@ -940,6 +940,30 @@ func TestKeylessCustomProviderIsUsable(t *testing.T) {
 	}
 }
 
+// resolveSpawn (the delegate/spawn path) must accept a keyless custom provider
+// the same way providerConn (the main-session path) already does — only a
+// missing base_url, not a missing api_key, should reject a custom provider.
+func TestResolveSpawnAllowsKeylessCustomProvider(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.Providers = map[string]config.LLM{
+		"ollama": {BaseURL: "http://localhost:11434/v1", Model: "qwen2.5-coder:7b"}, // no api_key
+	}
+	cfg.Agents = map[string]config.AgentProfile{"loc": {Provider: "ollama"}}
+	a := &app{cfg: cfg, workspace: cfg.Workspace}
+
+	plan, external, _, err := a.resolveSpawn("loc", "")
+	if err != nil {
+		t.Fatalf("resolveSpawn with keyless custom provider = %v, want success", err)
+	}
+	if external {
+		t.Fatal("resolveSpawn returned external=true for a plain LLM profile")
+	}
+	if plan.llmCfg.BaseURL != "http://localhost:11434/v1" {
+		t.Errorf("plan.llmCfg = %+v, want the ollama connection", plan.llmCfg)
+	}
+}
+
 func TestInputHistoryRecallAndPersist(t *testing.T) {
 	ws := t.TempDir()
 	m := &tuiModel{input: textarea.New(), app: &app{cfg: config.Default(), workspace: ws}}

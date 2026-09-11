@@ -438,7 +438,11 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 		if !rok {
 			return spawnPlan{}, false, p, fmt.Errorf("profile %q: unknown provider %q", profile, provider)
 		}
-		if rp.APIKey == "" {
+		if config.IsCustomProvider(a.cfg, provider) {
+			if rp.BaseURL == "" { // a custom provider must at least name where to connect
+				return spawnPlan{}, false, p, fmt.Errorf("profile %q: %s has no base_url — set providers.%s.base_url in config", profile, provider, provider)
+			}
+		} else if rp.APIKey == "" { // built-in cloud templates need a key
 			return spawnPlan{}, false, p, fmt.Errorf("profile %q: %s has no API key — add one with /ai key %s <token>", profile, provider, provider)
 		}
 		llmCfg = rp

@@ -2208,6 +2208,35 @@ func TestSessionsListSwitchDelete(t *testing.T) {
 	}
 }
 
+// TestDeleteSessionRemovesArchive verifies /sessions delete also removes the
+// session's companion .archive.jsonl file, not just its .json file — leaving
+// the archive behind leaks disk space and stale data indefinitely.
+func TestDeleteSessionRemovesArchive(t *testing.T) {
+	ws := t.TempDir()
+	a := &app{workspace: ws, cfg: config.Config{Name: "bob"}}
+	sessionsDir := filepath.Join(ws, ".agent", "sessions")
+	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sessionFile := filepath.Join(sessionsDir, "bob.json")
+	archiveFile := filepath.Join(sessionsDir, "bob.archive.jsonl")
+	if err := os.WriteFile(sessionFile, []byte(`[]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(archiveFile, []byte(`{"time":"now","goal":"g","entry":"e"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a.deleteSessionNamed("bob")
+
+	if _, err := os.Stat(sessionFile); !os.IsNotExist(err) {
+		t.Errorf("session file should be removed, stat err = %v", err)
+	}
+	if _, err := os.Stat(archiveFile); !os.IsNotExist(err) {
+		t.Errorf("archive file should be removed, stat err = %v", err)
+	}
+}
+
 type fixedApprover bool
 
 func (f fixedApprover) Approve(_, _ string) bool { return bool(f) }

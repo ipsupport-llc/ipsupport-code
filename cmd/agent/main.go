@@ -2216,8 +2216,9 @@ func (a *app) switchSession(name string) error {
 	return nil
 }
 
-// deleteSessionNamed removes a named session's file (and the legacy file for the
-// default name). If it's the active thread, memory is cleared too.
+// deleteSessionNamed removes a named session's file and its companion archive
+// (and the legacy file for the default name). If it's the active thread,
+// memory is cleared too.
 func (a *app) deleteSessionNamed(name string) []string {
 	if strings.TrimSpace(name) == "" {
 		return []string{"usage: /sessions delete <name>"}
@@ -2227,6 +2228,7 @@ func (a *app) deleteSessionNamed(name string) []string {
 	if os.Remove(filepath.Join(a.workspace, ".agent", "sessions", slug+".json")) == nil {
 		removed = true
 	}
+	os.Remove(filepath.Join(a.workspace, ".agent", "sessions", slug+".archive.jsonl")) // best-effort: not every session has one
 	if slug == "ipsupport-code" && os.Remove(a.legacySessionPath()) == nil {
 		removed = true
 	}

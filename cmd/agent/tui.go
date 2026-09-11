@@ -1328,12 +1328,24 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/btw": // idle: no running task — answer the side question right away
 		if q := strings.TrimSpace(rest); q != "" {
 			m.push(cDim.Render("  ✦ by the way — asking on the side…"))
-			// Snapshot the session HERE, synchronously, before launching the
-			// goroutine — a /clear or session switch run from the idle prompt
-			// while the goroutine is still in flight mutates a.history/a.system
-			// with no lock, so the goroutine must never read them live.
-			base := append([]llm.Message{llm.System(m.app.ag.System())}, m.app.ag.History()...)
-			go func() { m.app.emit("aside", map[string]any{"q": q, "a": m.app.ag.AnswerAside(m.ctx, base, q)}) }()
+			// Snapshot the session AND capture the agent + tracer HERE,
+			// synchronously, before launching the goroutine. The history/system
+			// snapshot guards against a /clear or session switch run from the
+			// idle prompt while the goroutine is still in flight (mutates
+			// a.history/a.system with no lock); capturing a.ag and a.tracer
+			// guards the same goroutine against /model, /permissions, /new, etc.
+			// — all of which call wire(), which reassigns a.ag and a.tracer with
+			// no lock on every call. Same pattern as resolveSpawn's tracer
+			// capture (see spawnPlan): the goroutine must never read a.ag/a.tracer
+			// live again.
+			ag, tracer := m.app.ag, m.app.tracer
+			base := append([]llm.Message{llm.System(ag.System())}, ag.History()...)
+			go func() {
+				answer := ag.AnswerAside(m.ctx, base, q)
+				if tracer != nil {
+					tracer.Emit("aside", map[string]any{"q": q, "a": answer})
+				}
+			}()
 		} else {
 			m.push(cDim.Render("  usage: /btw <question> — a quick answer, no tools"))
 		}

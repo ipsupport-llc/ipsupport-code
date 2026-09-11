@@ -13,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
+	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
 )
 
 const dateFmt = "2006-01-02"
@@ -241,11 +242,26 @@ func readPitfalls(path string) ([]Pitfall, error) {
 // global KB could have one's learned lesson silently lost to the other's last
 // write (the mutex only protects against races WITHIN one process). Purge/
 // Clear set overwrite, skipping the merge: those are a deliberate replace of
-// the whole store. The write itself is atomic (temp + rename) so a crash
-// mid-write can't truncate the lessons file either.
+// the whole store. A file lock around the whole read-merge-write cycle keeps
+// two such processes from interleaving (one's read landing before the other's
+// write, so each only ever merges its own delta) the same way the in-process
+// mutex keeps two goroutines from interleaving; an in-memory KB (path=="")
+// skips it, since there's nothing on disk to serialize around. The write
+// itself is atomic (temp + rename) so a crash mid-write can't truncate the
+// lessons file either. pending/overwrite are only cleared once that write
+// actually succeeds — if it fails, they're left intact so the next Save
+// replays them instead of silently losing them (a concurrent Add's own Save
+// wouldn't otherwise know to replay a lesson it never recorded).
 func (k *KB) Save() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.path != "" {
+		unlock, err := filelock.Lock(k.path)
+		if err != nil {
+			return &KnowledgeError{Op: "lock", Path: k.path, Err: err}
+		}
+		defer unlock()
+	}
 	if !k.overwrite && len(k.pending) > 0 {
 		if onDisk, err := readPitfalls(k.path); err == nil {
 			today := k.today()
@@ -257,8 +273,6 @@ func (k *KB) Save() error {
 		// on a read error, fall back to writing our own in-memory state — no
 		// worse than the previous unconditional-overwrite behavior.
 	}
-	k.pending = nil
-	k.overwrite = false
 	data, err := json.MarshalIndent(k.pitfalls, "", "  ")
 	if err != nil {
 		return &KnowledgeError{Op: "marshal", Path: k.path, Err: err}
@@ -266,6 +280,8 @@ func (k *KB) Save() error {
 	if err := atomicfile.Write(k.path, data, 0o644); err != nil {
 		return &KnowledgeError{Op: "write", Path: k.path, Err: err}
 	}
+	k.pending = nil
+	k.overwrite = false
 	return nil
 }
 

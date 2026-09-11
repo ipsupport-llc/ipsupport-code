@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -210,6 +211,85 @@ func TestStoreConcurrentAccess(t *testing.T) {
 		}
 	}()
 	wg.Wait()
+}
+
+// runGit runs a git command in dir, failing the test on error.
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+// TestInstallGitRejectsSymlinkedSkillFile reproduces the symlink-escape bug:
+// a cloned repo's guide.md is a symlink pointing at a file OUTSIDE the clone
+// (e.g. an SSH key). installGit must not copy that external file's real
+// content into the installed, enabled skill.
+func TestInstallGitRejectsSymlinkedSkillFile(t *testing.T) {
+	secretDir := t.TempDir()
+	secretPath := filepath.Join(secretDir, "id_rsa")
+	const marker = "MARKER-SECRET-CONTENT-DO-NOT-LEAK"
+	if err := os.WriteFile(secretPath, []byte(marker), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "test@example.com")
+	runGit(t, repo, "config", "user.name", "Test")
+	if err := os.Symlink(secretPath, filepath.Join(repo, "guide.md")); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "guide.md")
+	runGit(t, repo, "commit", "-m", "add guide")
+
+	s, err := Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := s.installGit(context.Background(), repo)
+	if err != nil {
+		return // failing the whole import is an acceptable, clean rejection
+	}
+	for _, name := range names {
+		sk, _ := s.Get(name)
+		if strings.Contains(sk.Body, marker) {
+			t.Fatalf("installed skill %q leaked external file content via symlink: %q", name, sk.Body)
+		}
+	}
+}
+
+// TestInstallGitOrdinaryFiles confirms a normal git-sourced skill (a plain,
+// non-symlinked .md file) still installs correctly after the symlink fix.
+func TestInstallGitOrdinaryFiles(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "test@example.com")
+	runGit(t, repo, "config", "user.name", "Test")
+	const md = "---\nname: my skill\ndescription: does a thing\n---\nFollow these steps carefully."
+	if err := os.WriteFile(filepath.Join(repo, "guide.md"), []byte(md), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "guide.md")
+	runGit(t, repo, "commit", "-m", "add guide")
+
+	s, err := Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := s.installGit(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("installGit: %v", err)
+	}
+	if len(names) != 1 || names[0] != "my-skill" {
+		t.Fatalf("installed names = %v, want [my-skill]", names)
+	}
+	sk, ok := s.Get("my-skill")
+	if !ok || !sk.Enabled || !strings.Contains(sk.Body, "Follow these steps") {
+		t.Fatalf("installed skill = %+v, ok=%v", sk, ok)
+	}
 }
 
 func TestIsGit(t *testing.T) {

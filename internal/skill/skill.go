@@ -348,6 +348,12 @@ func (s *Store) installGit(ctx context.Context, repo string) ([]string, error) {
 		if strings.EqualFold(filepath.Base(p), "readme.md") {
 			continue
 		}
+		// Reject symlinks outright: a cloned repo could name one guide.md and
+		// point it at an arbitrary local file (e.g. an SSH key), which would
+		// otherwise get copied verbatim into an installed, enabled skill.
+		if info, err := os.Lstat(p); err != nil || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
 		data, err := os.ReadFile(p)
 		if err != nil {
 			continue

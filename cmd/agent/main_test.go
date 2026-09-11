@@ -3072,6 +3072,57 @@ func TestReflectSeparateClientCountsTowardBudget(t *testing.T) {
 	}
 }
 
+// A one-shot task whose very first model request fails outright must not be
+// silently swallowed. Here the fake server streams a single character well
+// past internal/llm's degenerateRunThreshold (300), so the client's
+// degenerate-repetition detector aborts the call with a non-retriable
+// "looping" error — but only AFTER genuinely ticking up real completion
+// tokens for every chunk it already streamed (internal/llm.Chat does not
+// roll those back for a non-retriable error, unlike a retriable one). That
+// makes this a faithful stand-in for "the initial request failed but burned
+// real tokens first" (an auth error burns none, since it's rejected before
+// any generation — see internal/llm.send's status-code switch).
+//
+// runOne must (1) return a non-nil error so main() can exit nonzero instead
+// of falling through to exit 0, and (2) still record that spend via
+// recordUsage — both were skipped before this fix.
+func TestRunOneFailedFirstRequestSignalsErrorAndRecordsUsage(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	const chunks = 310 // past degenerateRunThreshold (300)
+	var sse strings.Builder
+	for i := 0; i < chunks; i++ {
+		sse.WriteString(`data: {"choices":[{"delta":{"content":"0"}}]}` + "\n\n")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse.String())
+	}))
+	defer srv.Close()
+
+	// A priced model, so a nonzero session cost is a meaningful assertion
+	// (an unpriced model would keep CostUSD at 0 even with tokens recorded).
+	if err := config.SaveGlobal("", config.LLM{BaseURL: srv.URL + "/v1", Type: "openai", Model: "gpt-4o-mini"}); err != nil {
+		t.Fatal(err)
+	}
+
+	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if err := a.runOne(context.Background(), "do the thing"); err == nil {
+		t.Error("runOne must return a non-nil error when the first model request fails outright, so main() can exit nonzero")
+	}
+	if a.sessionCost() <= 0 {
+		t.Errorf("sessionCostUSD = %v, want > 0 — recordUsage must run on the failed-generation path too, not just on success", a.sessionCost())
+	}
+	if tot := a.usage.Total().Tokens(); tot <= 0 {
+		t.Errorf("usage ledger total tokens = %d, want > 0 — a failed generation's real token spend must still be recorded", tot)
+	}
+}
+
 func TestRewindRestoresFiles(t *testing.T) {
 	ws := t.TempDir()
 	cfg := config.Default()

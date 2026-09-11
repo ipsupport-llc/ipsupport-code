@@ -2246,9 +2246,13 @@ func (a *app) newNamedSession(name string, persist bool) error {
 }
 
 // autoSessionName picks the next free "<base>-N" so a bare /new gets a fresh
-// scratch thread without clobbering an existing one.
-func (a *app) autoSessionName() string {
-	base := slugName(a.cfg.Name)
+// scratch thread without clobbering an existing one. base is the caller's
+// choice of starting point: a bare /new branches off the CURRENT session name
+// (continuity — you're mid-session, taking a scratch offshoot of it), while
+// the startup chooser's "start new" row wants a name independent of whatever
+// session was last active, not "<old session>-2" (see its call site).
+func (a *app) autoSessionName(base string) string {
+	base = slugName(base)
 	taken := map[string]bool{}
 	for _, s := range a.listSessions() {
 		taken[s.name] = true
@@ -2872,7 +2876,7 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	case "/new": // branch to a NEW session; the current one stays in /sessions
 		name, persist := strings.TrimSpace(rest), true
 		if name == "" {
-			name, persist = a.autoSessionName(), false
+			name, persist = a.autoSessionName(a.cfg.Name), false
 		}
 		hadContent := a.ag.SessionLen() > 0 // an empty session isn't saved — don't claim it's in /sessions
 		if err := a.newNamedSession(name, persist); err != nil {

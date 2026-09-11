@@ -304,7 +304,9 @@ func (m *tuiModel) chooseActivate() (tea.Model, tea.Cmd) {
 	if m.chooseCursor >= len(m.chooseRows) { // the "start new" row
 		// Don't restore anything; take a fresh auto-named thread so we don't save
 		// the empty startup state over an existing session. Don't persist the name.
-		m.app.cfg.Name = m.app.autoSessionName()
+		// Base it on the app's stable default identity, NOT the session that was
+		// last active — "start new" from the chooser must not produce "<old>-2".
+		m.app.cfg.Name = m.app.autoSessionName(config.Default().Name)
 		if err := m.app.wire(); err != nil { // rebind the archiver/history-tool to the new name
 			m.push(cErr.Render("couldn't start new session: " + err.Error()))
 			return m, nil
@@ -1314,7 +1316,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/new": // branch to a NEW session; the current one stays in /sessions
 		name, persist := strings.TrimSpace(rest), true
 		if name == "" {
-			name, persist = m.app.autoSessionName(), false // scratch thread; don't drift the default name
+			name, persist = m.app.autoSessionName(m.app.cfg.Name), false // scratch thread; don't drift the default name
 		}
 		hadContent := m.app.ag.SessionLen() > 0 // an empty session isn't saved — don't claim it's in /sessions
 		if err := m.app.newNamedSession(name, persist); err != nil {

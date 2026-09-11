@@ -2850,7 +2850,8 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		if strings.TrimSpace(rest) == "" {
 			printLines([]string{"usage: /btw <question> — a quick answer from the conversation, no tools"})
 		} else {
-			printLines([]string{"✦ by the way:", a.ag.AnswerAside(ctx, rest)})
+			base := append([]llm.Message{llm.System(a.ag.System())}, a.ag.History()...)
+			printLines([]string{"✦ by the way:", a.ag.AnswerAside(ctx, base, rest)})
 		}
 	case "/diff":
 		printLines(a.diffCommand())

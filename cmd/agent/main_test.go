@@ -1220,6 +1220,50 @@ func TestPlainReplClearResetsSessionAllow(t *testing.T) {
 	}
 }
 
+// TestCheckpointGenSurvivesWireRebuild reproduces a stale /rewind checkpoint
+// becoming spuriously valid again: /clear bumps Agent.HistoryGen to
+// invalidate a checkpoint captured earlier, but wire() — called again mid-
+// session by /permissions, /login, /model, and many other commands —
+// rebuilds a brand-new Agent whose historyGen counter restarts at 0. Without
+// carrying the old generation forward, the immediate SetHistory call always
+// lands the new Agent back at exactly gen=1, resurrecting any checkpoint
+// that happened to be captured at gen=1 (typically the session's very
+// first) regardless of how many discontinuities occurred since.
+func TestCheckpointGenSurvivesWireRebuild(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	cp := a.beginCheckpoint("test")
+	a.endCheckpoint(cp)
+	if !a.checkpointValid(cp) {
+		t.Fatal("test setup broken: checkpoint should be valid right after capture")
+	}
+
+	// /clear is a real discontinuity — it must invalidate the checkpoint.
+	if quit := a.command(context.Background(), "/clear"); quit {
+		t.Fatal("/clear should not quit the REPL")
+	}
+	if a.checkpointValid(cp) {
+		t.Fatal("test setup broken: /clear should have invalidated the checkpoint")
+	}
+
+	// A later wire() rebuild (e.g. /permissions, /login, /model) is a
+	// continuation, not a discontinuity — it must not resurrect a checkpoint
+	// that /clear already invalidated.
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if a.checkpointValid(cp) {
+		t.Fatal("checkpoint invalidated by /clear became valid again after a wire() rebuild")
+	}
+}
+
 // mcpList/mcpSchema carry no Mutates flag (they look like safe reads), but the
 // first call to either one launches the configured server. Launching must be
 // gated by approval — separately from mcpCall's own per-invocation approval —

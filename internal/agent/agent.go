@@ -227,6 +227,12 @@ func (a *Agent) TruncateHistory(n int) {
 // checkpoints.
 func (a *Agent) HistoryGen() int64 { return a.historyGen.Load() }
 
+// SeedHistoryGen carries the history generation counter forward from a
+// previous Agent, so rebuilding the stack (a /permissions or /skills toggle,
+// /login, /model) doesn't reset it to 0 and make an already-invalidated
+// checkpoint from before the rebuild spuriously valid again.
+func (a *Agent) SeedHistoryGen(g int64) { a.historyGen.Store(g) }
+
 // Compact summarizes the session so far into a short recap and replaces the
 // history with it, freeing context while keeping continuity. Returns how many
 // messages were compacted (0 if there was nothing worth compacting).

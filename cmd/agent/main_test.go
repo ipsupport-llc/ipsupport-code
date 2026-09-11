@@ -2913,6 +2913,28 @@ func TestReflectDisabledIsNoop(t *testing.T) {
 	}
 }
 
+// reflectTarget must accept a keyless custom provider (e.g. local Ollama/vLLM) as
+// the reflect_profile target, the same way resolveSpawn/providerConn already do —
+// only a missing base_url, not a missing api_key, should make it unusable. Before
+// this fix it silently fell back to the main/active model instead, so reflection
+// transcripts went to whatever provider was actually active (potentially a paid
+// remote one) rather than the dedicated local one configured for reflection.
+func TestReflectTargetAllowsKeylessCustomProvider(t *testing.T) {
+	cfg := config.Default()
+	cfg.LLM.Model = "main-model" // the active/main model — must NOT be what's returned
+	cfg.Providers = map[string]config.LLM{
+		"ollama": {BaseURL: "http://localhost:11434/v1", Model: "reflect-model"}, // no api_key
+	}
+	cfg.Agents = map[string]config.AgentProfile{"reflector": {Provider: "ollama"}}
+	cfg.ReflectProfile = "reflector"
+	a := &app{cfg: cfg}
+
+	_, _, _, provider, model := a.reflectTarget()
+	if provider != "ollama" || model != "reflect-model" {
+		t.Errorf("reflectTarget() = provider %q model %q, want ollama/reflect-model (the dedicated keyless custom provider, not a silent fallback to the main model)", provider, model)
+	}
+}
+
 // A dedicated reflect-profile/reasoning-override client (reflectTarget's
 // separate=true path) must count its spend toward the session budget guard,
 // same as the main-client path (recordUsage). Force "separate" via a

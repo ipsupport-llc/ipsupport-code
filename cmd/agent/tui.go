@@ -1678,7 +1678,8 @@ func (m *tuiModel) forceDetach() (tea.Model, tea.Cmd) {
 // ending with taskDoneMsg.
 func (m *tuiModel) runTask(goal string) tea.Cmd {
 	tctx, cancel := m.startTask()
-	ep := m.epoch // captured synchronously so a later force-detach can't shift it
+	m.app.maybeRewireHistoryTool() // must run here, on this goroutine, before the task's own goroutine starts — see its doc
+	ep := m.epoch                  // captured synchronously so a later force-detach can't shift it
 	return func() tea.Msg {
 		defer cancel()
 		m.app.runTaskStreaming(tctx, goal, ep)
@@ -1690,6 +1691,7 @@ func (m *tuiModel) runTask(goal string) tea.Cmd {
 // again, until max iterations (0 = until stopped) or the user cancels (esc).
 func (m *tuiModel) runLoop(interval time.Duration, max int, goal string) tea.Cmd {
 	tctx, cancel := m.startTask()
+	m.app.maybeRewireHistoryTool() // must run here, on this goroutine, before the task's own goroutine starts — see its doc
 	ep := m.epoch
 	return func() tea.Msg {
 		defer cancel()

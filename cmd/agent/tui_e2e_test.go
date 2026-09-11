@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -367,4 +368,69 @@ func TestTUI_E2E_MCPConnectDoesNotBlockUI(t *testing.T) {
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+}
+
+// TestSecondTaskRewireNoRaceWithConcurrentUIReads reproduces the
+// maybeRewireHistoryTool data race: a session that starts with an empty
+// archive gets its first entry archived once the first task's own remember()
+// runs; the SECOND task then finds hasArchivedHistory() true and rewires via
+// wire(), which reassigns a.client and a.ag with no lock (main.go's
+// a.client=.../a.ag=... assignments in wire()). Before the fix, that rewire
+// check (maybeRewireHistoryTool) ran from inside runTaskStreaming — i.e. on
+// the SAME goroutine Bubble Tea runs a tea.Cmd's closure on — concurrently
+// with the UI's Update/View goroutine reading m.app.client/m.app.ag while the
+// task is in flight (confirmed with -race: hits at both assignments). The fix
+// moves the call into runTask/runLoop, which run synchronously on the Update
+// goroutine BEFORE the tea.Cmd closure is even built, so the rewire
+// happens-before any concurrent read.
+//
+// This drives runTask exactly as Update does: get the Cmd synchronously
+// (which is where the fix now does the rewire), then run it on the calling
+// goroutine while a second, UI-simulating goroutine spins reading
+// m.app.client/m.app.ag concurrently — exactly how the TUI behaves while a
+// task is in flight. Must stay -race clean.
+func TestSecondTaskRewireNoRaceWithConcurrentUIReads(t *testing.T) {
+	url := tuiFakeServer(t, tuiContent("first answer"), tuiContent("second answer"))
+	a := tuiTestApp(t, url)
+	a.cfg.ReflectDisabled = true // keep the fake server's response order to just the two tasks' own calls
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// First task: archive starts empty (wire() above set historyToolOn=false);
+	// remember() archives this task's own entry right before Run() returns.
+	m.runTask("first task")()
+	if !a.hasArchivedHistory() {
+		t.Fatal("first task should have archived an entry via remember()")
+	}
+	if a.historyToolOn {
+		t.Fatal("historyToolOn should still be false — the rewire check only runs at the START of a task")
+	}
+
+	// Second task: this is where the rewire path triggers. Race the task's
+	// own execution against a UI-simulating reader goroutine.
+	cmd := m.runTask("second task")
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				m.app.client.Usage() // mirrors View()'s live read
+				_ = m.app.ag         // mirrors the UI's other live field read
+			}
+		}
+	}()
+	cmd()
+	close(stop)
+	wg.Wait()
+
+	if !a.historyToolOn {
+		t.Error("historyToolOn should be true after the second task rewired in the history tool")
+	}
 }

@@ -196,9 +196,19 @@ func externalResult(command string, stdout, stderr *textutil.BoundedTailWriter, 
 	return strings.TrimSpace(b.String())
 }
 
+// maxLineTapBuf caps how much of a not-yet-terminated line lineTap will hold.
+// lineTap only feeds a UI progress-line callback, so a few KB is plenty — a CLI
+// emitting one giant line with no terminator (a huge single-line JSON blob) must
+// not grow this buffer unboundedly, independent of the caps BoundedTailWriter
+// already applies to the same stream's bytes.
+const maxLineTapBuf = 4096
+
 // lineTap is an io.Writer that forwards each completed, non-empty output line to
 // onLine (trimmed) — used to surface a running external agent's latest line in
-// /jobs. One tap serves one stream, so its line buffer needs no locking.
+// /jobs. '\r' is treated as a line terminator alongside '\n' so `\r`-driven
+// progress bars (which never emit a `\n`) still flush regularly instead of
+// growing the buffer forever. One tap serves one stream, so its line buffer
+// needs no locking.
 type lineTap struct {
 	buf    []byte
 	onLine func(string)
@@ -207,7 +217,7 @@ type lineTap struct {
 func (t *lineTap) Write(p []byte) (int, error) {
 	t.buf = append(t.buf, p...)
 	for {
-		i := bytes.IndexByte(t.buf, '\n')
+		i := bytes.IndexAny(t.buf, "\r\n")
 		if i < 0 {
 			break
 		}
@@ -215,6 +225,11 @@ func (t *lineTap) Write(p []byte) (int, error) {
 			t.onLine(line)
 		}
 		t.buf = t.buf[i+1:]
+	}
+	if len(t.buf) > maxLineTapBuf {
+		// No terminator in sight — drop the stale partial line and resync on the
+		// next '\r' or '\n' rather than growing unboundedly.
+		t.buf = nil
 	}
 	return len(p), nil
 }

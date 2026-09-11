@@ -3912,7 +3912,7 @@ func initLocalModel(reader *bufio.Reader, def config.Config) {
 		MaxSteps:      def.LLM.MaxSteps,
 		ContextWindow: def.LLM.ContextWindow,
 	}
-	if err := config.SaveGlobal(def.Name, l); err != nil { // preserve any custom name
+	if err := config.SaveLocalModel(def.Name, l); err != nil { // preserve any custom name; also (re)activates "local"
 		slog.Warn("could not save config", "err", err)
 		return
 	}

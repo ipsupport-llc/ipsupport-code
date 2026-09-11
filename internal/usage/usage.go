@@ -111,22 +111,31 @@ func readEntries(path string) ([]Entry, error) {
 // two separate ipsupport-code processes sharing the same global usage store
 // could have one's update silently lost to the other's last write (the mutex
 // only protects against races WITHIN one process). Purge/Clear set overwrite,
-// skipping the merge: those are a deliberate replace of the whole ledger. A
-// file lock around the whole read-merge-write cycle keeps two such processes
-// from interleaving (one's read landing before the other's write, so each
-// only ever merges its own delta) the same way the in-process mutex keeps two
-// goroutines from interleaving. The write itself is atomic (temp + rename) so
-// a crash mid-write can't truncate the file either. pending/overwrite are only
-// cleared once that write actually succeeds — if it fails, they're left
-// intact so the next Save replays them instead of silently losing them (a
-// concurrent Add's own Save wouldn't otherwise know to replay a delta it
-// never recorded).
+// skipping the merge: those are a deliberate replace of the whole ledger. When
+// neither applies — nothing pending and no overwrite due — there is nothing
+// of this Store's own to persist, so Save skips the write entirely instead of
+// falling through to an unconditional write of s.entries: that write would
+// have no fresh read backing it, so a stale in-memory snapshot (e.g. after an
+// idle flush, or a no-op Purge, with no Add in between) could silently
+// clobber a fresher file a different process wrote since this one last read
+// it. A file lock around the whole read-merge-write cycle keeps two such
+// processes from interleaving (one's read landing before the other's write,
+// so each only ever merges its own delta) the same way the in-process mutex
+// keeps two goroutines from interleaving. The write itself is atomic (temp +
+// rename) so a crash mid-write can't truncate the file either. pending/
+// overwrite are only cleared once that write actually succeeds — if it
+// fails, they're left intact so the next Save replays them instead of
+// silently losing them (a concurrent Add's own Save wouldn't otherwise know
+// to replay a delta it never recorded).
 func (s *Store) Save() error {
 	if s.path == "" {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.overwrite && len(s.pending) == 0 {
+		return nil // nothing of ours to persist — see doc comment above
+	}
 	unlock, err := filelock.Lock(s.path)
 	if err != nil {
 		return err

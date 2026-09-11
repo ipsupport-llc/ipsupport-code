@@ -271,6 +271,96 @@ func TestSaveKeepsPendingWhenWriteFails(t *testing.T) {
 	}
 }
 
+// A Save() call with nothing newly pending (e.g. an idle/periodic flush, or
+// simply a second Save with no Add in between) used to skip the merge-read
+// entirely — that branch only ran when pending was non-empty — and fall
+// through to an unconditional write of s.entries. That write has no fresh
+// read backing it, so it silently clobbers whatever a concurrent process
+// wrote to the shared file since this Store last read it. Save must instead
+// skip the write altogether when there's nothing of its own to persist.
+func TestSaveWithNothingPendingDoesNotClobberConcurrentWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	a, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Add("2026-06-27", "grok", "grok-4.3", 10, 0)
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second process opens the same file (sees a's entry), adds its own, and
+	// saves — correctly merging onto the fresh file (disk total now 12).
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Add("2026-06-27", "grok", "grok-4.3", 2, 0)
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Back on the first process: it Saves again with NOTHING newly pending (no
+	// Add since its last Save). A blind overwrite would write a's stale
+	// in-memory snapshot (10) over b's already-persisted total (12).
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	final, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := final.Total().Tokens(); got != 12 {
+		t.Errorf("final on-disk total = %d, want 12 (b's update must survive a's empty-pending Save)", got)
+	}
+}
+
+// The real call sites (/usage purge, /usage retain) always Save()
+// unconditionally after Purge, regardless of how many entries it actually
+// dropped. A no-op Purge forces pending back to nil (see Purge), so that
+// Save() runs with nothing pending and !overwrite — the same empty-pending
+// gap as above, just reached via Purge instead of a plain second Save.
+func TestSaveAfterNoopPurgeDoesNotClobberConcurrentWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	a, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Add("2026-06-27", "grok", "grok-4.3", 10, 0)
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A concurrent process writes its own entry to the shared file.
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Add("2026-06-27", "grok", "grok-4.3", 2, 0)
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Back on the first process: a no-op purge (nothing old enough to drop),
+	// immediately followed by an unconditional Save — mirroring /usage purge
+	// and /usage retain.
+	if n := a.Purge("2000-01-01"); n != 0 {
+		t.Fatalf("Purge = %d, want 0 (no-op)", n)
+	}
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	final, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := final.Total().Tokens(); got != 12 {
+		t.Errorf("final on-disk total = %d, want 12 (b's update must survive a's no-op-purge Save)", got)
+	}
+}
+
 // A no-op Purge (nothing actually expired, the common case — the retention
 // check runs unconditionally at startup) must not leave overwrite stuck true
 // for the rest of the process's life: that would make every later Save() skip

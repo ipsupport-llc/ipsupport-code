@@ -2159,6 +2159,33 @@ func TestApprovalRestoresPriorState(t *testing.T) {
 	}
 }
 
+// esc from stApprove ("back to typing; the approval stays pending") had the
+// same hardcoded-stRunning bug as resolveApproval/approveSession — fixed
+// alongside them, but esc itself was left untouched at the time.
+func TestEscFromApprovalRestoresPriorState(t *testing.T) {
+	m := &tuiModel{app: &app{}, bridge: newBridge(), state: stIdle, input: textarea.New()}
+	m.pending = &approvalReq{kind: "run", detail: "go test ./...", reply: make(chan bool, 1)}
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyUp}) // idle → stApprove, via a background job's approval
+	if m.state != stApprove {
+		t.Fatalf("↑ from stIdle with a pending approval should enter stApprove, got %v", m.state)
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.state != stIdle {
+		t.Errorf("esc out of a background job's approval: state = %v, want stIdle", m.state)
+	}
+
+	m2 := &tuiModel{app: &app{}, bridge: newBridge(), state: stRunning, input: textarea.New()}
+	m2.Update(approvalMsg(approvalReq{kind: "run", detail: "rm -rf tmp", reply: make(chan bool, 1)}))
+	if m2.state != stApprove {
+		t.Fatalf("an approval raised while running should auto-enter stApprove, got %v", m2.state)
+	}
+	m2.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if m2.state != stRunning {
+		t.Errorf("esc out of a foreground approval: state = %v, want stRunning", m2.state)
+	}
+}
+
 func TestTailClip(t *testing.T) {
 	if got := textutil.Tail("short", 100); got != "short" {
 		t.Errorf("under cap = %q", got)

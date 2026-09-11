@@ -143,8 +143,14 @@ func (k *KB) Purge(maxAgeDays int) int {
 		kept = append(kept, p)
 	}
 	k.pitfalls = kept
-	k.pending = nil
 	if dropped > 0 {
+		// A deliberate replace: clear pending too, since k.pitfalls above already
+		// reflects every pending lesson (Add keeps them in lockstep) and
+		// overwrite makes Save write k.pitfalls directly. On a no-op purge,
+		// leave pending alone — otherwise an earlier Add's not-yet-saved lesson
+		// would be wiped here with neither overwrite nor pending left to tell
+		// Save there's anything of ours to persist, silently losing it.
+		k.pending = nil
 		k.overwrite = true
 	}
 	return dropped

@@ -415,3 +415,40 @@ func TestNoopPurgeDoesNotPoisonMergeSafety(t *testing.T) {
 		t.Error("concurrent process's entry was clobbered — a no-op Purge left overwrite stuck true, so the next Save skipped its merge-read")
 	}
 }
+
+// A no-op Purge cleared pending unconditionally, even though it only sets
+// overwrite when it actually removed something. So an Add's delta, still only
+// pending (not yet Saved), was wiped by a Purge that removed nothing —
+// leaving overwrite=false and pending=nil. The next Save (correctly, per the
+// empty-pending skip above) then saw nothing of its own to persist and wrote
+// nothing at all: the delta survived only in s.entries in memory, and the
+// ledger file was never even created.
+func TestNoopPurgeDoesNotDiscardEarlierAddDelta(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Add("2026-06-27", "grok", "grok-4.3", 10, 5) // delta not yet saved
+
+	// Retention check runs before the caller gets around to Save — cutoff is
+	// in the far past, so nothing is old enough to expire, a no-op purge.
+	if n := s.Purge("2000-01-01"); n != 0 {
+		t.Fatalf("Purge = %d, want 0 (no-op)", n)
+	}
+
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("ledger file was never created — the Add's delta was lost: %v", err)
+	}
+	final, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := final.Total().Tokens(); got != 15 {
+		t.Errorf("on-disk total = %d, want 15 (the Add's delta from before the no-op Purge must survive)", got)
+	}
+}

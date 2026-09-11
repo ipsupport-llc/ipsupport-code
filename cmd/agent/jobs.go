@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-code/internal/trace"
 )
 
 // Background jobs — fire-and-forget sub-agents. `agent.run(..., background=true)`
@@ -32,6 +33,11 @@ type job struct {
 	delivered bool      // already folded into the model's conversation
 	lastLine  string    // most recent output line from an external agent (liveness)
 	lastAt    time.Time // when lastLine arrived — a long gap hints the job is stuck
+	// tracer is captured synchronously at job creation (plan.tracer, from
+	// resolveSpawn) — the job's own background goroutine emits through THIS
+	// field, never through a.emit/a.tracer, which wire() reassigns with no lock
+	// on every call (see resolveSpawn and runSpawnPlan).
+	tracer trace.Tracer
 }
 
 // setJobProgress records the latest output line of a running job (called from the
@@ -60,7 +66,10 @@ func (a *app) spawnAgentBackground(_ context.Context, profile, task, dir string)
 	// a.cfg.Agents in particular is a map, so a resolve running concurrently
 	// with a config-mutating command is a Go runtime panic, not just a stale
 	// read. plan/external/extP are plain values captured now — the goroutine
-	// never touches a.cfg/a.subReg/a.workdir/a.planMode itself.
+	// never touches a.cfg/a.subReg/a.workdir/a.planMode/a.tracer itself; plan's
+	// captured tracer is carried onto the job below (job.tracer) so every event
+	// this job's lifecycle emits — job_done, and spawnExternalAgent's own
+	// subagent/subagent_done — goes through it instead of a.emit/a.tracer.
 	plan, external, extP, err := a.resolveSpawn(profile, dir)
 	if err != nil {
 		return "", err
@@ -71,7 +80,7 @@ func (a *app) spawnAgentBackground(_ context.Context, profile, task, dir string)
 	jctx, cancel := context.WithCancel(context.Background())
 	a.jobMu.Lock()
 	a.jobSeq++
-	j := &job{id: a.jobSeq, profile: resolved, task: task, dir: dir, started: time.Now(), cancel: cancel}
+	j := &job{id: a.jobSeq, profile: resolved, task: task, dir: dir, started: time.Now(), cancel: cancel, tracer: plan.tracer}
 	a.jobs = append(a.jobs, j)
 	id := j.id
 	a.jobMu.Unlock()
@@ -85,7 +94,7 @@ func (a *app) spawnAgentBackground(_ context.Context, profile, task, dir string)
 		var out string
 		var runErr error
 		if external {
-			out, runErr = a.spawnExternalAgent(jctx, resolved, extP, task, plan.subWorkspace, onLine)
+			out, runErr = a.spawnExternalAgent(jctx, resolved, extP, task, plan.subWorkspace, j.tracer, onLine)
 		} else {
 			out, runErr = a.runSpawnPlan(jctx, plan, task, onLine)
 		}
@@ -97,7 +106,9 @@ func (a *app) spawnAgentBackground(_ context.Context, profile, task, dir string)
 			j.ok, j.result = true, out
 		}
 		a.jobMu.Unlock()
-		a.emit("job_done", map[string]any{"job": id, "profile": resolved, "ok": runErr == nil})
+		if j.tracer != nil {
+			j.tracer.Emit("job_done", map[string]any{"job": id, "profile": resolved, "ok": runErr == nil})
+		}
 	}()
 	return fmt.Sprintf("background job #%d started (%s). Its result will be delivered to you at the start of a later turn — continue with other work; don't wait or poll.", id, resolved), nil
 }

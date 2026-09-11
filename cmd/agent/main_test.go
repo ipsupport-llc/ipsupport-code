@@ -2017,6 +2017,65 @@ func TestRunSpawnPlanTracerNoRace(t *testing.T) {
 	wg.Wait()
 }
 
+// TestSpawnAgentBackgroundTracerNoRace: TestRunSpawnPlanTracerNoRace (above)
+// covers runSpawnPlan's OWN a.tracer read, but OTHER job-lifecycle code running
+// in the SAME background goroutine also read a.tracer live, via a.emit — jobs.go's
+// own "job_done" emit, and (for an external-agent profile) spawnExternalAgent's
+// "subagent"/"subagent_done" emits, since spawnExternalAgent runs from inside
+// spawnAgentBackground's launched goroutine too. Before the fix, both raced any
+// wire() call happening on the foreground meanwhile — a data race under -race,
+// not just a stale value. The fix carries the tracer captured synchronously in
+// resolveSpawn (plan.tracer) all the way through: onto the job itself
+// (job.tracer) for job_done, and as an explicit parameter into spawnExternalAgent
+// for subagent/subagent_done — so nothing running inside a background job's own
+// goroutine ever touches a.tracer again. This test launches many background
+// jobs of BOTH kinds — an LLM-delegate profile and an external-agent profile —
+// calling wire() right after each dispatch, like a foreground settings change
+// firing while earlier jobs' own goroutines are still running, and must be
+// -race clean.
+func TestSpawnAgentBackgroundTracerNoRace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(2 * time.Millisecond) // keep runs in flight long enough to overlap wire()
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = "" // plain OpenAI-compat (skip LM Studio detection)
+	cfg.Agents = map[string]config.AgentProfile{
+		"loc":  {Provider: "local"},
+		"echo": {Kind: "external", Command: "echo", Args: []string{"ok:", "{task}"}},
+	}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 50; i++ {
+		profile := "loc"
+		if i%2 == 0 {
+			profile = "echo"
+		}
+		if _, err := a.spawnAgentBackground(context.Background(), profile, "race me", ""); err != nil {
+			t.Fatal(err)
+		}
+		// Simulates a foreground settings change (e.g. /model, a config-panel
+		// toggle) firing right after each dispatch — while earlier jobs' own
+		// goroutines may still be running job_done / spawnExternalAgent.
+		if err := a.wire(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := 0; i < 500 && a.jobsPending() > 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestBackgroundJobLifecycle(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()

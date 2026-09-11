@@ -3694,8 +3694,13 @@ func TestApplyRewindKeepsCheckpointOnRestoreFailure(t *testing.T) {
 }
 
 // A checkpoint's histLen indexes a specific session's conversation — starting
-// or switching to a different named session must drop it, or a later /rewind
-// could apply the old session's history-length index to the new one.
+// or switching to a different named session must invalidate it, or a later
+// /rewind could apply the old session's history-length index to the new one.
+// newNamedSession makes no checkpoint-specific call at all: it goes through
+// wire() (SetHistory carries the old thread forward) and then Reset(), both of
+// which bump Agent.historyGen — so the checkpoint's captured generation
+// mismatches structurally, without newNamedSession needing to know checkpoints
+// exist.
 func TestNewNamedSessionResetsCheckpoints(t *testing.T) {
 	ws := t.TempDir()
 	cfg := config.Default()
@@ -3713,8 +3718,9 @@ func TestNewNamedSessionResetsCheckpoints(t *testing.T) {
 	if err := a.newNamedSession("other", false); err != nil {
 		t.Fatal(err)
 	}
-	if len(a.checkpoints) != 0 || a.curCkpt != nil {
-		t.Errorf("checkpoints = %d, curCkpt = %v; want both cleared after switching sessions", len(a.checkpoints), a.curCkpt)
+	if rows := a.rewindRows(); len(rows) != 0 {
+		t.Errorf("checkpoints = %d after /new, want 0 — a checkpoint from before switching sessions indexes "+
+			"the old thread, so a later /rewind must not silently misapply instead of being invalidated", len(rows))
 	}
 }
 
@@ -3728,12 +3734,14 @@ func (fakeSummaryLLM) Chat(_ context.Context, _ []llm.Message, _ []map[string]an
 
 // Compact() shrinks the agent's history down to a short LLM-written summary,
 // so an open checkpoint's histLen (captured against the old, long history) is
-// just as stale afterward as it is after switchSession/newNamedSession — but
-// unlike those two, the compactDoneMsg success handler never called
-// resetCheckpoints. Bug: applyRewind's existing len(hist) guard silently
-// clamped the stale histLen down to the new (short) length, so a later
-// /rewind reported "rewound" while trimming nothing from the conversation —
-// the checkpoint looked honored when it wasn't.
+// just as stale afterward as it is after switchSession/newNamedSession. This
+// used to rely on the compactDoneMsg success handler remembering to call an
+// explicit resetCheckpoints — easy to miss (it originally was): applyRewind's
+// len(hist) guard silently clamped the stale histLen down to the new (short)
+// length, so a later /rewind reported "rewound" while trimming nothing from
+// the conversation — the checkpoint looked honored when it wasn't. Now
+// Compact() itself bumps Agent.historyGen, so the checkpoint's captured
+// generation mismatches structurally, regardless of what any caller does.
 func TestCompactResetsCheckpoints(t *testing.T) {
 	ws := t.TempDir()
 	cfg := config.Default()
@@ -3772,15 +3780,17 @@ func TestCompactResetsCheckpoints(t *testing.T) {
 // remember()'s ordinary per-turn rolling-window trim (the FIFO cut once history
 // exceeds maxHistory, ~agent.go line 299) is a THIRD path — distinct from
 // session-switch and Compact — that shifts which messages a checkpoint's histLen
-// points at just as much as those two, but used to never call resetCheckpoints.
-// Bug: a checkpoint taken while history sat right at the cap survived every
-// ordinary trim afterward, so a later /rewind either silently no-op'd
-// (rewindPreview's trimmed count landed at 0 despite turns needing undoing) or
-// reverted against a stale offset that no longer indexed the same logical turn.
+// points at just as much as those two, but used to rely on an easy-to-miss
+// explicit resetCheckpoints call (wired via a SetOnTrim hook). Bug: a
+// checkpoint taken while history sat right at the cap survived every ordinary
+// trim afterward, so a later /rewind either silently no-op'd (rewindPreview's
+// trimmed count landed at 0 despite turns needing undoing) or reverted against
+// a stale offset that no longer indexed the same logical turn. Now the trim
+// itself bumps Agent.historyGen directly — no external hook needed.
 func TestHistoryTrimResetsCheckpoints(t *testing.T) {
 	// A canned single-turn reply (no tool calls) from a fake OpenAI-compatible
-	// server, so a.wire() builds a REAL agent — exercising the actual SetOnTrim
-	// wiring in wire(), not a hand-rolled stand-in for it.
+	// server, so a.wire() builds a REAL agent — exercising the actual rolling
+	// trim inside remember(), not a hand-rolled stand-in for it.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
 	}))
@@ -3823,10 +3833,9 @@ func TestHistoryTrimResetsCheckpoints(t *testing.T) {
 }
 
 // /clear's TUI handler wipes a.ag's history via Reset() exactly like /new and
-// Compact do, so an open checkpoint's histLen is exactly as stale afterward —
-// but until this fix only /new, /sessions, and Compact called resetCheckpoints;
-// /clear left the checkpoint in place with an offset indexing a conversation
-// that no longer exists.
+// Compact do, so an open checkpoint's histLen is exactly as stale afterward.
+// Reset() bumps Agent.historyGen itself, so this is caught structurally even
+// though /clear's handler makes no explicit checkpoint-invalidating call at all.
 func TestTuiClearResetsCheckpoints(t *testing.T) {
 	ws := t.TempDir()
 	cfg := config.Default()
@@ -3852,8 +3861,9 @@ func TestTuiClearResetsCheckpoints(t *testing.T) {
 	}
 }
 
-// The plain (non-TUI) REPL's /clear handler has the identical gap: it wipes
-// a.ag's history the same way, but never called resetCheckpoints until this fix.
+// The plain (non-TUI) REPL's /clear handler has the identical exposure: it
+// wipes a.ag's history the same way, via the same Reset() that bumps
+// Agent.historyGen — caught structurally with no checkpoint-specific call here.
 func TestPlainClearResetsCheckpoints(t *testing.T) {
 	ws := t.TempDir()
 	cfg := config.Default()
@@ -3878,9 +3888,9 @@ func TestPlainClearResetsCheckpoints(t *testing.T) {
 	}
 }
 
-// The plain REPL's MANUAL /compact (unlike the TUI's compact handler, which
-// already called resetCheckpoints) never invalidated an open checkpoint either,
-// even though it replaces a.ag's history exactly the same way.
+// The plain REPL's MANUAL /compact goes through the same Agent.Compact(),
+// which bumps historyGen itself — invalidating an open checkpoint here too,
+// with no checkpoint-specific call in this handler at all.
 func TestPlainCompactResetsCheckpoints(t *testing.T) {
 	ws := t.TempDir()
 	cfg := config.Default()
@@ -3911,7 +3921,8 @@ func TestPlainCompactResetsCheckpoints(t *testing.T) {
 
 // runOne's end-of-task AUTOMATIC compaction is a fourth, distinct path (not the
 // TUI's auto-compact, not a manual /compact) that replaces a.ag's history the
-// same way Compact always has, but never called resetCheckpoints until this fix.
+// same way Compact always has — caught the same way, via historyGen, with no
+// checkpoint-specific call needed in runOne either.
 func TestRunOneAutoCompactResetsCheckpoints(t *testing.T) {
 	// A canned reply whose usage.prompt_tokens (9000) sits well past 75% of a
 	// small 10000-token window, so shouldAutoCompact() fires for real inside
@@ -3954,6 +3965,95 @@ func TestRunOneAutoCompactResetsCheckpoints(t *testing.T) {
 	if rows := a.rewindRows(); len(rows) != 0 {
 		t.Errorf("checkpoints = %d after runOne's auto-compact, want 0 — a checkpoint from before it "+
 			"indexes the discarded history, so a later /rewind must not silently misapply instead of being invalidated", len(rows))
+	}
+}
+
+// TestStructuralInvalidationCatchesUnknownMutator is the proof that this fix
+// closes the whole BUG CLASS, not just the specific call sites enumerated
+// above. Every test above exercises a real call site in this codebase — but
+// the actual failure mode this whole file guards against is a FUTURE call
+// site nobody has written yet. There is no longer a resetCheckpoints to wire
+// up at all, so this simulates that future path directly: it calls
+// Agent.SetHistory itself, bypassing every app-level helper (wire, /clear,
+// /compact, /new, /sessions — none of which are invoked here), standing in for
+// some hypothetical caller that discontinuously replaces history and has never
+// heard of checkpoints. If invalidation only worked because each known caller
+// remembers to say so, this would slip through exactly like the original bug.
+// It doesn't: SetHistory bumps Agent.historyGen unconditionally, so the
+// checkpoint's captured generation mismatches no matter who called it or why.
+func TestStructuralInvalidationCatchesUnknownMutator(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag = agent.New(fakeSummaryLLM{}, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
+	a.ag.Run(context.Background(), "task 1")
+	a.ag.Run(context.Background(), "task 2")
+
+	cp := a.beginCheckpoint("do something")
+	a.endCheckpoint(cp)
+	if len(a.checkpoints) != 1 {
+		t.Fatal("checkpoint not recorded")
+	}
+
+	// A brand-new, never-before-seen way to discontinuously mutate history —
+	// no resetCheckpoints call anywhere near it, because none exists to call.
+	a.ag.SetHistory([]llm.Message{llm.User("an entirely different, unrelated conversation")})
+
+	if rows := a.rewindRows(); len(rows) != 0 {
+		t.Errorf("checkpoints = %d after an untracked SetHistory call, want 0 — invalidation must be "+
+			"structural (a generation mismatch), not dependent on this call site having been specifically "+
+			"taught about checkpoints", len(rows))
+	}
+	if out := strings.Join(a.rewindCommand("1"), " "); !strings.Contains(out, "nothing to rewind") {
+		t.Errorf("rewindCommand after an untracked SetHistory call = %q, want it to report nothing to "+
+			"rewind to", out)
+	}
+}
+
+// TestApplyRewindPreservesEarlierCheckpoints guards the other direction: a
+// successful /rewind truncates history back to the target checkpoint, which
+// must NOT itself invalidate an EARLIER checkpoint still in the list — that
+// earlier checkpoint's histLen indexes a prefix the truncation leaves
+// byte-for-byte untouched, so the user can still rewind further back with a
+// second /rewind. This only holds because applyRewind truncates via
+// Agent.TruncateHistory (which does not bump historyGen), not SetHistory.
+func TestApplyRewindPreservesEarlierCheckpoints(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag = agent.New(fakeSummaryLLM{}, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
+
+	cpEarlier := a.beginCheckpoint("task 1")
+	a.ag.Run(context.Background(), "task 1")
+	a.endCheckpoint(cpEarlier)
+
+	cpLater := a.beginCheckpoint("task 2")
+	a.ag.Run(context.Background(), "task 2")
+	a.endCheckpoint(cpLater)
+
+	rows := a.rewindRows()
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 checkpoints before any rewind", len(rows))
+	}
+
+	// Rewind to the LATER checkpoint (rows are newest-first, so index 0).
+	a.applyRewind(rows[0].idx)
+
+	if rows := a.rewindRows(); len(rows) != 1 {
+		t.Fatalf("rows = %d after rewinding to the later checkpoint, want 1 (the earlier one) still "+
+			"offered — not invalidated by the rewind's own history truncation", len(rows))
 	}
 }
 

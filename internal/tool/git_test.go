@@ -283,6 +283,116 @@ func TestGitShowRejectsRevPathOutsideJailWhenJailIsSubdir(t *testing.T) {
 	}
 }
 
+// diff's enumeration step (git diff --name-only) always reports paths
+// relative to the REPO ROOT, never to the current effective directory. A
+// "/cd sub" moves cmd.Dir to the subdirectory for both the enumeration call
+// and the real diff that reuses its output as pathspecs — so a name like
+// "sub/x" got re-applied against a cwd that was ALREADY "sub", i.e. looked
+// for the nonexistent "sub/sub/x", and the real diff for a genuinely
+// modified file silently came back empty.
+func TestGitDiffFromSubdirResolvesRepoRootRelativePaths(t *testing.T) {
+	dir := initRepo(t)
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	subFile := filepath.Join(dir, "sub", "x")
+	if err := os.WriteFile(subFile, []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", "sub/x").CombinedOutput(); err != nil {
+		t.Fatalf("add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "add sub/x").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(subFile, []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate "/cd sub": the tool's effective directory becomes the
+	// subdirectory while the workspace/jail stay at the repo root.
+	c := config.Default()
+	c.Workspace = dir
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	e, err := policy.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.SetWorkdir("sub"); err != nil {
+		t.Fatal(err)
+	}
+	tl := NewGit(e, yes())
+
+	r := tl.Call(context.Background(), "diff", nil)
+	if r.IsError {
+		t.Fatalf("diff: %s", r.Content)
+	}
+	if !strings.Contains(r.Content, "v2") {
+		t.Errorf("diff from cwd=sub = %+v, want sub/x's change included, not silently dropped", r)
+	}
+}
+
+// git C-quotes non-ASCII filenames in --name-only's default output (e.g.
+// "é.txt" becomes a literal quoted "\303\251.txt"); passed straight back as a
+// pathspec, git does not unquote it and the real diff comes back empty.
+func TestGitDiffHandlesNonASCIIFilename(t *testing.T) {
+	dir := initRepo(t)
+	name := "é.txt"
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", name).CombinedOutput(); err != nil {
+		t.Fatalf("add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "add non-ascii file").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(path, []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tl := gitToolFor(t, dir, yes())
+	r := tl.Call(context.Background(), "diff", nil)
+	if r.IsError {
+		t.Fatalf("diff: %s", r.Content)
+	}
+	if !strings.Contains(r.Content, "v2") {
+		t.Errorf("diff = %+v, want the non-ASCII filename's change included, not silently dropped", r)
+	}
+}
+
+// A legitimately whitespace-leading filename (plain ASCII spaces aren't
+// special, so git does NOT quote it) used to be corrupted by a bare
+// strings.TrimSpace on the enumerated name, turning it into a pathspec that
+// doesn't exist and silently dropping its diff.
+func TestGitDiffHandlesWhitespaceLeadingFilename(t *testing.T) {
+	dir := initRepo(t)
+	name := " lead.txt"
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", name).CombinedOutput(); err != nil {
+		t.Fatalf("add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "add whitespace-leading file").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(path, []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tl := gitToolFor(t, dir, yes())
+	r := tl.Call(context.Background(), "diff", nil)
+	if r.IsError {
+		t.Fatalf("diff: %s", r.Content)
+	}
+	if !strings.Contains(r.Content, "v2") {
+		t.Errorf("diff = %+v, want the whitespace-leading filename's change included, not silently dropped", r)
+	}
+}
+
 func TestGitMutatingDeniedByUser(t *testing.T) {
 	dir := initRepo(t)
 	tl := gitToolFor(t, dir, no())

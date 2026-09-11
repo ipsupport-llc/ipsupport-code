@@ -2791,6 +2791,7 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		}
 	case "/reset", "/clear": // wipe THIS thread
 		a.ag.Reset()
+		a.resetSessionAllow()
 		a.clearFacts()
 		a.ag.SetSystem(a.systemPrompt())
 		a.saveSession()

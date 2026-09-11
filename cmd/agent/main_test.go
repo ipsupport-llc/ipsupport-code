@@ -1184,6 +1184,39 @@ func TestSessionAllowGate(t *testing.T) {
 	}
 }
 
+// The plain (non-TUI) REPL's /clear must reset session-allow grants exactly
+// like the TUI's /clear does — otherwise an "allow all this session" grant
+// from before /clear silently keeps auto-approving after the thread is
+// wiped, contradicting /clear's "fresh conversation" semantics.
+func TestPlainReplClearResetsSessionAllow(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	a.allowSession("edit") // grant "a" (allow-all-this-session) for the file category
+	a.sessionMu.Lock()
+	granted := len(a.sessionAllow)
+	a.sessionMu.Unlock()
+	if granted == 0 {
+		t.Fatal("test setup broken: allowSession did not record a grant")
+	}
+
+	if quit := a.command(context.Background(), "/clear"); quit {
+		t.Fatal("/clear should not quit the REPL")
+	}
+
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	if len(a.sessionAllow) != 0 {
+		t.Errorf("plain /clear left session-allow grants behind: %v, want none", a.sessionAllow)
+	}
+}
+
 // mcpList/mcpSchema carry no Mutates flag (they look like safe reads), but the
 // first call to either one launches the configured server. Launching must be
 // gated by approval — separately from mcpCall's own per-invocation approval —

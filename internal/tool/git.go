@@ -67,7 +67,13 @@ func (g *gitTool) diff(ctx context.Context, a Args) Result {
 	// leaves them raw and unquoted: git otherwise C-quotes non-ASCII/special
 	// filenames in --name-only output, and a quoted name passed back to git
 	// as a pathspec is NOT unquoted, silently matching nothing.
-	nameArgs := []string{"diff", "--name-only", "-z"}
+	//
+	// --no-textconv --no-ext-diff: without them, a workspace's .gitattributes
+	// can bind a diff/textconv driver to an arbitrary local command, which
+	// plain git diff would execute as a subprocess with no approval gate at
+	// all (diff is a read-only action here) — these flags force git to fall
+	// back to its own built-in comparison instead of running that command.
+	nameArgs := []string{"diff", "--no-textconv", "--no-ext-diff", "--name-only", "-z"}
 	if staged {
 		nameArgs = append(nameArgs, "--staged")
 	}
@@ -114,7 +120,12 @@ func (g *gitTool) diff(ctx context.Context, a Args) Result {
 		return Ok("(ok, no output)")
 	}
 
-	args := []string{"diff"}
+	// --no-textconv/--no-ext-diff: this is a read-only action with no
+	// approval gate, but a .gitattributes diff/textconv driver (or an
+	// ext-diff command) configured in the local .git/config would otherwise
+	// let plain "git diff" execute an arbitrary subprocess to produce the
+	// diff content. Suppress both so diff can never run configured commands.
+	args := []string{"diff", "--no-textconv", "--no-ext-diff"}
 	if staged {
 		args = append(args, "--staged")
 	}

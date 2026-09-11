@@ -142,8 +142,9 @@ type eventMsg uiEvent
 type approvalMsg approvalReq
 type taskDoneMsg struct{ epoch int64 } // which run finished — a force-detached run's is stale
 type compactDoneMsg struct {
-	n   int
-	err error
+	n     int
+	err   error
+	epoch int64 // which run this compaction belonged to — a force-detached one's is stale
 }
 type skillsMsg struct {
 	names []string
@@ -547,6 +548,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(detect, m.input.Focus())
 
 	case compactDoneMsg:
+		if msg.epoch != m.epoch {
+			// A force-detached (orphaned) compaction finally landed — the UI moved on
+			// to a fresh agent long ago. Ignore it: don't finalize/drain/save a
+			// compaction nobody is waiting on.
+			return m, nil
+		}
 		m.cancel = nil
 		switch {
 		case msg.err != nil:
@@ -1529,9 +1536,10 @@ func (m *tuiModel) startCompact(auto bool) tea.Cmd {
 	// couldn't before (Compact(ctx) already forwards ctx into its LLM call).
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.cancel = cancel
+	ep := m.epoch // captured synchronously so a later force-detach can't shift it
 	return func() tea.Msg {
 		n, err := m.app.ag.Compact(ctx)
-		return compactDoneMsg{n: n, err: err}
+		return compactDoneMsg{n: n, err: err, epoch: ep}
 	}
 }
 

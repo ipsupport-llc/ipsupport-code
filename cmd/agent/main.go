@@ -1658,10 +1658,11 @@ func nextReasoning(cur string) string {
 	return reasoningLevels[0]
 }
 
-// mcpServerNames lists configured MCP server names, sorted.
-func (a *app) mcpServerNames() []string {
-	names := make([]string, 0, len(a.cfg.McpServers))
-	for n := range a.cfg.McpServers {
+// mcpServerNames lists configured MCP server names, sorted. servers is the
+// server set to use — see mcpList for why this isn't read from a.cfg here.
+func (a *app) mcpServerNames(servers map[string]mcp.Server) []string {
+	names := make([]string, 0, len(servers))
+	for n := range servers {
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -1676,15 +1677,15 @@ func (a *app) mcpServerNames() []string {
 // config can name an arbitrary command) with no approval at all. Once
 // approved, the cached client short-circuits both the connect and the prompt
 // for the rest of the session.
-func (a *app) mcpClient(ctx context.Context, name string) (*mcp.Client, error) {
+func (a *app) mcpClient(ctx context.Context, servers map[string]mcp.Server, name string) (*mcp.Client, error) {
 	a.mcpMu.Lock()
 	defer a.mcpMu.Unlock()
 	if c, ok := a.mcpClients[name]; ok {
 		return c, nil
 	}
-	srv, ok := a.cfg.McpServers[name]
+	srv, ok := servers[name]
 	if !ok {
-		return nil, fmt.Errorf("unknown MCP server %q (configured: %s)", name, strings.Join(a.mcpServerNames(), ", "))
+		return nil, fmt.Errorf("unknown MCP server %q (configured: %s)", name, strings.Join(a.mcpServerNames(servers), ", "))
 	}
 	detail := name
 	switch {
@@ -1720,14 +1721,21 @@ func (a *app) closeMCP() {
 	a.mcpClients = nil
 }
 
-// mcpList is the catalog the `mcp` tool's list action returns.
-func (a *app) mcpList(ctx context.Context) string {
-	if len(a.cfg.McpServers) == 0 {
+// mcpList is the catalog the `mcp` tool's list action returns. servers is the
+// server set to use, passed in rather than read from a.cfg here: mcpList runs
+// in a background goroutine dispatched by the TUI's /mcp command (see that
+// case in tui.go), and reconfigure() (/login, /init) reassigns a.cfg wholesale
+// with no lock — a live a.cfg.McpServers read from that goroutine would race
+// it. Callers that aren't racing a.cfg (the REPL, and the mcp tool wiring,
+// both of which can only run while no reconfigure is concurrently possible)
+// pass a.cfg.McpServers directly.
+func (a *app) mcpList(ctx context.Context, servers map[string]mcp.Server) string {
+	if len(servers) == 0 {
 		return "no MCP servers configured — add them under \"mcp_servers\" in config.json"
 	}
 	var b strings.Builder
-	for _, name := range a.mcpServerNames() {
-		c, err := a.mcpClient(ctx, name)
+	for _, name := range a.mcpServerNames(servers) {
+		c, err := a.mcpClient(ctx, servers, name)
 		if err != nil {
 			fmt.Fprintf(&b, "%s: (unavailable: %s)\n", name, oneLine(err.Error(), 70))
 			continue
@@ -1742,7 +1750,7 @@ func (a *app) mcpList(ctx context.Context) string {
 
 // mcpSchema returns one tool's input schema (for the tool's schema action).
 func (a *app) mcpSchema(ctx context.Context, server, tool string) string {
-	c, err := a.mcpClient(ctx, server)
+	c, err := a.mcpClient(ctx, a.cfg.McpServers, server)
 	if err != nil {
 		return "error: " + err.Error()
 	}
@@ -1760,7 +1768,7 @@ func (a *app) mcpSchema(ctx context.Context, server, tool string) string {
 // mcpCall runs an MCP tool, asking approval first (it's external code that can do
 // anything).
 func (a *app) mcpCall(ctx context.Context, server, tool string, args map[string]any) (string, error) {
-	c, err := a.mcpClient(ctx, server)
+	c, err := a.mcpClient(ctx, a.cfg.McpServers, server)
 	if err != nil {
 		return "", err
 	}
@@ -1935,7 +1943,9 @@ func (a *app) wire() error {
 	// One proxy tool fronts every configured MCP server, so the catalog grows by a
 	// single tool — not by every server's schemas. Only when servers are set.
 	if len(a.cfg.McpServers) > 0 {
-		tools = append(tools, tool.NewMCP(a.mcpList, a.mcpCall, a.mcpSchema))
+		tools = append(tools, tool.NewMCP(func(ctx context.Context) string {
+			return a.mcpList(ctx, a.cfg.McpServers)
+		}, a.mcpCall, a.mcpSchema))
 	}
 	// The history tool only earns its catalog space once there's something
 	// durably archived to recall (see hasArchivedHistory) — a brand-new session
@@ -2820,7 +2830,7 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	case "/knowledge", "/kb":
 		printLines(a.knowledgeCommand(rest))
 	case "/mcp":
-		fmt.Println(a.mcpList(ctx))
+		fmt.Println(a.mcpList(ctx, a.cfg.McpServers))
 	case "/rewind":
 		printLines(a.rewindCommand(rest))
 	case "/reflect":

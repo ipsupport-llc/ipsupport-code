@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -226,7 +227,7 @@ func TestMCPCommand_ReturnsCmdWithoutBlocking(t *testing.T) {
 	// the old code made inline in Update never returns.
 	oldCallReturned := make(chan struct{})
 	go func() {
-		m.app.mcpList(m.ctx)
+		m.app.mcpList(m.ctx, m.app.cfg.McpServers)
 		close(oldCallReturned)
 	}()
 	select {
@@ -312,4 +313,55 @@ func TestTUI_E2E_MCPConnectDoesNotBlockUI(t *testing.T) {
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+}
+
+// TestMCPCommandDoesNotRaceConfigReload is a regression test for a data race:
+// the /mcp command's tea.Cmd goroutine (built in runCommand) used to read
+// a.cfg.McpServers live via mcpList → mcpServerNames/mcpClient, which races
+// reconfigure() (/login, /init) reassigning a.cfg wholesale with no lock.
+// /mcp's bare form never sets m.state busy (see commandWhileBusy), so nothing
+// stops the user from running /login the instant after typing /mcp, while an
+// earlier /mcp's tea.Cmd goroutine is still in flight.
+//
+// The fix captures a.cfg.McpServers synchronously in runCommand, before the
+// tea.Cmd's goroutine starts, so that goroutine never touches a.cfg again.
+// This drives runCommand("/mcp") on the calling goroutine (as Update would)
+// and runs the returned tea.Cmd on its own goroutine — exactly how bubbletea
+// dispatches it — while concurrently reassigning a.cfg, the same way
+// reconfigure() does for /login. Must be -race clean.
+func TestMCPCommandDoesNotRaceConfigReload(t *testing.T) {
+	a := tuiTestApp(t, tuiFakeServer(t))
+	a.cfg.McpServers = map[string]mcp.Server{"a": {URL: "http://mcp.invalid/a"}, "b": {URL: "http://mcp.invalid/b"}}
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.bridge.Abort)
+	// Pre-cache a client for every server name used below (including "c",
+	// swapped in by the simulated reconfigure) so mcpClient's cache hit always
+	// short-circuits before reaching approveGated — which routes through the
+	// UI bridge and would otherwise block forever waiting for a real
+	// tea.Program's Update to answer it, something this test never drives.
+	// This test targets the config-snapshot race, not approval flow (already
+	// covered by TestMCPClientGatesLaunchApproval and the e2e tests above).
+	m.app.mcpClients = map[string]*mcp.Client{"a": {}, "b": {}, "c": {}}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		_, cmd := m.runCommand("/mcp") // captures a.cfg.McpServers HERE, synchronously
+		if cmd == nil {
+			t.Fatal(`runCommand("/mcp") returned a nil tea.Cmd`)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			cmd() // bubbletea would run this on its own goroutine
+		}()
+		// Simulates reconfigure() (/login, /init): a.cfg reassigned wholesale, no
+		// lock, while an earlier /mcp's tea.Cmd goroutine may still be running.
+		newCfg := config.Default()
+		newCfg.McpServers = map[string]mcp.Server{"c": {URL: "http://mcp.invalid/c"}}
+		m.app.cfg = newCfg
+	}
+	wg.Wait()
 }

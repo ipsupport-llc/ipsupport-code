@@ -1,8 +1,11 @@
 package config
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -93,6 +96,47 @@ func TestSaveRefusesToWipeCorruptConfig(t *testing.T) {
 	// now it must abort.
 	if err := SaveSpawn(SpawnPolicy{Default: "allow"}); err == nil {
 		t.Error("saving over a corrupt config should error, not silently wipe it")
+	}
+}
+
+// mergeJSONFile's read-merge-write cycle had no cross-process/cross-goroutine
+// locking (unlike usage.Store.Save, which already wraps its own
+// read-merge-write in filelock.Lock). Many goroutines merging distinct keys
+// concurrently each read the file before any of the others have written back,
+// so all but the last writer's key are silently lost. This must not happen —
+// it's the same class of bug that would bite two ipsupport-code processes
+// running /rename and /model at the same time.
+func TestMergeJSONFileConcurrentDistinctKeysNoneLost(t *testing.T) {
+	isolate(t)
+	path := filepath.Join(t.TempDir(), "config.json")
+
+	const n = 60
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			errs[i] = mergeJSONFile(path, 0o644, map[string]any{fmt.Sprintf("k%d", i): i})
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("mergeJSONFile[%d]: %v", i, err)
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != n {
+		t.Errorf("keys survived = %d, want %d (lost update: concurrent merges clobbered each other without a lock around the read-merge-write cycle)", len(raw), n)
 	}
 }
 

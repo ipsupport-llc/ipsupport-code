@@ -514,6 +514,48 @@ func TestGitStatusDoesNotRunFsmonitorHook(t *testing.T) {
 	}
 }
 
+// Same as above but for "diff", which has TWO git invocations (the
+// --name-only enumeration and the real diff) — both must suppress
+// core.fsmonitor. An actual pending change is required so the real diff
+// invocation is reached too, not just the enumeration.
+func TestGitDiffDoesNotRunFsmonitorHook(t *testing.T) {
+	dir := initRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", "a.txt").CombinedOutput(); err != nil {
+		t.Fatalf("add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "add a.txt").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	hook := filepath.Join(dir, "fsmonitor-hook.sh")
+	script := "#!/bin/sh\ntouch " + marker + "\necho 1\nexit 0\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "config", "core.fsmonitor", hook).CombinedOutput(); err != nil {
+		t.Fatalf("config: %v\n%s", err, out)
+	}
+
+	tl := gitToolFor(t, dir, no())
+	r := tl.Call(context.Background(), "diff", nil)
+	if r.IsError {
+		t.Fatalf("diff: %s", r.Content)
+	}
+	if !strings.Contains(r.Content, "v2") {
+		t.Errorf("diff = %+v, want the usual diff output", r)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("diff ran the configured fsmonitor hook (marker file created): approval bypass via core.fsmonitor")
+	}
+}
+
 func TestGitMutatingDeniedByUser(t *testing.T) {
 	dir := initRepo(t)
 	tl := gitToolFor(t, dir, no())

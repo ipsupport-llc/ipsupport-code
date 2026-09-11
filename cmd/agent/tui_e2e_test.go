@@ -76,7 +76,7 @@ func TestSessionPersistsAcrossRestarts(t *testing.T) {
 		c.Workspace, c.LLM.BaseURL, c.LLM.Model = ws, url, "fake"
 		c.Run.Default, c.File.Default, c.File.Jail = "allow", "allow", "."
 		a := &app{cfg: c, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
-		a.approver = &stdinApprover{r: a.reader}
+		a.approver = &stdinApprover{stdin: newStdinOwner(a.reader)}
 		if err := a.wire(); err != nil {
 			t.Fatal(err)
 		}

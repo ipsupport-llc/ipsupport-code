@@ -1446,6 +1446,85 @@ func TestMCPClientLockNotHeldDuringApproval(t *testing.T) {
 	<-done
 }
 
+// Regression test for the orphan-connection bug traded in by the #229 fix
+// above: making mcpClient release mcpMu across the approval wait and dial
+// (to fix the TUI deadlock) means a connect attempt that's in flight —
+// approved and dialing, but not yet re-cached — is invisible to closeMCP,
+// which only ever iterated a.mcpClients. Before this fix, closeMCP returned
+// instantly while such a connection kept running in the background, and
+// nothing ever waited for or cancelled it: on process exit it would either
+// leak as a real orphan (stdio subprocess) or, at best, keep dialing
+// pointlessly until its own 20s timeout.
+//
+// This drives a connect into flight against a server that never answers,
+// confirms the server actually received the request (so the connection is
+// genuinely established, not just queued), then calls closeMCP and asserts
+// it (a) returns promptly by actively cancelling the in-flight attempt
+// rather than passively waiting it out, and (b) the blocked mcpClient call
+// itself unwinds shortly after, instead of running until its own timeout.
+// It also checks that once shutdown has begun, a later launch is refused
+// outright rather than started and left with nothing to ever close it.
+func TestCloseMCPCancelsInFlightConnectAttempt(t *testing.T) {
+	gate := make(chan struct{}) // held open so the slow server never answers on its own
+	gotInit := make(chan struct{})
+	var once sync.Once
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(gotInit) })
+		<-gate
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer slow.Close()
+	defer close(gate) // let the handler return before slow.Close() waits on it
+
+	a := &app{cfg: config.Default(), approver: &countingApprover{reply: true}}
+	a.cfg.McpServers = map[string]mcp.Server{"slow": {URL: slow.URL}}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.mcpClient(context.Background(), a.cfg.McpServers, "slow")
+		done <- err
+	}()
+
+	select {
+	case <-gotInit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server never received the initialize request — the connect never actually started")
+	}
+
+	// The connect is now genuinely in flight, blocked on a response that will
+	// never come on its own.
+	closeStart := time.Now()
+	a.closeMCP()
+	if elapsed := time.Since(closeStart); elapsed > 500*time.Millisecond {
+		t.Fatalf("closeMCP took %s — it must actively cancel an in-flight connect attempt, not passively wait for it to finish on its own", elapsed)
+	}
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("mcpClient should have failed once closeMCP cancelled its in-flight connect attempt")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("mcpClient's in-flight connect attempt was not aborted by closeMCP — the underlying connection leaked past shutdown")
+	}
+	if len(a.mcpClients) != 0 {
+		t.Error("a connect attempt cancelled by shutdown must not be cached")
+	}
+
+	// Once shutdown has begun, even a fresh launch against a server that would
+	// answer immediately must be refused — otherwise it would start a brand
+	// new connection with closeMCP already having run and nothing left to
+	// ever close it.
+	fast, _ := fakeMCPServer(t)
+	a.cfg.McpServers["fast"] = mcp.Server{URL: fast.URL}
+	if _, err := a.mcpClient(context.Background(), a.cfg.McpServers, "fast"); err == nil {
+		t.Error("mcpClient must refuse to launch new MCP servers once shutdown has begun")
+	}
+	if len(a.mcpClients) != 0 {
+		t.Error("a post-shutdown launch attempt must not be cached")
+	}
+}
+
 // Regression test for the bug this fix closes: reconfigure() (backing
 // /login and /init) replaced a.cfg wholesale but never touched the
 // mcpClient cache, so editing an MCP server's URL and reconfiguring left

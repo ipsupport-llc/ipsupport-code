@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
+	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
 )
 
 func tuiFakeServer(t *testing.T, responses ...string) string {
@@ -194,4 +196,120 @@ func TestCtrlR_SecondPress_StepsToOlderMatch(t *testing.T) {
 	if m.searchIdx != 1 {
 		t.Fatalf("second ctrl+r: searchIdx = %d, want 1 (next older entry)", m.searchIdx)
 	}
+}
+
+// TestMCPCommand_ReturnsCmdWithoutBlocking is a regression test for the /mcp
+// deadlock: a not-yet-connected MCP server's launch is approval-gated
+// (mcpClient → approveGated → the UI bridge), which blocks until Update
+// delivers an approvalMsg and the user answers it. The old code called
+// mcpList directly inside Update — the single goroutine that alone can drain
+// the bridge — so that call could never return.
+//
+// This proves both halves of the fix: (1) the exact old call pattern really
+// does hang when nothing drains the bridge (reproduced directly, without a
+// running tea.Program), and (2) runCommand("/mcp") no longer makes that call
+// inline — it returns immediately with a non-nil tea.Cmd, deferring the
+// blocking connect+approval to that Cmd's own goroutine.
+func TestMCPCommand_ReturnsCmdWithoutBlocking(t *testing.T) {
+	a := tuiTestApp(t, tuiFakeServer(t))
+	a.cfg.McpServers = map[string]mcp.Server{"test": {URL: "http://mcp.invalid"}} // never dialed: approval blocks first
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Release the goroutine below once the test is done asserting, instead of
+	// leaking a permanently-blocked goroutine past the test.
+	t.Cleanup(m.bridge.Abort)
+
+	// (1) The old pattern, reproduced directly: with nobody draining
+	// m.bridge.approvals (no tea.Program/waitApproval running), the exact call
+	// the old code made inline in Update never returns.
+	oldCallReturned := make(chan struct{})
+	go func() {
+		m.app.mcpList(m.ctx)
+		close(oldCallReturned)
+	}()
+	select {
+	case <-oldCallReturned:
+		t.Fatal("mcpList returned with no approval answered — test setup didn't reproduce the blocking approval wait")
+	case <-time.After(200 * time.Millisecond):
+		// Expected: still blocked waiting on the approval bridge, exactly as it
+		// would have been if Update had called this inline.
+	}
+
+	// (2) The fix: runCommand itself must not block, and must hand back a
+	// non-nil tea.Cmd so the connect+approval happens off Update's goroutine.
+	done := make(chan struct{})
+	var cmd tea.Cmd
+	go func() {
+		_, cmd = m.runCommand("/mcp")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(1 * time.Second):
+		t.Fatal(`runCommand("/mcp") blocked — the first-connect approval wait must happen inside the returned tea.Cmd, not inline`)
+	}
+	if cmd == nil {
+		t.Fatal(`runCommand("/mcp") returned a nil tea.Cmd — the connect+approval must be dispatched asynchronously`)
+	}
+}
+
+// TestTUI_E2E_MCPConnectDoesNotBlockUI drives the REAL tea.Program loop
+// (teatest) through the exact scenario that used to deadlock the TUI: /mcp
+// against a server that has never been approved. Before the fix, the approval
+// prompt could never even render — Update itself was wedged inside the
+// connect call, unable to process the approvalMsg its own waitApproval Cmd
+// had already delivered. If this regresses, both WaitFor calls below time out.
+func TestTUI_E2E_MCPConnectDoesNotBlockUI(t *testing.T) {
+	mcpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			ID     *int   `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+		if req.ID == nil { // a notification (initialized) → just accept it
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		result := `{}`
+		if req.Method == "tools/list" {
+			result = `{"tools":[{"name":"echo","description":"echoes input"}]}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":%s}`, *req.ID, result)
+	}))
+	defer mcpSrv.Close()
+
+	a := tuiTestApp(t, tuiFakeServer(t))
+	a.cfg.McpServers = map[string]mcp.Server{"test": {URL: mcpSrv.URL}}
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 40))
+	tm.Type("/mcp")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+
+	// The approval prompt must render — proving Update is still alive and
+	// draining waitApproval/waitEvent while the connect blocks on its own Cmd
+	// goroutine, not on Update's.
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return strings.Contains(string(b), "approve mcp launch")
+	}, teatest.WithDuration(5*time.Second))
+
+	// Answer it (↑ switches a pending approval into the answerable stApprove
+	// state from idle, then y approves) — proving keys still reach Update.
+	tm.Send(tea.KeyMsg{Type: tea.KeyUp})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("y")})
+
+	// The catalog comes back via mcpMsg on a later Update call.
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return strings.Contains(string(b), "echo")
+	}, teatest.WithDuration(5*time.Second))
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 }

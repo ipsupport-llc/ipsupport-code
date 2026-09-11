@@ -163,6 +163,7 @@ type modelsMsg struct { // /model result: lines to show, or setTo to switch mode
 	lines []string
 	setTo string
 }
+type mcpMsg struct{ text string } // /mcp result: the server/tool catalog
 
 // newTUIModel installs the UI bridge as the agent's tracer + approver, wires the
 // stack, and builds the model. Split out from runTUI so tests can drive it.
@@ -627,6 +628,13 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pushLines(msg.lines)
 		return m.idleDrain()
+
+	case mcpMsg:
+		// Deliberately NOT idleDrain(): /mcp can run while a real task is still
+		// stRunning (commandWhileBusy allows its bare form through), so this must
+		// never touch m.state — just land the result, same as windowMsg.
+		m.pushLines(strings.Split(msg.text, "\n"))
+		return m, nil
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -1271,8 +1279,18 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.pushLines(m.app.knowledgeCommand(rest))
 		return m, nil
 	case "/mcp":
-		m.pushLines(strings.Split(m.app.mcpList(m.ctx), "\n"))
-		return m, nil
+		// Off the UI thread: a not-yet-connected server's launch is approval-gated
+		// (mcpClient → approveGated → the bridge), which blocks until Update
+		// delivers an approvalMsg and the user answers it. Update runs on a single
+		// goroutine, so calling mcpList inline here would wait on an answer only
+		// Update can deliver — deadlocking the whole TUI. Dispatched as a tea.Cmd,
+		// the blocking connect (and its approval wait) runs on ITS OWN goroutine
+		// while Update keeps servicing waitApproval/keys as normal; the catalog
+		// comes back via mcpMsg on a later Update call. /mcp can also be run while
+		// a real task is busy (see commandWhileBusy), so — like windowMsg — this
+		// must not touch m.state: pushing the result is all it does.
+		ctx := m.ctx
+		return m, func() tea.Msg { return mcpMsg{text: m.app.mcpList(ctx)} }
 	case "/rewind":
 		m.openRewind()
 		return m, nil

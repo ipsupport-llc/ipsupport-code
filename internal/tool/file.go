@@ -95,6 +95,16 @@ func (f *fileTool) read(_ context.Context, a Args) Result {
 	if err != nil {
 		return Err(err.Error())
 	}
+	// Reject non-regular files (FIFOs etc.) here, before either path below opens
+	// them — os.Open itself blocks forever on a FIFO with no writer, same class
+	// of bug as search's (see !info.Mode().IsRegular() there). This is the one
+	// entry point shared by the plain and windowed read paths, so one check
+	// covers both.
+	if info, err := os.Stat(abs); err != nil {
+		return Err("cannot read " + path + ": " + err.Error())
+	} else if !info.Mode().IsRegular() {
+		return Err("cannot read " + path + ": not a regular file")
+	}
 	// Optional line window: stream a slice of a big file instead of loading the
 	// whole thing into memory, to keep the context lean (offset is 1-based;
 	// limit 0 = to the end).

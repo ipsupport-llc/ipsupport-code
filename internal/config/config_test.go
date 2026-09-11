@@ -312,6 +312,33 @@ func TestUnsetFileValueOnNullRootDoesNotPanic(t *testing.T) {
 	}
 }
 
+// mergeJSONFile (which backs the typed global setters — SaveGlobal, SaveOffline,
+// etc.) keeps its own separate raw map, distinct from readObject's, so it needs
+// the same null-root guard independently: a global config file containing the
+// literal JSON `null` unmarshals raw to a nil map, and mergeJSONFile must not
+// hand that nil map to its raw[k] = b assignment, which would panic.
+func TestSaveGlobalOnNullRootDoesNotPanic(t *testing.T) {
+	isolate(t)
+	if err := os.MkdirAll(filepath.Dir(GlobalPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(GlobalPath(), []byte("null"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SaveGlobal("me", LLM{BaseURL: "http://localhost:1234/v1"}); err != nil {
+		t.Fatalf("SaveGlobal on a null-root file: %v", err)
+	}
+
+	cfg, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Name != "me" {
+		t.Errorf("cfg.Name = %q, want %q (null-root file should behave like an empty one)", cfg.Name, "me")
+	}
+}
+
 func writeWorkspaceConfig(t *testing.T, js string) string {
 	t.Helper()
 	dir := t.TempDir()

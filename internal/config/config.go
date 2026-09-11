@@ -398,6 +398,9 @@ func mergeJSONFile(path string, perm os.FileMode, kv map[string]any) error {
 		if err := json.Unmarshal(data, &raw); err != nil {
 			return fmt.Errorf("refusing to save: %s is not valid JSON (%v) — fix or remove it so your saved settings aren't lost", path, err)
 		}
+		if raw == nil {
+			raw = map[string]json.RawMessage{}
+		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}

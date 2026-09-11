@@ -136,7 +136,13 @@ func (g *gitTool) diff(ctx context.Context, a Args) Result {
 		args = append(args, "--staged")
 	}
 	args = append(args, "--")
-	args = append(args, allowed...)
+	// ":(literal)" forces each path to match itself exactly. Without it, a
+	// bare path is a pathspec GLOB: a tracked file literally named e.g. "*"
+	// would make git match every other file too — including one excluded
+	// above as a secret — and leak its content into this "read-only" diff.
+	for _, p := range allowed {
+		args = append(args, ":(literal)"+p)
+	}
 	res := g.run(ctx, "diff", false, args...)
 	if blocked > 0 && !res.IsError {
 		res.Content += "\n…[" + strconv.Itoa(blocked) + " secret/credential file(s) excluded from this diff]"

@@ -2011,10 +2011,18 @@ func (a *app) wire() error {
 	// the TUI bridge and on /login to reload config; without this hand-off the
 	// restored conversation would be dropped and every launch would start blank.
 	var prior []llm.Message
+	var priorGen int64
 	if a.ag != nil {
 		prior = a.ag.History()
+		priorGen = a.ag.HistoryGen()
 	}
 	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.goalSteps())
+	// Carry historyGen forward too: a fresh Agent starts at 0, and SetHistory
+	// below always bumps by exactly 1 — without seeding, every rebuild would
+	// land back at gen=1 regardless of how many rebuilds (or a /clear) came
+	// before, letting a checkpoint invalidated pre-rebuild become spuriously
+	// valid again against the new Agent instance.
+	a.ag.SeedHistoryGen(priorGen)
 	a.ag.SetHistory(prior)
 	a.ag.SetPlanMode(a.planMode)     // carry the mode into the rebuilt agent
 	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task

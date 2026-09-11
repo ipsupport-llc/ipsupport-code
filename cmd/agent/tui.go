@@ -158,6 +158,7 @@ type shellCmdMsg struct{ out string }    // output of a one-off !cmd
 type windowMsg struct {                  // re-detected context window for a provider
 	provider string
 	tokens   int
+	epoch    int64 // model active at dispatch time — a later model switch's is stale
 }
 type modelsMsg struct { // /model result: lines to show, or setTo to switch model
 	lines []string
@@ -407,7 +408,11 @@ func (m *tuiModel) detectWindowCmd() tea.Cmd {
 	// Capture the target on the UI thread (race-free); probe off-thread; apply via
 	// windowMsg on the UI thread. Handles local (LM Studio) and external providers
 	// (context_length from /models) so a /ai or /model switch never blocks the UI.
+	// The epoch is captured here too — if the model switches again before the
+	// probe resolves, the response lands stale and is discarded (see the
+	// windowMsg handler).
 	act, provider, local := m.app.activeLLM(), m.app.providerName(), m.app.isLocal()
+	ep := m.app.modelEpoch.Load()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -419,7 +424,7 @@ func (m *tuiModel) detectWindowCmd() tea.Cmd {
 		} else {
 			tok = llm.DetectModelContext(ctx, act.BaseURL, act.APIKey, act.Model, http.DefaultClient)
 		}
-		return windowMsg{provider: provider, tokens: tok}
+		return windowMsg{provider: provider, tokens: tok, epoch: ep}
 	}
 }
 
@@ -605,7 +610,13 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case windowMsg:
-		// applied on the UI thread, so View/auto-compact never race the write
+		// applied on the UI thread, so View/auto-compact never race the write.
+		// A stale probe — dispatched for a model that's since been switched away
+		// from — is discarded outright: same provider name doesn't mean same
+		// model (e.g. two different local models both report provider "local").
+		if msg.epoch != m.app.modelEpoch.Load() {
+			return m, nil
+		}
 		if msg.tokens > 0 {
 			m.app.applyWindow(msg.provider, msg.tokens)
 			if msg.provider == m.app.providerName() {
@@ -851,17 +862,17 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.approveChoice = !m.approveChoice // toggle Yes/No
 			return m, nil
 		case "y", "Y":
-			m.resolveApproval(true)
-			return m, m.waitApproval()
+			model, cmd := m.resolveApproval(true)
+			return model, tea.Batch(cmd, m.waitApproval())
 		case "n", "N":
-			m.resolveApproval(false)
-			return m, m.waitApproval()
+			model, cmd := m.resolveApproval(false)
+			return model, tea.Batch(cmd, m.waitApproval())
 		case "a", "A": // allow this kind for the rest of the session (in-memory)
-			m.approveSession()
-			return m, m.waitApproval()
+			model, cmd := m.approveSession()
+			return model, tea.Batch(cmd, m.waitApproval())
 		case "enter":
-			m.resolveApproval(m.approveChoice)
-			return m, m.waitApproval()
+			model, cmd := m.resolveApproval(m.approveChoice)
+			return model, tea.Batch(cmd, m.waitApproval())
 		case "esc":
 			m.state = m.preApprove // back to typing; the approval stays pending
 			return m, nil
@@ -874,13 +885,15 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Answer a pending approval directly — but only with an empty input, so
 			// typing a word starting with y/n/a mid-sentence still just types.
 			if m.pending != nil && strings.TrimSpace(m.input.Value()) == "" {
+				var model tea.Model
+				var cmd tea.Cmd
 				switch k.String() {
 				case "a", "A":
-					m.approveSession()
+					model, cmd = m.approveSession()
 				default:
-					m.resolveApproval(k.String() == "y" || k.String() == "Y")
+					model, cmd = m.resolveApproval(k.String() == "y" || k.String() == "Y")
 				}
-				return m, m.waitApproval()
+				return model, tea.Batch(cmd, m.waitApproval())
 			}
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(k)
@@ -1028,25 +1041,32 @@ func (m *tuiModel) applyPendingMode() {
 	}
 }
 
-func (m *tuiModel) resolveApproval(ok bool) {
+// resolveApproval answers the pending approval and restores the state stApprove
+// interrupted — unless the foreground task's own completion arrived while the
+// prompt was showing (m.taskDoneAway), in which case that deferred completion is
+// finalized instead of resuming a "running" that finished behind the modal.
+func (m *tuiModel) resolveApproval(ok bool) (tea.Model, tea.Cmd) {
 	m.state = m.preApprove
-	if m.pending == nil {
-		return
+	if m.pending != nil {
+		m.pending.reply <- ok
+		m.pending = nil
+		verdict := cErr.Render("denied")
+		if ok {
+			verdict = cOk.Render("allowed")
+		}
+		m.push(cDim.Render("  → ") + verdict)
 	}
-	m.pending.reply <- ok
-	m.pending = nil
-	verdict := cErr.Render("denied")
-	if ok {
-		verdict = cOk.Render("allowed")
+	if model, cmd, drained := m.finalizeTaskDoneAway(); drained {
+		return model, cmd
 	}
-	m.push(cDim.Render("  → ") + verdict)
+	return m, nil
 }
 
 // approveSession approves the pending request AND stops asking about its whole
 // category for the rest of the session (in-memory; cleared on /new & /clear).
-func (m *tuiModel) approveSession() {
+func (m *tuiModel) approveSession() (tea.Model, tea.Cmd) {
 	if m.pending == nil {
-		return
+		return m, nil
 	}
 	cat := categoryLabel(approvalCategory(m.pending.kind))
 	m.app.allowSession(m.pending.kind)
@@ -1054,6 +1074,10 @@ func (m *tuiModel) approveSession() {
 	m.pending.reply <- true
 	m.pending = nil
 	m.push(cDim.Render("  → ") + cOk.Render("allowed") + cDim.Render(" · won't ask about "+cat+" again this session"))
+	if model, cmd, drained := m.finalizeTaskDoneAway(); drained {
+		return model, cmd
+	}
+	return m, nil
 }
 
 // hist is the recall ring — the app's per-workspace prompt history, persisted so ↑
@@ -1248,6 +1272,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		return m, m.detectWindowCmd()
 	case "/clear", "/reset": // wipe THIS thread + the screen
 		m.app.ag.Reset()
+		m.app.resetCheckpoints() // histLen indexed the wiped history — meaningless now
 		m.app.resetSessionAllow()
 		m.app.clearFacts()
 		m.app.ag.SetSystem(m.app.systemPrompt())
@@ -1336,12 +1361,24 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/btw": // idle: no running task — answer the side question right away
 		if q := strings.TrimSpace(rest); q != "" {
 			m.push(cDim.Render("  ✦ by the way — asking on the side…"))
-			// Snapshot the session HERE, synchronously, before launching the
-			// goroutine — a /clear or session switch run from the idle prompt
-			// while the goroutine is still in flight mutates a.history/a.system
-			// with no lock, so the goroutine must never read them live.
-			base := append([]llm.Message{llm.System(m.app.ag.System())}, m.app.ag.History()...)
-			go func() { m.app.emit("aside", map[string]any{"q": q, "a": m.app.ag.AnswerAside(m.ctx, base, q)}) }()
+			// Snapshot the session AND capture the agent + tracer HERE,
+			// synchronously, before launching the goroutine. The history/system
+			// snapshot guards against a /clear or session switch run from the
+			// idle prompt while the goroutine is still in flight (mutates
+			// a.history/a.system with no lock); capturing a.ag and a.tracer
+			// guards the same goroutine against /model, /permissions, /new, etc.
+			// — all of which call wire(), which reassigns a.ag and a.tracer with
+			// no lock on every call. Same pattern as resolveSpawn's tracer
+			// capture (see spawnPlan): the goroutine must never read a.ag/a.tracer
+			// live again.
+			ag, tracer := m.app.ag, m.app.tracer
+			base := append([]llm.Message{llm.System(ag.System())}, ag.History()...)
+			go func() {
+				answer := ag.AnswerAside(m.ctx, base, q)
+				if tracer != nil {
+					tracer.Emit("aside", map[string]any{"q": q, "a": answer})
+				}
+			}()
 		} else {
 			m.push(cDim.Render("  usage: /btw <question> — a quick answer, no tools"))
 		}
@@ -1650,7 +1687,8 @@ func (m *tuiModel) forceDetach() (tea.Model, tea.Cmd) {
 // ending with taskDoneMsg.
 func (m *tuiModel) runTask(goal string) tea.Cmd {
 	tctx, cancel := m.startTask()
-	ep := m.epoch // captured synchronously so a later force-detach can't shift it
+	m.app.maybeRewireHistoryTool() // must run here, on this goroutine, before the task's own goroutine starts — see its doc
+	ep := m.epoch                  // captured synchronously so a later force-detach can't shift it
 	return func() tea.Msg {
 		defer cancel()
 		m.app.runTaskStreaming(tctx, goal, ep)
@@ -1662,6 +1700,7 @@ func (m *tuiModel) runTask(goal string) tea.Cmd {
 // again, until max iterations (0 = until stopped) or the user cancels (esc).
 func (m *tuiModel) runLoop(interval time.Duration, max int, goal string) tea.Cmd {
 	tctx, cancel := m.startTask()
+	m.app.maybeRewireHistoryTool() // must run here, on this goroutine, before the task's own goroutine starts — see its doc
 	ep := m.epoch
 	return func() tea.Msg {
 		defer cancel()

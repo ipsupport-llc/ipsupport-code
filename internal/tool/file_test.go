@@ -212,6 +212,56 @@ func TestFileSearchSkipsFIFO(t *testing.T) {
 	}
 }
 
+// read must reject FIFOs (named pipes) instead of hanging — os.Open itself
+// blocks forever on a FIFO with no writer, before any read even starts. This
+// is a separate code path from search (its own os.Open call in readPlain),
+// so search's fix doesn't cover it.
+func TestFileReadSkipsFIFO(t *testing.T) {
+	dir := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o600); err != nil {
+		t.Skipf("mkfifo unsupported here: %v", err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+
+	done := make(chan Result, 1)
+	go func() {
+		done <- tl.Call(context.Background(), "read", map[string]any{"path": "pipe"})
+	}()
+
+	select {
+	case r := <-done:
+		if !r.IsError {
+			t.Errorf("read of a FIFO should be rejected, got: %s", r.Content)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("read hung opening a FIFO")
+	}
+}
+
+// Same as TestFileReadSkipsFIFO, but through the windowed (offset/limit) read
+// path — readWindow has its own os.Open call, distinct from readPlain's.
+func TestFileReadWindowSkipsFIFO(t *testing.T) {
+	dir := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o600); err != nil {
+		t.Skipf("mkfifo unsupported here: %v", err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+
+	done := make(chan Result, 1)
+	go func() {
+		done <- tl.Call(context.Background(), "read", map[string]any{"path": "pipe", "offset": 1})
+	}()
+
+	select {
+	case r := <-done:
+		if !r.IsError {
+			t.Errorf("windowed read of a FIFO should be rejected, got: %s", r.Content)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("windowed read hung opening a FIFO")
+	}
+}
+
 // os.MkdirAll is a silent no-op on an existing directory — mkdir must tell
 // the model that explicitly instead of always saying "created", which reads
 // as a fresh start and hides the one fact (this already exists) that would

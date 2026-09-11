@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1184,6 +1185,39 @@ func TestSessionAllowGate(t *testing.T) {
 	}
 }
 
+// The plain (non-TUI) REPL's /clear must reset session-allow grants exactly
+// like the TUI's /clear does — otherwise an "allow all this session" grant
+// from before /clear silently keeps auto-approving after the thread is
+// wiped, contradicting /clear's "fresh conversation" semantics.
+func TestPlainReplClearResetsSessionAllow(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	a.allowSession("edit") // grant "a" (allow-all-this-session) for the file category
+	a.sessionMu.Lock()
+	granted := len(a.sessionAllow)
+	a.sessionMu.Unlock()
+	if granted == 0 {
+		t.Fatal("test setup broken: allowSession did not record a grant")
+	}
+
+	if quit := a.command(context.Background(), "/clear"); quit {
+		t.Fatal("/clear should not quit the REPL")
+	}
+
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	if len(a.sessionAllow) != 0 {
+		t.Errorf("plain /clear left session-allow grants behind: %v, want none", a.sessionAllow)
+	}
+}
+
 // mcpList/mcpSchema carry no Mutates flag (they look like safe reads), but the
 // first call to either one launches the configured server. Launching must be
 // gated by approval — separately from mcpCall's own per-invocation approval —
@@ -1237,6 +1271,109 @@ func TestMCPClientGatesLaunchApproval(t *testing.T) {
 	}
 	if inner.calls != 2 {
 		t.Errorf("an already-launched (cached) server must not re-ask for approval, calls=%d", inner.calls)
+	}
+}
+
+// fakeMCPServer is a minimal HTTP MCP server that counts the requests it
+// receives, so a test can tell whether a given connection actually dialed it.
+func fakeMCPServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			ID     *int   `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+		if req.ID == nil { // a notification (initialized) → just accept it
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		result := `{}`
+		if req.Method == "tools/list" {
+			result = `{"tools":[]}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":%s}`, *req.ID, result)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// Regression test for the bug this fix closes: reconfigure() (backing
+// /login and /init) replaced a.cfg wholesale but never touched the
+// mcpClient cache, so editing an MCP server's URL and reconfiguring left
+// calls going to the OLD connection until the process restarted. A changed
+// server's cached client must be closed and evicted so the next mcpClient
+// call reconnects using the new config; an unchanged server's cached client
+// must survive (caching still works for the normal, no-edit case).
+func TestReconfigureInvalidatesStaleMCPClient(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // isolate config.Load's global file from ~/.config
+
+	oldSrv, oldHits := fakeMCPServer(t)
+	newSrv, newHits := fakeMCPServer(t)
+
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceMCP := func(url string) {
+		data := fmt.Sprintf(`{"mcp_servers":{"test":{"url":%q}}}`, url)
+		if err := os.WriteFile(filepath.Join(workspace, ".agent", "config.json"), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeWorkspaceMCP(oldSrv.URL)
+
+	// tui:true skips reconfigure's synchronous context-window detection (that
+	// dial is orthogonal to this test and only ever runs off-thread for a real
+	// TUI session — see maybeDetectWindowSync).
+	a := &app{cfg: config.Default(), workspace: workspace, approver: &countingApprover{reply: true}, tui: true}
+	a.cfg.McpServers = map[string]mcp.Server{"test": {URL: oldSrv.URL}}
+
+	c1, err := a.mcpClient(context.Background(), a.cfg.McpServers, "test")
+	if err != nil {
+		t.Fatalf("initial mcpClient: %v", err)
+	}
+	if oldHits.Load() == 0 {
+		t.Fatal("expected the old server to have been dialed")
+	}
+
+	// Edit the server's URL (as /init rewriting .agent/config.json would) and
+	// reconfigure — the next mcpClient call must NOT return the stale client.
+	writeWorkspaceMCP(newSrv.URL)
+	if err := a.reconfigure(); err != nil {
+		t.Fatalf("reconfigure: %v", err)
+	}
+
+	c2, err := a.mcpClient(context.Background(), a.cfg.McpServers, "test")
+	if err != nil {
+		t.Fatalf("mcpClient after reconfigure: %v", err)
+	}
+	if c2 == c1 {
+		t.Fatal("mcpClient returned the stale cached client after the server's url changed")
+	}
+	if newHits.Load() == 0 {
+		t.Error("expected the NEW server to have been dialed after reconfigure")
+	}
+	hitsAfterReconnect := newHits.Load()
+
+	// Reconfigure again with NO change — the live connection must be reused.
+	if err := a.reconfigure(); err != nil {
+		t.Fatalf("second reconfigure: %v", err)
+	}
+	c3, err := a.mcpClient(context.Background(), a.cfg.McpServers, "test")
+	if err != nil {
+		t.Fatalf("mcpClient after no-op reconfigure: %v", err)
+	}
+	if c3 != c2 {
+		t.Error("an unchanged server's cached client must survive reconfigure")
+	}
+	if got := newHits.Load(); got != hitsAfterReconnect {
+		t.Errorf("unchanged server got %d more requests after a no-op reconfigure — cache was not reused", got-hitsAfterReconnect)
 	}
 }
 
@@ -2078,6 +2215,60 @@ func TestSpawnAgentBackgroundTracerNoRace(t *testing.T) {
 	}
 }
 
+// TestSpawnAgentBackgroundPriceOverridesNoRace: addSessionCost, called from
+// runSpawnPlan's background-job goroutine to record a sub-agent's spend, used
+// to resolve price overrides by calling a.priceOverrides() while holding
+// costMu — which reads a.cfg.Prices live. costMu only serializes
+// addSessionCost/sessionCost against each other; it does nothing to protect
+// a.cfg itself from reconfigure() (the /login path), which reassigns a.cfg
+// WHOLESALE (a.cfg = cfg) with no lock at all. Before the fix, a background
+// job's cost-accrual racing a concurrent /login was a data race under -race,
+// not just a stale value. The fix resolves price overrides synchronously in
+// resolveSpawn (plan.priceOverrides) — exactly like reasoning params and the
+// tracer above — so runSpawnPlan's own goroutine never reads a.cfg.Prices
+// again; addSessionCost now takes the overrides as a parameter instead of
+// resolving them itself. This test launches many background jobs back-to-back,
+// reassigning a.cfg wholesale right after each dispatch — like /login firing
+// while a previously-launched job is still running in the background — and
+// must be -race clean.
+func TestSpawnAgentBackgroundPriceOverridesNoRace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(2 * time.Millisecond) // keep jobs in flight long enough to overlap
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = "" // plain OpenAI-compat (skip LM Studio detection)
+	cfg.Agents = map[string]config.AgentProfile{"loc": {Provider: "local"}}
+	kb, _ := knowledge.Open("")
+	usg, _ := usage.Open("") // in-memory — a.usage != nil is what gates the addSessionCost call
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usg,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 50; i++ {
+		if _, err := a.spawnAgentBackground(context.Background(), "loc", "go", ""); err != nil {
+			t.Fatal(err)
+		}
+		// Simulates reconfigure()'s /login path reassigning a.cfg wholesale, from
+		// the same (foreground) goroutine that launched the job above — while
+		// earlier jobs' own goroutines may still be running runSpawnPlan.
+		next := cfg
+		if i%2 == 0 {
+			next.Prices = map[string][2]float64{"local/" + cfg.LLM.Model: {1, 2}}
+		}
+		a.cfg = next
+	}
+	for i := 0; i < 500 && a.jobsPending() > 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestBackgroundJobLifecycle(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
@@ -2410,6 +2601,59 @@ func TestEscFromApprovalRestoresPriorState(t *testing.T) {
 	if m2.state != stRunning {
 		t.Errorf("esc out of a foreground approval: state = %v, want stRunning", m2.state)
 	}
+}
+
+// A background job's approval can interrupt a foreground task (preApprove=stRunning,
+// stApprove); if the foreground task's OWN completion then arrives while that prompt
+// is still showing, taskDoneMsg's m.state != stRunning branch defers finalization
+// (m.taskDoneAway=true, m.cancel=nil — "finalize on panel close", see closePanel).
+// resolveApproval/approveSession used to just restore m.preApprove (=stRunning)
+// unconditionally, ignoring that deferred completion: the UI showed "running" with
+// m.cancel already nil and nothing left to ever flip it back — permanently stuck,
+// since only closePanel (never called by the approval modal's own close path) drained
+// taskDoneAway. Answering the approval must finalize the deferred completion instead.
+func TestApprovalCloseFinalizesDeferredTaskDone(t *testing.T) {
+	newRunningModel := func() *tuiModel {
+		m := &tuiModel{state: stRunning, input: textarea.New(), bridge: newBridge(), ctx: context.Background(), app: &app{cfg: config.Default()}}
+		m.app.windowDetected = true // detectWindowCmd → nil (no probe)
+		m.app.client = llm.NewOpenAIClient(config.LLM{})
+		m.app.ag = agent.New(m.app.client, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
+		return m
+	}
+
+	run := func(t *testing.T, answer func(m *tuiModel)) {
+		t.Helper()
+		m := newRunningModel()
+		m.cancel = func() {} // the foreground task is running
+		m.epoch = 1
+		m.Update(approvalMsg(approvalReq{kind: "run", detail: "go test ./...", reply: make(chan bool, 1)}))
+		if m.state != stApprove || m.preApprove != stRunning {
+			t.Fatalf("approval over a running task: state=%v preApprove=%v, want stApprove/stRunning", m.state, m.preApprove)
+		}
+		m.Update(taskDoneMsg{epoch: m.epoch}) // the foreground task finishes WHILE the prompt is showing
+		if !m.taskDoneAway || m.cancel != nil {
+			t.Fatalf("task finishing under the modal should set taskDoneAway and clear cancel: taskDoneAway=%v cancel=%v", m.taskDoneAway, m.cancel)
+		}
+		answer(m) // the user answers the approval
+		if m.state != stIdle {
+			t.Errorf("answering over a deferred task-done: state = %v, want stIdle (not stuck at stRunning)", m.state)
+		}
+		if m.taskDoneAway {
+			t.Error("taskDoneAway must be drained on answering, not left stuck forever")
+		}
+		// The UI must not just look idle — a new task must actually be able to start.
+		m.submit("go")
+		if m.state != stRunning {
+			t.Errorf("a new task should be able to start after the fix, state = %v", m.state)
+		}
+	}
+
+	t.Run("y", func(t *testing.T) {
+		run(t, func(m *tuiModel) { m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}) })
+	})
+	t.Run("allow-session", func(t *testing.T) {
+		run(t, func(m *tuiModel) { m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}) })
+	})
 }
 
 func TestTailClip(t *testing.T) {
@@ -3578,6 +3822,141 @@ func TestHistoryTrimResetsCheckpoints(t *testing.T) {
 	}
 }
 
+// /clear's TUI handler wipes a.ag's history via Reset() exactly like /new and
+// Compact do, so an open checkpoint's histLen is exactly as stale afterward —
+// but until this fix only /new, /sessions, and Compact called resetCheckpoints;
+// /clear left the checkpoint in place with an offset indexing a conversation
+// that no longer exists.
+func TestTuiClearResetsCheckpoints(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	cp := a.beginCheckpoint("do something")
+	a.endCheckpoint(cp)
+	if len(a.checkpoints) != 1 {
+		t.Fatal("checkpoint not recorded")
+	}
+
+	m := &tuiModel{app: a, input: textarea.New()}
+	m.runCommand("/clear")
+
+	if rows := a.rewindRows(); len(rows) != 0 {
+		t.Errorf("checkpoints = %d after /clear, want 0 — a checkpoint from before /clear indexes "+
+			"the wiped history, so a later /rewind must not silently misapply instead of being invalidated", len(rows))
+	}
+}
+
+// The plain (non-TUI) REPL's /clear handler has the identical gap: it wipes
+// a.ag's history the same way, but never called resetCheckpoints until this fix.
+func TestPlainClearResetsCheckpoints(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	cp := a.beginCheckpoint("do something")
+	a.endCheckpoint(cp)
+	if len(a.checkpoints) != 1 {
+		t.Fatal("checkpoint not recorded")
+	}
+
+	a.command(context.Background(), "/clear")
+
+	if rows := a.rewindRows(); len(rows) != 0 {
+		t.Errorf("checkpoints = %d after /clear, want 0 — a checkpoint from before /clear indexes "+
+			"the wiped history, so a later /rewind must not silently misapply instead of being invalidated", len(rows))
+	}
+}
+
+// The plain REPL's MANUAL /compact (unlike the TUI's compact handler, which
+// already called resetCheckpoints) never invalidated an open checkpoint either,
+// even though it replaces a.ag's history exactly the same way.
+func TestPlainCompactResetsCheckpoints(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag = agent.New(fakeSummaryLLM{}, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
+	a.ag.Run(context.Background(), "task 1")
+	a.ag.Run(context.Background(), "task 2")
+
+	cp := a.beginCheckpoint("do something")
+	a.endCheckpoint(cp)
+	if len(a.checkpoints) != 1 {
+		t.Fatal("checkpoint not recorded")
+	}
+
+	a.command(context.Background(), "/compact")
+
+	if rows := a.rewindRows(); len(rows) != 0 {
+		t.Errorf("checkpoints = %d after /compact, want 0 — a checkpoint from before /compact indexes "+
+			"the discarded history, so a later /rewind must not silently misapply instead of being invalidated", len(rows))
+	}
+}
+
+// runOne's end-of-task AUTOMATIC compaction is a fourth, distinct path (not the
+// TUI's auto-compact, not a manual /compact) that replaces a.ag's history the
+// same way Compact always has, but never called resetCheckpoints until this fix.
+func TestRunOneAutoCompactResetsCheckpoints(t *testing.T) {
+	// A canned reply whose usage.prompt_tokens (9000) sits well past 75% of a
+	// small 10000-token window, so shouldAutoCompact() fires for real inside
+	// runOne — not a hand-rolled stand-in for the gating logic.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],`+
+			`"usage":{"prompt_tokens":9000,"completion_tokens":5}}`)
+	}))
+	defer srv.Close()
+
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = ""
+	cfg.LLM.ContextWindow = 10000
+	cfg.ReflectDisabled = true // keep this test about auto-compact, not reflection
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build up enough session length for autoCompactNeeded's floor (sessionLen
+	// >= 4) before taking the checkpoint under test.
+	a.ag.Run(context.Background(), "task 1")
+	a.ag.Run(context.Background(), "task 2")
+
+	cp := a.beginCheckpoint("do something")
+	a.endCheckpoint(cp)
+	if len(a.checkpoints) != 1 {
+		t.Fatal("checkpoint not recorded")
+	}
+
+	if err := a.runOne(context.Background(), "task 3"); err != nil {
+		t.Fatalf("runOne: %v", err)
+	}
+
+	if rows := a.rewindRows(); len(rows) != 0 {
+		t.Errorf("checkpoints = %d after runOne's auto-compact, want 0 — a checkpoint from before it "+
+			"indexes the discarded history, so a later /rewind must not silently misapply instead of being invalidated", len(rows))
+	}
+}
+
 func TestCdCommand(t *testing.T) {
 	ws := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(ws, "proj", "sub"), 0o755); err != nil {
@@ -4108,6 +4487,41 @@ func TestActiveLLM(t *testing.T) {
 	}
 }
 
+// A window probe dispatched for the active local model must not apply if the
+// user switches to a different local model before it resolves — both report
+// provider "local", so the epoch captured at dispatch is what catches the
+// mismatch (see the windowMsg handler in tui.go).
+func TestStaleWindowProbeDiscardedAfterModelSwitch(t *testing.T) {
+	m := &tuiModel{app: &app{cfg: config.Config{LLM: config.LLM{Model: "model-a", ContextWindow: 4096}}}}
+	m.app.windowDetected = false
+
+	staleEpoch := m.app.modelEpoch.Load() // captured at dispatch time, for model-a
+
+	// user switches to model-b before the probe resolves (mirrors setModel)
+	m.app.cfg.LLM.Model = "model-b"
+	m.app.windowDetected = false
+	m.app.modelEpoch.Add(1)
+
+	// model-a's stale probe response lands
+	m.Update(windowMsg{provider: "local", tokens: 8192, epoch: staleEpoch})
+
+	if m.app.cfg.LLM.ContextWindow != 4096 {
+		t.Errorf("stale probe overwrote context window: got %d, want 4096 (model-a's value preserved)", m.app.cfg.LLM.ContextWindow)
+	}
+	if m.app.windowDetected {
+		t.Error("stale probe must not set windowDetected — model-b still needs its own probe")
+	}
+
+	// a fresh (non-stale) probe for model-b still applies normally
+	m.Update(windowMsg{provider: "local", tokens: 8192, epoch: m.app.modelEpoch.Load()})
+	if m.app.cfg.LLM.ContextWindow != 8192 {
+		t.Errorf("fresh probe for the active model should apply: got %d, want 8192", m.app.cfg.LLM.ContextWindow)
+	}
+	if !m.app.windowDetected {
+		t.Error("fresh probe for the active model should set windowDetected")
+	}
+}
+
 func TestAutoCompactNeeded(t *testing.T) {
 	if !autoCompactNeeded(6200, 8192, 4, 0.75) {
 		t.Error("76% of the window with history should trigger compaction")
@@ -4412,5 +4826,113 @@ func TestCompleteDirSegments(t *testing.T) {
 
 	if _, m = a.completeDir("../../etc"); len(m) != 0 { // jail: no escaping the workspace
 		t.Errorf("path outside the jail must yield nothing, got %v", m)
+	}
+}
+
+// --- stdinOwner: single-owner stdin reads for the plain REPL -----------------
+//
+// Before stdinOwner existed, the REPL's command loop and stdinApprover's y/n
+// prompt each called ReadString directly on the SAME shared *bufio.Reader. A
+// background job's approval can fire from its own goroutine at any time,
+// including while the loop is itself blocked reading the next command — two
+// goroutines calling ReadString concurrently on one *bufio.Reader is a data
+// race on its internal buffer (undefined behavior: -race flags it, and in
+// practice a line typed for one can be silently handed to the other). These
+// tests exercise the fix: every read now goes through one owner goroutine.
+
+// TestStdinOwnerApprovalPriorityOverPendingCommand reproduces the exact
+// interleaving from the bug report deterministically (no sleeps): a command
+// read is already queued — mimicking the REPL loop blocked waiting for the
+// next typed line — when an approval read is ALSO queued — mimicking a
+// background job asking for a y/n answer at that same moment. The line that
+// arrives afterward must go to the approval, never to the stale command read,
+// confirming input is routed to the correct consumer rather than left to
+// whichever happened to call ReadString first.
+func TestStdinOwnerApprovalPriorityOverPendingCommand(t *testing.T) {
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	o := newStdinOwner(bufio.NewReader(pr))
+
+	// Queue the command request FIRST, chronologically, then the approval
+	// request — proving priority is decided by ROLE at delivery time, not by
+	// arrival order. Both channels are buffered (cap 1), so these sends
+	// complete immediately without needing a goroutine of their own.
+	cmdReply := make(chan lineResult, 1)
+	o.cmdReq <- cmdReply
+	approveReply := make(chan lineResult, 1)
+	o.approveReq <- approveReply
+
+	// Only now does any data become available to read — in a goroutine since
+	// io.Pipe's Write blocks until the owner's ReadString consumes it.
+	go func() { pw.Write([]byte("y\n")) }()
+
+	select {
+	case res := <-approveReply:
+		if res.err != nil || res.line != "y\n" {
+			t.Fatalf("approval got (%q, %v), want (\"y\\n\", nil)", res.line, res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("approval never received a line — priority routing broken")
+	}
+
+	// The stale command request must NOT have been satisfied by this line.
+	select {
+	case res := <-cmdReply:
+		t.Fatalf("command request must not win over a pending approval, got %q", res.line)
+	default:
+	}
+}
+
+// TestStdinOwnerConcurrentReadsNoCorruption hammers a single owner from many
+// goroutines at once — half acting like the REPL loop (readCmdLine), half like
+// concurrent background-job approvals (readApproveLine) — and checks that
+// every line fed in is delivered exactly once, intact, to exactly one caller.
+// Run with -race, this is the test that would have caught the original bug:
+// unsynchronized concurrent ReadString calls on the same *bufio.Reader.
+func TestStdinOwnerConcurrentReadsNoCorruption(t *testing.T) {
+	const n = 200
+	lines := make([]string, n)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line-%04d\n", i)
+	}
+	o := newStdinOwner(bufio.NewReader(strings.NewReader(strings.Join(lines, ""))))
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	seen := make(map[string]int, n)
+	readErrs := 0
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			var line string
+			var err error
+			if i%2 == 0 {
+				line, err = o.readCmdLine()
+			} else {
+				line, err = o.readApproveLine()
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				readErrs++
+				return
+			}
+			seen[line]++
+		}(i)
+	}
+	wg.Wait()
+
+	if readErrs != 0 {
+		t.Fatalf("unexpected read errors: %d", readErrs)
+	}
+	if len(seen) != n {
+		t.Fatalf("got %d distinct lines delivered, want %d (duplicate or corrupted delivery)", len(seen), n)
+	}
+	for _, want := range lines {
+		if seen[want] != 1 {
+			t.Errorf("line %q delivered %d time(s), want exactly 1", want, seen[want])
+		}
 	}
 }

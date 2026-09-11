@@ -237,6 +237,7 @@ type app struct {
 	usage     *usage.Store
 	skills    *skill.Store
 	reader    *bufio.Reader
+	stdin     *stdinOwner // the sole owner of reader's actual reads (see stdinOwner)
 
 	fileTracer trace.Tracer  // JSONL dataset
 	uiTracer   trace.Tracer  // live TUI (nil in plain mode)
@@ -266,6 +267,13 @@ type app struct {
 	// (its taskDoneMsg, its post-Run side effects) are honoured only while the
 	// epoch it captured is still current — a force-detached run is orphaned.
 	taskEpoch atomic.Int64
+
+	// modelEpoch bumps whenever the active model/provider changes (/login,
+	// /ai <provider>, /model <name>). An in-flight windowMsg probe is honoured
+	// only while the epoch it captured is still current — a stale probe for a
+	// model that's no longer active is discarded instead of clobbering the
+	// newly active model's context-window state.
+	modelEpoch atomic.Int64
 
 	costMu         sync.Mutex // guards sessionCostUSD (parallel sub-agent spawns accrue too)
 	sessionCostUSD float64    // estimated spend this process run, for the SessionBudgetUSD guard
@@ -320,7 +328,8 @@ func build(workspace, sessionName string, reader *bufio.Reader) (*app, func(), e
 	}
 
 	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader}
-	a.approver = &stdinApprover{r: reader, app: a}       // set after: it references the app for session-allow
+	a.stdin = newStdinOwner(reader)                      // sole reader of `reader`'s actual bytes from here on (see stdinOwner)
+	a.approver = &stdinApprover{stdin: a.stdin, app: a}  // set after: it references the app for session-allow
 	cleanup := func() { a.shutdownJobs(); a.closeMCP() } // cancel background jobs (killing external-agent subprocesses too) and shut down any launched MCP servers on exit
 	a.applyUsageRetention()                              // honor usage_retention_days on startup
 	a.applyKnowledgeRetention()                          // honor knowledge_retention_days on startup
@@ -404,15 +413,16 @@ func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, o
 // (/ai add from the foreground) is a Go runtime panic, not just a stale
 // value.
 type spawnPlan struct {
-	profile      string
-	provider     string
-	llmCfg       config.LLM
-	rolePrompt   string
-	subReg       *tool.Registry
-	subWorkspace string
-	planMode     bool
-	spawnDefault string
-	tracer       trace.Tracer
+	profile        string
+	provider       string
+	llmCfg         config.LLM
+	rolePrompt     string
+	subReg         *tool.Registry
+	subWorkspace   string
+	planMode       bool
+	spawnDefault   string
+	tracer         trace.Tracer
+	priceOverrides map[string]usage.Price
 }
 
 // resolveSpawn resolves profile/dir into a spawnPlan (or, for an external CLI
@@ -493,6 +503,11 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	// live map that /reasoning (applyReasoning) mutates from the foreground with
 	// no lock, so runSpawnPlan's own goroutine must never read it again itself.
 	llmCfg = a.withReasoning(llmCfg, provider, "")
+	// Resolve price overrides HERE too, synchronously — a.cfg is reassigned
+	// wholesale (a.cfg = cfg) by reconfigure() (/login) with no lock, so
+	// runSpawnPlan's own goroutine must never read a.cfg.Prices (via
+	// a.priceOverrides()) again itself — see addSessionCost.
+	priceOverrides := a.priceOverrides()
 
 	// Resolve the working directory (default: the session workspace). The path may
 	// point anywhere — ~ is expanded, relatives resolve against the session — but
@@ -534,18 +549,22 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	return spawnPlan{
 		profile: profile, provider: provider, llmCfg: llmCfg, rolePrompt: p.Prompt,
 		subReg: subReg, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default,
-		tracer: tracer,
+		tracer: tracer, priceOverrides: priceOverrides,
 	}, false, p, nil
 }
 
 // runSpawnPlan runs an already-resolved plan — safe to call from a background
 // job's own goroutine, since it only touches plan (captured up front by
 // resolveSpawn) and state that's already concurrency-safe on its own
-// (a.usage, a.addSessionCost have their own synchronization; a.kb is a stable
-// pointer once wire() has run). a.tracer is NOT stable — wire() reassigns it
-// with no lock on every call, and wire() runs repeatedly throughout a live
-// process, not just at startup — so this uses plan.tracer (captured
-// synchronously by resolveSpawn) instead of a.emit/a.tracer.
+// (a.usage has its own synchronization; a.kb is a stable pointer once wire()
+// has run). a.tracer is NOT stable — wire() reassigns it with no lock on
+// every call, and wire() runs repeatedly throughout a live process, not just
+// at startup — so this uses plan.tracer (captured synchronously by
+// resolveSpawn) instead of a.emit/a.tracer. Likewise a.cfg is NOT stable —
+// reconfigure() (/login) reassigns it wholesale (a.cfg = cfg) with no lock —
+// so the sub-agent's spend is added via plan.priceOverrides (also captured
+// synchronously by resolveSpawn), never by having addSessionCost re-read
+// a.cfg.Prices live.
 func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onLine func(string)) (string, error) {
 	// Ask before spawning unless the policy is relaxed. "ask" (default) guards
 	// every spawn — even local ones still cost compute, and a runaway main model
@@ -573,7 +592,7 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 	if a.usage != nil { // the sub-agent's spend counts too
 		pt, ct := client.Usage()
 		a.usage.Add(today(), plan.provider, plan.llmCfg.Model, pt, ct)
-		a.addSessionCost(plan.llmCfg.Model, pt, ct) // sub-agent spend counts toward /budget too
+		a.addSessionCost(plan.llmCfg.Model, pt, ct, plan.priceOverrides) // sub-agent spend counts toward /budget too
 		_ = a.usage.Save()
 	}
 	done := map[string]any{"agent": id, "profile": plan.profile, "ok": err == nil}
@@ -1711,6 +1730,24 @@ func (a *app) mcpClient(ctx context.Context, servers map[string]mcp.Server, name
 	return c, nil
 }
 
+// invalidateStaleMCP evicts (and closes) any cached MCP client whose server
+// was removed from config, or whose spec changed, comparing against old — the
+// server map as of just before this reconfigure. mcpClient only ever checks
+// the cache, never the current config, once a client exists — so without this
+// a config reload (/login, /init) would leave calls going to a since-edited
+// server's stale URL/command/auth until the process restarted.
+func (a *app) invalidateStaleMCP(old map[string]mcp.Server) {
+	a.mcpMu.Lock()
+	defer a.mcpMu.Unlock()
+	for name, c := range a.mcpClients {
+		if spec, ok := a.cfg.McpServers[name]; ok && spec.Equal(old[name]) {
+			continue // unchanged — keep the live connection
+		}
+		c.Close()
+		delete(a.mcpClients, name)
+	}
+}
+
 // closeMCP shuts down every launched MCP server (called on exit).
 func (a *app) closeMCP() {
 	a.mcpMu.Lock()
@@ -2018,12 +2055,15 @@ func (a *app) reconfigure() error {
 	if err != nil {
 		return err
 	}
+	oldServers := a.cfg.McpServers
 	a.cfg = cfg
+	a.invalidateStaleMCP(oldServers)
 	if err := a.wire(); err != nil {
 		return err
 	}
 	a.loadSession()          // a fresh agent — restore the persisted session
 	a.windowDetected = false // model may have changed (/login) — re-detect
+	a.modelEpoch.Add(1)      // orphan any in-flight probe for the old model
 	a.maybeDetectWindowSync()
 	return nil
 }
@@ -2491,7 +2531,7 @@ func (a *app) recordUsage() {
 		return
 	}
 	a.usage.Add(today(), a.providerName(), a.activeLLM().Model, dp, dc)
-	a.addSessionCost(a.activeLLM().Model, dp, dc) // for the budget guard
+	a.addSessionCost(a.activeLLM().Model, dp, dc, a.priceOverrides()) // for the budget guard
 	if err := a.usage.Save(); err != nil {
 		slog.Warn("usage ledger save failed", "err", err)
 	}
@@ -2499,9 +2539,16 @@ func (a *app) recordUsage() {
 
 // addSessionCost accrues estimated spend for the budget guard. Mutex-guarded:
 // parallel sub-agent spawns record their spend from their own goroutines.
-func (a *app) addSessionCost(model string, prompt, completion int) {
+// overrides must be the caller's own resolved price table, not read live from
+// a.cfg here — a.cfg is reassigned wholesale by reconfigure() (/login) with
+// no lock, so a background job's own goroutine (runSpawnPlan) passes its
+// plan.priceOverrides, captured synchronously by resolveSpawn; the
+// foreground-only callers (recordUsage, reflectAndStore) pass a.priceOverrides()
+// directly since they never race reconfigure() (both are on the goroutine
+// that owns a.cfg).
+func (a *app) addSessionCost(model string, prompt, completion int, overrides map[string]usage.Price) {
 	a.costMu.Lock()
-	a.sessionCostUSD += usage.CostUSD(model, prompt, completion, a.priceOverrides())
+	a.sessionCostUSD += usage.CostUSD(model, prompt, completion, overrides)
 	a.costMu.Unlock()
 }
 
@@ -2613,7 +2660,7 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 	if separate && a.usage != nil { // a dedicated reflect model's spend isn't in the main client
 		if p, c := client.Usage(); p > 0 || c > 0 {
 			a.usage.Add(today(), provider, model, p, c)
-			a.addSessionCost(model, p, c) // for the budget guard
+			a.addSessionCost(model, p, c, a.priceOverrides()) // for the budget guard
 			_ = a.usage.Save()
 		}
 	}
@@ -2679,6 +2726,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	a.detectContextWindow() // the model is loaded now — confirm the real window
 	if a.shouldAutoCompact() {
 		if n, err := a.ag.Compact(ctx); err == nil && n > 0 {
+			a.resetCheckpoints() // histLen indexed the pre-compact history — meaningless now
 			a.saveSession()
 			fmt.Fprintf(os.Stderr, "(auto-compacted %d messages to free context)\n", n)
 		}
@@ -2693,8 +2741,12 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 		a.emit("error", map[string]any{"text": a.budgetMsg()})
 		return
 	}
-	a.injectJobResults()       // finished background jobs land before the model thinks
-	a.maybeRewireHistoryTool() // the archive may have gained its first entry since wire()
+	// maybeRewireHistoryTool is NOT called here: runTaskStreaming runs on the
+	// tea.Cmd's own goroutine, and wire() (which it can trigger) reassigns
+	// a.client/a.ag with no lock while the UI reads them live — see
+	// maybeRewireHistoryTool's doc. runTask/runLoop (tui.go) call it
+	// synchronously before this goroutine even starts.
+	a.injectJobResults() // finished background jobs land before the model thinks
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
@@ -2723,7 +2775,7 @@ func (a *app) repl(ctx context.Context) {
 	}
 	for {
 		fmt.Print("\n> ")
-		line, err := a.reader.ReadString('\n')
+		line, err := a.stdin.readCmdLine()
 		if err != nil {
 			fmt.Println()
 			return
@@ -2801,6 +2853,8 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		}
 	case "/reset", "/clear": // wipe THIS thread
 		a.ag.Reset()
+		a.resetSessionAllow()
+		a.resetCheckpoints() // histLen indexed the wiped history — meaningless now
 		a.clearFacts()
 		a.ag.SetSystem(a.systemPrompt())
 		a.saveSession()
@@ -2810,6 +2864,9 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		if err != nil {
 			fmt.Println("compact failed:", err)
 		} else {
+			if n > 0 {
+				a.resetCheckpoints() // histLen indexed the pre-compact history — meaningless now
+			}
 			a.saveSession()
 			fmt.Printf("compacted %d messages → summary.\n", n)
 		}
@@ -3055,6 +3112,7 @@ func (a *app) setProvider(name string) []string {
 	}
 	a.cfg.Provider = name
 	a.windowDetected = false
+	a.modelEpoch.Add(1) // orphan any in-flight probe for the old provider/model
 	if err := config.SaveProviders(a.cfg.Provider, a.cfg.Providers); err != nil {
 		return []string{"error: " + err.Error()}
 	}
@@ -3222,6 +3280,7 @@ func (a *app) setModel(name string) []string {
 		_ = config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
 	}
 	a.windowDetected = false
+	a.modelEpoch.Add(1) // orphan any in-flight probe for the old model
 	if err := a.wire(); err != nil {
 		return []string{"error: " + err.Error()}
 	}
@@ -4161,21 +4220,24 @@ func (g gatedApprover) Approve(ctx context.Context, kind, detail string) bool {
 }
 
 // stdinApprover prompts the operator on stderr for a policy "ask" decision. The
-// mutex serializes prompts so concurrent tool-call approvals never read the
-// shared stdin reader at the same time. `a` grants the kind's category for the
-// whole session (via the app's session-allow set). ctx is unused: this is the
-// plain (non-TUI) prompt, a synchronous stdin read with no way to interrupt it.
+// mutex serializes prompts so concurrent tool-call approvals never read a line
+// meant for each other; `stdin` (a *stdinOwner, shared with the plain REPL's
+// command loop) additionally keeps this from ever racing the loop's OWN read
+// of the same underlying reader — see stdinOwner. `a` grants the kind's
+// category for the whole session (via the app's session-allow set). ctx is
+// unused: this is the plain (non-TUI) prompt, a synchronous stdin read with no
+// way to interrupt it.
 type stdinApprover struct {
-	mu  sync.Mutex
-	r   *bufio.Reader
-	app *app
+	mu    sync.Mutex
+	stdin *stdinOwner
+	app   *app
 }
 
 func (s *stdinApprover) Approve(_ context.Context, kind, detail string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fmt.Fprintf(os.Stderr, "\n[approve %s] %s\n  allow? [y/N/a=all %s this session] ", kind, detail, categoryLabel(approvalCategory(kind)))
-	line, err := s.r.ReadString('\n')
+	line, err := s.stdin.readApproveLine()
 	if err != nil {
 		return false
 	}
@@ -4189,6 +4251,80 @@ func (s *stdinApprover) Approve(_ context.Context, kind, detail string) bool {
 		return true
 	}
 	return false
+}
+
+// stdinOwner is the ONLY goroutine ever allowed to call ReadString on the
+// process's shared plain-mode stdin reader. Two independent call sites need a
+// line from it: the plain REPL's command loop (readCmdLine, ~repl()'s main
+// loop) and stdinApprover's y/n prompt (readApproveLine), which a detached
+// background job's own goroutine can trigger at any time — including the exact
+// moment the REPL loop is itself blocked waiting for the next command. Two
+// goroutines calling ReadString on the same *bufio.Reader concurrently is a
+// data race on its internal buffer (undefined behavior — the read meant for
+// one caller can be silently handed to the other, or worse); routing both
+// through this owner means at most one goroutine ever touches the reader.
+//
+// run reads one line, THEN picks a recipient — so a request that only shows up
+// mid-read still gets first crack at that line once it completes. Between the
+// two, an approval always wins over a merely-queued command read (see
+// pickRecipient), mirroring the TUI's own modal "approval takes the keys"
+// behavior: a background job asking the operator something right now takes
+// priority over whatever the next typed command would have been.
+type stdinOwner struct {
+	r          *bufio.Reader
+	cmdReq     chan chan lineResult
+	approveReq chan chan lineResult
+}
+
+// lineResult is one ReadString('\n') outcome, delivered to whichever request
+// (command or approval) wins that read.
+type lineResult struct {
+	line string
+	err  error
+}
+
+func newStdinOwner(r *bufio.Reader) *stdinOwner {
+	o := &stdinOwner{r: r, cmdReq: make(chan chan lineResult, 1), approveReq: make(chan chan lineResult, 1)}
+	go o.run()
+	return o
+}
+
+// run is the sole goroutine that touches r, for the life of the process.
+func (o *stdinOwner) run() {
+	for {
+		line, err := o.r.ReadString('\n')
+		o.pickRecipient() <- lineResult{line, err}
+	}
+}
+
+// pickRecipient blocks until the command loop or a pending approval wants the
+// line just read, favoring an approval whenever both are waiting at once.
+func (o *stdinOwner) pickRecipient() chan lineResult {
+	select {
+	case reply := <-o.approveReq:
+		return reply
+	default:
+	}
+	select {
+	case reply := <-o.approveReq:
+		return reply
+	case reply := <-o.cmdReq:
+		return reply
+	}
+}
+
+// readCmdLine reads the plain REPL's next command line.
+func (o *stdinOwner) readCmdLine() (string, error) { return o.readVia(o.cmdReq) }
+
+// readApproveLine reads a background job's approval answer, taking priority
+// over a command line the REPL loop may be waiting on (see pickRecipient).
+func (o *stdinOwner) readApproveLine() (string, error) { return o.readVia(o.approveReq) }
+
+func (o *stdinOwner) readVia(req chan chan lineResult) (string, error) {
+	reply := make(chan lineResult, 1)
+	req <- reply
+	res := <-reply
+	return res.line, res.err
 }
 
 // logLevel is the log threshold: warnings and up by default (so retries/errors

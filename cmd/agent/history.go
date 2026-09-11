@@ -74,6 +74,13 @@ func (a *app) hasArchivedHistory() bool {
 // Archive() runs before remember() appends the just-finished turn to the
 // agent's live history, so rewiring synchronously from there would rebuild
 // a.ag (via wire()) from a history snapshot missing that turn.
+//
+// It also must run on the same goroutine as the UI's Update/View loop, never
+// from inside the task's own goroutine: wire() reassigns a.client and a.ag
+// with no lock, and the UI reads both live while a task is in flight. That's
+// why runTask/runLoop (tui.go) call this synchronously, before building the
+// tea.Cmd closure Bubble Tea runs the task on — not runTaskStreaming itself,
+// which executes ON that closure's goroutine.
 func (a *app) maybeRewireHistoryTool() {
 	if !a.historyToolOn && a.hasArchivedHistory() {
 		_ = a.wire()

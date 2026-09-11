@@ -18,6 +18,7 @@ import (
 	"strings"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
+	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
 	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
 )
 
@@ -385,14 +386,25 @@ func mergeGlobalKeys(kv map[string]any) error {
 }
 
 // mergeJSONFile sets the given top-level keys in a JSON object file, preserving
-// every other key. Two safety properties matter because this file holds API keys
-// and provider presets:
+// every other key. Three safety properties matter because this file holds API
+// keys and provider presets:
 //   - If the existing file can't be parsed, ABORT (don't write). The old code
 //     ignored the parse error and wrote back only the new key, silently wiping
 //     providers/keys — and one truncated write then cascaded into total loss.
 //   - Write atomically (temp + rename) so an interrupted save can never leave a
 //     half-written, unparseable file behind.
+//   - Lock the whole read-merge-write cycle (the same internal/filelock package
+//     usage.Store.Save already uses) so two concurrent callers — two goroutines,
+//     or two separate ipsupport-code processes each running e.g. /rename or
+//     /model — can't both read the file before either has written back, which
+//     would silently lose one of their updates.
 func mergeJSONFile(path string, perm os.FileMode, kv map[string]any) error {
+	unlock, err := filelock.Lock(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	raw := map[string]json.RawMessage{}
 	if data, err := os.ReadFile(path); err == nil {
 		if err := json.Unmarshal(data, &raw); err != nil {
@@ -488,12 +500,20 @@ func SaveProviders(provider string, providers map[string]LLM) error {
 // [..]/{..}→array/object; anything else is the literal string), preserving every
 // other key. It refuses to write if the existing file is unparseable, and
 // validates that the result is a well-formed Config with no unknown keys (so a
-// typo like `goal_max_retunrs` is rejected rather than silently persisted).
+// typo like `goal_max_retunrs` is rejected rather than silently persisted). The
+// read-merge-write cycle is locked (see mergeJSONFile) against concurrent
+// callers racing on the same file.
 func SetFileValue(path string, perm os.FileMode, dotted, raw string) error {
 	segs, err := splitPath(dotted)
 	if err != nil {
 		return err
 	}
+	unlock, err := filelock.Lock(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	root, err := readObject(path)
 	if err != nil {
 		return err
@@ -508,12 +528,19 @@ func SetFileValue(path string, perm os.FileMode, dotted, raw string) error {
 }
 
 // UnsetFileValue removes the dotted-path key from the config file at path. A key
-// that isn't present is a no-op (not an error).
+// that isn't present is a no-op (not an error). The read-merge-write cycle is
+// locked (see mergeJSONFile) against concurrent callers racing on the same file.
 func UnsetFileValue(path string, perm os.FileMode, dotted string) error {
 	segs, err := splitPath(dotted)
 	if err != nil {
 		return err
 	}
+	unlock, err := filelock.Lock(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	root, err := readObject(path)
 	if err != nil {
 		return err

@@ -341,6 +341,10 @@ func (s *Store) installGit(ctx context.Context, repo string) ([]string, error) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("git clone failed: %s", oneLine(string(out)))
 	}
+	tmpReal, err := filepath.EvalSymlinks(tmp)
+	if err != nil {
+		return nil, fmt.Errorf("resolve clone dir: %w", err)
+	}
 
 	var files []string
 	for _, glob := range []string{filepath.Join(tmp, "*.md"), filepath.Join(tmp, "skills", "*.md")} {
@@ -357,6 +361,15 @@ func (s *Store) installGit(ctx context.Context, repo string) ([]string, error) {
 		// point it at an arbitrary local file (e.g. an SSH key), which would
 		// otherwise get copied verbatim into an installed, enabled skill.
 		if info, err := os.Lstat(p); err != nil || info.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		// The leaf can be an ordinary file while an ANCESTOR directory (e.g. a
+		// committed `skills` symlink) points outside the clone — filepath.Glob
+		// follows symlinked directory components transparently, so the Lstat
+		// check above wouldn't catch it. Resolve the real path and reject
+		// anything that resolves outside the clone.
+		real, err := filepath.EvalSymlinks(p)
+		if err != nil || (real != tmpReal && !strings.HasPrefix(real, tmpReal+string(filepath.Separator))) {
 			continue
 		}
 		data, err := os.ReadFile(p)

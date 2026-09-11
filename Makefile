@@ -14,6 +14,7 @@ build: ## host binary for local testing
 release: ## stripped static binaries for every target into dist/
 	@mkdir -p dist
 	@for p in $(PLATFORMS); do \
+	  set -e; \
 	  os=$${p%/*}; arch=$${p#*/}; ext=$$( [ "$$os" = windows ] && echo .exe || echo ); \
 	  echo "→ $$os/$$arch"; \
 	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BIN)-$$os-$$arch$$ext $(PKG); \

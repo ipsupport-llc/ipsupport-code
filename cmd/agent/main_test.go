@@ -3244,6 +3244,38 @@ func TestWireRaisesMaxHistoryForRawMemory(t *testing.T) {
 	}
 }
 
+// /clear is the user's explicit "start fresh" signal. Before this fix it only
+// reset a.history — a workspace-scoped learned fact (e.g. a stale build
+// command from an abandoned subdirectory) survived untouched and kept
+// leaking into the system prompt of every task after /clear.
+func TestClearCommandDropsStaleProjectFacts(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	a.facts = []string{"build via: cd rl_hero_go && go build -o bin/rl_hero_go . && ./bin/rl_hero_go"}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(a.ag.System(), "rl_hero_go") {
+		t.Fatal("test setup broken: system prompt doesn't contain the stale fact before /clear")
+	}
+
+	m := &tuiModel{input: textarea.New(), app: a}
+	m.runCommand("/clear")
+
+	if len(a.facts) != 0 {
+		t.Errorf("/clear left %d facts behind, want none", len(a.facts))
+	}
+	if strings.Contains(a.ag.System(), "rl_hero_go") {
+		t.Error("/clear did not refresh the system prompt — stale fact still present")
+	}
+	if _, err := os.Stat(a.factsPath()); !os.IsNotExist(err) {
+		t.Errorf("/clear did not remove the on-disk facts file: err=%v", err)
+	}
+}
+
 // The pipe-through-script smoke test can't reliably confirm quit semantics, so
 // verify the exit path directly: /exit must yield tea.Quit.
 func TestExitCommandQuits(t *testing.T) {

@@ -1220,6 +1220,8 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/clear", "/reset": // wipe THIS thread + the screen
 		m.app.ag.Reset()
 		m.app.resetSessionAllow()
+		m.app.clearFacts()
+		m.app.ag.SetSystem(m.app.systemPrompt())
 		m.app.saveSession()
 		m.history = m.history[:0]
 		if m.ready {

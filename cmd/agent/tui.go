@@ -158,6 +158,7 @@ type shellCmdMsg struct{ out string }    // output of a one-off !cmd
 type windowMsg struct {                  // re-detected context window for a provider
 	provider string
 	tokens   int
+	epoch    int64 // model active at dispatch time — a later model switch's is stale
 }
 type modelsMsg struct { // /model result: lines to show, or setTo to switch model
 	lines []string
@@ -407,7 +408,11 @@ func (m *tuiModel) detectWindowCmd() tea.Cmd {
 	// Capture the target on the UI thread (race-free); probe off-thread; apply via
 	// windowMsg on the UI thread. Handles local (LM Studio) and external providers
 	// (context_length from /models) so a /ai or /model switch never blocks the UI.
+	// The epoch is captured here too — if the model switches again before the
+	// probe resolves, the response lands stale and is discarded (see the
+	// windowMsg handler).
 	act, provider, local := m.app.activeLLM(), m.app.providerName(), m.app.isLocal()
+	ep := m.app.modelEpoch.Load()
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -419,7 +424,7 @@ func (m *tuiModel) detectWindowCmd() tea.Cmd {
 		} else {
 			tok = llm.DetectModelContext(ctx, act.BaseURL, act.APIKey, act.Model, http.DefaultClient)
 		}
-		return windowMsg{provider: provider, tokens: tok}
+		return windowMsg{provider: provider, tokens: tok, epoch: ep}
 	}
 }
 
@@ -605,7 +610,13 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case windowMsg:
-		// applied on the UI thread, so View/auto-compact never race the write
+		// applied on the UI thread, so View/auto-compact never race the write.
+		// A stale probe — dispatched for a model that's since been switched away
+		// from — is discarded outright: same provider name doesn't mean same
+		// model (e.g. two different local models both report provider "local").
+		if msg.epoch != m.app.modelEpoch.Load() {
+			return m, nil
+		}
 		if msg.tokens > 0 {
 			m.app.applyWindow(msg.provider, msg.tokens)
 			if msg.provider == m.app.providerName() {

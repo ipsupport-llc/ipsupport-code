@@ -273,6 +273,45 @@ func TestSaveProvidersRoundTrip(t *testing.T) {
 	}
 }
 
+// A config file containing the literal JSON `null` (e.g. `echo null >
+// config.json`, an easy manual mistake — valid JSON, but not an object)
+// unmarshals into a nil map rather than an error. readObject must not hand
+// that nil map to a caller that then panics writing into it; it must behave
+// like a fresh/empty file instead.
+func TestSetFileValueOnNullRootDoesNotPanic(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte("null"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := SetFileValue(path, 0o644, "run.default", "allow"); err != nil {
+		t.Fatalf("SetFileValue on a null-root file: %v", err)
+	}
+
+	got, ok := LookupPathInFile(path, "run.default")
+	if !ok || got != "allow" {
+		t.Errorf("run.default = %v (ok=%v), want allow", got, ok)
+	}
+}
+
+// UnsetFileValue reads and deletes rather than writing into the root map, so
+// it doesn't panic on a nil root, but it must still behave correctly (no-op,
+// no error) on the same null-root file rather than erroring or misbehaving.
+func TestUnsetFileValueOnNullRootDoesNotPanic(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte("null"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := UnsetFileValue(path, 0o644, "run.default"); err != nil {
+		t.Fatalf("UnsetFileValue on a null-root file: %v", err)
+	}
+}
+
 func writeWorkspaceConfig(t *testing.T, js string) string {
 	t.Helper()
 	dir := t.TempDir()

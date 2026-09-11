@@ -2036,6 +2036,39 @@ func TestExternalApprovalCategorySeparate(t *testing.T) {
 	}
 }
 
+// A background job (jobs.go) runs detached from the foreground task and can
+// raise an approval after the foreground has already gone idle. The approvalMsg
+// handler only auto-enters stApprove from stRunning, so that case is instead
+// reached via ↑ from stIdle. Answering it must restore stIdle — not force
+// stRunning with nothing actually running, which would wedge the UI forever
+// (esc has no cancel to call, and nothing is left to flip the state back).
+func TestApprovalRestoresPriorState(t *testing.T) {
+	// Background job's approval, answered while the foreground was idle.
+	m := &tuiModel{app: &app{}, bridge: newBridge(), state: stIdle, input: textarea.New()}
+	m.pending = &approvalReq{kind: "run", detail: "go test ./...", reply: make(chan bool, 1)}
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyUp}) // the documented idle → stApprove path
+	if m.state != stApprove {
+		t.Fatalf("↑ from stIdle with a pending approval should enter stApprove, got %v", m.state)
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}) // answer it
+	if m.state != stIdle {
+		t.Errorf("answering a background job's approval raised while idle: state = %v, want stIdle", m.state)
+	}
+
+	// Normal case: an approval raised by the foreground task must still resume
+	// stRunning once answered.
+	m2 := &tuiModel{app: &app{}, bridge: newBridge(), state: stRunning, input: textarea.New()}
+	m2.Update(approvalMsg(approvalReq{kind: "run", detail: "rm -rf tmp", reply: make(chan bool, 1)}))
+	if m2.state != stApprove {
+		t.Fatalf("an approval raised while running should auto-enter stApprove, got %v", m2.state)
+	}
+	m2.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if m2.state != stRunning {
+		t.Errorf("answering an approval raised while running: state = %v, want stRunning", m2.state)
+	}
+}
+
 func TestTailClip(t *testing.T) {
 	if got := textutil.Tail("short", 100); got != "short" {
 		t.Errorf("under cap = %q", got)

@@ -81,6 +81,7 @@ type tuiModel struct {
 	searchQuery   string   // Ctrl+R reverse-search query (stHistSearch)
 	searchIdx     int      // index into app.promptHist of the current match; -1 = none
 	pending       *approvalReq
+	preApprove    uiState       // state being interrupted when stApprove was entered — stRunning normally, or stIdle when a background job's approval is answered via ↑ while idle; restored when the approval is resolved
 	approveChoice bool          // selected Yes(true)/No(false) while answering an approval
 	cfgCursor     int           // selected row in the /config panel (stConfig)
 	cfgPhase      int           // stConfig sub-flow: cfgPhaseList, or an add-provider form field
@@ -509,6 +510,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// dedicated panel (config/agents/rewind/...) already shows its own
 		// "approval waiting behind this" indicator and keeps its own state.
 		if m.state == stRunning {
+			m.preApprove = m.state
 			m.state = stApprove
 		}
 		return m, nil
@@ -699,6 +701,7 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// idle/running screens: inside a panel (e.g. /config over a task) ↑ must keep
 	// moving the cursor — esc the panel first, then answer.
 	if m.pending != nil && (m.state == stRunning || m.state == stIdle) && k.String() == "up" {
+		m.preApprove = m.state
 		m.state = stApprove
 		m.approveChoice = true
 		return m, nil
@@ -1009,7 +1012,7 @@ func (m *tuiModel) applyPendingMode() {
 }
 
 func (m *tuiModel) resolveApproval(ok bool) {
-	m.state = stRunning
+	m.state = m.preApprove
 	if m.pending == nil {
 		return
 	}
@@ -1030,7 +1033,7 @@ func (m *tuiModel) approveSession() {
 	}
 	cat := categoryLabel(approvalCategory(m.pending.kind))
 	m.app.allowSession(m.pending.kind)
-	m.state = stRunning
+	m.state = m.preApprove
 	m.pending.reply <- true
 	m.pending = nil
 	m.push(cDim.Render("  → ") + cOk.Render("allowed") + cDim.Render(" · won't ask about "+cat+" again this session"))

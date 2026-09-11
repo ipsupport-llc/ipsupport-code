@@ -2714,6 +2714,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	a.detectContextWindow() // the model is loaded now — confirm the real window
 	if a.shouldAutoCompact() {
 		if n, err := a.ag.Compact(ctx); err == nil && n > 0 {
+			a.resetCheckpoints() // histLen indexed the pre-compact history — meaningless now
 			a.saveSession()
 			fmt.Fprintf(os.Stderr, "(auto-compacted %d messages to free context)\n", n)
 		}
@@ -2837,6 +2838,7 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	case "/reset", "/clear": // wipe THIS thread
 		a.ag.Reset()
 		a.resetSessionAllow()
+		a.resetCheckpoints() // histLen indexed the wiped history — meaningless now
 		a.clearFacts()
 		a.ag.SetSystem(a.systemPrompt())
 		a.saveSession()
@@ -2846,6 +2848,9 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		if err != nil {
 			fmt.Println("compact failed:", err)
 		} else {
+			if n > 0 {
+				a.resetCheckpoints() // histLen indexed the pre-compact history — meaningless now
+			}
 			a.saveSession()
 			fmt.Printf("compacted %d messages → summary.\n", n)
 		}

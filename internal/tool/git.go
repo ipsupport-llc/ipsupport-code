@@ -139,7 +139,7 @@ func (g *gitTool) show(ctx context.Context, a Args) Result {
 	if strings.HasPrefix(ref, "-") { // a leading dash would be read as a git flag
 		return Err("invalid ref (leading dash): " + ref)
 	}
-	if _, path, ok := strings.Cut(ref, ":"); ok && path != "" {
+	if path, ok := blobPath(ref); ok {
 		// <rev>:<path> blob/tree syntax returns the file's raw content at that
 		// revision — --stat has no effect on a blob reference, so this is a
 		// direct read of the path's content and must respect the same jail +
@@ -149,6 +149,26 @@ func (g *gitTool) show(ctx context.Context, a Args) Result {
 		}
 	}
 	return g.run(ctx, "show", false, "show", "--stat", ref)
+}
+
+// blobPath extracts the <path> portion of a git "<rev>:<path>" blob/tree ref,
+// including its index-stage variants ":<path>" and ":<n>:<path>" (stage 0-3,
+// see gitrevisions(7)). ":0:.env" names the SAME path as "HEAD:.env", but a
+// naive split on the first colon reads it as path "0:.env" — which never
+// matches the secret-file glob (it isn't ".env") — letting git read the real
+// .env blob straight out of the index while the policy check looks at the
+// wrong string. Parsed per git's own grammar so the same path is checked
+// whichever form selected it.
+func blobPath(ref string) (path string, ok bool) {
+	if strings.HasPrefix(ref, ":") {
+		rest := ref[1:]
+		if len(rest) >= 2 && rest[0] >= '0' && rest[0] <= '3' && rest[1] == ':' {
+			rest = rest[2:]
+		}
+		return rest, rest != ""
+	}
+	_, p, cut := strings.Cut(ref, ":")
+	return p, cut && p != ""
 }
 
 func (g *gitTool) add(ctx context.Context, a Args) Result {

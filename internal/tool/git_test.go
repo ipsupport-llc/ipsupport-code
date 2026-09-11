@@ -210,6 +210,30 @@ func TestGitDiffExcludesSecretFilesFromWholeRepoDiff(t *testing.T) {
 	}
 }
 
+// git's own ":[<n>:]<path>" index-stage syntax (e.g. ":0:.env") names the SAME
+// path as "HEAD:.env" but bypassed the naive first-colon split (which read
+// ":0:.env" as path "0:.env", never matching the secret-file glob) and read
+// the blob straight out of the index regardless of file.read's restriction on
+// the identical path.
+func TestGitShowRejectsIndexStageSecretBypass(t *testing.T) {
+	dir := initRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("API_KEY=hunter2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", ".env").CombinedOutput(); err != nil {
+		t.Fatalf("add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "add env").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+	tl := gitToolFor(t, dir, yes())
+	ctx := context.Background()
+
+	if r := tl.Call(ctx, "show", map[string]any{"ref": ":0:.env"}); !r.IsError || strings.Contains(r.Content, "hunter2") {
+		t.Errorf("show :0:.env = %+v, want blocked as a secret, not the raw content", r)
+	}
+}
+
 func TestGitMutatingDeniedByUser(t *testing.T) {
 	dir := initRepo(t)
 	tl := gitToolFor(t, dir, no())

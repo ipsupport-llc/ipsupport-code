@@ -3020,7 +3020,7 @@ func TestNewSessionPreservesOld(t *testing.T) {
 	a.ag.SetHistory([]llm.Message{llm.User("g0"), {Role: "assistant", Content: "a0"}})
 	a.saveSession() // ipsupport-code.json
 
-	auto := a.autoSessionName()
+	auto := a.autoSessionName(a.cfg.Name)
 	if auto != "ipsupport-code-2" {
 		t.Fatalf("autoSessionName = %q, want ipsupport-code-2", auto)
 	}
@@ -3042,6 +3042,37 @@ func TestNewSessionPreservesOld(t *testing.T) {
 	}
 	if loaded, _ := config.Load(cfg.Workspace); loaded.Name == "ipsupport-code-2" {
 		t.Errorf("a bare /new must not persist the auto name as the default identity")
+	}
+}
+
+// The startup chooser's "start new" row used to reuse autoSessionName's
+// bare-/new behavior verbatim — deriving the fresh session's name from
+// whatever session was last active ("cfg.Name"), so starting new from a
+// session named e.g. "старая" produced "старая-2" instead of a name
+// independent of it. "Start new" means exactly that: not a continuation.
+func TestChooserStartNewDoesNotDeriveNameFromOldSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Name = "старая"
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag.SetHistory([]llm.Message{llm.User("g0"), {Role: "assistant", Content: "a0"}})
+	a.saveSession() // "старая.json" now on disk
+
+	rows := a.listSessions()
+	m := &tuiModel{app: a, state: stChooseSession, chooseRows: rows, chooseCursor: len(rows)} // the "start new" row
+	m.chooseActivate()
+
+	if strings.HasPrefix(m.app.cfg.Name, "старая") {
+		t.Fatalf(`"start new" derived its name from the old session: got %q`, m.app.cfg.Name)
+	}
+	if want := "ipsupport-code-2"; m.app.cfg.Name != want { // base "ipsupport-code" (config.Default().Name), first free suffix
+		t.Fatalf(`"start new" session name = %q, want %q`, m.app.cfg.Name, want)
 	}
 }
 

@@ -450,7 +450,8 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	// Resolve the working directory (default: the session workspace). The path may
 	// point anywhere — ~ is expanded, relatives resolve against the session — but
 	// the sub-agent gets its OWN jail rooted there, so it still can't escape it.
-	subReg, subWorkspace := a.subReg, a.effectiveDir()
+	subWorkspace := a.effectiveDir()
+	var subReg *tool.Registry
 	if d := strings.TrimSpace(dir); d != "" {
 		root, err := a.resolveSpawnDir(d)
 		if err != nil {
@@ -467,6 +468,21 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 			return spawnPlan{}, false, p, pErr
 		}
 		subReg, subWorkspace = a.buildSubReg(subPol, root), root
+	} else {
+		// No explicit dir: still give the sub-agent its OWN *policy.Engine, not
+		// a.pol. a.pol.workdir has no lock and /cd mutates it live — sharing the
+		// pointer (as a.subReg does at wire() time) would let a foreground /cd
+		// bleed into an already-running background delegate's relative path
+		// resolution. Snapshot the host's current dir now as the delegate's fixed
+		// starting workdir.
+		subPol, pErr := policy.New(a.cfg)
+		if pErr != nil {
+			return spawnPlan{}, false, p, pErr
+		}
+		if _, err := subPol.SetWorkdir(subWorkspace); err != nil {
+			return spawnPlan{}, false, p, err
+		}
+		subReg = a.buildSubReg(subPol, a.hostSandboxRoot())
 	}
 	return spawnPlan{
 		profile: profile, provider: provider, llmCfg: llmCfg, rolePrompt: p.Prompt,

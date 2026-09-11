@@ -2337,6 +2337,65 @@ func TestSubagentTargetsAndDepthCap(t *testing.T) {
 	}
 }
 
+// A background delegate spawned with no explicit dir must get its OWN
+// *policy.Engine snapshotted to the host's current dir — not a live reference
+// to a.pol (or the a.subReg wired from it at startup). a.pol.workdir has no
+// lock and /cd mutates it in place, so reusing it would let a foreground /cd
+// bleed into an already-resolved background delegate's relative file paths.
+func TestResolveSpawnDefaultDirGetsIndependentPolicy(t *testing.T) {
+	ws := t.TempDir()
+	for _, d := range []string{"start", "other"} {
+		if err := os.MkdirAll(filepath.Join(ws, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(ws, "start", "marker.txt"), []byte("start"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "other", "marker.txt"), []byte("other"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.Agents = map[string]config.AgentProfile{"rev": {Provider: "local"}}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the session having already /cd'd into "start" before spawning.
+	if _, err := a.pol.SetWorkdir(filepath.Join(ws, "start")); err != nil {
+		t.Fatal(err)
+	}
+	a.workdir = filepath.Join(ws, "start")
+
+	plan, external, _, err := a.resolveSpawn("rev", "") // no explicit dir
+	if err != nil || external {
+		t.Fatalf("resolveSpawn = %+v, external=%v, err=%v", plan, external, err)
+	}
+
+	// Foreground /cd elsewhere WHILE the delegate is (hypothetically) running.
+	if _, err := a.pol.SetWorkdir(filepath.Join(ws, "other")); err != nil {
+		t.Fatal(err)
+	}
+
+	res := plan.subReg.Dispatch(context.Background(), "file", "read", map[string]any{"path": "marker.txt"})
+	if res.IsError {
+		t.Fatalf("delegate read failed: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "start") {
+		t.Errorf("delegate resolved marker.txt = %q, want the snapshot from %q — the host's later /cd must not bleed through", res.Content, "start")
+	}
+
+	// It must also be a genuinely separate *tool.Registry — not the shared
+	// a.subReg wired once at startup.
+	if plan.subReg == a.subReg {
+		t.Error("default-dir delegate must get its own *tool.Registry, not the shared a.subReg")
+	}
+}
+
 // A sandboxed host must not hand a sub-agent (spawn.exec=true) an UNCONFINED
 // run tool — buildSubReg used to build tool.NewRun with no wrap argument at
 // all, so Seatbelt/Landlock never applied to a delegated sub-agent's shell

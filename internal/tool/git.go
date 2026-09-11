@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -143,8 +144,13 @@ func (g *gitTool) show(ctx context.Context, a Args) Result {
 		// <rev>:<path> blob/tree syntax returns the file's raw content at that
 		// revision — --stat has no effect on a blob reference, so this is a
 		// direct read of the path's content and must respect the same jail +
-		// secret-file checks file.read enforces on the identical path.
-		if err := g.checkPathPolicy(path); err != nil {
+		// secret-file checks file.read enforces on the identical path. Unlike
+		// an ordinary path, git ALWAYS resolves <path> here against the
+		// REPOSITORY ROOT, never cwd or the configured jail — so when the
+		// jail is a subdirectory of a larger repo, checking it the way
+		// checkPathPolicy does (jail-relative) validates a different file
+		// than the one git actually reads.
+		if err := g.checkRevPathPolicy(ctx, path); err != nil {
 			return Err(err.Error())
 		}
 	}
@@ -169,6 +175,45 @@ func blobPath(ref string) (path string, ok bool) {
 	}
 	_, p, cut := strings.Cut(ref, ":")
 	return p, cut && p != ""
+}
+
+// checkRevPathPolicy applies the jail + secret-file checks to <path> from a
+// "<rev>:<path>" blob/tree ref, resolved against the ACTUAL git repository
+// root (not the configured jail) since that's what git itself resolves path
+// against. The resulting absolute path is then checked against the jail same
+// as any other read, so a path outside the jail (even if inside the repo) is
+// rejected.
+func (g *gitTool) checkRevPathPolicy(ctx context.Context, path string) error {
+	root, err := g.repoRoot(ctx)
+	if err != nil {
+		return err
+	}
+	abs, err := g.pol.Resolve(filepath.Join(root, path))
+	if err != nil {
+		return err
+	}
+	if g.pol.IsSecret(abs) {
+		return errors.New("reading " + path + " is blocked (it looks like a secrets/credentials file)")
+	}
+	return nil
+}
+
+// repoRoot returns the absolute path of the git repository containing the
+// resolved working directory, via "git rev-parse --show-toplevel".
+func (g *gitTool) repoRoot(ctx context.Context) (string, error) {
+	dir, err := g.pol.Resolve(".")
+	if err != nil {
+		return "", err
+	}
+	cctx, cancel := context.WithTimeout(ctx, defaultRunTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "git", "rev-parse", "--show-toplevel")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return "", errors.New("could not determine the git repository root: " + err.Error())
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func (g *gitTool) add(ctx context.Context, a Args) Result {

@@ -222,14 +222,25 @@ func (e *Engine) Write(path string) (Decision, error) {
 	if err != nil {
 		return Deny, err
 	}
-	rel := e.rel(abs)
-	if fileMatch(e.file.DenyWrite, rel) {
+	if e.DeniedWrite(abs) {
 		return Deny, nil
 	}
-	if fileMatch(e.file.AllowWrite, rel) {
+	if fileMatch(e.file.AllowWrite, e.rel(abs)) {
 		return Allow, nil
 	}
 	return parseDefault(e.file.Default), nil
+}
+
+// DeniedWrite reports whether an already-resolved absolute path is blocked by
+// the DenyWrite floor (.env, *secret*, …). Write's own check above only
+// covers the path as it resolved at that moment; a caller that waits on an
+// (async, possibly slow) approval between Resolve calls must call this again
+// against the freshly re-resolved path right before it actually opens the
+// file, since the target could have been swapped to a symlink pointing at a
+// denied file while approval was pending — Resolve alone only re-enforces the
+// jail, not the deny-write glob.
+func (e *Engine) DeniedWrite(abs string) bool {
+	return fileMatch(e.file.DenyWrite, e.rel(abs))
 }
 
 // secretReadFloor blocks reading obvious credential files, so the agent can't

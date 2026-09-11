@@ -288,6 +288,13 @@ func (f *fileTool) writeFile(action string, a Args, appendMode bool) Result {
 	if err != nil {
 		return Err(err.Error())
 	}
+	// Re-check the deny-write floor against the freshly re-resolved path: the
+	// approval above may have waited a while, during which the target could
+	// have been swapped to a symlink now pointing at a denied file (e.g.
+	// .env). Resolve just re-ran the jail check, not this one.
+	if f.pol.DeniedWrite(abs) {
+		return Err(action + " " + path + " denied by workspace policy")
+	}
 	f.snapshot(abs) // checkpoint the prior content before we change it
 	var old string
 	if !appendMode {
@@ -417,6 +424,11 @@ func (f *fileTool) edit(_ context.Context, a Args) Result {
 	if err != nil {
 		return Err(err.Error())
 	}
+	// Re-check the deny-write floor against the freshly re-resolved path — see
+	// the identical comment in writeFile.
+	if f.pol.DeniedWrite(abs) {
+		return Err("edit " + path + " denied by workspace policy")
+	}
 	f.snapshot(abs) // checkpoint the prior content before we change it
 	data, err := os.ReadFile(abs)
 	if err != nil {
@@ -544,6 +556,11 @@ func (f *fileTool) mkdir(_ context.Context, a Args) Result {
 	abs, err := f.pol.Resolve(path)
 	if err != nil {
 		return Err(err.Error())
+	}
+	// Re-check the deny-write floor against the freshly re-resolved path — see
+	// the identical comment in writeFile.
+	if f.pol.DeniedWrite(abs) {
+		return Err("mkdir " + path + " denied by workspace policy")
 	}
 	// os.MkdirAll is a silent no-op when the directory already exists — check
 	// first so the model is TOLD it already existed instead of always seeing

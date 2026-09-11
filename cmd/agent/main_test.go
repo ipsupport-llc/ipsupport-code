@@ -2121,6 +2121,30 @@ func TestSpawnExternalAgent(t *testing.T) {
 	}
 }
 
+// External CLI agents run outside our sandbox with no read-only mode, so plan
+// mode must refuse the launch outright — not just skip the outer "mutates"
+// backstop that LLM sub-agents get via SetPlanMode. Prove it by asserting the
+// command never actually ran (a marker file it would create is absent), not
+// just that an error came back.
+func TestSpawnExternalAgentBlockedInPlanMode(t *testing.T) {
+	ws := t.TempDir()
+	marker := filepath.Join(ws, "marker.txt")
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.Agents = map[string]config.AgentProfile{
+		"touch": {Kind: "external", Command: "touch", Args: []string{"{task}"}},
+	}
+	a := &app{cfg: cfg, workspace: ws, approver: fixedApprover(true), planMode: true}
+
+	_, err := a.spawnAgent(context.Background(), "touch", marker, "")
+	if err == nil || !strings.Contains(err.Error(), "plan mode") {
+		t.Fatalf("external agent in plan mode = %v, want a plan-mode rejection", err)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Error("external agent ran and mutated the filesystem despite plan mode")
+	}
+}
+
 func TestDiffCommand(t *testing.T) {
 	dir := t.TempDir()
 	git := func(args ...string) {

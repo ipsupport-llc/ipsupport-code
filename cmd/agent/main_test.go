@@ -212,6 +212,24 @@ func TestForceDetachFreesTheUI(t *testing.T) {
 	}
 }
 
+// A slow /compact left running in the background (the user started a new task,
+// or force-detached, while it was still folding the session) must not clobber
+// whatever newer state the UI has moved on to when it finally lands late — its
+// epoch is stale, mirroring taskDoneMsg's own guard.
+func TestStaleCompactDoneMsgIgnored(t *testing.T) {
+	m := &tuiModel{state: stRunning, cancel: func() {}, input: textarea.New()}
+	m.epoch = 2 // the UI has since moved on to a new run
+
+	m.Update(compactDoneMsg{n: 0, epoch: 1}) // the old compaction's message, stale
+
+	if m.state != stRunning {
+		t.Error("a stale compactDoneMsg disturbed the running UI")
+	}
+	if m.cancel == nil {
+		t.Error("a stale compactDoneMsg cleared the current run's cancel func")
+	}
+}
+
 func TestAsideDrainsOnce(t *testing.T) {
 	a := &app{}
 	if a.addAside("  "); len(a.pendingAside) != 0 {

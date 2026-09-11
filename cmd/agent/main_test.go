@@ -2412,6 +2412,59 @@ func TestEscFromApprovalRestoresPriorState(t *testing.T) {
 	}
 }
 
+// A background job's approval can interrupt a foreground task (preApprove=stRunning,
+// stApprove); if the foreground task's OWN completion then arrives while that prompt
+// is still showing, taskDoneMsg's m.state != stRunning branch defers finalization
+// (m.taskDoneAway=true, m.cancel=nil — "finalize on panel close", see closePanel).
+// resolveApproval/approveSession used to just restore m.preApprove (=stRunning)
+// unconditionally, ignoring that deferred completion: the UI showed "running" with
+// m.cancel already nil and nothing left to ever flip it back — permanently stuck,
+// since only closePanel (never called by the approval modal's own close path) drained
+// taskDoneAway. Answering the approval must finalize the deferred completion instead.
+func TestApprovalCloseFinalizesDeferredTaskDone(t *testing.T) {
+	newRunningModel := func() *tuiModel {
+		m := &tuiModel{state: stRunning, input: textarea.New(), bridge: newBridge(), ctx: context.Background(), app: &app{cfg: config.Default()}}
+		m.app.windowDetected = true // detectWindowCmd → nil (no probe)
+		m.app.client = llm.NewOpenAIClient(config.LLM{})
+		m.app.ag = agent.New(m.app.client, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
+		return m
+	}
+
+	run := func(t *testing.T, answer func(m *tuiModel)) {
+		t.Helper()
+		m := newRunningModel()
+		m.cancel = func() {} // the foreground task is running
+		m.epoch = 1
+		m.Update(approvalMsg(approvalReq{kind: "run", detail: "go test ./...", reply: make(chan bool, 1)}))
+		if m.state != stApprove || m.preApprove != stRunning {
+			t.Fatalf("approval over a running task: state=%v preApprove=%v, want stApprove/stRunning", m.state, m.preApprove)
+		}
+		m.Update(taskDoneMsg{epoch: m.epoch}) // the foreground task finishes WHILE the prompt is showing
+		if !m.taskDoneAway || m.cancel != nil {
+			t.Fatalf("task finishing under the modal should set taskDoneAway and clear cancel: taskDoneAway=%v cancel=%v", m.taskDoneAway, m.cancel)
+		}
+		answer(m) // the user answers the approval
+		if m.state != stIdle {
+			t.Errorf("answering over a deferred task-done: state = %v, want stIdle (not stuck at stRunning)", m.state)
+		}
+		if m.taskDoneAway {
+			t.Error("taskDoneAway must be drained on answering, not left stuck forever")
+		}
+		// The UI must not just look idle — a new task must actually be able to start.
+		m.submit("go")
+		if m.state != stRunning {
+			t.Errorf("a new task should be able to start after the fix, state = %v", m.state)
+		}
+	}
+
+	t.Run("y", func(t *testing.T) {
+		run(t, func(m *tuiModel) { m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}}) })
+	})
+	t.Run("allow-session", func(t *testing.T) {
+		run(t, func(m *tuiModel) { m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}}) })
+	})
+}
+
 func TestTailClip(t *testing.T) {
 	if got := textutil.Tail("short", 100); got != "short" {
 		t.Errorf("under cap = %q", got)

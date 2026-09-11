@@ -851,17 +851,17 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.approveChoice = !m.approveChoice // toggle Yes/No
 			return m, nil
 		case "y", "Y":
-			m.resolveApproval(true)
-			return m, m.waitApproval()
+			model, cmd := m.resolveApproval(true)
+			return model, tea.Batch(cmd, m.waitApproval())
 		case "n", "N":
-			m.resolveApproval(false)
-			return m, m.waitApproval()
+			model, cmd := m.resolveApproval(false)
+			return model, tea.Batch(cmd, m.waitApproval())
 		case "a", "A": // allow this kind for the rest of the session (in-memory)
-			m.approveSession()
-			return m, m.waitApproval()
+			model, cmd := m.approveSession()
+			return model, tea.Batch(cmd, m.waitApproval())
 		case "enter":
-			m.resolveApproval(m.approveChoice)
-			return m, m.waitApproval()
+			model, cmd := m.resolveApproval(m.approveChoice)
+			return model, tea.Batch(cmd, m.waitApproval())
 		case "esc":
 			m.state = m.preApprove // back to typing; the approval stays pending
 			return m, nil
@@ -874,13 +874,15 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Answer a pending approval directly — but only with an empty input, so
 			// typing a word starting with y/n/a mid-sentence still just types.
 			if m.pending != nil && strings.TrimSpace(m.input.Value()) == "" {
+				var model tea.Model
+				var cmd tea.Cmd
 				switch k.String() {
 				case "a", "A":
-					m.approveSession()
+					model, cmd = m.approveSession()
 				default:
-					m.resolveApproval(k.String() == "y" || k.String() == "Y")
+					model, cmd = m.resolveApproval(k.String() == "y" || k.String() == "Y")
 				}
-				return m, m.waitApproval()
+				return model, tea.Batch(cmd, m.waitApproval())
 			}
 			var cmd tea.Cmd
 			m.input, cmd = m.input.Update(k)
@@ -1028,25 +1030,32 @@ func (m *tuiModel) applyPendingMode() {
 	}
 }
 
-func (m *tuiModel) resolveApproval(ok bool) {
+// resolveApproval answers the pending approval and restores the state stApprove
+// interrupted — unless the foreground task's own completion arrived while the
+// prompt was showing (m.taskDoneAway), in which case that deferred completion is
+// finalized instead of resuming a "running" that finished behind the modal.
+func (m *tuiModel) resolveApproval(ok bool) (tea.Model, tea.Cmd) {
 	m.state = m.preApprove
-	if m.pending == nil {
-		return
+	if m.pending != nil {
+		m.pending.reply <- ok
+		m.pending = nil
+		verdict := cErr.Render("denied")
+		if ok {
+			verdict = cOk.Render("allowed")
+		}
+		m.push(cDim.Render("  → ") + verdict)
 	}
-	m.pending.reply <- ok
-	m.pending = nil
-	verdict := cErr.Render("denied")
-	if ok {
-		verdict = cOk.Render("allowed")
+	if model, cmd, drained := m.finalizeTaskDoneAway(); drained {
+		return model, cmd
 	}
-	m.push(cDim.Render("  → ") + verdict)
+	return m, nil
 }
 
 // approveSession approves the pending request AND stops asking about its whole
 // category for the rest of the session (in-memory; cleared on /new & /clear).
-func (m *tuiModel) approveSession() {
+func (m *tuiModel) approveSession() (tea.Model, tea.Cmd) {
 	if m.pending == nil {
-		return
+		return m, nil
 	}
 	cat := categoryLabel(approvalCategory(m.pending.kind))
 	m.app.allowSession(m.pending.kind)
@@ -1054,6 +1063,10 @@ func (m *tuiModel) approveSession() {
 	m.pending.reply <- true
 	m.pending = nil
 	m.push(cDim.Render("  → ") + cOk.Render("allowed") + cDim.Render(" · won't ask about "+cat+" again this session"))
+	if model, cmd, drained := m.finalizeTaskDoneAway(); drained {
+		return model, cmd
+	}
+	return m, nil
 }
 
 // hist is the recall ring — the app's per-workspace prompt history, persisted so ↑

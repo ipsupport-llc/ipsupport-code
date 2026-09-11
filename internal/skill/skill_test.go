@@ -285,6 +285,46 @@ func TestInstallGitRejectsSymlinkedSkillFile(t *testing.T) {
 	}
 }
 
+// TestInstallGitRejectsSymlinkedAncestorDir reproduces a gap in the leaf-symlink
+// guard above: a cloned repo's "skills" directory is ITSELF a symlink pointing
+// outside the clone, at a directory containing an ordinary (non-symlink) file.
+// filepath.Glob follows the symlinked directory transparently, so the matched
+// file's own Lstat reports a regular file — the leaf-symlink guard alone
+// wouldn't catch this. installGit must not copy the external file's content
+// into an installed, enabled skill.
+func TestInstallGitRejectsSymlinkedAncestorDir(t *testing.T) {
+	externalDir := t.TempDir()
+	const marker = "TOP-SECRET-EXTERNAL-CONTENT"
+	if err := os.WriteFile(filepath.Join(externalDir, "confidential.md"), []byte(marker), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	runGit(t, repo, "config", "user.email", "test@example.com")
+	runGit(t, repo, "config", "user.name", "Test")
+	if err := os.Symlink(externalDir, filepath.Join(repo, "skills")); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, repo, "add", "skills")
+	runGit(t, repo, "commit", "-m", "add skills symlink")
+
+	s, err := Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names, err := s.installGit(context.Background(), repo)
+	if err != nil {
+		return // failing the whole import is an acceptable, clean rejection
+	}
+	for _, name := range names {
+		sk, _ := s.Get(name)
+		if strings.Contains(sk.Body, marker) {
+			t.Fatalf("installed skill %q leaked external file content via symlinked ancestor dir: %q", name, sk.Body)
+		}
+	}
+}
+
 // TestInstallGitOrdinaryFiles confirms a normal git-sourced skill (a plain,
 // non-symlinked .md file) still installs correctly after the symlink fix.
 func TestInstallGitOrdinaryFiles(t *testing.T) {

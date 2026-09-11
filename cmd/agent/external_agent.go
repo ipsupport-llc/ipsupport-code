@@ -87,16 +87,16 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 
 	// Always gated, even when ordinary spawns are relaxed (spawn allow) — an
 	// unsandboxed agent asks separately. 'a' on the prompt relaxes just this
-	// category for the session. Serialized like spawns so fan-outs ask one at a
-	// time. The FULL task goes on its own detail line — you're approving an
-	// autonomous agent, so you get to read exactly what it was told to do.
+	// category for the session. The FULL task goes on its own detail line —
+	// you're approving an autonomous agent, so you get to read exactly what it
+	// was told to do. This wait is human-paced, so it must not be held behind a
+	// shared lock (see runSpawnPlan) — that would block an unrelated job's own
+	// approval behind this one's.
 	head := command + " · " + root
 	if profile != command {
 		head = profile + " · " + head
 	}
-	a.spawnMu.Lock()
-	approved := a.approveGated("external agent", head+"\n  task: "+task)
-	a.spawnMu.Unlock()
+	approved := a.approveGated(ctx, "external agent", head+"\n  task: "+task)
 	if !approved {
 		return "", fmt.Errorf("external agent denied by user")
 	}

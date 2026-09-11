@@ -1144,7 +1144,7 @@ type countingApprover struct {
 	reply bool
 }
 
-func (c *countingApprover) Approve(_, _ string) bool { c.calls++; return c.reply }
+func (c *countingApprover) Approve(_ context.Context, _, _ string) bool { c.calls++; return c.reply }
 
 // An "allow this kind for the session" grant short-circuits the real prompt for the
 // whole category, leaves other categories asking, and clears on reset.
@@ -1152,7 +1152,7 @@ func TestSessionAllowGate(t *testing.T) {
 	inner := &countingApprover{reply: false}
 	a := &app{cfg: config.Default(), approver: inner}
 
-	if a.approveGated("write", "x") { // not allowed yet → hits inner (denies)
+	if a.approveGated(context.Background(), "write", "x") { // not allowed yet → hits inner (denies)
 		t.Error("write should be denied by the inner approver before any grant")
 	}
 	if inner.calls != 1 {
@@ -1160,18 +1160,18 @@ func TestSessionAllowGate(t *testing.T) {
 	}
 
 	a.allowSession("edit") // edit → "file" category
-	if !a.approveGated("write", "y") {
+	if !a.approveGated(context.Background(), "write", "y") {
 		t.Error("write should be auto-allowed after a file-category session grant")
 	}
 	if inner.calls != 1 {
 		t.Errorf("inner was called again (%d) despite the session grant", inner.calls)
 	}
-	if a.approveGated("run", "z"); inner.calls != 2 {
+	if a.approveGated(context.Background(), "run", "z"); inner.calls != 2 {
 		t.Errorf("a different category (run) must still hit the prompt; calls=%d", inner.calls)
 	}
 
 	a.resetSessionAllow()
-	a.approveGated("write", "w")
+	a.approveGated(context.Background(), "write", "w")
 	if inner.calls != 3 {
 		t.Errorf("after reset, write must hit the prompt again; calls=%d", inner.calls)
 	}
@@ -2513,7 +2513,7 @@ func TestDeleteSessionRemovesArchive(t *testing.T) {
 
 type fixedApprover bool
 
-func (f fixedApprover) Approve(_, _ string) bool { return bool(f) }
+func (f fixedApprover) Approve(_ context.Context, _, _ string) bool { return bool(f) }
 
 func TestSubagentTargetsAndDepthCap(t *testing.T) {
 	cfg := config.Default()
@@ -3574,7 +3574,7 @@ func TestBridgeAbortDeniesBlockedApproval(t *testing.T) {
 	for _, readFirst := range []bool{false, true} {
 		b := newBridge()
 		done := make(chan bool, 1)
-		go func() { done <- b.Approve("write", "x") }()
+		go func() { done <- b.Approve(context.Background(), "write", "x") }()
 		if readFirst {
 			<-b.approvals // Approve is now blocked waiting for the reply
 		}
@@ -3587,6 +3587,107 @@ func TestBridgeAbortDeniesBlockedApproval(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("readFirst=%v: Approve never returned after Abort (hang)", readFirst)
 		}
+	}
+}
+
+// A background job's OWN context is cancelled by /jobs kill <id> — jobs.go's
+// findJob+cancel calls only that job's context.CancelFunc, never b.Abort (which
+// is bridge-wide and would wrongly deny every OTHER job's and the foreground's
+// in-flight approvals too). So a job stuck waiting on its own approval must be
+// freed by its own ctx being cancelled, without touching b.abort at all —
+// otherwise /jobs kill on that job would hang forever instead of unblocking it.
+func TestBridgeApproveUnblocksOnOwnContextCancel(t *testing.T) {
+	for _, readFirst := range []bool{false, true} {
+		b := newBridge()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan bool, 1)
+		go func() { done <- b.Approve(ctx, "spawn agent", "job task") }()
+		if readFirst {
+			<-b.approvals // Approve is now blocked waiting for the reply
+		}
+		cancel() // simulates /jobs kill <id>: only this job's own ctx, not b.abort
+		select {
+		case ok := <-done:
+			if ok {
+				t.Errorf("readFirst=%v: ctx-cancelled approval should be denied", readFirst)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("readFirst=%v: Approve never returned after its own ctx was cancelled (hang)", readFirst)
+		}
+		// The bridge-wide abort must be untouched — a DIFFERENT job (or the
+		// foreground) waiting on its own approval must not be denied by this one
+		// job's kill.
+		select {
+		case <-b.abort:
+			t.Errorf("readFirst=%v: killing one job's ctx must not close the shared bridge abort", readFirst)
+		default:
+		}
+	}
+}
+
+// seqApprover simulates the app's single shared approver seeing two concurrent
+// approval requests from two different background jobs: the first call blocks
+// (as if a human hasn't answered yet) until ITS OWN ctx is cancelled; every
+// later call resolves immediately. This isolates exactly the property spawnMu
+// broke: one job's pending approval must not block another job's unrelated one.
+type seqApprover struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *seqApprover) Approve(ctx context.Context, _, _ string) bool {
+	s.mu.Lock()
+	s.calls++
+	first := s.calls == 1
+	s.mu.Unlock()
+	if first {
+		<-ctx.Done() // job A: stuck on its own approval — never resolved by a human
+		return false
+	}
+	return false // job B: resolves immediately, without waiting on job A at all
+}
+
+// Before the fix, runSpawnPlan/mcpClient/mcpCall held a.spawnMu across the
+// ENTIRE blocking approval wait, so job A stuck waiting on its own "spawn agent"
+// approval held the mutex until its wait resolved — blocking job B's completely
+// unrelated spawn approval behind it. After the fix, the wait is no longer
+// serialized behind a shared mutex, so job B's approval must resolve quickly and
+// independently of job A's still-pending one.
+func TestSpawnApprovalDoesNotBlockUnrelatedSpawn(t *testing.T) {
+	sa := &seqApprover{}
+	a := &app{cfg: config.Default(), approver: sa}
+
+	planA := spawnPlan{profile: "a", llmCfg: config.LLM{Model: "m"}, subWorkspace: "/tmp/a", spawnDefault: "ask"}
+	planB := spawnPlan{profile: "b", llmCfg: config.LLM{Model: "m"}, subWorkspace: "/tmp/b", spawnDefault: "ask"}
+
+	aCtx, aCancel := context.WithCancel(context.Background())
+	defer aCancel()
+
+	aStarted := make(chan struct{})
+	go func() {
+		close(aStarted)
+		a.runSpawnPlan(aCtx, planA, "job A task", nil) // stuck until aCtx cancels
+	}()
+	<-aStarted
+	// Give job A a moment to actually reach the approval wait (best-effort —
+	// the mutex-held-too-long bug doesn't depend on winning this race, since job
+	// A never releases its lock on its own; but this keeps the test honest about
+	// exercising real concurrency instead of a single goroutine racing to Lock() first).
+	time.Sleep(20 * time.Millisecond)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.runSpawnPlan(context.Background(), planB, "job B task", nil)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil || err.Error() != "spawn denied by user" {
+			t.Errorf("job B's spawn approval result = %v, want \"spawn denied by user\"", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("job B's spawn approval blocked behind job A's still-pending one (spawnMu still serializing the wait)")
 	}
 }
 

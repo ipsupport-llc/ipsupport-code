@@ -268,7 +268,6 @@ type app struct {
 	pol             *policy.Engine // host policy/jail; sub-agents in a dir get their own
 	workdir         string         // absolute session working dir (set by /cd); "" = workspace
 	subReg          *tool.Registry // tools for sub-agents (no `agent` tool → no recursion)
-	spawnMu         sync.Mutex     // serializes spawn-approval prompts during parallel fan-out
 	spawnSeq        atomic.Int64   // unique id per sub-agent spawn (for grouping its UI events)
 	mcpMu           sync.Mutex     // guards the lazy MCP client cache
 	mcpClients      map[string]*mcp.Client
@@ -514,12 +513,12 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onLine func(string)) (string, error) {
 	// Ask before spawning unless the policy is relaxed. "ask" (default) guards
 	// every spawn — even local ones still cost compute, and a runaway main model
-	// could fan out endlessly. Serialize the prompt so parallel fan-out spawns ask
-	// one at a time instead of racing on the approver.
+	// could fan out endlessly. This wait is human-paced and must NOT be held
+	// behind a shared lock — the approver (TUI bridge / stdin prompt) already
+	// serializes concurrent prompts on its own, and a mutex held here would
+	// block an unrelated job's own spawn/mcp approval behind this one's.
 	if plan.spawnDefault != "allow" {
-		a.spawnMu.Lock()
-		approved := a.approveGated("spawn agent", fmt.Sprintf("%s · %s · %s\n  task: %s", plan.profile, plan.llmCfg.Model, plan.subWorkspace, task))
-		a.spawnMu.Unlock()
+		approved := a.approveGated(ctx, "spawn agent", fmt.Sprintf("%s · %s · %s\n  task: %s", plan.profile, plan.llmCfg.Model, plan.subWorkspace, task))
 		if !approved {
 			return "", fmt.Errorf("spawn denied by user")
 		}
@@ -1654,9 +1653,7 @@ func (a *app) mcpClient(ctx context.Context, name string) (*mcp.Client, error) {
 	case srv.URL != "":
 		detail = fmt.Sprintf("%s: %s", name, srv.URL)
 	}
-	a.spawnMu.Lock()
-	approved := a.approveGated("mcp launch", detail)
-	a.spawnMu.Unlock()
+	approved := a.approveGated(ctx, "mcp launch", detail)
 	if !approved {
 		return nil, fmt.Errorf("mcp server %q launch denied by user", name)
 	}
@@ -1721,7 +1718,7 @@ func (a *app) mcpSchema(ctx context.Context, server, tool string) string {
 }
 
 // mcpCall runs an MCP tool, asking approval first (it's external code that can do
-// anything). The approval prompt is serialized like sub-agent spawns.
+// anything).
 func (a *app) mcpCall(ctx context.Context, server, tool string, args map[string]any) (string, error) {
 	c, err := a.mcpClient(ctx, server)
 	if err != nil {
@@ -1733,9 +1730,7 @@ func (a *app) mcpCall(ctx context.Context, server, tool string, args map[string]
 			detail += " " + oneLine(string(b), 60)
 		}
 	}
-	a.spawnMu.Lock()
-	approved := a.approveGated("mcp call", detail)
-	a.spawnMu.Unlock()
+	approved := a.approveGated(ctx, "mcp call", detail)
 	if !approved {
 		return "", fmt.Errorf("mcp call denied by user")
 	}
@@ -4091,30 +4086,34 @@ func (a *app) resetSessionAllow() {
 }
 
 // approveGated is the approval path the tools use: a session-allow for the kind's
-// category short-circuits the prompt, otherwise it asks the real approver.
-func (a *app) approveGated(kind, detail string) bool {
+// category short-circuits the prompt, otherwise it asks the real approver. ctx is
+// the caller's own context (a job's, for a background sub-agent).
+func (a *app) approveGated(ctx context.Context, kind, detail string) bool {
 	if a.sessionAllowed(kind) {
 		return true
 	}
-	return a.approver.Approve(kind, detail)
+	return a.approver.Approve(ctx, kind, detail)
 }
 
 // gatedApprover adapts approveGated to the tool.Approver interface.
 type gatedApprover struct{ app *app }
 
-func (g gatedApprover) Approve(kind, detail string) bool { return g.app.approveGated(kind, detail) }
+func (g gatedApprover) Approve(ctx context.Context, kind, detail string) bool {
+	return g.app.approveGated(ctx, kind, detail)
+}
 
 // stdinApprover prompts the operator on stderr for a policy "ask" decision. The
 // mutex serializes prompts so concurrent tool-call approvals never read the
 // shared stdin reader at the same time. `a` grants the kind's category for the
-// whole session (via the app's session-allow set).
+// whole session (via the app's session-allow set). ctx is unused: this is the
+// plain (non-TUI) prompt, a synchronous stdin read with no way to interrupt it.
 type stdinApprover struct {
 	mu  sync.Mutex
 	r   *bufio.Reader
 	app *app
 }
 
-func (s *stdinApprover) Approve(kind, detail string) bool {
+func (s *stdinApprover) Approve(_ context.Context, kind, detail string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fmt.Fprintf(os.Stderr, "\n[approve %s] %s\n  allow? [y/N/a=all %s this session] ", kind, detail, categoryLabel(approvalCategory(kind)))

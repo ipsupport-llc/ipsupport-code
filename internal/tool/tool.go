@@ -51,8 +51,11 @@ func (e *ToolError) Error() string {
 func (e *ToolError) Unwrap() error { return e.Err }
 
 // Approver answers an interactive permission prompt for a policy "ask" decision.
+// ctx is the caller's own context (a job's, for a background sub-agent) — an
+// implementation that blocks on a human answer must also honor ctx.Done(), so a
+// job's own cancellation (not just a process-wide abort) can free it.
 type Approver interface {
-	Approve(kind, detail string) bool
+	Approve(ctx context.Context, kind, detail string) bool
 }
 
 // Tool is one fat domain tool.

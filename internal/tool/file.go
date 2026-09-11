@@ -259,12 +259,14 @@ func (f *fileTool) search(_ context.Context, a Args) Result {
 	return Ok(strings.TrimRight(b.String(), "\n"))
 }
 
-func (f *fileTool) write(_ context.Context, a Args) Result { return f.writeFile("write", a, false) }
-func (f *fileTool) appendFile(_ context.Context, a Args) Result {
-	return f.writeFile("append", a, true)
+func (f *fileTool) write(ctx context.Context, a Args) Result {
+	return f.writeFile(ctx, "write", a, false)
+}
+func (f *fileTool) appendFile(ctx context.Context, a Args) Result {
+	return f.writeFile(ctx, "append", a, true)
 }
 
-func (f *fileTool) writeFile(action string, a Args, appendMode bool) Result {
+func (f *fileTool) writeFile(ctx context.Context, action string, a Args, appendMode bool) Result {
 	path := a.Str("path")
 	content := a.Str("content")
 
@@ -276,7 +278,7 @@ func (f *fileTool) writeFile(action string, a Args, appendMode bool) Result {
 	case policy.Deny:
 		return Err(action + " " + path + " denied by workspace policy")
 	case policy.Ask:
-		if !f.ap.Approve(action, path) {
+		if !f.ap.Approve(ctx, action, path) {
 			return Err(action + " " + path + " denied by user")
 		}
 	}
@@ -382,7 +384,7 @@ func withoutKey(m map[string]any, key string) map[string]any {
 	return out
 }
 
-func (f *fileTool) edit(_ context.Context, a Args) Result {
+func (f *fileTool) edit(ctx context.Context, a Args) Result {
 	path := a.Str("path")
 
 	pairs, err := editPairs(a)
@@ -405,7 +407,7 @@ func (f *fileTool) edit(_ context.Context, a Args) Result {
 	case policy.Deny:
 		return Err("edit " + path + " denied by workspace policy")
 	case policy.Ask:
-		if !f.ap.Approve("edit", path) {
+		if !f.ap.Approve(ctx, "edit", path) {
 			return Err("edit " + path + " denied by user")
 		}
 	}
@@ -523,7 +525,7 @@ func diffStat(diff string) (added, removed int) {
 	return added, removed
 }
 
-func (f *fileTool) mkdir(_ context.Context, a Args) Result {
+func (f *fileTool) mkdir(ctx context.Context, a Args) Result {
 	path := a.Str("path")
 	d, err := f.pol.Write(path)
 	if err != nil {
@@ -533,7 +535,7 @@ func (f *fileTool) mkdir(_ context.Context, a Args) Result {
 	case policy.Deny:
 		return Err("mkdir " + path + " denied by workspace policy")
 	case policy.Ask:
-		if !f.ap.Approve("mkdir", path) {
+		if !f.ap.Approve(ctx, "mkdir", path) {
 			return Err("mkdir " + path + " denied by user")
 		}
 	}

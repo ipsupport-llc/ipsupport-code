@@ -1,6 +1,9 @@
 package main
 
-import "sync"
+import (
+	"context"
+	"sync"
+)
 
 // uiBridge is the seam between the agent (running in a background goroutine) and
 // the Bubble Tea UI loop. It implements both trace.Tracer (live step events) and
@@ -41,8 +44,11 @@ func (b *uiBridge) Emit(kind string, fields map[string]any) {
 
 // Approve (tool.Approver) blocks the calling tool until the UI answers, or
 // returns false (deny) if the task is cancelled while it's waiting — so esc
-// never leaves a tool goroutine blocked forever.
-func (b *uiBridge) Approve(kind, detail string) bool {
+// never leaves a tool goroutine blocked forever. It also denies as soon as ctx
+// is cancelled: a background job's own context (cancelled by /jobs kill <id>)
+// is otherwise invisible to this single bridge-wide abort, so killing a
+// specific job stuck on its own approval wouldn't unblock it.
+func (b *uiBridge) Approve(ctx context.Context, kind, detail string) bool {
 	b.mu.Lock()
 	abort := b.abort
 	b.mu.Unlock()
@@ -52,11 +58,15 @@ func (b *uiBridge) Approve(kind, detail string) bool {
 	case b.approvals <- approvalReq{kind: kind, detail: detail, reply: reply}:
 	case <-abort:
 		return false
+	case <-ctx.Done():
+		return false
 	}
 	select {
 	case ok := <-reply:
 		return ok
 	case <-abort:
+		return false
+	case <-ctx.Done():
 		return false
 	}
 }

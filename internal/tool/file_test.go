@@ -17,7 +17,7 @@ import (
 // approverFunc adapts a function to the Approver interface for tests.
 type approverFunc func(kind, detail string) bool
 
-func (f approverFunc) Approve(kind, detail string) bool { return f(kind, detail) }
+func (f approverFunc) Approve(_ context.Context, kind, detail string) bool { return f(kind, detail) }
 
 func yes() Approver { return approverFunc(func(_, _ string) bool { return true }) }
 func no() Approver  { return approverFunc(func(_, _ string) bool { return false }) }

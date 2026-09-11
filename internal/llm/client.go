@@ -295,11 +295,15 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	const maxAttempts = 8 // ride out a longer network glitch before giving up (it's the internet)
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		// Snapshot the live completion count so a stalled attempt's un-reconciled
-		// per-delta estimate can be rolled back before the retry re-counts it
-		// (otherwise the failed attempt's tokens are double-counted).
-		base := c.completionCount()
-		msg, err, retriable := c.send(ctx, buf)
+		// reqCompl counts THIS attempt's own live per-delta bumps (c.bumpToken),
+		// so a retriable failure can roll back exactly this attempt's own
+		// contribution before the retry re-counts it (otherwise the failed
+		// attempt's tokens are double-counted) — a delta, like the success-path
+		// reconciliation below, not a snapshot-restore of the whole shared
+		// counter (which would also wipe out a DIFFERENT concurrent Chat()
+		// call's legitimate progress made while this attempt was in flight).
+		var reqCompl int
+		msg, err, retriable := c.send(ctx, buf, &reqCompl)
 		if err == nil {
 			return msg, nil
 		}
@@ -307,7 +311,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 		if !retriable || ctx.Err() != nil || attempt == maxAttempts {
 			break
 		}
-		c.setCompletionCount(base) // undo the failed attempt's live estimate
+		c.rollbackCompletionCount(reqCompl) // undo only this attempt's own bumped estimate
 		wait := backoff(attempt)
 		if c.OnRetry != nil {
 			c.OnRetry(attempt, wait, err.Error())
@@ -432,7 +436,7 @@ func isSingleRune(s string) bool {
 }
 
 // send makes one attempt; the bool reports whether the failure is worth a retry.
-func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bool) {
+func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Message, error, bool) {
 	c.mu.Lock()
 	c.live.Reset() // this attempt's own live output, not a dropped attempt's leftovers
 	c.liveReasoning.Reset()
@@ -486,7 +490,7 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bo
 		return Message{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, oneLine(string(data))), false
 	}
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		m, err := c.parseStream(resp.Body, tick, c.maxRespTk)
+		m, err := c.parseStream(resp.Body, tick, c.maxRespTk, reqCompl)
 		if err != nil {
 			var re *runawayError
 			var de *degenerateOutputError
@@ -515,19 +519,21 @@ func oneLine(s string) string { return textutil.OneLine(s, 150) }
 // the live completion-token counter as deltas arrive so the UI updates in real
 // time (LM Studio sends roughly one token per chunk). The final usage chunk
 // reconciles the estimate with the real count.
-func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message, error) {
+func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl *int) (Message, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	var content strings.Builder
 	calls := map[int]*ToolCall{}
 	var order []int
-	reqCompl := 0
 	// progress marks a REAL token delta: it counts it and pushes the idle deadline
 	// back. Only real progress resets the watchdog — SSE heartbeats / keep-alive
 	// comments (": ping", blank lines from proxies) must NOT, or a wedged-but-
 	// heartbeating stream would "think" forever without ever producing a token.
+	// *reqCompl is this attempt's own bump count, owned by the caller (Chat's
+	// retry loop) so a retriable failure can roll back exactly this attempt's
+	// contribution to the shared c.complTk — see Chat.
 	progress := func() {
-		reqCompl++
+		(*reqCompl)++
 		c.bumpToken()
 		tick()
 	}
@@ -555,7 +561,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 		// there; a server that batches many tokens per chunk trips it late. It's a
 		// runaway backstop, not a billing meter — the usage chunk reconciles the real
 		// count — so an approximate trigger point is acceptable.
-		if maxTk > 0 && reqCompl > maxTk {
+		if maxTk > 0 && *reqCompl > maxTk {
 			return Message{}, &runawayError{maxTk}
 		}
 		line := strings.TrimSpace(sc.Text())
@@ -657,7 +663,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 		if ch.Usage != nil {
 			c.mu.Lock()
 			c.promptTk += ch.Usage.PromptTokens
-			c.complTk += ch.Usage.CompletionTokens - reqCompl
+			c.complTk += ch.Usage.CompletionTokens - *reqCompl
 			if ch.Usage.PromptTokens > 0 {
 				c.lastPromptTk = ch.Usage.PromptTokens
 			}
@@ -726,17 +732,14 @@ func (c *OpenAIClient) bumpToken() {
 	c.mu.Unlock()
 }
 
-// completionCount / setCompletionCount snapshot and restore the running completion
-// tally, so the retry loop can undo a stalled attempt's un-reconciled estimate.
-func (c *OpenAIClient) completionCount() int {
+// rollbackCompletionCount undoes a failed attempt's own contribution to the
+// running completion estimate: a delta of exactly what THAT attempt bumped via
+// bumpToken, not a snapshot-restore of the whole shared counter — the same
+// delta pattern parseStream's success-path reconciliation uses, applied to the
+// failure path too (see Chat's retry loop).
+func (c *OpenAIClient) rollbackCompletionCount(n int) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.complTk
-}
-
-func (c *OpenAIClient) setCompletionCount(n int) {
-	c.mu.Lock()
-	c.complTk = n
+	c.complTk -= n
 	c.mu.Unlock()
 }
 

@@ -39,3 +39,23 @@ func TestFileTracerJSONL(t *testing.T) {
 		t.Error("record missing time")
 	}
 }
+
+// TestFileTracerPermissions ensures the trace file — which records prompts,
+// tool-call arguments, and file-read observations — is created owner-only
+// (0600), not group/world readable.
+func TestFileTracerPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "traces.jsonl")
+	tr, err := NewFileTracer(path, "run1")
+	if err != nil {
+		t.Fatalf("NewFileTracer: %v", err)
+	}
+	defer tr.Close()
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("trace file perm = %o, want 0600", perm)
+	}
+}

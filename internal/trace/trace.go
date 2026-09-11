@@ -33,8 +33,17 @@ func NewFileTracer(path, runID string) (*FileTracer, error) {
 			return nil, err
 		}
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {
+		return nil, err
+	}
+	// The trace file records prompts, tool-call arguments, and file-read
+	// observations — potentially sensitive content. O_CREATE's mode only
+	// applies when the file doesn't already exist, so a pre-existing trace
+	// file (e.g. from before this fix) would otherwise keep looser
+	// permissions forever; tighten it on every open.
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
 		return nil, err
 	}
 	return &FileTracer{f: f, enc: json.NewEncoder(f), runID: runID}, nil

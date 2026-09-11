@@ -13,6 +13,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/procgroup"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
+	"github.com/ipsupport-llc/ipsupport-code/internal/trace"
 )
 
 // External CLI agents (codex, claude, aider…) run OUTSIDE our sandbox: their own
@@ -68,8 +69,12 @@ func catalogNames() []string {
 // root (already resolved and validated by the caller — resolveSpawn, synchronously,
 // never this function's own goroutine — see spawnPlan) with the task substituted
 // into Args, and hand the tail of its output (plus a change summary) back to the
-// delegating model.
-func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.AgentProfile, task, root string, onLine func(string)) (string, error) {
+// delegating model. tracer is likewise captured synchronously by the caller
+// (resolveSpawn's plan.tracer, or the equivalent captured on a background job —
+// see jobs.go) — this function must never read the live a.tracer itself, since it
+// runs from inside a background job's own goroutine just as often as it runs
+// synchronously from the foreground.
+func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.AgentProfile, task, root string, tracer trace.Tracer, onLine func(string)) (string, error) {
 	command := strings.TrimSpace(p.Command)
 	if command == "" {
 		return "", fmt.Errorf("profile %q: external agent has no command", profile)
@@ -99,7 +104,9 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 	defer cancel()
 
 	id := fmt.Sprintf("sub%d", a.spawnSeq.Add(1)) // groups this sub-agent's UI events
-	a.emit("subagent", map[string]any{"agent": id, "profile": profile, "provider": "external", "model": command, "dir": root, "task": task})
+	if tracer != nil {
+		tracer.Emit("subagent", map[string]any{"agent": id, "profile": profile, "provider": "external", "model": command, "dir": root, "task": task})
+	}
 
 	cmd := exec.CommandContext(cctx, command, expandTaskArgs(p.Args, task)...)
 	cmd.Dir = root
@@ -131,7 +138,9 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 	if runErr != nil {
 		done["error"] = oneLine(runErr.Error(), 60)
 	}
-	a.emit("subagent_done", done)
+	if tracer != nil {
+		tracer.Emit("subagent_done", done)
+	}
 	if runErr != nil {
 		return "", fmt.Errorf("%s failed: %w\n%s", command, runErr, body)
 	}

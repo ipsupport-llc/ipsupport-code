@@ -209,6 +209,20 @@ func (a *app) rewindRows() []rewindRow {
 	return rows
 }
 
+// ancestorRedirected reports whether p's parent directory has been swapped for
+// a symlink (or sits beneath one) since it was captured: os.Lstat(p) only ever
+// inspects the LEAF component of p, so a parent directory replaced with a
+// symlink to somewhere else entirely is invisible to it — WriteFile/Remove
+// below would follow that ancestor symlink transparently and act on whatever
+// it now points at instead of the checkpointed path. An error from
+// EvalSymlinks (parent simply doesn't exist) is left for the caller's own
+// existing fallback to handle, not treated as redirection.
+func ancestorRedirected(p string) bool {
+	dir := filepath.Dir(p)
+	real, err := filepath.EvalSymlinks(dir)
+	return err == nil && real != dir
+}
+
 // applyRewind restores to before checkpoint idx: every file changed from that turn
 // onward is reverted to its earliest pre-state (created files deleted), and the
 // session memory is trimmed back. Side effects (shell, git, network) can't be undone.
@@ -242,7 +256,9 @@ func (a *app) applyRewind(idx int) []string {
 			// it now points at instead of restoring the checkpointed file. A
 			// Lstat error here means the path is simply gone, which is fine:
 			// WriteFile below recreates it as a plain file.
-			if fi, err := os.Lstat(p); err == nil && !fi.Mode().IsRegular() {
+			if ancestorRedirected(p) {
+				failed = append(failed, p+" (parent directory redirected — refusing to restore through it)")
+			} else if fi, err := os.Lstat(p); err == nil && !fi.Mode().IsRegular() {
 				failed = append(failed, p+" (no longer a plain file — refusing to restore through it)")
 			} else if err := os.WriteFile(p, s.content, 0o644); err == nil {
 				restored++
@@ -250,7 +266,9 @@ func (a *app) applyRewind(idx int) []string {
 				failed = append(failed, p)
 			}
 		default: // created from the target turn onward → remove it
-			if err := os.Remove(p); err == nil || os.IsNotExist(err) {
+			if ancestorRedirected(p) {
+				failed = append(failed, p+" (parent directory redirected — refusing to remove through it)")
+			} else if err := os.Remove(p); err == nil || os.IsNotExist(err) {
 				deleted++
 			} else {
 				failed = append(failed, p)

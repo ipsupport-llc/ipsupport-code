@@ -1,6 +1,7 @@
 package knowledge
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -284,5 +285,63 @@ func TestSaveKeepsPendingWhenWriteFails(t *testing.T) {
 	all := final.All()
 	if len(all) != 2 {
 		t.Fatalf("lessons after recovery = %+v, want 2 (the failed save's lesson must survive to the next successful Save)", all)
+	}
+}
+
+// A no-op Purge (nothing actually old enough to drop, the common case — the
+// retention check runs unconditionally at startup) must not leave overwrite
+// stuck true for the rest of the process's life: that would make every later
+// Save() skip the merge-read and clobber whatever a concurrent process wrote
+// to the shared file in the meantime.
+func TestNoopPurgeDoesNotPoisonMergeSafety(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k.json")
+	kb, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb.Add(Pitfall{Domain: "file", ErrorPattern: "from kb", ProvenFix: "x"})
+	if err := kb.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Startup retention check: everything was just added, so nothing is older
+	// than 3650 days — a no-op purge.
+	if n := kb.Purge(3650); n != 0 {
+		t.Fatalf("Purge = %d, want 0 (no-op)", n)
+	}
+
+	// A concurrent process writes its own lesson straight to the shared file,
+	// bypassing this process's in-memory state entirely.
+	onDisk, err := readPitfalls(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	onDisk = append(onDisk, Pitfall{Domain: "concurrent", ErrorPattern: "from other process", ProvenFix: "y", Hits: 1, Added: "2026-01-01", LastSeen: "2026-01-01"})
+	data, err := json.MarshalIndent(onDisk, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ordinary use later in the same process: an Add followed by a Save.
+	kb.Add(Pitfall{Domain: "file", ErrorPattern: "another one", ProvenFix: "z"})
+	if err := kb.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	final, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, p := range final.All() {
+		if p.Domain == "concurrent" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("concurrent process's lesson was clobbered — a no-op Purge left overwrite stuck true, so the next Save skipped its merge-read")
 	}
 }

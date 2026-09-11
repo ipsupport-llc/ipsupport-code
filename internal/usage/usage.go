@@ -10,18 +10,25 @@ import (
 	"os"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
 )
 
-// Entry is one (day, provider, model) bucket of token counts.
+// Entry is one (day, provider, model) bucket of token counts. DurationMS is
+// wall-clock time spent generating them (the run that produced Completion),
+// summed across every call folded into this bucket — a rough per-bucket
+// generation-speed denominator, not pure model-only time (a run can include
+// tool-call round-trips). Omitted (0) for entries recorded before this field
+// existed, or if a caller doesn't have a duration to report.
 type Entry struct {
 	Date       string `json:"date"` // YYYY-MM-DD
 	Provider   string `json:"provider"`
 	Model      string `json:"model"`
 	Prompt     int    `json:"prompt"`
 	Completion int    `json:"completion"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
 }
 
 // Store is the ledger, persisted to a JSON file (in-memory if path is ""). Safe
@@ -63,28 +70,31 @@ func Open(path string) (*Store, error) {
 
 // Add folds tokens into the (date, provider, model) bucket. A no-op for a
 // non-positive delta so a turn that reported no usage doesn't create a row.
-func (s *Store) Add(date, provider, model string, prompt, completion int) {
+// dur is the wall-clock time the run that produced these tokens took (0 if
+// unknown) — see Entry.DurationMS.
+func (s *Store) Add(date, provider, model string, prompt, completion int, dur time.Duration) {
 	if prompt <= 0 && completion <= 0 {
 		return
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	addEntry(&s.entries, date, provider, model, prompt, completion)
-	addEntry(&s.pending, date, provider, model, prompt, completion)
+	addEntry(&s.entries, date, provider, model, prompt, completion, dur)
+	addEntry(&s.pending, date, provider, model, prompt, completion, dur)
 }
 
-// addEntry folds (date, provider, model, prompt, completion) into an existing
-// bucket in list, or appends a new one.
-func addEntry(list *[]Entry, date, provider, model string, prompt, completion int) {
+// addEntry folds (date, provider, model, prompt, completion, duration) into
+// an existing bucket in list, or appends a new one.
+func addEntry(list *[]Entry, date, provider, model string, prompt, completion int, dur time.Duration) {
 	for i := range *list {
 		e := &(*list)[i]
 		if e.Date == date && e.Provider == provider && e.Model == model {
 			e.Prompt += prompt
 			e.Completion += completion
+			e.DurationMS += dur.Milliseconds()
 			return
 		}
 	}
-	*list = append(*list, Entry{date, provider, model, prompt, completion})
+	*list = append(*list, Entry{date, provider, model, prompt, completion, dur.Milliseconds()})
 }
 
 // readEntries loads the ledger at path without mutating a Store — a missing
@@ -144,7 +154,7 @@ func (s *Store) Save() error {
 	if !s.overwrite && len(s.pending) > 0 {
 		if onDisk, err := readEntries(s.path); err == nil {
 			for _, p := range s.pending {
-				addEntry(&onDisk, p.Date, p.Provider, p.Model, p.Prompt, p.Completion)
+				addEntry(&onDisk, p.Date, p.Provider, p.Model, p.Prompt, p.Completion, time.Duration(p.DurationMS)*time.Millisecond)
 			}
 			s.entries = onDisk
 		}
@@ -168,10 +178,21 @@ type Total struct {
 	Key        string // a date, or "provider/model"
 	Prompt     int
 	Completion int
+	DurationMS int64
 }
 
 // Tokens is the combined prompt+completion count.
 func (t Total) Tokens() int { return t.Prompt + t.Completion }
+
+// TokensPerSec is the completion-token generation rate over DurationMS, or 0
+// if no duration was recorded for this bucket (e.g. entries from before
+// Entry.DurationMS existed).
+func (t Total) TokensPerSec() float64 {
+	if t.DurationMS <= 0 {
+		return 0
+	}
+	return float64(t.Completion) / (float64(t.DurationMS) / 1000)
+}
 
 // TotalSince sums all entries on or after cutoff (an ISO YYYY-MM-DD date; ISO
 // dates compare correctly as strings). cutoff "" sums everything.
@@ -188,6 +209,7 @@ func (s *Store) totalSince(cutoff string) Total {
 		if e.Date >= cutoff {
 			t.Prompt += e.Prompt
 			t.Completion += e.Completion
+			t.DurationMS += e.DurationMS
 		}
 	}
 	return t
@@ -264,6 +286,7 @@ func (s *Store) aggregate(keyOf func(Entry) string, byKeyDesc bool) []Total {
 		}
 		t.Prompt += e.Prompt
 		t.Completion += e.Completion
+		t.DurationMS += e.DurationMS
 	}
 	out := make([]Total, 0, len(m))
 	for _, t := range m {

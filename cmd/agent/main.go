@@ -591,10 +591,12 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 		plan.tracer.Emit("subagent", map[string]any{"agent": id, "profile": plan.profile, "provider": plan.provider, "model": plan.llmCfg.Model, "dir": plan.subWorkspace, "task": oneLine(task, 80)})
 	}
 
+	start := time.Now()
 	tr, err := sub.Run(ctx, task)
+	dur := time.Since(start)
 	if a.usage != nil { // the sub-agent's spend counts too
 		pt, ct := client.Usage()
-		a.usage.Add(today(), plan.provider, plan.llmCfg.Model, pt, ct)
+		a.usage.Add(today(), plan.provider, plan.llmCfg.Model, pt, ct, dur)
 		a.addSessionCost(plan.llmCfg.Model, pt, ct, plan.priceOverrides) // sub-agent spend counts toward /budget too
 		_ = a.usage.Save()
 	}
@@ -2618,7 +2620,9 @@ func (a *app) recordRun(tr agent.Transcript) {
 // provider/model bucket in the persistent ledger. Best-effort; called once a
 // task (and its reflection) has finished. The client's cumulative count carries
 // across re-wires, so the delta is always the work done since the prior task.
-func (a *app) recordUsage() {
+// dur is the wall-clock time the run took (0 if unknown) — folded into the
+// ledger so /usage can show an approximate tokens/sec (see usage.Entry).
+func (a *app) recordUsage(dur time.Duration) {
 	if a.usage == nil {
 		return
 	}
@@ -2628,7 +2632,7 @@ func (a *app) recordUsage() {
 	if dp <= 0 && dc <= 0 {
 		return
 	}
-	a.usage.Add(today(), a.providerName(), a.activeLLM().Model, dp, dc)
+	a.usage.Add(today(), a.providerName(), a.activeLLM().Model, dp, dc, dur)
 	a.addSessionCost(a.activeLLM().Model, dp, dc, a.priceOverrides()) // for the budget guard
 	if err := a.usage.Save(); err != nil {
 		slog.Warn("usage ledger save failed", "err", err)
@@ -2750,14 +2754,16 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 	a.emit("reflecting", map[string]any{"model": model})
 	refl := reflect.New(client)
 	refl.Lite = lite // facts-only, terse — for a small local model that loops
+	start := time.Now()
 	lessons, err := refl.Reflect(ctx, tr)
+	dur := time.Since(start)
 	if err != nil {
 		slog.Warn("reflection failed", "err", err)
 		return 0
 	}
 	if separate && a.usage != nil { // a dedicated reflect model's spend isn't in the main client
 		if p, c := client.Usage(); p > 0 || c > 0 {
-			a.usage.Add(today(), provider, model, p, c)
+			a.usage.Add(today(), provider, model, p, c, dur)
 			a.addSessionCost(model, p, c, a.priceOverrides()) // for the budget guard
 			_ = a.usage.Save()
 		}
@@ -2800,9 +2806,11 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
+	start := time.Now()
 	tr, err := a.ag.Run(ctx, goal)
+	dur := time.Since(start)
 	if err != nil {
-		a.recordUsage() // the failed attempt may have burned real tokens — don't drop them
+		a.recordUsage(dur) // the failed attempt may have burned real tokens — don't drop them
 		slog.Error("run failed", "err", err)
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return err
@@ -2819,7 +2827,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 			fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
 		}
 	}
-	a.recordUsage()
+	a.recordUsage(dur)
 	a.saveSession()
 	a.detectContextWindow() // the model is loaded now — confirm the real window
 	if a.shouldAutoCompact() {
@@ -2847,12 +2855,14 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
+	start := time.Now()
 	tr, err := a.ag.Run(ctx, goal)
+	dur := time.Since(start)
 	if a.taskEpoch.Load() != epoch {
 		return // force-detached mid-run — its results belong to a run the UI abandoned
 	}
 	if err != nil {
-		a.recordUsage() // the failed attempt may have burned real tokens — don't drop them
+		a.recordUsage(dur) // the failed attempt may have burned real tokens — don't drop them
 		a.emit("error", map[string]any{"text": err.Error()})
 		return
 	}
@@ -2861,7 +2871,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	if !tr.Stopped { // reflect only on a clean finish, not on any premature stop
 		a.reflectAndStore(ctx, tr)
 	}
-	a.recordUsage()
+	a.recordUsage(dur)
 	a.saveSession() // persist the partial work so a follow-up can continue
 }
 
@@ -4047,7 +4057,11 @@ func (a *app) usageLedger() (days, models [][2]string) {
 		if i >= 14 {
 			break
 		}
-		days = append(days, [2]string{t.Key, humanK(t.Tokens()) + " tok"})
+		v := humanK(t.Tokens()) + " tok"
+		if rate := t.TokensPerSec(); rate > 0 {
+			v += fmt.Sprintf("  (%.1f tok/s)", rate)
+		}
+		days = append(days, [2]string{t.Key, v})
 	}
 	ov := a.priceOverrides()
 	for i, t := range a.usage.ByModel() {
@@ -4059,6 +4073,9 @@ func (a *app) usageLedger() (days, models [][2]string) {
 			model = t.Key[idx+1:] // strip the "provider/" prefix for price matching
 		}
 		v := humanK(t.Tokens()) + " tok"
+		if rate := t.TokensPerSec(); rate > 0 {
+			v += fmt.Sprintf("  (%.1f tok/s)", rate)
+		}
 		if c := fmtCost(usage.CostUSD(model, t.Prompt, t.Completion, ov)); c != "" {
 			v += "  " + c
 		}

@@ -1851,13 +1851,21 @@ func (m *tuiModel) View() string {
 			elapsed := time.Since(m.taskStart).Truncate(time.Second)
 			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" %s… (%s)", m.busyMsg, elapsed))
 		} else {
-			elapsed := time.Since(m.taskStart).Truncate(time.Second)
+			raw := time.Since(m.taskStart)
+			elapsed := raw.Truncate(time.Second)
 			gen := c - m.startTok // completion tokens generated this task
 			// Until the first token streams (the model is still reading the
 			// prompt) show just the clock — a stuck "↑0 tok" reads as broken.
 			detail := elapsed.String()
 			if gen > 0 {
 				detail = fmt.Sprintf("%s · ↑%s tok", elapsed, humanK(gen))
+				// A rate over the first instant is too noisy to be useful (a
+				// couple of tokens over a fraction of a second reads as an
+				// absurd spike) — only show it once there's enough elapsed
+				// time for the average to have settled down.
+				if raw > 2*time.Second {
+					detail += fmt.Sprintf(" (%.1f tok/s)", float64(gen)/raw.Seconds())
+				}
 			}
 			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" %s · thinking… (%s)", m.app.providerModel(), detail))
 			if meter := m.ctxMeter(); meter != "" { // watch the window fill during a long task

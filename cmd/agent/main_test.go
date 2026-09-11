@@ -3791,6 +3791,39 @@ func TestRunOneFailedFirstRequestSignalsErrorAndRecordsUsage(t *testing.T) {
 	}
 }
 
+// A successful run's wall-clock time must reach the usage ledger too (not
+// just prompt/completion counts), so /usage can derive an approximate
+// tokens/sec — see usage.Entry.DurationMS.
+func TestRunOneRecordsDurationInUsageLedger(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(20 * time.Millisecond) // guarantee a measurable, non-flaky duration
+		io.Copy(io.Discard, r.Body)
+		// A real "usage" field, unlike tuiContent's bare choices-only body — the
+		// non-streaming response path only counts tokens it reports explicitly.
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}],`+
+			`"usage":{"prompt_tokens":10,"completion_tokens":5}}`)
+	}))
+	defer srv.Close()
+
+	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	a.cfg.LLM.BaseURL, a.cfg.LLM.Model = srv.URL, "fake"
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.runOne(context.Background(), "do the thing"); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.usage.Total().DurationMS; got < 20 {
+		t.Errorf("usage ledger DurationMS = %d, want >= 20 (the run's wall-clock time must be recorded)", got)
+	}
+}
+
 func TestRewindRestoresFiles(t *testing.T) {
 	ws := t.TempDir()
 	cfg := config.Default()

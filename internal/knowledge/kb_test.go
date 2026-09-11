@@ -2,6 +2,7 @@ package knowledge
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -168,5 +169,120 @@ func TestSaveMergesConcurrentProcessesInsteadOfClobbering(t *testing.T) {
 	all := final.All()
 	if len(all) != 3 {
 		t.Fatalf("merged lessons = %+v, want 3 (nothing clobbered)", all)
+	}
+}
+
+// The previous merge-on-Save fix only narrows the cross-process race, it
+// doesn't close it: two processes' Save calls can still interleave, since the
+// only serialization is an in-process mutex. Here "a" does a large save (many
+// distinct pending lessons, so its own read-merge-write takes a while) and "b"
+// does a tiny one that finishes almost instantly. Without a lock around the
+// whole cycle, b's fresh read (taken while a is still merging) misses a's
+// not-yet-written update, and b's write then gets clobbered by a's own
+// (later) write — silently losing b's lesson. Save must hold a cross-process
+// file lock for its entire read-merge-write cycle so neither process's read
+// can land inside the other's read-to-write window.
+func TestSaveLocksAcrossWholeReadMergeWriteCycle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k.json")
+
+	a, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2000; i++ { // pads a's own merge so its write lands well after its read
+		a.Add(Pitfall{Domain: fmt.Sprintf("d%d", i), ErrorPattern: "e", ProvenFix: "x"})
+	}
+
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Add(Pitfall{Domain: "b-process", ErrorPattern: "e", ProvenFix: "y"})
+
+	var wg sync.WaitGroup
+	var errA error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errA = a.Save()
+	}()
+	time.Sleep(10 * time.Millisecond) // let a pass its own fresh read and start its slow merge
+	if err := b.Save(); err != nil {
+		t.Fatalf("b.Save: %v", err)
+	}
+	wg.Wait()
+	if errA != nil {
+		t.Fatalf("a.Save: %v", errA)
+	}
+
+	final, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := final.All()
+	if len(all) != 2001 {
+		t.Fatalf("final lessons = %d, want 2001 (a's 2000 + b's 1, nothing clobbered)", len(all))
+	}
+	found := false
+	for _, p := range all {
+		if p.Domain == "b-process" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("b's lesson was clobbered by a's concurrent (larger) save — Save must lock the file across the whole read-merge-write cycle")
+	}
+}
+
+// If Save's own write fails (disk full, permission error, ...), any pending
+// Add lessons must survive so the NEXT Save replays them. Clearing pending
+// unconditionally would let a concurrent Add — whose own eventual Save only
+// knows about ITS OWN lesson — silently and permanently drop the failed one,
+// even from memory: that next Save re-reads the file fresh (still missing the
+// failed write) and assigns k.pitfalls wholesale to fresh-plus-its-own-
+// pending, discarding the earlier lesson entirely.
+func TestSaveKeepsPendingWhenWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	goodPath := filepath.Join(dir, "knowledge.json")
+	kb, err := Open(goodPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb.Add(Pitfall{Domain: "d1", ErrorPattern: "from failed save", ProvenFix: "x"}) // lesson 1 — its save below will fail
+
+	// Force the write to fail deterministically (no reliance on permission
+	// bits, which root/CI can bypass): point path at a file inside a directory
+	// component that is itself a plain file, so atomicfile.Write's MkdirAll
+	// can never succeed.
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	kb.path = filepath.Join(blocker, "knowledge.json")
+	if err := kb.Save(); err == nil {
+		t.Fatal("Save should have failed: parent path component is a file, not a dir")
+	}
+
+	// A concurrent Add lands while lesson 1 is still only pending, not durable.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		kb.Add(Pitfall{Domain: "d2", ErrorPattern: "concurrent add", ProvenFix: "y"}) // lesson 2
+	}()
+	wg.Wait()
+
+	kb.path = goodPath // the process recovers / retries against the real path
+	if err := kb.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	final, err := Open(goodPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := final.All()
+	if len(all) != 2 {
+		t.Fatalf("lessons after recovery = %+v, want 2 (the failed save's lesson must survive to the next successful Save)", all)
 	}
 }

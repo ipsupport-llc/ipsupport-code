@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
+	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
 )
 
 // Entry is one (day, provider, model) bucket of token counts.
@@ -110,15 +111,27 @@ func readEntries(path string) ([]Entry, error) {
 // two separate ipsupport-code processes sharing the same global usage store
 // could have one's update silently lost to the other's last write (the mutex
 // only protects against races WITHIN one process). Purge/Clear set overwrite,
-// skipping the merge: those are a deliberate replace of the whole ledger. The
-// write itself is atomic (temp + rename) so a crash mid-write can't truncate
-// the file either.
+// skipping the merge: those are a deliberate replace of the whole ledger. A
+// file lock around the whole read-merge-write cycle keeps two such processes
+// from interleaving (one's read landing before the other's write, so each
+// only ever merges its own delta) the same way the in-process mutex keeps two
+// goroutines from interleaving. The write itself is atomic (temp + rename) so
+// a crash mid-write can't truncate the file either. pending/overwrite are only
+// cleared once that write actually succeeds — if it fails, they're left
+// intact so the next Save replays them instead of silently losing them (a
+// concurrent Add's own Save wouldn't otherwise know to replay a delta it
+// never recorded).
 func (s *Store) Save() error {
 	if s.path == "" {
 		return nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	unlock, err := filelock.Lock(s.path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if !s.overwrite && len(s.pending) > 0 {
 		if onDisk, err := readEntries(s.path); err == nil {
 			for _, p := range s.pending {
@@ -129,13 +142,16 @@ func (s *Store) Save() error {
 		// on a read error, fall back to writing our own in-memory state — no
 		// worse than the previous unconditional-overwrite behavior.
 	}
-	s.pending = nil
-	s.overwrite = false
 	data, err := json.MarshalIndent(s.entries, "", "  ")
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(s.path, data, 0o644)
+	if err := atomicfile.Write(s.path, data, 0o644); err != nil {
+		return err
+	}
+	s.pending = nil
+	s.overwrite = false
+	return nil
 }
 
 // Total is an aggregated row for display.

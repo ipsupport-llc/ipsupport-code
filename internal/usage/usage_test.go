@@ -1,9 +1,12 @@
 package usage
 
 import (
+	"fmt"
+	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestStoreConcurrentAdd(t *testing.T) {
@@ -153,5 +156,116 @@ func TestStorePersist(t *testing.T) {
 	m := s2.ByModel()
 	if len(m) != 1 || m[0].Tokens() != 300 {
 		t.Errorf("reloaded ledger = %+v, want one row of 300 tokens", m)
+	}
+}
+
+// The previous merge-on-Save fix only narrows the cross-process race, it
+// doesn't close it: two processes' Save calls can still interleave, since the
+// only serialization is an in-process mutex. Here "a" does a large save (many
+// distinct pending entries, so its own read-merge-write takes a while) and "b"
+// does a tiny one that finishes almost instantly. Without a lock around the
+// whole cycle, b's fresh read (taken while a is still merging) misses a's
+// not-yet-written update, and b's write then gets clobbered by a's own
+// (later) write — silently losing b's entry. Save must hold a cross-process
+// file lock for its entire read-merge-write cycle so neither process's read
+// can land inside the other's read-to-write window.
+func TestSaveLocksAcrossWholeReadMergeWriteCycle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+
+	a, _ := Open(path)
+	for i := 0; i < 2000; i++ { // pads a's own merge so its write lands well after its read
+		a.Add(fmt.Sprintf("2020-01-%02d", 1+i%28), fmt.Sprintf("p%d", i), "m", 1, 1)
+	}
+
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Add("2026-06-27", "b-process", "m", 5, 5)
+
+	var wg sync.WaitGroup
+	var errA error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errA = a.Save()
+	}()
+	time.Sleep(10 * time.Millisecond) // let a pass its own fresh read and start its slow merge
+	if err := b.Save(); err != nil {
+		t.Fatalf("b.Save: %v", err)
+	}
+	wg.Wait()
+	if errA != nil {
+		t.Fatalf("a.Save: %v", errA)
+	}
+
+	final, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(final.entries) != 2001 {
+		t.Fatalf("final entries = %d, want 2001 (a's 2000 + b's 1, nothing clobbered)", len(final.entries))
+	}
+	found := false
+	for _, e := range final.entries {
+		if e.Provider == "b-process" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("b's entry was clobbered by a's concurrent (larger) save — Save must lock the file across the whole read-merge-write cycle")
+	}
+}
+
+// If Save's own write fails (disk full, permission error, ...), any pending
+// Add deltas must survive so the NEXT Save replays them. Clearing pending
+// unconditionally would let a concurrent Add — whose own eventual Save only
+// knows about ITS OWN delta — silently and permanently drop the failed one,
+// even from memory: that next Save re-reads the file fresh (still missing the
+// failed write) and assigns s.entries wholesale to fresh-plus-its-own-pending,
+// discarding the earlier delta entirely.
+func TestSaveKeepsPendingWhenWriteFails(t *testing.T) {
+	dir := t.TempDir()
+	goodPath := filepath.Join(dir, "usage.json")
+	s, _ := Open(goodPath)
+	s.Add("2026-06-27", "p1", "m", 10, 10) // delta 1 — its save below will fail
+
+	// Force the write to fail deterministically (no reliance on permission
+	// bits, which root/CI can bypass): point path at a file inside a directory
+	// component that is itself a plain file, so atomicfile.Write's MkdirAll
+	// can never succeed.
+	blocker := filepath.Join(dir, "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.path = filepath.Join(blocker, "usage.json")
+	if err := s.Save(); err == nil {
+		t.Fatal("Save should have failed: parent path component is a file, not a dir")
+	}
+
+	// A concurrent Add lands while delta 1 is still only pending, not durable.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		s.Add("2026-06-27", "p2", "m", 5, 5) // delta 2
+	}()
+	wg.Wait()
+
+	s.path = goodPath // the process recovers / retries against the real path
+	if err := s.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	final, err := Open(goodPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, m := range final.ByModel() {
+		seen[m.Key] = true
+	}
+	if !seen["p1/m"] || !seen["p2/m"] {
+		t.Errorf("ByModel keys = %v, want both p1/m and p2/m (the failed save's delta must survive to the next successful Save)", seen)
 	}
 }

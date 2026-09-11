@@ -573,7 +573,6 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case msg.n == 0:
 			m.push(cDim.Render("nothing to compact"))
 		default:
-			m.app.resetCheckpoints() // histLen indexed the pre-compact history — meaningless now
 			m.app.saveSession()
 			m.push(cDim.Render(fmt.Sprintf("compacted %d messages → summary", msg.n)))
 		}
@@ -1272,7 +1271,6 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		return m, m.detectWindowCmd()
 	case "/clear", "/reset": // wipe THIS thread + the screen
 		m.app.ag.Reset()
-		m.app.resetCheckpoints() // histLen indexed the wiped history — meaningless now
 		m.app.resetSessionAllow()
 		m.app.clearFacts()
 		m.app.ag.SetSystem(m.app.systemPrompt())

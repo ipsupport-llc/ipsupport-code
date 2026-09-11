@@ -234,6 +234,55 @@ func TestGitShowRejectsIndexStageSecretBypass(t *testing.T) {
 	}
 }
 
+// show's "<rev>:<path>" blob syntax always resolves <path> against the
+// REPOSITORY ROOT, never the configured jail dir or cwd. When the jail is a
+// subdirectory of a larger repo, checkPathPolicy(path) used to validate
+// <jail>/<path> (which doesn't exist) while git actually read
+// <repo-root>/<path> — a completely different, out-of-jail file — with the
+// jail check passing on the wrong path. A file outside the jail but inside
+// the repo must now be rejected, while a file genuinely inside the jail must
+// still work.
+func TestGitShowRejectsRevPathOutsideJailWhenJailIsSubdir(t *testing.T) {
+	dir := initRepo(t) // dir is the repo root
+	subdir := filepath.Join(dir, "sub")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "outside.txt"), []byte("TOP-SECRET-ROOT-CONTENT"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(subdir, "infile.txt"), []byte("inside the jail"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", "outside.txt", "sub/infile.txt").CombinedOutput(); err != nil {
+		t.Fatalf("add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "add files").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+
+	c := config.Default()
+	c.Workspace = dir
+	c.File = config.FilePolicy{Default: "allow", Jail: "sub"} // jail = a SUBDIRECTORY of the repo
+	e, err := policy.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tl := NewGit(e, yes())
+	ctx := context.Background()
+
+	// The exploit: HEAD:outside.txt reads a file OUTSIDE the jail (at the
+	// repo root) — must now be rejected, not leak its content.
+	if r := tl.Call(ctx, "show", map[string]any{"ref": "HEAD:outside.txt"}); !r.IsError || strings.Contains(r.Content, "TOP-SECRET-ROOT-CONTENT") {
+		t.Errorf("show HEAD:outside.txt = %+v, want rejected as outside the jail, not the leaked content", r)
+	}
+
+	// Normal usage of a file genuinely inside the jail must still work.
+	if r := tl.Call(ctx, "show", map[string]any{"ref": "HEAD:sub/infile.txt"}); r.IsError || !strings.Contains(r.Content, "inside the jail") {
+		t.Errorf("show HEAD:sub/infile.txt = %+v, want the file content", r)
+	}
+}
+
 func TestGitMutatingDeniedByUser(t *testing.T) {
 	dir := initRepo(t)
 	tl := gitToolFor(t, dir, no())

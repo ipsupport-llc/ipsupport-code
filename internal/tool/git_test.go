@@ -393,6 +393,54 @@ func TestGitDiffHandlesWhitespaceLeadingFilename(t *testing.T) {
 	}
 }
 
+// A .gitattributes diff/textconv driver bound in the local git config must
+// never be executed by the "diff" action: it's a read-only action with no
+// approval gate, so a configured driver would otherwise let plain "git diff"
+// run an arbitrary subprocess. Approver denies everything, to make clear the
+// driver's non-execution has nothing to do with approval (diff never asks).
+func TestGitDiffDoesNotRunTextconvDriver(t *testing.T) {
+	dir := initRepo(t)
+
+	if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("data.bin diff=marker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data.bin"), []byte("v1\x00binary\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", ".gitattributes", "data.bin").CombinedOutput(); err != nil {
+		t.Fatalf("add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "add data.bin").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	driver := filepath.Join(dir, "textconv-driver.sh")
+	script := "#!/bin/sh\ntouch " + marker + "\ncat \"$1\"\n"
+	if err := os.WriteFile(driver, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "config", "diff.marker.textconv", driver).CombinedOutput(); err != nil {
+		t.Fatalf("config: %v\n%s", err, out)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "data.bin"), []byte("v2\x00binary\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tl := gitToolFor(t, dir, no())
+	r := tl.Call(context.Background(), "diff", map[string]any{"path": "data.bin"})
+	if r.IsError {
+		t.Fatalf("diff: %s", r.Content)
+	}
+	if !strings.Contains(r.Content, "data.bin") {
+		t.Errorf("diff = %+v, want a sensible (binary-fallback) diff mentioning data.bin", r)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("diff ran the configured textconv driver (marker file created): approval/plan-mode bypass via .gitattributes")
+	}
+}
+
 func TestGitMutatingDeniedByUser(t *testing.T) {
 	dir := initRepo(t)
 	tl := gitToolFor(t, dir, no())

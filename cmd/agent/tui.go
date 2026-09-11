@@ -1314,8 +1314,16 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		// comes back via mcpMsg on a later Update call. /mcp can also be run while
 		// a real task is busy (see commandWhileBusy), so — like windowMsg — this
 		// must not touch m.state: pushing the result is all it does.
+		//
+		// servers is captured HERE, synchronously on the UI goroutine, before that
+		// tea.Cmd's goroutine starts — mcpList must never read a.cfg.McpServers
+		// live from it. This bare form doesn't set m.state busy, so nothing stops
+		// the user from immediately running /login or /init, and reconfigure()
+		// reassigns a.cfg wholesale with no lock: a live read racing that write.
+		// Same capture-before-dispatch pattern as spawnPlan (resolveSpawn).
 		ctx := m.ctx
-		return m, func() tea.Msg { return mcpMsg{text: m.app.mcpList(ctx)} }
+		servers := m.app.cfg.McpServers
+		return m, func() tea.Msg { return mcpMsg{text: m.app.mcpList(ctx, servers)} }
 	case "/rewind":
 		m.openRewind()
 		return m, nil

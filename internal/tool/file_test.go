@@ -226,6 +226,74 @@ func TestFileAskDeniedByUser(t *testing.T) {
 	}
 }
 
+// A write's deny-write check (against .env / *secret* / …) only runs once,
+// against the path as it resolved BEFORE the (possibly slow, human) approval
+// prompt. If the target is swapped to a symlink pointing at a denied file
+// WHILE approval is pending, the post-approval Resolve() call follows that
+// symlink — and, absent a second deny-write check, the jail-confinement check
+// alone lets it through (the real .env is still inside the workspace), so the
+// write lands on the protected file. Simulate the swap happening during the
+// async approval wait by doing it inside the approver's callback itself.
+func TestFileWriteRejectsSymlinkSwapToDeniedFileDuringApproval(t *testing.T) {
+	dir := t.TempDir()
+	envPath := filepath.Join(dir, ".env")
+	const secret = "TOKEN=supersecret\n"
+	if err := os.WriteFile(envPath, []byte(secret), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	newPath := filepath.Join(dir, "new.txt")
+	swap := approverFunc(func(_, _ string) bool {
+		// Simulate the target being swapped mid-approval: "new.txt" becomes a
+		// symlink to the deny-listed .env.
+		if err := os.Symlink(envPath, newPath); err != nil {
+			t.Fatal(err)
+		}
+		return true
+	})
+	// Build the policy engine straight from config.Default() (not the
+	// fileToolFor helper, which replaces the whole FilePolicy and drops its
+	// DenyWrite floor) so the real .env/*secret* deny-write floor is active,
+	// matching how config.Load() always unions it in for a real workspace.
+	c := config.Default()
+	c.Workspace = dir
+	c.File.Default = "ask"
+	c.File.Jail = "."
+	e, err := policy.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tl := NewFile(e, swap, nil)
+
+	r := tl.Call(context.Background(), "write", map[string]any{"path": "new.txt", "content": "PWNED"})
+	if !r.IsError {
+		t.Fatalf("write via symlink swap to .env should be rejected, got: %+v", r)
+	}
+
+	got, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != secret {
+		t.Errorf(".env content = %q, want it unchanged (%q) — the write landed on the protected file", got, secret)
+	}
+}
+
+// The re-check added above must not break the ordinary case: an "ask" write
+// with no symlink shenanigans, approved by the user, still lands normally.
+func TestFileWriteApprovedByUserStillSucceeds(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "ask", yes())
+	r := tl.Call(context.Background(), "write", map[string]any{"path": "ok.txt", "content": "hello"})
+	if r.IsError {
+		t.Fatalf("approved write should succeed: %s", r.Content)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "ok.txt"))
+	if err != nil || string(data) != "hello" {
+		t.Errorf("file = %q (err %v), want %q", data, err, "hello")
+	}
+}
+
 func TestFileEditProducesDiff(t *testing.T) {
 	dir := t.TempDir()
 	tl := fileToolFor(t, dir, "allow", yes())

@@ -23,7 +23,7 @@ type rewindPreviewItem struct {
 // and how many conversation messages get trimmed. Used to preview in the picker.
 func (a *app) rewindPreview(idx int) ([]rewindPreviewItem, int) {
 	a.ckptMu.Lock()
-	if idx < 0 || idx >= len(a.checkpoints) {
+	if idx < 0 || idx >= len(a.checkpoints) || !a.checkpointValid(a.checkpoints[idx]) {
 		a.ckptMu.Unlock()
 		return nil, 0
 	}
@@ -95,13 +95,25 @@ func (a *app) rewindCommand(rest string) []string {
 }
 
 // checkpoint is the state captured at the START of one turn, so /rewind can
-// restore to before it: how long the session memory was then, and the prior
-// content of every file the turn (or its sub-agents) went on to change.
+// restore to before it: how long the session memory was then, the agent's
+// history generation at that moment (see gen), and the prior content of every
+// file the turn (or its sub-agents) went on to change.
 type checkpoint struct {
 	goal    string
 	histLen int
-	files   map[string]fileSnap // absolute path → prior state
+	// gen is Agent.HistoryGen() at capture time. Applying histLen only makes
+	// sense against the same history it indexed — if the generation has since
+	// moved on (Reset, SetHistory, Compact, or an ordinary rolling trim all
+	// bump it), this checkpoint is stale and must be treated as invalid,
+	// structurally, regardless of whether whatever changed history remembered
+	// to say so.
+	gen   int64
+	files map[string]fileSnap // absolute path → prior state
 }
+
+// checkpointValid reports whether cp still indexes the CURRENT history: its
+// captured generation must match Agent.HistoryGen() exactly.
+func (a *app) checkpointValid(cp *checkpoint) bool { return cp.gen == a.ag.HistoryGen() }
 
 type fileSnap struct {
 	content []byte
@@ -122,7 +134,7 @@ const (
 func (a *app) beginCheckpoint(goal string) *checkpoint {
 	a.ckptMu.Lock()
 	defer a.ckptMu.Unlock()
-	cp := &checkpoint{goal: oneLine(goal, 60), histLen: a.ag.SessionLen(), files: map[string]fileSnap{}}
+	cp := &checkpoint{goal: oneLine(goal, 60), histLen: a.ag.SessionLen(), gen: a.ag.HistoryGen(), files: map[string]fileSnap{}}
 	a.checkpoints = append(a.checkpoints, cp)
 	if len(a.checkpoints) > maxCheckpoints {
 		a.checkpoints = a.checkpoints[len(a.checkpoints)-maxCheckpoints:]
@@ -140,16 +152,6 @@ func (a *app) endCheckpoint(cp *checkpoint) {
 	if a.curCkpt == cp {
 		a.curCkpt = nil
 	}
-	a.ckptMu.Unlock()
-}
-
-// resetCheckpoints drops all checkpoints and closes any open one — a
-// checkpoint's histLen indexes a specific session's conversation, so it's
-// meaningless once /new or /sessions switches to a different thread.
-func (a *app) resetCheckpoints() {
-	a.ckptMu.Lock()
-	a.checkpoints = nil
-	a.curCkpt = nil
 	a.ckptMu.Unlock()
 }
 
@@ -204,6 +206,9 @@ func (a *app) rewindRows() []rewindRow {
 	defer a.ckptMu.Unlock()
 	rows := make([]rewindRow, 0, len(a.checkpoints))
 	for i := len(a.checkpoints) - 1; i >= 0; i-- {
+		if !a.checkpointValid(a.checkpoints[i]) {
+			continue // history has changed discontinuously since — stale, not offered
+		}
 		rows = append(rows, rewindRow{idx: i, goal: a.checkpoints[i].goal, files: len(a.checkpoints[i].files)})
 	}
 	return rows
@@ -228,7 +233,7 @@ func ancestorRedirected(p string) bool {
 // session memory is trimmed back. Side effects (shell, git, network) can't be undone.
 func (a *app) applyRewind(idx int) []string {
 	a.ckptMu.Lock()
-	if idx < 0 || idx >= len(a.checkpoints) {
+	if idx < 0 || idx >= len(a.checkpoints) || !a.checkpointValid(a.checkpoints[idx]) {
 		a.ckptMu.Unlock()
 		return []string{"nothing to rewind to"}
 	}
@@ -275,11 +280,11 @@ func (a *app) applyRewind(idx int) []string {
 			}
 		}
 	}
-	hist := a.ag.History()
-	if histLen > len(hist) {
-		histLen = len(hist)
-	}
-	a.ag.SetHistory(hist[:histLen])
+	// TruncateHistory, not SetHistory: it only cuts the tail, leaving every
+	// earlier checkpoint's own (smaller) histLen indexing an untouched prefix —
+	// so rewinding here doesn't itself invalidate an EARLIER checkpoint the
+	// user might still want to rewind to next.
+	a.ag.TruncateHistory(histLen)
 	a.saveSession()
 
 	// Only discard the checkpoint once its file changes actually applied — a

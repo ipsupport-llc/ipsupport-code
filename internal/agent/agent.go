@@ -71,12 +71,15 @@ type Agent struct {
 	// archiver, if set, durably records every entry remember() commits to
 	// history — see Archiver.
 	archiver Archiver
-	// onTrim, if set, is called whenever remember's rolling-window trim actually
-	// drops messages from the front of history. A checkpoint's histLen indexes
-	// into that history, so a front-trim invalidates it exactly like Compact
-	// does — the caller wires this to the same reset Compact's success handler
-	// already calls.
-	onTrim func()
+	// historyGen counts discontinuous changes to history: Reset, SetHistory,
+	// Compact's replacement, and remember's rolling-window trim all bump it —
+	// an ordinary append does not. A checkpoint that captures this alongside its
+	// history length can tell, structurally, whether that length still indexes
+	// the same history it was taken against: any caller that discontinuously
+	// changes history (however it does so, now or in the future) automatically
+	// invalidates every outstanding checkpoint, without needing to separately
+	// remember to say so.
+	historyGen atomic.Int64
 }
 
 // Archiver durably records every (goal, final answer + actions digest) pair
@@ -103,7 +106,7 @@ func New(l llm.Chatter, reg *tool.Registry, kb *knowledge.KB, tr trace.Tracer, s
 }
 
 // Reset clears the session conversation memory.
-func (a *Agent) Reset() { a.history = nil }
+func (a *Agent) Reset() { a.history = nil; a.historyGen.Add(1) }
 
 // SetSystem swaps the base system prompt (e.g. after learning new project facts),
 // so the next run uses it without a full re-wire.
@@ -146,11 +149,6 @@ func (a *Agent) SetBeforeTurn(fn func() []llm.Message) { a.beforeTurn = fn }
 // running task, and each question gets a one-turn, no-tools answer (emitted as an
 // "aside" event) using the live conversation, without steering the task.
 func (a *Agent) SetAsides(fn func() []string) { a.asides = fn }
-
-// SetOnTrim registers a hook called whenever remember's rolling-window trim
-// fires (see onTrim). Wired to the checkpoint reset so a /rewind can't silently
-// misapply against a session whose front has since been cut off.
-func (a *Agent) SetOnTrim(fn func()) { a.onTrim = fn }
 
 // asidePrompt frames a /btw side question so the model answers it in one turn and
 // doesn't try to act on it.
@@ -195,8 +193,39 @@ func (a *Agent) MaxHistory() int { return a.maxHistory }
 // History returns a copy of the session conversation (for persistence).
 func (a *Agent) History() []llm.Message { return append([]llm.Message(nil), a.history...) }
 
-// SetHistory restores a session conversation (e.g. loaded from disk).
-func (a *Agent) SetHistory(h []llm.Message) { a.history = append([]llm.Message(nil), h...) }
+// SetHistory restores a session conversation (e.g. loaded from disk, or
+// carried forward into a rebuilt Agent) — a discontinuous replacement, so it
+// bumps historyGen (see HistoryGen).
+func (a *Agent) SetHistory(h []llm.Message) {
+	a.history = append([]llm.Message(nil), h...)
+	a.historyGen.Add(1)
+}
+
+// TruncateHistory cuts history back to its first n entries (a no-op if n is
+// already >= the current length) — /rewind's own way of undoing turns
+// recorded after a checkpoint. Unlike SetHistory, this only ever removes
+// entries from the END, leaving every earlier entry byte-for-byte as it was,
+// so it does NOT bump historyGen: any OTHER checkpoint whose captured length
+// is <= n still indexes that identical, untouched prefix and stays valid —
+// e.g. an earlier checkpoint the user might still want to rewind to next.
+func (a *Agent) TruncateHistory(n int) {
+	if n < 0 {
+		n = 0
+	}
+	if n < len(a.history) {
+		a.history = append([]llm.Message(nil), a.history[:n]...)
+	}
+}
+
+// HistoryGen returns the current history generation: a counter bumped by every
+// discontinuous change to history (Reset, SetHistory, Compact, and remember's
+// rolling-window trim) but not by an ordinary append. A checkpoint that
+// captured this at take-time, alongside a history length, can compare it here
+// to tell — structurally — whether that length still indexes the same
+// history, instead of relying on every caller capable of discontinuously
+// changing history to separately remember to invalidate outstanding
+// checkpoints.
+func (a *Agent) HistoryGen() int64 { return a.historyGen.Load() }
 
 // Compact summarizes the session so far into a short recap and replaces the
 // history with it, freeing context while keeping continuity. Returns how many
@@ -248,6 +277,7 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 		{Role: "user", Content: summary},
 		{Role: "assistant", Content: "Got it — I have that context."},
 	}
+	a.historyGen.Add(1)
 	return n, nil
 }
 
@@ -313,9 +343,7 @@ func (a *Agent) remember(goal, final string, msgs []llm.Message) {
 	a.history = append(a.history, llm.User(goal), llm.Message{Role: "assistant", Content: entry})
 	if a.maxHistory > 0 && len(a.history) > a.maxHistory {
 		a.history = append([]llm.Message(nil), a.history[len(a.history)-a.maxHistory:]...)
-		if a.onTrim != nil {
-			a.onTrim()
-		}
+		a.historyGen.Add(1)
 	}
 }
 

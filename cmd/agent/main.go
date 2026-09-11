@@ -2020,7 +2020,6 @@ func (a *app) wire() error {
 	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
 	a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
-	a.ag.SetOnTrim(a.resetCheckpoints) // a checkpoint's histLen indexes the pre-trim history — meaningless now
 	if a.cfg.Memory == "raw" {
 		// A local server's KV-cache only helps while the prompt PREFIX stays
 		// identical between requests; remember()'s trim cuts from the front,
@@ -2208,7 +2207,6 @@ func (a *app) newNamedSession(name string, persist bool) error {
 	a.ag.Reset()          // fresh — don't load name's prior thread
 	a.resetSessionAllow() // a new session shouldn't inherit "allow all this session"
 	a.clearGoal()         // a new session shouldn't inherit the old one's standing goal either
-	a.resetCheckpoints()  // a checkpoint's histLen indexes the OLD thread — meaningless here
 	return nil
 }
 
@@ -2351,8 +2349,7 @@ func (a *app) switchSession(name string) error {
 		return err
 	}
 	a.ag.Reset()
-	a.loadSession()      // replace with the target name's thread
-	a.resetCheckpoints() // a checkpoint's histLen indexes the OLD thread — meaningless here
+	a.loadSession() // replace with the target name's thread
 	return nil
 }
 
@@ -2726,7 +2723,6 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	a.detectContextWindow() // the model is loaded now — confirm the real window
 	if a.shouldAutoCompact() {
 		if n, err := a.ag.Compact(ctx); err == nil && n > 0 {
-			a.resetCheckpoints() // histLen indexed the pre-compact history — meaningless now
 			a.saveSession()
 			fmt.Fprintf(os.Stderr, "(auto-compacted %d messages to free context)\n", n)
 		}
@@ -2854,7 +2850,6 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	case "/reset", "/clear": // wipe THIS thread
 		a.ag.Reset()
 		a.resetSessionAllow()
-		a.resetCheckpoints() // histLen indexed the wiped history — meaningless now
 		a.clearFacts()
 		a.ag.SetSystem(a.systemPrompt())
 		a.saveSession()
@@ -2864,9 +2859,6 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		if err != nil {
 			fmt.Println("compact failed:", err)
 		} else {
-			if n > 0 {
-				a.resetCheckpoints() // histLen indexed the pre-compact history — meaningless now
-			}
 			a.saveSession()
 			fmt.Printf("compacted %d messages → summary.\n", n)
 		}

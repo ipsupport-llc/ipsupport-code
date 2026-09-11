@@ -45,13 +45,7 @@ func (g *gitTool) initRepo(ctx context.Context, _ Args) Result {
 }
 
 func (g *gitTool) status(ctx context.Context, _ Args) Result {
-	// -c core.fsmonitor=: status is a read-only action with no approval gate,
-	// but a workspace's local .git/config can bind core.fsmonitor to an
-	// arbitrary executable (a legitimate perf feature for large repos) that
-	// plain "git status" would otherwise invoke as a subprocess. The override
-	// must come before the subcommand (git -c is a global option, unlike
-	// diff's --no-textconv/--no-ext-diff which are diff's own flags).
-	return g.run(ctx, "status", false, "-c", "core.fsmonitor=", "status", "--short", "--branch")
+	return g.run(ctx, "status", false, "status", "--short", "--branch")
 }
 
 func (g *gitTool) diff(ctx context.Context, a Args) Result {
@@ -69,11 +63,6 @@ func (g *gitTool) diff(ctx context.Context, a Args) Result {
 	// span a tracked secret file among the changed ones, so find the actual
 	// changed files first and check each individually before diffing them.
 	//
-	// -c core.fsmonitor=: same override as status (see status, above) — a
-	// workspace's local .git/config can bind core.fsmonitor to an arbitrary
-	// executable that plain git diff would otherwise invoke as a subprocess,
-	// and this enumeration step is itself a full "git diff" invocation.
-	//
 	// -z NUL-delimits the enumerated names instead of newlines, which also
 	// leaves them raw and unquoted: git otherwise C-quotes non-ASCII/special
 	// filenames in --name-only output, and a quoted name passed back to git
@@ -84,7 +73,7 @@ func (g *gitTool) diff(ctx context.Context, a Args) Result {
 	// plain git diff would execute as a subprocess with no approval gate at
 	// all (diff is a read-only action here) — these flags force git to fall
 	// back to its own built-in comparison instead of running that command.
-	nameArgs := []string{"-c", "core.fsmonitor=", "diff", "--no-textconv", "--no-ext-diff", "--name-only", "-z"}
+	nameArgs := []string{"diff", "--no-textconv", "--no-ext-diff", "--name-only", "-z"}
 	if staged {
 		nameArgs = append(nameArgs, "--staged")
 	}
@@ -131,15 +120,14 @@ func (g *gitTool) diff(ctx context.Context, a Args) Result {
 		return Ok("(ok, no output)")
 	}
 
-	// -c core.fsmonitor=: same override as above — this is a second,
-	// separate "git diff" invocation, so it needs its own copy of the guard.
-	//
 	// --no-textconv/--no-ext-diff: this is a read-only action with no
 	// approval gate, but a .gitattributes diff/textconv driver (or an
 	// ext-diff command) configured in the local .git/config would otherwise
 	// let plain "git diff" execute an arbitrary subprocess to produce the
 	// diff content. Suppress both so diff can never run configured commands.
-	args := []string{"-c", "core.fsmonitor=", "diff", "--no-textconv", "--no-ext-diff"}
+	// This is a second, separate "git diff" invocation from the enumeration
+	// above, so it needs its own copy of these action-specific flags.
+	args := []string{"diff", "--no-textconv", "--no-ext-diff"}
 	if staged {
 		args = append(args, "--staged")
 	}
@@ -301,7 +289,19 @@ func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ..
 
 	cctx, cancel := context.WithTimeout(ctx, defaultRunTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, "git", args...)
+	// -c core.fsmonitor=: applied to EVERY action, mutating or not. A
+	// workspace's local .git/config can bind core.fsmonitor to an arbitrary
+	// executable (a legitimate perf feature for large repos) that git would
+	// otherwise invoke as a subprocess on actions like status/diff that
+	// consult it — with no approval gate, since those are read-only. The
+	// override is a harmless no-op for actions that never consult fsmonitor
+	// (log, show, add, commit, branch, checkout, init), so it's applied here
+	// once for all of them rather than requiring each action to remember it.
+	// It must precede the subcommand (git -c is a global option, unlike
+	// diff's --no-textconv/--no-ext-diff, which are the diff subcommand's own
+	// flags and stay action-specific since they'd be invalid on e.g. commit).
+	gitArgs := append([]string{"-c", "core.fsmonitor="}, args...)
+	cmd := exec.CommandContext(cctx, "git", gitArgs...)
 	cmd.Dir = dir
 	// Kill the WHOLE process group on timeout/cancel, and bound Wait so a
 	// hook, pager, or external diff/merge tool that outlives git itself (and

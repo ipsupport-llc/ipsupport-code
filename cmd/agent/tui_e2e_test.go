@@ -255,6 +255,61 @@ func TestMCPCommand_ReturnsCmdWithoutBlocking(t *testing.T) {
 	}
 }
 
+// TestBtwAsideAgentTracerNoRace reproduces the idle /btw data race one level up
+// from the history/system snapshot (that race is covered separately by
+// TestAnswerAsideSnapshotDoesNotRaceWithReset in internal/agent). Even with that
+// snapshot in place, the /btw handler's goroutine still called
+// m.app.ag.AnswerAside(...) and m.app.emit(...) (which reads a.tracer) — both
+// live app-field reads happening at whatever later moment the goroutine
+// actually runs. wire() (invoked by /model, /permissions, /new, and 30+ other
+// places) reassigns a.ag and a.tracer with no lock on EVERY call. Before the
+// fix, the goroutine racing a concurrent wire() was a data race under -race,
+// not just a stale value. The fix captures a.ag and a.tracer synchronously
+// (same goroutine as this test's dispatch loop) before launching the
+// goroutine — same pattern as resolveSpawn's tracer capture (spawnPlan.tracer)
+// — so the goroutine never touches a.ag/a.tracer again. This test fires many
+// /btw asides against a slow fake LLM, calling wire() right after each dispatch
+// (a foreground settings change firing while an earlier aside's own goroutine
+// is still in flight), and must be -race clean.
+func TestBtwAsideAgentTracerNoRace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(2 * time.Millisecond) // keep the aside in flight long enough to overlap wire()
+		io.WriteString(w, tuiContent("answer"))
+	}))
+	defer srv.Close()
+
+	a := tuiTestApp(t, srv.URL)
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const n = 50
+	for i := 0; i < n; i++ {
+		m.runCommand("/btw are we there yet")
+		// Simulates a foreground settings change (/model, /permissions, /new,
+		// ...) firing right after dispatch — while earlier asides' own
+		// goroutines may still be running.
+		if err := a.wire(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Wait for every dispatched aside to actually finish (and emit) before this
+	// test returns — a goroutine still racing when the process exits would never
+	// get the chance to trip -race.
+	for i := 0; i < n; i++ {
+		select {
+		case ev := <-m.bridge.events:
+			if ev.kind != "aside" {
+				t.Fatalf("unexpected event kind %q, want %q", ev.kind, "aside")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("only %d of %d asides completed", i, n)
+		}
+	}
+}
+
 // TestTUI_E2E_MCPConnectDoesNotBlockUI drives the REAL tea.Program loop
 // (teatest) through the exact scenario that used to deadlock the TUI: /mcp
 // against a server that has never been approved. Before the fix, the approval

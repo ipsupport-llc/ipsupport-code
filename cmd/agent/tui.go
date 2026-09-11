@@ -648,8 +648,13 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state = stHistSearch
 			m.searchQuery = ""
 			m.searchIdx = m.searchFrom(len(m.app.promptHist) - 1)
+			return m, nil
 		}
-		return m, nil
+		if m.state != stHistSearch {
+			return m, nil
+		}
+		// Already searching: fall through past this switch so the stHistSearch
+		// case below (its own "ctrl+r") can step to an older match.
 	case "ctrl+l":
 		m.history = m.history[:0]
 		if m.ready {

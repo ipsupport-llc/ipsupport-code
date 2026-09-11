@@ -161,3 +161,37 @@ func TestTUI_E2E_HelpCommand(t *testing.T) {
 	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 }
+
+// A second Ctrl+R while already reverse-searching must step to an OLDER match,
+// not re-find the same one — the standard reverse-incremental-search
+// convention (bash/readline). Regression test: the top-level switch's
+// unconditional return used to shadow stHistSearch's own "step to an older
+// match" case, so repeated Ctrl+R just re-found the same first match forever.
+func TestCtrlR_SecondPress_StepsToOlderMatch(t *testing.T) {
+	a := tuiTestApp(t, tuiFakeServer(t))
+	a.addPromptHist("deploy backend")
+	a.addPromptHist("deploy frontend")
+	a.addPromptHist("deploy platform")
+
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if m.state != stHistSearch {
+		t.Fatalf("first ctrl+r: state = %v, want stHistSearch", m.state)
+	}
+	first := m.searchIdx
+	if first != 2 {
+		t.Fatalf("first ctrl+r: searchIdx = %d, want 2 (most recent entry)", first)
+	}
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlR})
+	if m.searchIdx == first {
+		t.Fatalf("second ctrl+r: searchIdx stayed at %d, want an older match", m.searchIdx)
+	}
+	if m.searchIdx != 1 {
+		t.Fatalf("second ctrl+r: searchIdx = %d, want 1 (next older entry)", m.searchIdx)
+	}
+}

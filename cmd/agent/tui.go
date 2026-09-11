@@ -67,8 +67,12 @@ type tuiModel struct {
 	input textarea.Model
 	spin  spinner.Model
 
-	state         uiState
-	history       []string
+	state      uiState
+	history    []string
+	wrappedLog strings.Builder // renderContent's cache — see wrapLine/rewrapLog for why; a
+	// strings.Builder (not a plain string) specifically so appending a new
+	// line in push() is amortized O(1) instead of reallocating+copying the
+	// WHOLE accumulated log on every "+=" (strings are immutable in Go).
 	queued        []string // pending user messages (tasks + /commands), drained in order
 	steer         []string // /btw asides for the current run — pinned above the input, not in scrollback; cleared when the task ends
 	histIdx       int      // recall cursor into app.promptHist; == len means "not browsing"
@@ -462,6 +466,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.vp.Height = h
 		}
 		m.input.SetWidth(msg.Width - 4)
+		m.rewrapLog() // width changed — every cached wrapped line is potentially stale
 		m.vp.SetContent(m.renderContent())
 		m.vp.GotoBottom()
 		return m, nil
@@ -690,6 +695,7 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// case below (its own "ctrl+r") can step to an older match.
 	case "ctrl+l":
 		m.history = m.history[:0]
+		m.wrappedLog.Reset()
 		if m.ready {
 			m.vp.SetContent("")
 		}
@@ -1260,6 +1266,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.history = m.history[:0]
+		m.wrappedLog.Reset()
 		if m.ready {
 			m.vp.SetContent("")
 		}
@@ -1276,6 +1283,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.app.ag.SetSystem(m.app.systemPrompt())
 		m.app.saveSession()
 		m.history = m.history[:0]
+		m.wrappedLog.Reset()
 		if m.ready {
 			m.vp.SetContent("")
 		}
@@ -2023,14 +2031,20 @@ func (m *tuiModel) queuedView() []string {
 }
 
 // syncViewport re-fits the log to the current size (the queue region changed how
-// much room it has) and re-renders, keeping the bottom pinned if we were there.
+// much room it has), keeping the bottom pinned if we were there. It does NOT
+// call vp.SetContent: content (m.history) hasn't changed, only the available
+// height has, and vp.SetContent is O(total log length) — it re-splits and
+// re-measures every line (bubbles/viewport's own cost, independent of our
+// wrappedLog cache). syncViewport runs on every input-height transition while
+// typing (via syncInputHeight, called from every View()), so paying that full
+// rescan here made typing itself cost O(scrollback size) — this was the
+// dominant cause of input lag in a long-running session.
 func (m *tuiModel) syncViewport() {
 	if !m.ready {
 		return
 	}
 	atBottom := m.vp.AtBottom()
 	m.vp.Height = m.viewportHeight()
-	m.vp.SetContent(m.renderContent())
 	if atBottom {
 		m.vp.GotoBottom()
 	}
@@ -2044,6 +2058,12 @@ func (m *tuiModel) push(lines ...string) {
 	}
 	atBottom := !m.ready || m.vp.AtBottom()
 	m.history = append(m.history, lines...)
+	for _, ln := range lines {
+		if m.wrappedLog.Len() > 0 {
+			m.wrappedLog.WriteByte('\n')
+		}
+		m.wrappedLog.WriteString(m.wrapLine(ln))
+	}
 	if m.ready {
 		m.vp.SetContent(m.renderContent())
 		if atBottom {
@@ -2052,23 +2072,37 @@ func (m *tuiModel) push(lines ...string) {
 	}
 }
 
-// renderContent joins the log, soft-wrapping any line wider than the viewport so
-// a long single-line input/answer doesn't run off the edge. Lines that already
-// fit (including the width-padded diff rows) pass through untouched.
-func (m *tuiModel) renderContent() string {
-	if m.width < 1 {
-		return strings.Join(m.history, "\n")
+// wrapLine soft-wraps a single log line if it's wider than the viewport, so a
+// long single-line input/answer doesn't run off the edge. A line that already
+// fits (including the width-padded diff rows) passes through untouched.
+func (m *tuiModel) wrapLine(ln string) string {
+	if m.width < 1 || lipgloss.Width(ln) <= m.width {
+		return ln
 	}
-	wrap := lipgloss.NewStyle().Width(m.width)
-	out := make([]string, len(m.history))
+	return lipgloss.NewStyle().Width(m.width).Render(ln)
+}
+
+// rewrapLog rebuilds the cached, wrapped log content from ALL of m.history —
+// only correct to call when m.width has just changed (a resize): wrapping
+// depends on width, so every cached line is potentially stale. Everywhere
+// else (a plain push of new lines), wrapLog appends incrementally instead —
+// re-wrapping the whole scrollback on every single pushed line made each
+// subsequent push progressively more expensive as a session's log grew
+// (O(n) per push, so O(n²) over a long-running session).
+func (m *tuiModel) rewrapLog() {
+	m.wrappedLog.Reset()
 	for i, ln := range m.history {
-		if lipgloss.Width(ln) > m.width {
-			out[i] = wrap.Render(ln)
-		} else {
-			out[i] = ln
+		if i > 0 {
+			m.wrappedLog.WriteByte('\n')
 		}
+		m.wrappedLog.WriteString(m.wrapLine(ln))
 	}
-	return strings.Join(out, "\n")
+}
+
+// renderContent returns the cached, wrapped log content — see rewrapLog and
+// push's incremental append for how it's kept in sync with m.history.
+func (m *tuiModel) renderContent() string {
+	return m.wrappedLog.String()
 }
 
 // keyHelp documents the keyboard shortcuts for /help.

@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -267,6 +268,50 @@ func TestResolveChasesDanglingSymlinkTarget(t *testing.T) {
 	}
 	if got != inJailTarget {
 		t.Errorf("Resolve(injail-link) = %q, want its real target %q", got, inJailTarget)
+	}
+}
+
+// A symlink chain longer than resolveSymlinks' own chase-depth limit
+// (maxSymlinkChase) must be rejected outright, not silently treated as an
+// ordinary missing path. Before the fix, hitting the depth limit while
+// os.Readlink on the current hop still succeeded (there was a further,
+// unresolved hop left in the chain) fell through to the missing-ancestor
+// walk meant for a path that simply doesn't exist yet. That walk
+// reconstructs the CURRENT (still in-jail) symlink's own path and the jail
+// check passes it — even though the chain's real, unresolved tail points
+// outside the jail. os.OpenFile/os.WriteFile at actual I/O time then follow
+// the OS-level symlink chain past hop 20 to wherever it really ends,
+// silently bypassing the jail.
+func TestResolveRejectsSymlinkChainDeeperThanChaseLimit(t *testing.T) {
+	ws := t.TempDir()
+	outside := t.TempDir()
+
+	// A chain of maxSymlinkChase+1 symlinks inside the jail, the last one
+	// pointing to a (nonexistent) file outside the jail. The final target
+	// never exists, so EvalSymlinks never succeeds along the way and the
+	// manual, depth-limited chase is forced to walk every hop.
+	const n = maxSymlinkChase + 1
+	links := make([]string, n)
+	for i := range links {
+		links[i] = filepath.Join(ws, fmt.Sprintf("link%d", i))
+	}
+	for i := 0; i < n-1; i++ {
+		if err := os.Symlink(links[i+1], links[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outsideTarget := filepath.Join(outside, "escaped.txt")
+	if err := os.Symlink(outsideTarget, links[n-1]); err != nil {
+		t.Fatal(err)
+	}
+
+	c := config.Default()
+	c.Workspace = ws
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	e := eng(t, c)
+
+	if got, err := e.Resolve("link0"); err == nil {
+		t.Errorf("Resolve(link0) = %q, nil; want an error (chain too deep, unresolved tail escapes the jail)", got)
 	}
 }
 

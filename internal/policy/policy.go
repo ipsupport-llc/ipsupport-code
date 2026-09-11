@@ -264,7 +264,10 @@ func (e *Engine) Resolve(path string) (string, error) {
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(e.base(), abs)
 	}
-	abs = resolveSymlinks(filepath.Clean(abs))
+	abs, err := resolveSymlinks(filepath.Clean(abs))
+	if err != nil {
+		return "", err
+	}
 
 	if e.jailRoot == "" {
 		return abs, nil
@@ -302,11 +305,11 @@ const maxSymlinkChase = 20
 // follows the symlink at the OS level and writes through it to wherever it
 // points, jail or no jail. So a dangling symlink's own target is chased
 // (possibly through a chain of them) before falling back to the ancestor walk.
-func resolveSymlinks(abs string) string { return resolveSymlinksChase(abs, 0) }
+func resolveSymlinks(abs string) (string, error) { return resolveSymlinksChase(abs, 0) }
 
-func resolveSymlinksChase(abs string, depth int) string {
+func resolveSymlinksChase(abs string, depth int) (string, error) {
 	if real, err := filepath.EvalSymlinks(abs); err == nil {
-		return real
+		return real, nil
 	}
 	if depth < maxSymlinkChase {
 		if target, err := os.Readlink(abs); err == nil {
@@ -315,17 +318,26 @@ func resolveSymlinksChase(abs string, depth int) string {
 			}
 			return resolveSymlinksChase(filepath.Clean(target), depth+1)
 		}
+	} else if _, err := os.Readlink(abs); err == nil {
+		// The chase depth limit was hit, but abs is still a symlink with a
+		// further hop we never followed (as opposed to a genuinely missing
+		// path, where Readlink fails below). Falling through to the
+		// missing-path walk would reconstruct abs's own in-jail location and
+		// pass the jail check, while os.OpenFile/os.WriteFile later follow
+		// the OS-level chain past this point to wherever it actually ends —
+		// jail or not. Reject instead of silently trusting an unresolved tail.
+		return "", fmt.Errorf("symlink chain too deep (> %d hops) resolving %q", maxSymlinkChase, abs)
 	}
 	var missing []string
 	cur := abs
 	for {
 		parent := filepath.Dir(cur)
 		if parent == cur {
-			return abs // reached root without an existing ancestor
+			return abs, nil // reached root without an existing ancestor
 		}
 		missing = append([]string{filepath.Base(cur)}, missing...)
 		if real, err := filepath.EvalSymlinks(parent); err == nil {
-			return filepath.Join(append([]string{real}, missing...)...)
+			return filepath.Join(append([]string{real}, missing...)...), nil
 		}
 		cur = parent
 	}

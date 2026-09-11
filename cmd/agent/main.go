@@ -391,7 +391,7 @@ func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, o
 		return "", err
 	}
 	if external { // a local CLI agent, not one of our LLM sub-agents
-		return a.spawnExternalAgent(ctx, plan.profile, extP, task, plan.subWorkspace, onLine)
+		return a.spawnExternalAgent(ctx, plan.profile, extP, task, plan.subWorkspace, plan.tracer, onLine)
 	}
 	return a.runSpawnPlan(ctx, plan, task, onLine)
 }
@@ -430,6 +430,14 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	}
 	profile = resolved
 	p := a.cfg.Agents[profile]
+
+	// Capture a.tracer HERE, synchronously, before EITHER branch below — wire()
+	// reassigns it (a fresh trace.Multi(a.fileTracer, a.uiTracer)) with no lock on
+	// every call, and both the external-agent branch (spawnExternalAgent) and the
+	// LLM branch (runSpawnPlan) run inside a background job's own goroutine, so
+	// neither must ever read a.tracer live again — see spawnPlan.
+	tracer := a.tracer
+
 	if p.Kind == "external" {
 		// External CLIs run outside our sandbox with their own permissions — there's
 		// no read-only mode to hand them the way SetPlanMode gives an LLM sub-agent
@@ -453,7 +461,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 		if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
 			return spawnPlan{}, true, p, fmt.Errorf("dir %q is not a directory", root)
 		}
-		return spawnPlan{profile: profile, subWorkspace: root}, true, p, nil
+		return spawnPlan{profile: profile, subWorkspace: root, tracer: tracer}, true, p, nil
 	}
 	provider := p.Provider
 	if provider == "" {
@@ -485,14 +493,6 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	// live map that /reasoning (applyReasoning) mutates from the foreground with
 	// no lock, so runSpawnPlan's own goroutine must never read it again itself.
 	llmCfg = a.withReasoning(llmCfg, provider, "")
-
-	// Capture a.tracer HERE too, synchronously — wire() reassigns it (a fresh
-	// trace.Multi(a.fileTracer, a.uiTracer)) with no lock on EVERY call, and
-	// wire() runs repeatedly throughout a live process (config-panel toggles,
-	// /model, /rename, skill toggles, session switches...), not just at
-	// startup, so runSpawnPlan's own goroutine must never read a.tracer again
-	// itself.
-	tracer := a.tracer
 
 	// Resolve the working directory (default: the session workspace). The path may
 	// point anywhere — ~ is expanded, relatives resolve against the session — but

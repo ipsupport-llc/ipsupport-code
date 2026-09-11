@@ -4954,6 +4954,9 @@ func TestStdinOwnerApprovalPriorityOverPendingCommand(t *testing.T) {
 	pr, pw := io.Pipe()
 	t.Cleanup(func() { pr.Close(); pw.Close() })
 	o := newStdinOwner(bufio.NewReader(pr))
+	o.start() // this test pokes cmdReq/approveReq directly instead of going through
+	// readCmdLine/readApproveLine (which would otherwise trigger this lazily) —
+	// see stdinOwner's doc comment for why the reader goroutine starts lazily.
 
 	// Queue the command request FIRST, chronologically, then the approval
 	// request — proving priority is decided by ROLE at delivery time, not by
@@ -5036,6 +5039,42 @@ func TestStdinOwnerConcurrentReadsNoCorruption(t *testing.T) {
 		if seen[want] != 1 {
 			t.Errorf("line %q delivered %d time(s), want exactly 1", want, seen[want])
 		}
+	}
+}
+
+// TestStdinOwnerDoesNotReadUntilFirstRequest guards the actual production bug:
+// newStdinOwner used to start its reader goroutine immediately, so it sat in
+// ReadString on the process's real os.Stdin for the entire run — including in
+// TUI mode, where a.approver is replaced by the TUI's own channel-based
+// approver before readCmdLine/readApproveLine could ever be called, so that
+// goroutine was pure dead weight racing bubbletea's own raw-mode reader for
+// the same bytes and silently stealing keystrokes the TUI never saw. The
+// reader must stay untouched until something actually asks for a line.
+func TestStdinOwnerDoesNotReadUntilFirstRequest(t *testing.T) {
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	o := newStdinOwner(bufio.NewReader(pr))
+
+	// io.Pipe's Write blocks until something Reads. If newStdinOwner had
+	// already started reading, this would complete almost immediately.
+	wrote := make(chan struct{})
+	go func() { pw.Write([]byte("line\n")); close(wrote) }()
+
+	select {
+	case <-wrote:
+		t.Fatal("stdinOwner read from its reader before any request was made")
+	case <-time.After(100 * time.Millisecond):
+		// Nothing consumed it — correct, no request has been made yet.
+	}
+
+	line, err := o.readCmdLine()
+	if err != nil || line != "line\n" {
+		t.Fatalf("readCmdLine() = (%q, %v), want (\"line\\n\", nil)", line, err)
+	}
+	select {
+	case <-wrote:
+	case <-time.After(2 * time.Second):
+		t.Fatal("write never completed even after a request was made")
 	}
 }
 

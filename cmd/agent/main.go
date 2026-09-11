@@ -385,7 +385,7 @@ func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, o
 		return "", err
 	}
 	if external { // a local CLI agent, not one of our LLM sub-agents
-		return a.spawnExternalAgent(ctx, plan.profile, extP, task, dir, onLine)
+		return a.spawnExternalAgent(ctx, plan.profile, extP, task, plan.subWorkspace, onLine)
 	}
 	return a.runSpawnPlan(ctx, plan, task, onLine)
 }
@@ -430,7 +430,22 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 		if a.planMode {
 			return spawnPlan{}, true, p, fmt.Errorf("plan mode is ON — external agent %q was NOT launched (it runs outside the sandbox with no read-only mode); list it as a step in your plan, then finish", profile)
 		}
-		return spawnPlan{profile: profile}, true, p, nil
+		// Resolve dir HERE, synchronously, same as the LLM branch below —
+		// spawnExternalAgent runs from inside a background job's own goroutine,
+		// which must never call a.effectiveDir()/resolveSpawnDir() itself
+		// (a.workdir has no lock and /cd mutates it live).
+		root := a.effectiveDir()
+		if d := strings.TrimSpace(dir); d != "" {
+			resolved, err := a.resolveSpawnDir(d)
+			if err != nil {
+				return spawnPlan{}, true, p, err
+			}
+			root = resolved
+		}
+		if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
+			return spawnPlan{}, true, p, fmt.Errorf("dir %q is not a directory", root)
+		}
+		return spawnPlan{profile: profile, subWorkspace: root}, true, p, nil
 	}
 	provider := p.Provider
 	if provider == "" {

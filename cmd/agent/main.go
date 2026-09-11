@@ -404,15 +404,16 @@ func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, o
 // (/ai add from the foreground) is a Go runtime panic, not just a stale
 // value.
 type spawnPlan struct {
-	profile      string
-	provider     string
-	llmCfg       config.LLM
-	rolePrompt   string
-	subReg       *tool.Registry
-	subWorkspace string
-	planMode     bool
-	spawnDefault string
-	tracer       trace.Tracer
+	profile        string
+	provider       string
+	llmCfg         config.LLM
+	rolePrompt     string
+	subReg         *tool.Registry
+	subWorkspace   string
+	planMode       bool
+	spawnDefault   string
+	tracer         trace.Tracer
+	priceOverrides map[string]usage.Price
 }
 
 // resolveSpawn resolves profile/dir into a spawnPlan (or, for an external CLI
@@ -493,6 +494,11 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	// live map that /reasoning (applyReasoning) mutates from the foreground with
 	// no lock, so runSpawnPlan's own goroutine must never read it again itself.
 	llmCfg = a.withReasoning(llmCfg, provider, "")
+	// Resolve price overrides HERE too, synchronously — a.cfg is reassigned
+	// wholesale (a.cfg = cfg) by reconfigure() (/login) with no lock, so
+	// runSpawnPlan's own goroutine must never read a.cfg.Prices (via
+	// a.priceOverrides()) again itself — see addSessionCost.
+	priceOverrides := a.priceOverrides()
 
 	// Resolve the working directory (default: the session workspace). The path may
 	// point anywhere — ~ is expanded, relatives resolve against the session — but
@@ -534,18 +540,22 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	return spawnPlan{
 		profile: profile, provider: provider, llmCfg: llmCfg, rolePrompt: p.Prompt,
 		subReg: subReg, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default,
-		tracer: tracer,
+		tracer: tracer, priceOverrides: priceOverrides,
 	}, false, p, nil
 }
 
 // runSpawnPlan runs an already-resolved plan — safe to call from a background
 // job's own goroutine, since it only touches plan (captured up front by
 // resolveSpawn) and state that's already concurrency-safe on its own
-// (a.usage, a.addSessionCost have their own synchronization; a.kb is a stable
-// pointer once wire() has run). a.tracer is NOT stable — wire() reassigns it
-// with no lock on every call, and wire() runs repeatedly throughout a live
-// process, not just at startup — so this uses plan.tracer (captured
-// synchronously by resolveSpawn) instead of a.emit/a.tracer.
+// (a.usage has its own synchronization; a.kb is a stable pointer once wire()
+// has run). a.tracer is NOT stable — wire() reassigns it with no lock on
+// every call, and wire() runs repeatedly throughout a live process, not just
+// at startup — so this uses plan.tracer (captured synchronously by
+// resolveSpawn) instead of a.emit/a.tracer. Likewise a.cfg is NOT stable —
+// reconfigure() (/login) reassigns it wholesale (a.cfg = cfg) with no lock —
+// so the sub-agent's spend is added via plan.priceOverrides (also captured
+// synchronously by resolveSpawn), never by having addSessionCost re-read
+// a.cfg.Prices live.
 func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onLine func(string)) (string, error) {
 	// Ask before spawning unless the policy is relaxed. "ask" (default) guards
 	// every spawn — even local ones still cost compute, and a runaway main model
@@ -573,7 +583,7 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 	if a.usage != nil { // the sub-agent's spend counts too
 		pt, ct := client.Usage()
 		a.usage.Add(today(), plan.provider, plan.llmCfg.Model, pt, ct)
-		a.addSessionCost(plan.llmCfg.Model, pt, ct) // sub-agent spend counts toward /budget too
+		a.addSessionCost(plan.llmCfg.Model, pt, ct, plan.priceOverrides) // sub-agent spend counts toward /budget too
 		_ = a.usage.Save()
 	}
 	done := map[string]any{"agent": id, "profile": plan.profile, "ok": err == nil}
@@ -2481,7 +2491,7 @@ func (a *app) recordUsage() {
 		return
 	}
 	a.usage.Add(today(), a.providerName(), a.activeLLM().Model, dp, dc)
-	a.addSessionCost(a.activeLLM().Model, dp, dc) // for the budget guard
+	a.addSessionCost(a.activeLLM().Model, dp, dc, a.priceOverrides()) // for the budget guard
 	if err := a.usage.Save(); err != nil {
 		slog.Warn("usage ledger save failed", "err", err)
 	}
@@ -2489,9 +2499,16 @@ func (a *app) recordUsage() {
 
 // addSessionCost accrues estimated spend for the budget guard. Mutex-guarded:
 // parallel sub-agent spawns record their spend from their own goroutines.
-func (a *app) addSessionCost(model string, prompt, completion int) {
+// overrides must be the caller's own resolved price table, not read live from
+// a.cfg here — a.cfg is reassigned wholesale by reconfigure() (/login) with
+// no lock, so a background job's own goroutine (runSpawnPlan) passes its
+// plan.priceOverrides, captured synchronously by resolveSpawn; the
+// foreground-only callers (recordUsage, reflectAndStore) pass a.priceOverrides()
+// directly since they never race reconfigure() (both are on the goroutine
+// that owns a.cfg).
+func (a *app) addSessionCost(model string, prompt, completion int, overrides map[string]usage.Price) {
 	a.costMu.Lock()
-	a.sessionCostUSD += usage.CostUSD(model, prompt, completion, a.priceOverrides())
+	a.sessionCostUSD += usage.CostUSD(model, prompt, completion, overrides)
 	a.costMu.Unlock()
 }
 
@@ -2603,7 +2620,7 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 	if separate && a.usage != nil { // a dedicated reflect model's spend isn't in the main client
 		if p, c := client.Usage(); p > 0 || c > 0 {
 			a.usage.Add(today(), provider, model, p, c)
-			a.addSessionCost(model, p, c) // for the budget guard
+			a.addSessionCost(model, p, c, a.priceOverrides()) // for the budget guard
 			_ = a.usage.Save()
 		}
 	}

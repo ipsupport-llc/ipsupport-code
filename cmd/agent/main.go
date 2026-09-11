@@ -282,6 +282,7 @@ type app struct {
 	goal            goalState     // standing goal pursued by the judge loop (per workspace)
 	windowDetected  bool          // got the real loaded context window (vs a default/guess)
 	sessionRestored bool          // a saved session was restored at startup (TUI renders a recap)
+	historyToolOn   bool          // history tool is in the current tool list (see hasArchivedHistory, maybeRewireHistoryTool)
 	tui             bool          // running the TUI (detect the context window off-thread, not inline)
 	startNew        bool          // -new: skip the startup chooser, begin a fresh session
 
@@ -1853,8 +1854,11 @@ func (a *app) wire() error {
 	}
 	// The history tool only earns its catalog space once there's something
 	// durably archived to recall (see hasArchivedHistory) — a brand-new session
-	// has nothing to look back on yet.
-	if a.hasArchivedHistory() {
+	// has nothing to look back on yet. Recorded in historyToolOn so
+	// maybeRewireHistoryTool can tell, at the next task, whether the archive's
+	// first write since happened and the tool now needs adding.
+	a.historyToolOn = a.hasArchivedHistory()
+	if a.historyToolOn {
 		tools = append(tools, tool.NewHistory(historySource{path: a.archivePath()}))
 	}
 	reg = tool.NewRegistry(tools...)
@@ -2544,7 +2548,8 @@ func (a *app) runOne(ctx context.Context, goal string) {
 		fmt.Println(a.budgetMsg())
 		return
 	}
-	a.injectJobResults() // finished background jobs land before the model thinks
+	a.injectJobResults()       // finished background jobs land before the model thinks
+	a.maybeRewireHistoryTool() // the archive may have gained its first entry since wire()
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
@@ -2584,7 +2589,8 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 		a.emit("error", map[string]any{"text": a.budgetMsg()})
 		return
 	}
-	a.injectJobResults() // finished background jobs land before the model thinks
+	a.injectJobResults()       // finished background jobs land before the model thinks
+	a.maybeRewireHistoryTool() // the archive may have gained its first entry since wire()
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal

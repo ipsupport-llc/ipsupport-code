@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -5509,5 +5510,23 @@ func TestRenderContentIncrementalMatchesFullRewrap(t *testing.T) {
 	if incremental != fromScratch {
 		t.Errorf("incremental push()-built log differs from a full rewrapLog() rebuild:\nincremental:\n%q\nfrom scratch:\n%q",
 			incremental, fromScratch)
+	}
+}
+
+// Some terminals (confirmed: iTerm2) silently drop mouse-tracking mode when a
+// tab loses and regains focus, so a two-finger scroll after switching back
+// falls through to the terminal's own pre-alt-screen scrollback instead of
+// reaching the program as a wheel event. Regaining focus must reassert mouse
+// mode so scrolling keeps working.
+func TestFocusMsgReenablesMouseMode(t *testing.T) {
+	m := &tuiModel{ready: true, width: 80, height: 40, vp: viewport.New(80, 34)}
+	_, cmd := m.Update(tea.FocusMsg{})
+	if cmd == nil {
+		t.Fatal("Update(tea.FocusMsg{}) returned a nil Cmd — mouse mode won't be reasserted on focus regain")
+	}
+	got := reflect.TypeOf(cmd())
+	want := reflect.TypeOf(tea.EnableMouseCellMotion())
+	if got != want {
+		t.Errorf("Update(tea.FocusMsg{})'s Cmd produced %v, want %v (tea.EnableMouseCellMotion's message type)", got, want)
 	}
 }

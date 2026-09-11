@@ -396,8 +396,13 @@ func (a *app) runTUI(ctx context.Context) error {
 	}
 	tuiDebugHeartbeat(ctx)
 	// WithMouseCellMotion lets the wheel scroll the log in the alt-screen (without
-	// it the terminal swallows the wheel and nothing moves).
-	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx)).Run()
+	// it the terminal swallows the wheel and nothing moves). WithReportFocus
+	// pairs with the FocusMsg handler in Update(): some terminals (confirmed:
+	// iTerm2) silently drop mouse-tracking mode when a tab loses and regains
+	// focus, so a two-finger scroll after switching back falls through to the
+	// terminal's own pre-alt-screen scrollback instead of reaching us as a
+	// wheel event — reasserting mouse mode on every focus-gained event fixes it.
+	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithReportFocus(), tea.WithContext(ctx)).Run()
 	return err
 }
 
@@ -522,6 +527,15 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vp.SetContent(m.renderContent())
 		m.vp.GotoBottom()
 		return m, nil
+
+	case tea.FocusMsg:
+		// Some terminals (confirmed: iTerm2) silently drop mouse-tracking mode
+		// when a tab loses and regains focus — without this, a two-finger
+		// scroll after switching back falls through to the terminal's own
+		// pre-alt-screen scrollback instead of reaching us as a wheel event.
+		// Resending the enable sequence is a harmless no-op if the terminal
+		// never dropped it.
+		return m, func() tea.Msg { return tea.EnableMouseCellMotion() }
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd

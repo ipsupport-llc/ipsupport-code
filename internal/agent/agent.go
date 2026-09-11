@@ -71,6 +71,12 @@ type Agent struct {
 	// archiver, if set, durably records every entry remember() commits to
 	// history — see Archiver.
 	archiver Archiver
+	// onTrim, if set, is called whenever remember's rolling-window trim actually
+	// drops messages from the front of history. A checkpoint's histLen indexes
+	// into that history, so a front-trim invalidates it exactly like Compact
+	// does — the caller wires this to the same reset Compact's success handler
+	// already calls.
+	onTrim func()
 }
 
 // Archiver durably records every (goal, final answer + actions digest) pair
@@ -140,6 +146,11 @@ func (a *Agent) SetBeforeTurn(fn func() []llm.Message) { a.beforeTurn = fn }
 // running task, and each question gets a one-turn, no-tools answer (emitted as an
 // "aside" event) using the live conversation, without steering the task.
 func (a *Agent) SetAsides(fn func() []string) { a.asides = fn }
+
+// SetOnTrim registers a hook called whenever remember's rolling-window trim
+// fires (see onTrim). Wired to the checkpoint reset so a /rewind can't silently
+// misapply against a session whose front has since been cut off.
+func (a *Agent) SetOnTrim(fn func()) { a.onTrim = fn }
 
 // asidePrompt frames a /btw side question so the model answers it in one turn and
 // doesn't try to act on it.
@@ -298,6 +309,9 @@ func (a *Agent) remember(goal, final string, msgs []llm.Message) {
 	a.history = append(a.history, llm.User(goal), llm.Message{Role: "assistant", Content: entry})
 	if a.maxHistory > 0 && len(a.history) > a.maxHistory {
 		a.history = append([]llm.Message(nil), a.history[len(a.history)-a.maxHistory:]...)
+		if a.onTrim != nil {
+			a.onTrim()
+		}
 	}
 }
 

@@ -1938,6 +1938,7 @@ func (a *app) wire() error {
 	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
 	a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
+	a.ag.SetOnTrim(a.resetCheckpoints) // a checkpoint's histLen indexes the pre-trim history — meaningless now
 	if a.cfg.Memory == "raw" {
 		// A local server's KV-cache only helps while the prompt PREFIX stays
 		// identical between requests; remember()'s trim cuts from the front,

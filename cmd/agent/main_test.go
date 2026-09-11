@@ -2111,6 +2111,60 @@ func TestSpawnAgentBackgroundTracerNoRace(t *testing.T) {
 	}
 }
 
+// TestSpawnAgentBackgroundPriceOverridesNoRace: addSessionCost, called from
+// runSpawnPlan's background-job goroutine to record a sub-agent's spend, used
+// to resolve price overrides by calling a.priceOverrides() while holding
+// costMu — which reads a.cfg.Prices live. costMu only serializes
+// addSessionCost/sessionCost against each other; it does nothing to protect
+// a.cfg itself from reconfigure() (the /login path), which reassigns a.cfg
+// WHOLESALE (a.cfg = cfg) with no lock at all. Before the fix, a background
+// job's cost-accrual racing a concurrent /login was a data race under -race,
+// not just a stale value. The fix resolves price overrides synchronously in
+// resolveSpawn (plan.priceOverrides) — exactly like reasoning params and the
+// tracer above — so runSpawnPlan's own goroutine never reads a.cfg.Prices
+// again; addSessionCost now takes the overrides as a parameter instead of
+// resolving them itself. This test launches many background jobs back-to-back,
+// reassigning a.cfg wholesale right after each dispatch — like /login firing
+// while a previously-launched job is still running in the background — and
+// must be -race clean.
+func TestSpawnAgentBackgroundPriceOverridesNoRace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(2 * time.Millisecond) // keep jobs in flight long enough to overlap
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = "" // plain OpenAI-compat (skip LM Studio detection)
+	cfg.Agents = map[string]config.AgentProfile{"loc": {Provider: "local"}}
+	kb, _ := knowledge.Open("")
+	usg, _ := usage.Open("") // in-memory — a.usage != nil is what gates the addSessionCost call
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usg,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 50; i++ {
+		if _, err := a.spawnAgentBackground(context.Background(), "loc", "go", ""); err != nil {
+			t.Fatal(err)
+		}
+		// Simulates reconfigure()'s /login path reassigning a.cfg wholesale, from
+		// the same (foreground) goroutine that launched the job above — while
+		// earlier jobs' own goroutines may still be running runSpawnPlan.
+		next := cfg
+		if i%2 == 0 {
+			next.Prices = map[string][2]float64{"local/" + cfg.LLM.Model: {1, 2}}
+		}
+		a.cfg = next
+	}
+	for i := 0; i < 500 && a.jobsPending() > 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestBackgroundJobLifecycle(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()

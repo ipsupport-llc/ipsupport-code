@@ -236,6 +236,40 @@ func TestStaleCompactDoneMsgIgnored(t *testing.T) {
 	}
 }
 
+// A /skills install left running in the background (a new task started, or a
+// force-detach happened, while the install goroutine was still hitting the
+// network) must not clobber whatever newer state the UI has moved on to when
+// it finally lands late — its epoch is stale, mirroring compactDoneMsg's own
+// guard.
+func TestStaleSkillsMsgIgnored(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	oldAgent := a.ag
+	m := &tuiModel{app: a, state: stRunning, cancel: func() {}, input: textarea.New()}
+	m.epoch = 2 // a new task has since started at this epoch
+
+	m.Update(skillsMsg{names: []string{"some-skill"}, epoch: 1}) // the old install's message, stale
+
+	if m.state != stRunning {
+		t.Error("a stale skillsMsg disturbed the running UI")
+	}
+	if m.cancel == nil {
+		t.Error("a stale skillsMsg cleared the new task's cancel func")
+	}
+	if a.ag != oldAgent {
+		t.Error("a stale skillsMsg triggered a re-wire on top of the newer run")
+	}
+	if len(m.history) != 0 {
+		t.Error("a stale skillsMsg polluted the log")
+	}
+}
+
 func TestAsideDrainsOnce(t *testing.T) {
 	a := &app{}
 	if a.addAside("  "); len(a.pendingAside) != 0 {

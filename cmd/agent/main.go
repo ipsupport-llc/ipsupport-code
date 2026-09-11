@@ -466,7 +466,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	// Resolve the working directory (default: the session workspace). The path may
 	// point anywhere — ~ is expanded, relatives resolve against the session — but
 	// the sub-agent gets its OWN jail rooted there, so it still can't escape it.
-	subWorkspace := a.effectiveDir()
+	subWorkspace := a.pol.Workdir()
 	var subReg *tool.Registry
 	if d := strings.TrimSpace(dir); d != "" {
 		root, err := a.resolveSpawnDir(d)

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -414,7 +415,7 @@ func TestParseStreamTicksOnlyOnProgress(t *testing.T) {
 
 	// A comment/heartbeat, a blank data line, and an empty delta — no progress.
 	heartbeats := ": ping\n\ndata: \n\ndata: {\"choices\":[{\"delta\":{}}]}\n\ndata: [DONE]\n\n"
-	if _, err := cl.parseStream(strings.NewReader(heartbeats), tick, 0); err != nil {
+	if _, err := cl.parseStream(strings.NewReader(heartbeats), tick, 0, new(int)); err != nil {
 		t.Fatal(err)
 	}
 	if ticks != 0 {
@@ -424,7 +425,7 @@ func TestParseStreamTicksOnlyOnProgress(t *testing.T) {
 	// A real content delta does reset it.
 	ticks = 0
 	real := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
-	if _, err := cl.parseStream(strings.NewReader(real), tick, 0); err != nil {
+	if _, err := cl.parseStream(strings.NewReader(real), tick, 0, new(int)); err != nil {
 		t.Fatal(err)
 	}
 	if ticks != 1 {
@@ -444,7 +445,7 @@ func TestParseStreamAccumulatesLiveOutput(t *testing.T) {
 		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{\"content\":\"the answer\"}}]}\n\n" +
 		"data: [DONE]\n\n"
-	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, 0)
+	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, 0, new(int))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -458,7 +459,7 @@ func TestParseStreamAccumulatesLiveOutput(t *testing.T) {
 	// OpenRouter's alternate reasoning key.
 	cl2 := NewOpenAIClient(config.LLM{Model: "x"})
 	sse2 := "data: {\"choices\":[{\"delta\":{\"reasoning\":\"pondering\"}}]}\n\ndata: [DONE]\n\n"
-	if _, err := cl2.parseStream(strings.NewReader(sse2), func() {}, 0); err != nil {
+	if _, err := cl2.parseStream(strings.NewReader(sse2), func() {}, 0, new(int)); err != nil {
 		t.Fatal(err)
 	}
 	if got := cl2.Live(); got != "pondering" {
@@ -469,7 +470,7 @@ func TestParseStreamAccumulatesLiveOutput(t *testing.T) {
 	// still populate Live() — this is the case that was reported empty live.
 	cl3 := NewOpenAIClient(config.LLM{Model: "x"})
 	sse3 := "data: {\"choices\":[{\"delta\":{\"content\":\"plain answer\"}}]}\n\ndata: [DONE]\n\n"
-	if _, err := cl3.parseStream(strings.NewReader(sse3), func() {}, 0); err != nil {
+	if _, err := cl3.parseStream(strings.NewReader(sse3), func() {}, 0, new(int)); err != nil {
 		t.Fatal(err)
 	}
 	if got := cl3.Live(); got != "plain answer" {
@@ -541,7 +542,7 @@ func TestStripChannelTokens(t *testing.T) {
 func TestParseStreamStripsLeakedChannelToken(t *testing.T) {
 	cl := NewOpenAIClient(config.LLM{Model: "x"})
 	sse := `data: {"choices":[{"delta":{"content":"<channel|>I'll help you build this."}}]}` + "\n\ndata: [DONE]\n\n"
-	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, 0)
+	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, 0, new(int))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -683,6 +684,93 @@ func TestChatRollsBackTokensOnStallRetry(t *testing.T) {
 	}
 	if _, compl := cl.Usage(); compl != 5 {
 		t.Errorf("completion tokens = %d, want 5 (the stalled attempt's estimate must be rolled back, not added)", compl)
+	}
+}
+
+// Two concurrent Chat() calls on the SAME client share one c.complTk counter.
+// Before the fix, a retriable failure rolled the counter back to a snapshot
+// taken at the start of ITS OWN attempt — an absolute restore, not a per-
+// request delta. If a DIFFERENT concurrent Chat() call completed and
+// reconciled its own tokens into the counter while the failing attempt was in
+// flight, the restore wiped that other call's contribution out too.
+//
+// Here B starts first (so its pre-attempt snapshot would be 0), streams a
+// couple of deltas, then blocks. While B is blocked, A runs an entire
+// Chat() to completion, reconciling 100 real completion tokens. Only then is
+// B's held connection allowed to fail (a retriable premature EOF, the same
+// shape as TestChatRetriesOnPrematureCleanEOF); B retries and reconciles 7
+// more. The correct final total is A's 100 + B's 7 = 107. The old snapshot-
+// restore code reports 7 — A's 100 silently destroyed by B's rollback.
+func TestChatConcurrentRetryRollbackDoesNotClobberOtherCall(t *testing.T) {
+	var reqNum int32
+	bStreamed := make(chan struct{}) // closed once B's first attempt has streamed its deltas
+	letBFail := make(chan struct{})  // closed once A has fully completed — now let B's attempt fail
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch atomic.AddInt32(&reqNum, 1) {
+		case 1:
+			// B's first attempt: stream 2 deltas (bumps B's own live estimate by
+			// 2), then hold the connection open — un-reconciled — until A has
+			// fully completed elsewhere, then let this handler return, which
+			// closes the body cleanly with no "[DONE]" (a retriable premature
+			// EOF, per TestChatRetriesOnPrematureCleanEOF).
+			w.Header().Set("Content-Type", "text/event-stream")
+			fl := w.(http.Flusher)
+			io.WriteString(w, `data: {"choices":[{"delta":{"content":"b"}}]}`+"\n\n")
+			io.WriteString(w, `data: {"choices":[{"delta":{"content":"b"}}]}`+"\n\n")
+			fl.Flush()
+			close(bStreamed)
+			<-letBFail
+		case 2:
+			// A: completes immediately, reconciling to 100 real completion tokens.
+			w.Header().Set("Content-Type", "text/event-stream")
+			fl := w.(http.Flusher)
+			io.WriteString(w, `data: {"choices":[{"delta":{"content":"a"}}]}`+"\n\n")
+			fl.Flush()
+			io.WriteString(w, `data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":1,"completion_tokens":100}}`+"\n\n")
+			io.WriteString(w, "data: [DONE]\n\n")
+			fl.Flush()
+		case 3:
+			// B's retry: succeeds, reconciling to 7 real completion tokens.
+			w.Header().Set("Content-Type", "text/event-stream")
+			fl := w.(http.Flusher)
+			io.WriteString(w, `data: {"choices":[{"delta":{"content":"b2"}}]}`+"\n\n")
+			fl.Flush()
+			io.WriteString(w, `data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":1,"completion_tokens":7}}`+"\n\n")
+			io.WriteString(w, "data: [DONE]\n\n")
+			fl.Flush()
+		}
+	}))
+	defer srv.Close()
+
+	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+
+	var bErr, aErr error
+	bDone := make(chan struct{})
+	go func() {
+		_, bErr = cl.Chat(context.Background(), []Message{User("b")}, nil)
+		close(bDone)
+	}()
+	<-bStreamed // B is now blocked, holding its 2-bump estimate un-reconciled
+
+	aDone := make(chan struct{})
+	go func() {
+		_, aErr = cl.Chat(context.Background(), []Message{User("a")}, nil)
+		close(aDone)
+	}()
+	<-aDone // A has fully completed and reconciled its 100 real tokens
+
+	close(letBFail) // now let B's held attempt fail, retry, and succeed
+	<-bDone
+
+	if aErr != nil {
+		t.Fatalf("A: Chat failed: %v", aErr)
+	}
+	if bErr != nil {
+		t.Fatalf("B: Chat failed: %v", bErr)
+	}
+	if _, compl := cl.Usage(); compl != 107 {
+		t.Errorf("completion tokens = %d, want 107 (A's 100 + B's 7 — A's contribution must survive B's rollback)", compl)
 	}
 }
 

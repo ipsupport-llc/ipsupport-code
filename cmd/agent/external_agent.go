@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -66,23 +65,14 @@ func catalogNames() []string {
 }
 
 // spawnExternalAgent runs an external-CLI profile as a sub-agent: exec Command in
-// the target dir with the task substituted into Args, and hand the tail of its
-// output (plus a change summary) back to the delegating model.
-func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.AgentProfile, task, dir string, onLine func(string)) (string, error) {
+// root (already resolved and validated by the caller — resolveSpawn, synchronously,
+// never this function's own goroutine — see spawnPlan) with the task substituted
+// into Args, and hand the tail of its output (plus a change summary) back to the
+// delegating model.
+func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.AgentProfile, task, root string, onLine func(string)) (string, error) {
 	command := strings.TrimSpace(p.Command)
 	if command == "" {
 		return "", fmt.Errorf("profile %q: external agent has no command", profile)
-	}
-	root := a.effectiveDir()
-	if d := strings.TrimSpace(dir); d != "" {
-		resolved, err := a.resolveSpawnDir(d)
-		if err != nil {
-			return "", err
-		}
-		root = resolved
-	}
-	if fi, err := os.Stat(root); err != nil || !fi.IsDir() {
-		return "", fmt.Errorf("dir %q is not a directory", root)
 	}
 
 	// Always gated, even when ordinary spawns are relaxed (spawn allow) — an

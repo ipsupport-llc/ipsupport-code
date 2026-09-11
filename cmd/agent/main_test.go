@@ -1908,6 +1908,57 @@ func TestSpawnAgentBackgroundReasoningNoMapRace(t *testing.T) {
 	}
 }
 
+// TestSpawnAgentBackgroundExternalDirNoRace: unlike the LLM-delegate branch of
+// resolveSpawn (already fixed — see the two tests above), the external-agent
+// branch deferred directory resolution to spawnExternalAgent itself, which read
+// a.workdir (via a.effectiveDir()) from INSIDE the background job's own
+// goroutine — racing a foreground /cd (a plain unlocked write to a.workdir)
+// dispatched while the job was still starting up. The fix resolves dir
+// synchronously in resolveSpawn instead, exactly like the LLM branch, so the
+// job's own goroutine never touches a.workdir again. This test launches many
+// background external-agent jobs with no explicit dir, immediately mutating
+// a.workdir in a tight loop right after each dispatch (simulating /cd racing a
+// just-dispatched job), and must be -race clean.
+func TestSpawnAgentBackgroundExternalDirNoRace(t *testing.T) {
+	ws := t.TempDir()
+	other := filepath.Join(ws, "other")
+	if err := os.MkdirAll(other, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.Agents = map[string]config.AgentProfile{
+		"echo": {Kind: "external", Command: "echo", Args: []string{"ok:", "{task}"}},
+	}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 50; i++ {
+		if _, err := a.spawnAgentBackground(context.Background(), "echo", "race me", ""); err != nil {
+			t.Fatal(err)
+		}
+		// Simulates /cd firing from the foreground right after dispatch — a
+		// plain unlocked write to a.workdir — while the just-launched job's own
+		// goroutine may still be starting up.
+		for j := 0; j < 200; j++ {
+			if j%2 == 0 {
+				a.workdir = other
+			} else {
+				a.workdir = ws
+			}
+		}
+	}
+
+	for i := 0; i < 500 && a.jobsPending() > 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestBackgroundJobLifecycle(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()

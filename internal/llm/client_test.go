@@ -204,6 +204,32 @@ func TestChatDoesNotFlagOrdinaryRepeatedCodeIdiom(t *testing.T) {
 	}
 }
 
+// A model's reasoning phase legitimately drafts its final sentence and then
+// the content phase restates that EXACT sentence verbatim as the visible
+// answer (a common CoT pattern: reasoning ends "So the answer is: '<sentence>'",
+// then content emits "<sentence>"). Before the fix, checkPhraseRepeat ran on
+// the single shared live buffer (reasoning+content concatenated), so the
+// sentence's appearance in content matched its own earlier appearance in
+// reasoning and falsely tripped phraseRepeatError — a legitimate channel
+// handoff, not an actual loop. Reasoning and content must be compared only
+// within their own channel.
+func TestChatDoesNotFlagReasoningToContentHandoff(t *testing.T) {
+	sentence := `The migration completes without downtime by draining connections before the cutover, then swapping the pool.`
+	reasoning := "Let's work through the tradeoffs of each rollout strategy in detail before settling on one. " +
+		"So the answer is: '" + sentence + "'"
+	cl := NewOpenAIClient(config.LLM{BaseURL: sseServer(t,
+		fmt.Sprintf(`{"choices":[{"delta":{"reasoning_content":%q}}]}`, reasoning),
+		fmt.Sprintf(`{"choices":[{"delta":{"content":%q}}]}`, sentence),
+	), Model: "fake"})
+	msg, err := cl.Chat(context.Background(), []Message{User("go")}, nil)
+	if err != nil {
+		t.Fatalf("reasoning->content handoff repeating the same sentence should not abort: %v", err)
+	}
+	if msg.Content != sentence {
+		t.Errorf("content = %q, want %q", msg.Content, sentence)
+	}
+}
+
 // DisableLoopDetection (per-connection, config.LLM) opts a provider out of
 // both repetition detectors entirely — a capable hosted provider (Claude,
 // OpenAI) that a user trusts not to need this can turn it off, while it stays

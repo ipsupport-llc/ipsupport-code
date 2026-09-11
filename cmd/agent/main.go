@@ -2253,6 +2253,16 @@ func (a *app) loadFacts() {
 	}
 }
 
+// clearFacts drops every learned project fact for this workspace. Facts are
+// meant to be durable across sessions, but /clear is the user's explicit
+// "start fresh" signal — without this, a fact learned about an abandoned
+// line of work (e.g. a build command for a subdirectory that no longer
+// exists) keeps leaking into the system prompt of every task after /clear.
+func (a *app) clearFacts() {
+	a.facts = nil
+	_ = os.Remove(a.factsPath())
+}
+
 // addFacts dedupe-appends learned facts (most recent maxFacts kept), persists,
 // and returns the genuinely new ones.
 func (a *app) addFacts(facts []string) []string {
@@ -2680,6 +2690,8 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		}
 	case "/reset", "/clear": // wipe THIS thread
 		a.ag.Reset()
+		a.clearFacts()
+		a.ag.SetSystem(a.systemPrompt())
 		a.saveSession()
 		fmt.Println("session cleared.")
 	case "/compact":

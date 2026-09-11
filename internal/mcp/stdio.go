@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+
+	"github.com/ipsupport-llc/ipsupport-code/internal/procgroup"
 )
 
 // stdioTransport speaks newline-delimited JSON-RPC to a subprocess over its
@@ -29,26 +31,35 @@ type stdioTransport struct {
 }
 
 func dialStdio(name string, s Server) (transport, error) {
-	cmd := exec.Command(s.Command, s.Args...)
+	ctx, cancel := context.WithCancel(context.Background())
+	cmd := exec.CommandContext(ctx, s.Command, s.Args...)
 	cmd.Env = os.Environ()
 	for k, v := range s.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	cmd.Stderr = io.Discard
+	// Kill the WHOLE process group on close, and bound Wait so a grandchild
+	// that outlives the server (e.g. a shell's backgrounded child) holding the
+	// stdout pipe open can't hang teardown forever — same wedge class
+	// internal/tool/run.go and git.go already guard against.
+	procgroup.Set(cmd)
 	in, err := cmd.StdinPipe()
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	out, err := cmd.StdoutPipe()
 	if err != nil {
+		cancel()
 		return nil, err
 	}
 	if err := cmd.Start(); err != nil {
+		cancel()
 		return nil, fmt.Errorf("start %s: %w", s.Command, err)
 	}
 	return newStdio(in, out, func() {
 		_ = in.Close()
-		_ = cmd.Process.Kill()
+		cancel()
 		_ = cmd.Wait()
 	}), nil
 }

@@ -2673,6 +2673,46 @@ func TestBuildAppliesSessionNameBeforeWire(t *testing.T) {
 	}
 }
 
+// TestRenameRebindsArchive proves /rename doesn't just relabel cfg.Name — the
+// already-built archiver has to be re-pointed too, or the next archived turn
+// keeps landing in the OLD name's file. See rename() in tui.go.
+func TestRenameRebindsArchive(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+	}))
+	defer srv.Close()
+
+	if err := config.SaveGlobal("", config.LLM{BaseURL: srv.URL + "/v1", Type: "openai"}); err != nil {
+		t.Fatal(err)
+	}
+
+	ws := t.TempDir()
+	a, cleanup, err := build(ws, "old-name", bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	m := &tuiModel{app: a}
+	m.rename("new-name")
+
+	if _, err := a.ag.Run(context.Background(), "say hi"); err != nil {
+		t.Fatal(err)
+	}
+
+	oldPath := filepath.Join(ws, ".agent", "sessions", slugName("old-name")+".archive.jsonl")
+	newPath := filepath.Join(ws, ".agent", "sessions", slugName("new-name")+".archive.jsonl")
+
+	if fi, err := os.Stat(oldPath); err == nil {
+		t.Errorf("turn archived to the OLD name's file %s (%d bytes) — /rename must rebind the archiver, not just relabel cfg.Name", oldPath, fi.Size())
+	}
+	if fi, err := os.Stat(newPath); err != nil || fi.Size() == 0 {
+		t.Errorf("turn not archived under the NEW name's file %s: %v", newPath, err)
+	}
+}
+
 func TestAgentsPanelBuild(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveAgents writes the global config

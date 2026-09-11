@@ -15,7 +15,7 @@ func TestStoreConcurrentAdd(t *testing.T) {
 	var wg sync.WaitGroup
 	for i := 0; i < 64; i++ {
 		wg.Add(1)
-		go func() { defer wg.Done(); s.Add("2026-06-27", "p", "m", 1, 1) }()
+		go func() { defer wg.Done(); s.Add("2026-06-27", "p", "m", 1, 1, 0) }()
 	}
 	wg.Wait()
 	if got := s.Total().Tokens(); got != 128 {
@@ -25,11 +25,11 @@ func TestStoreConcurrentAdd(t *testing.T) {
 
 func TestStoreAddAndAggregate(t *testing.T) {
 	s, _ := Open("")
-	s.Add("2026-06-27", "grok", "grok-4.3", 100, 200)
-	s.Add("2026-06-27", "grok", "grok-4.3", 10, 20) // folds into same bucket
-	s.Add("2026-06-26", "local", "qwen", 5, 5)
-	s.Add("2026-06-27", "local", "qwen", 1, 1)
-	s.Add("2026-06-27", "x", "z", 0, 0) // non-positive → ignored
+	s.Add("2026-06-27", "grok", "grok-4.3", 100, 200, 0)
+	s.Add("2026-06-27", "grok", "grok-4.3", 10, 20, 0) // folds into same bucket
+	s.Add("2026-06-26", "local", "qwen", 5, 5, 0)
+	s.Add("2026-06-27", "local", "qwen", 1, 1, 0)
+	s.Add("2026-06-27", "x", "z", 0, 0, 0) // non-positive → ignored
 
 	days := s.ByDay()
 	if len(days) != 2 || days[0].Key != "2026-06-27" {
@@ -46,9 +46,9 @@ func TestStoreAddAndAggregate(t *testing.T) {
 
 func TestStoreTotalSincePurgeClear(t *testing.T) {
 	s, _ := Open("")
-	s.Add("2026-06-01", "p", "m", 10, 10)
-	s.Add("2026-06-20", "p", "m", 20, 20)
-	s.Add("2026-06-27", "p", "m", 30, 30)
+	s.Add("2026-06-01", "p", "m", 10, 10, 0)
+	s.Add("2026-06-20", "p", "m", 20, 20, 0)
+	s.Add("2026-06-27", "p", "m", 30, 30, 0)
 
 	if got := s.Total().Tokens(); got != 120 {
 		t.Errorf("Total = %d, want 120", got)
@@ -88,8 +88,8 @@ func TestPricing(t *testing.T) {
 	}
 	// CostSince sums per-entry by model
 	s, _ := Open("")
-	s.Add("2026-06-27", "openai", "gpt-4o", 1_000_000, 0)         // $2.50
-	s.Add("2026-06-27", "openrouter", "x:free", 9_000_000, 9_000) // $0
+	s.Add("2026-06-27", "openai", "gpt-4o", 1_000_000, 0, 0)         // $2.50
+	s.Add("2026-06-27", "openrouter", "x:free", 9_000_000, 9_000, 0) // $0
 	if got := s.CostSince("", nil); got != 2.50 {
 		t.Errorf("CostSince = %v, want 2.50", got)
 	}
@@ -103,7 +103,7 @@ func TestPricing(t *testing.T) {
 func TestStoreSaveMergesConcurrentProcessesInsteadOfClobbering(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.json")
 	a, _ := Open(path)
-	a.Add("2026-06-27", "grok", "grok-4.3", 100, 100)
+	a.Add("2026-06-27", "grok", "grok-4.3", 100, 100, 0)
 	if err := a.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -113,11 +113,11 @@ func TestStoreSaveMergesConcurrentProcessesInsteadOfClobbering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.Add("2026-06-27", "openai", "gpt-4o", 50, 50)
+	b.Add("2026-06-27", "openai", "gpt-4o", 50, 50, 0)
 
 	// Back on the first process: it adds more of its own and saves again —
 	// without ever having seen b's update.
-	a.Add("2026-06-27", "grok", "grok-4.3", 10, 10)
+	a.Add("2026-06-27", "grok", "grok-4.3", 10, 10, 0)
 	if err := a.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestStoreSaveMergesConcurrentProcessesInsteadOfClobbering(t *testing.T) {
 func TestStorePersist(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.json")
 	s, _ := Open(path)
-	s.Add("2026-06-27", "grok", "grok-4.3", 100, 200)
+	s.Add("2026-06-27", "grok", "grok-4.3", 100, 200, 0)
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -175,14 +175,14 @@ func TestSaveLocksAcrossWholeReadMergeWriteCycle(t *testing.T) {
 
 	a, _ := Open(path)
 	for i := 0; i < 2000; i++ { // pads a's own merge so its write lands well after its read
-		a.Add(fmt.Sprintf("2020-01-%02d", 1+i%28), fmt.Sprintf("p%d", i), "m", 1, 1)
+		a.Add(fmt.Sprintf("2020-01-%02d", 1+i%28), fmt.Sprintf("p%d", i), "m", 1, 1, 0)
 	}
 
 	b, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.Add("2026-06-27", "b-process", "m", 5, 5)
+	b.Add("2026-06-27", "b-process", "m", 5, 5, 0)
 
 	var wg sync.WaitGroup
 	var errA error
@@ -229,7 +229,7 @@ func TestSaveKeepsPendingWhenWriteFails(t *testing.T) {
 	dir := t.TempDir()
 	goodPath := filepath.Join(dir, "usage.json")
 	s, _ := Open(goodPath)
-	s.Add("2026-06-27", "p1", "m", 10, 10) // delta 1 — its save below will fail
+	s.Add("2026-06-27", "p1", "m", 10, 10, 0) // delta 1 — its save below will fail
 
 	// Force the write to fail deterministically (no reliance on permission
 	// bits, which root/CI can bypass): point path at a file inside a directory
@@ -249,7 +249,7 @@ func TestSaveKeepsPendingWhenWriteFails(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		s.Add("2026-06-27", "p2", "m", 5, 5) // delta 2
+		s.Add("2026-06-27", "p2", "m", 5, 5, 0) // delta 2
 	}()
 	wg.Wait()
 
@@ -284,7 +284,7 @@ func TestSaveWithNothingPendingDoesNotClobberConcurrentWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.Add("2026-06-27", "grok", "grok-4.3", 10, 0)
+	a.Add("2026-06-27", "grok", "grok-4.3", 10, 0, 0)
 	if err := a.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestSaveWithNothingPendingDoesNotClobberConcurrentWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.Add("2026-06-27", "grok", "grok-4.3", 2, 0)
+	b.Add("2026-06-27", "grok", "grok-4.3", 2, 0, 0)
 	if err := b.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestSaveAfterNoopPurgeDoesNotClobberConcurrentWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.Add("2026-06-27", "grok", "grok-4.3", 10, 0)
+	a.Add("2026-06-27", "grok", "grok-4.3", 10, 0, 0)
 	if err := a.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +337,7 @@ func TestSaveAfterNoopPurgeDoesNotClobberConcurrentWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	b.Add("2026-06-27", "grok", "grok-4.3", 2, 0)
+	b.Add("2026-06-27", "grok", "grok-4.3", 2, 0, 0)
 	if err := b.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +369,7 @@ func TestSaveAfterNoopPurgeDoesNotClobberConcurrentWrite(t *testing.T) {
 func TestNoopPurgeDoesNotPoisonMergeSafety(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "usage.json")
 	s, _ := Open(path)
-	s.Add("2026-06-27", "grok", "grok-4.3", 10, 10)
+	s.Add("2026-06-27", "grok", "grok-4.3", 10, 10, 0)
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -386,7 +386,7 @@ func TestNoopPurgeDoesNotPoisonMergeSafety(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	addEntry(&onDisk, "2026-06-27", "concurrent-process", "m", 99, 99)
+	addEntry(&onDisk, "2026-06-27", "concurrent-process", "m", 99, 99, 0)
 	data, err := json.MarshalIndent(onDisk, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -396,7 +396,7 @@ func TestNoopPurgeDoesNotPoisonMergeSafety(t *testing.T) {
 	}
 
 	// Ordinary use later in the same process: an Add followed by a Save.
-	s.Add("2026-06-27", "grok", "grok-4.3", 1, 1)
+	s.Add("2026-06-27", "grok", "grok-4.3", 1, 1, 0)
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +429,7 @@ func TestNoopPurgeDoesNotDiscardEarlierAddDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.Add("2026-06-27", "grok", "grok-4.3", 10, 5) // delta not yet saved
+	s.Add("2026-06-27", "grok", "grok-4.3", 10, 5, 0) // delta not yet saved
 
 	// Retention check runs before the caller gets around to Save — cutoff is
 	// in the far past, so nothing is old enough to expire, a no-op purge.
@@ -450,5 +450,43 @@ func TestNoopPurgeDoesNotDiscardEarlierAddDelta(t *testing.T) {
 	}
 	if got := final.Total().Tokens(); got != 15 {
 		t.Errorf("on-disk total = %d, want 15 (the Add's delta from before the no-op Purge must survive)", got)
+	}
+}
+
+// Duration accumulates across multiple Add calls into the same bucket (like
+// Prompt/Completion already do), and TokensPerSec derives from the total —
+// not just the last call's duration.
+func TestDurationAccumulatesAndDerivesTokensPerSec(t *testing.T) {
+	s, err := Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Add("2026-06-27", "local", "qwen", 0, 100, 2*time.Second)
+	s.Add("2026-06-27", "local", "qwen", 0, 100, 2*time.Second) // same bucket — folds in
+
+	models := s.ByModel()
+	if len(models) != 1 {
+		t.Fatalf("got %d model buckets, want 1", len(models))
+	}
+	m := models[0]
+	if m.DurationMS != 4000 {
+		t.Fatalf("DurationMS = %d, want 4000 (2s + 2s)", m.DurationMS)
+	}
+	if got, want := m.TokensPerSec(), 50.0; got != want { // 200 completion tokens / 4s
+		t.Errorf("TokensPerSec = %v, want %v", got, want)
+	}
+}
+
+// An entry with no duration recorded (e.g. from before Entry.DurationMS
+// existed, or a caller that couldn't measure one) must report 0 tok/s, not
+// divide by zero or fabricate a rate.
+func TestTokensPerSecZeroWithoutDuration(t *testing.T) {
+	s, err := Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Add("2026-06-27", "local", "qwen", 0, 100, 0)
+	if got := s.ByModel()[0].TokensPerSec(); got != 0 {
+		t.Errorf("TokensPerSec = %v, want 0 (no duration recorded)", got)
 	}
 }

@@ -125,7 +125,14 @@ func main() {
 		if !newSession {
 			app.loadSession() // one-shot: silently continue the saved session
 		}
-		app.runOne(ctx, strings.TrimSpace(strings.Join(flag.Args(), " ")))
+		if err := app.runOne(ctx, strings.TrimSpace(strings.Join(flag.Args(), " "))); err != nil {
+			// The task never ran at all — exit nonzero so scripts/CI checking $?
+			// see the failure instead of falling through to the implicit exit-0
+			// below. os.Exit skips every registered defer, so run them by hand.
+			stop()
+			cleanup()
+			os.Exit(1)
+		}
 	case isTTY():
 		// The TUI owns the alt-screen — routing logs to stderr would bleed raw
 		// "level=WARN …" lines over the interface (retries are shown in-UI anyway).
@@ -2611,11 +2618,14 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 	return learned
 }
 
-// runOne is the plain (printing) path used in one-shot and piped modes.
-func (a *app) runOne(ctx context.Context, goal string) {
+// runOne is the plain (printing) path used in one-shot and piped modes. It
+// returns a non-nil error when the task never ran at all (e.g. the initial
+// model request failed) so the caller can signal a nonzero exit status
+// instead of silently exiting 0.
+func (a *app) runOne(ctx context.Context, goal string) error {
 	if a.budgetExceeded() {
 		fmt.Println(a.budgetMsg())
-		return
+		return nil
 	}
 	a.injectJobResults()       // finished background jobs land before the model thinks
 	a.maybeRewireHistoryTool() // the archive may have gained its first entry since wire()
@@ -2624,9 +2634,10 @@ func (a *app) runOne(ctx context.Context, goal string) {
 	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
 	tr, err := a.ag.Run(ctx, goal)
 	if err != nil {
+		a.recordUsage() // the failed attempt may have burned real tokens — don't drop them
 		slog.Error("run failed", "err", err)
 		fmt.Fprintln(os.Stderr, "error:", err)
-		return
+		return err
 	}
 	a.recordRun(tr)
 	a.finishGoal(goal, tr)
@@ -2649,6 +2660,7 @@ func (a *app) runOne(ctx context.Context, goal string) {
 			fmt.Fprintf(os.Stderr, "(auto-compacted %d messages to free context)\n", n)
 		}
 	}
+	return nil
 }
 
 // runTaskStreaming is the TUI path: no printing — progress reaches the screen via
@@ -2668,6 +2680,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 		return // force-detached mid-run — its results belong to a run the UI abandoned
 	}
 	if err != nil {
+		a.recordUsage() // the failed attempt may have burned real tokens — don't drop them
 		a.emit("error", map[string]any{"text": err.Error()})
 		return
 	}

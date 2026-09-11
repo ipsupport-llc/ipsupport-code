@@ -2817,6 +2817,10 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	}
 	a.recordRun(tr)
 	a.finishGoal(goal, tr)
+	a.recordUsage(dur)
+	a.saveSession() // the conversation is decided now — save it before the slower,
+	// best-effort reflection pass below, which the process could be interrupted
+	// during (e.g. a signal mid-reflection) without losing this turn's real output
 	if strings.TrimSpace(tr.Final) != "" {
 		fmt.Println(tr.Final)
 	} else {
@@ -2827,8 +2831,6 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 			fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
 		}
 	}
-	a.recordUsage(dur)
-	a.saveSession()
 	a.detectContextWindow() // the model is loaded now — confirm the real window
 	if a.shouldAutoCompact() {
 		if n, err := a.ag.Compact(ctx); err == nil && n > 0 {
@@ -2868,11 +2870,16 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	}
 	a.recordRun(tr)
 	a.finishGoal(goal, tr)
+	a.recordUsage(dur)
+	a.saveSession() // the conversation is decided now — save it before the slower,
+	// best-effort reflection below. That matters because /exit quits immediately even
+	// while state is still "busy" (reflecting) rather than making the user wait for it
+	// (see commandWhileBusy) — saving here first means the just-finished exchange (the
+	// part the user actually sees and cares about) reaches disk before that race even
+	// becomes possible, instead of depending on reflection finishing first.
 	if !tr.Stopped { // reflect only on a clean finish, not on any premature stop
 		a.reflectAndStore(ctx, tr)
 	}
-	a.recordUsage(dur)
-	a.saveSession() // persist the partial work so a follow-up can continue
 }
 
 func (a *app) repl(ctx context.Context) {

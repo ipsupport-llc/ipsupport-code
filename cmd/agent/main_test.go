@@ -5550,3 +5550,75 @@ func TestThinkingViewHiddenDuringNonTaskBusyWork(t *testing.T) {
 		t.Errorf("thinkingView() during non-task busy work = %v, want nil (must not show a prior task's leftover Live() text)", got)
 	}
 }
+
+// runOne must persist the just-finished exchange to the session file BEFORE
+// the (separate, best-effort, potentially slow) reflection pass — reflection
+// touches only the knowledge base, never session history, so there's no
+// reason the two need to be sequenced the other way around. This matters
+// because interactive exit paths don't wait for reflection to finish (see
+// commandWhileBusy's /exit case): if saveSession ran after reflection, a slow
+// or interrupted reflection pass could cost the user their just-completed
+// exchange even though they already saw the answer on screen.
+func TestSaveSessionHappensBeforeSlowReflection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	reflectStarted := make(chan struct{})
+	release := make(chan struct{})
+	var startOnce, releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) }) // don't hang the server on a t.Fatal above
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n++
+		nn := n
+		io.Copy(io.Discard, r.Body)
+		switch nn {
+		case 1:
+			// A tool call, so the transcript actually used a tool — reflection
+			// skips its own LLM call entirely for a transcript that didn't
+			// (internal/reflect.Reflect: !usedTools(t) → return early, no HTTP
+			// call at all), which would make this test pass for the wrong reason.
+			io.WriteString(w, tuiToolCall("calc", `{"expression":"1+1"}`))
+		case 2:
+			io.WriteString(w, tuiContent("the answer"))
+		default: // reflection's own (slow) call — a client-side retry loop would
+			// hit this branch again, so only the first arrival unblocks the test.
+			startOnce.Do(func() { close(reflectStarted) })
+			<-release
+			io.WriteString(w, tuiContent("")) // reflection failing/empty is fine — it's best-effort
+		}
+	}))
+	defer srv.Close()
+
+	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	a.cfg.LLM.BaseURL, a.cfg.LLM.Model = srv.URL, "fake"
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- a.runOne(context.Background(), "do the thing") }()
+
+	select {
+	case <-reflectStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reflection never started")
+	}
+
+	// Reflection is now blocked mid-HTTP-call. If saveSession still ran before
+	// it (the fix), the session file already has this exchange.
+	data, err := os.ReadFile(a.sessionPath())
+	if err != nil {
+		t.Fatalf("session file not written before reflection finished: %v", err)
+	}
+	if !strings.Contains(string(data), "the answer") {
+		t.Errorf("session file written before reflection finished doesn't contain the exchange: %s", data)
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	if err := <-done; err != nil {
+		t.Fatalf("runOne: %v", err)
+	}
+}

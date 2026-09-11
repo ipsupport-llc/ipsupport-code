@@ -80,6 +80,11 @@ func Open(dir string, hc *http.Client) (*Store, error) {
 			// overwrites on the next explicit change.
 			slog.Warn("skill state file is corrupt; using defaults until it's changed", "path", s.statePath(), "err", err)
 		}
+		if s.state == nil {
+			// The valid-JSON literal `null` unmarshals with no error but sets
+			// s.state itself to nil, which panics on the first write into it below.
+			s.state = map[string]entry{}
+		}
 	}
 	s.seedBuiltins()
 	return s, nil

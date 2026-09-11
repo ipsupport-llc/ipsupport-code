@@ -2511,6 +2511,38 @@ func TestReflectDisabledIsNoop(t *testing.T) {
 	}
 }
 
+// A dedicated reflect-profile/reasoning-override client (reflectTarget's
+// separate=true path) must count its spend toward the session budget guard,
+// same as the main-client path (recordUsage). Force "separate" via a
+// reflect-scope reasoning override so a fresh OpenAIClient is built, point it
+// at a fake server that reports token usage, and confirm sessionCostUSD moves.
+func TestReflectSeparateClientCountsTowardBudget(t *testing.T) {
+	const resp = `{"choices":[{"message":{"role":"assistant","content":"{\"facts\":[]}"}}],` +
+		`"usage":{"prompt_tokens":1000,"completion_tokens":500}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, resp)
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.LLM.BaseURL = srv.URL
+	cfg.LLM.Model = "gpt-4o-mini" // must match a priced entry so cost isn't trivially zero
+	cfg.Reasoning = map[string]json.RawMessage{"reflect:local": json.RawMessage(`{}`)}
+	u, _ := usage.Open("")
+	a := &app{cfg: cfg, usage: u}
+
+	tr := agent.Transcript{Messages: []llm.Message{
+		llm.User("do x"),
+		{Role: "tool", Name: "run", Content: "did x"}, // Reflect skips the model call without tool use
+	}, Final: "done"}
+
+	a.reflectAndStore(context.Background(), tr)
+
+	if a.sessionCost() <= 0 {
+		t.Errorf("sessionCostUSD = %v, want > 0 — separate reflect client's spend must count toward /budget", a.sessionCost())
+	}
+}
+
 func TestRewindRestoresFiles(t *testing.T) {
 	ws := t.TempDir()
 	cfg := config.Default()

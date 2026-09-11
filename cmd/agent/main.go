@@ -2511,6 +2511,7 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 	if separate && a.usage != nil { // a dedicated reflect model's spend isn't in the main client
 		if p, c := client.Usage(); p > 0 || c > 0 {
 			a.usage.Add(today(), provider, model, p, c)
+			a.addSessionCost(model, p, c) // for the budget guard
 			_ = a.usage.Save()
 		}
 	}

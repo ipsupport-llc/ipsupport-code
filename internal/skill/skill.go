@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
@@ -53,10 +54,13 @@ type entry struct {
 	Source  string `json:"source,omitempty"`
 }
 
-// Store is the on-disk skills directory plus the enabled/source state.
+// Store is the on-disk skills directory plus the enabled/source state. The
+// same *Store is shared between the foreground and background/sub-agent tool
+// registries, so state access must be safe for concurrent use.
 type Store struct {
 	dir   string
 	http  *http.Client
+	mu    sync.RWMutex // guards state
 	state map[string]entry
 }
 
@@ -184,6 +188,8 @@ func (s *Store) skillPath(name string) string {
 	return filepath.Join(s.dir, name+".md")
 }
 
+// saveState marshals s.state to disk. Callers must hold s.mu (or be running
+// before the Store is shared, as during Open).
 func (s *Store) saveState() error {
 	data, err := json.MarshalIndent(s.state, "", "  ")
 	if err != nil {
@@ -198,6 +204,8 @@ func (s *Store) saveState() error {
 func (s *Store) List() []Skill {
 	matches, _ := filepath.Glob(filepath.Join(s.dir, "*.md"))
 	out := make([]Skill, 0, len(matches))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, p := range matches {
 		data, err := os.ReadFile(p)
 		if err != nil {
@@ -267,6 +275,8 @@ func (s *Store) SetEnabled(name string, on bool) error {
 	if _, ok := s.Get(name); !ok {
 		return fmt.Errorf("no skill named %q", name)
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	e := s.state[name]
 	e.Enabled = on
 	s.state[name] = e
@@ -281,6 +291,8 @@ func (s *Store) Remove(name string) error {
 	if err := os.Remove(s.skillPath(name)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	delete(s.state, name)
 	return s.saveState()
 }
@@ -362,6 +374,8 @@ func (s *Store) write(name, body, source string) error {
 	if err := os.WriteFile(s.skillPath(name), []byte(clipped), 0o644); err != nil {
 		return err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.state[name] = entry{Enabled: true, Source: source}
 	return s.saveState()
 }

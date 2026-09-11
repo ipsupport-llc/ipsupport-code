@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -174,6 +175,41 @@ func TestStatePersistsAcrossReopen(t *testing.T) {
 	if sk, _ := s2.Get(name); !sk.Enabled {
 		t.Errorf("enabled state not persisted for %q", name)
 	}
+}
+
+// TestStoreConcurrentAccess covers the real deployment shape: the same *Store
+// is wired into both the foreground and background/sub-agent tool registries,
+// so a mutator (SetEnabled) and readers (List, HasEnabled) run concurrently on
+// the same underlying state. Run with -race.
+func TestStoreConcurrentAccess(t *testing.T) {
+	s, err := Open(t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := s.List()
+	if len(list) == 0 {
+		t.Fatal("expected built-in skills to be seeded")
+	}
+	name := list[0].Name
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			if err := s.SetEnabled(name, i%2 == 0); err != nil {
+				t.Error(err)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			s.List()
+			s.HasEnabled()
+		}
+	}()
+	wg.Wait()
 }
 
 func TestIsGit(t *testing.T) {

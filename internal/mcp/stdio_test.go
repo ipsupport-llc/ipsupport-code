@@ -68,3 +68,25 @@ func TestStdioRoundTripCancelsBlockedWrite(t *testing.T) {
 		t.Errorf("roundTrip took %s to return — the blocked write defeated ctx", elapsed)
 	}
 }
+
+// dialStdio's server process must not be able to wedge teardown by leaving a
+// grandchild behind that holds the stdout pipe open. "sh -c 'sleep 6 & wait'"
+// backgrounds a sleep and then waits on it, mirroring a real MCP server whose
+// process spawns its own child; killing only the shell (the old behavior)
+// leaves the backgrounded sleep running as an orphan, still holding the
+// inherited stdout/stderr fds, and cmd.Wait() then blocks until it exits on
+// its own. close() must instead kill the whole process group and return
+// promptly (bounded well under the child's 6s sleep).
+func TestDialStdioCloseDoesNotHangOnOrphanedGrandchild(t *testing.T) {
+	tr, err := dialStdio("test", Server{Command: "sh", Args: []string{"-c", "sleep 6 & wait"}})
+	if err != nil {
+		t.Fatalf("dialStdio: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond) // give sh time to fork and background the sleep
+
+	start := time.Now()
+	tr.close()
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Fatalf("close() took %s — want a prompt return, not a wait on the orphaned grandchild", elapsed)
+	}
+}

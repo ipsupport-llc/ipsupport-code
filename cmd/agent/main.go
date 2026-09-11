@@ -400,9 +400,10 @@ func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, o
 // spawnPlan is everything runSpawnPlan needs, resolved up front against the
 // live app config — so a background job's goroutine (launched well after
 // resolveSpawn returns) only ever touches these captured values afterward,
-// never a.cfg/a.subReg/a.workdir/a.planMode live. a.cfg.Agents in particular
-// is a map: a concurrent read (here) racing a concurrent write (/ai add from
-// the foreground) is a Go runtime panic, not just a stale value.
+// never a.cfg/a.subReg/a.workdir/a.planMode/a.tracer live. a.cfg.Agents in
+// particular is a map: a concurrent read (here) racing a concurrent write
+// (/ai add from the foreground) is a Go runtime panic, not just a stale
+// value.
 type spawnPlan struct {
 	profile      string
 	provider     string
@@ -412,6 +413,7 @@ type spawnPlan struct {
 	subWorkspace string
 	planMode     bool
 	spawnDefault string
+	tracer       trace.Tracer
 }
 
 // resolveSpawn resolves profile/dir into a spawnPlan (or, for an external CLI
@@ -485,6 +487,14 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	// no lock, so runSpawnPlan's own goroutine must never read it again itself.
 	llmCfg = a.withReasoning(llmCfg, provider, "")
 
+	// Capture a.tracer HERE too, synchronously — wire() reassigns it (a fresh
+	// trace.Multi(a.fileTracer, a.uiTracer)) with no lock on EVERY call, and
+	// wire() runs repeatedly throughout a live process (config-panel toggles,
+	// /model, /rename, skill toggles, session switches...), not just at
+	// startup, so runSpawnPlan's own goroutine must never read a.tracer again
+	// itself.
+	tracer := a.tracer
+
 	// Resolve the working directory (default: the session workspace). The path may
 	// point anywhere — ~ is expanded, relatives resolve against the session — but
 	// the sub-agent gets its OWN jail rooted there, so it still can't escape it.
@@ -525,14 +535,18 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	return spawnPlan{
 		profile: profile, provider: provider, llmCfg: llmCfg, rolePrompt: p.Prompt,
 		subReg: subReg, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default,
+		tracer: tracer,
 	}, false, p, nil
 }
 
 // runSpawnPlan runs an already-resolved plan — safe to call from a background
 // job's own goroutine, since it only touches plan (captured up front by
 // resolveSpawn) and state that's already concurrency-safe on its own
-// (a.emit, a.usage, a.addSessionCost all have their own synchronization;
-// a.kb/a.tracer are stable pointers once wire() has run).
+// (a.usage, a.addSessionCost have their own synchronization; a.kb is a stable
+// pointer once wire() has run). a.tracer is NOT stable — wire() reassigns it
+// with no lock on every call, and wire() runs repeatedly throughout a live
+// process, not just at startup — so this uses plan.tracer (captured
+// synchronously by resolveSpawn) instead of a.emit/a.tracer.
 func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onLine func(string)) (string, error) {
 	// Ask before spawning unless the policy is relaxed. "ask" (default) guards
 	// every spawn — even local ones still cost compute, and a runaway main model
@@ -549,10 +563,12 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 
 	id := fmt.Sprintf("sub%d", a.spawnSeq.Add(1)) // groups this sub-agent's UI events
 	client := llm.NewOpenAIClient(plan.llmCfg)    // reasoning params already resolved in resolveSpawn
-	sub := agent.New(client, plan.subReg, a.kb, a.tracer, a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt), plan.llmCfg.MaxSteps)
+	sub := agent.New(client, plan.subReg, a.kb, plan.tracer, a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt), plan.llmCfg.MaxSteps)
 	sub.SetPlanMode(plan.planMode)
 	sub.SetLabel(id)
-	a.emit("subagent", map[string]any{"agent": id, "profile": plan.profile, "provider": plan.provider, "model": plan.llmCfg.Model, "dir": plan.subWorkspace, "task": oneLine(task, 80)})
+	if plan.tracer != nil {
+		plan.tracer.Emit("subagent", map[string]any{"agent": id, "profile": plan.profile, "provider": plan.provider, "model": plan.llmCfg.Model, "dir": plan.subWorkspace, "task": oneLine(task, 80)})
+	}
 
 	tr, err := sub.Run(ctx, task)
 	if a.usage != nil { // the sub-agent's spend counts too
@@ -565,7 +581,9 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 	if err != nil {
 		done["error"] = oneLine(err.Error(), 60)
 	}
-	a.emit("subagent_done", done)
+	if plan.tracer != nil {
+		plan.tracer.Emit("subagent_done", done)
+	}
 	if err != nil {
 		return "", err
 	}

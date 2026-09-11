@@ -1304,6 +1304,70 @@ func fakeMCPServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	return srv, &hits
 }
 
+// blockingApprover blocks Approve until release is closed, so a test can hold
+// an mcpClient launch approval "in flight" for as long as it needs.
+type blockingApprover struct {
+	release chan struct{}
+	calls   atomic.Int32
+}
+
+func (b *blockingApprover) Approve(_ context.Context, _, _ string) bool {
+	b.calls.Add(1)
+	<-b.release
+	return true
+}
+
+// Regression test for a real UI deadlock: mcpClient used to hold a.mcpMu for
+// its ENTIRE body, including the (potentially indefinite) approveGated wait.
+// /login and /init call reconfigure -> invalidateStaleMCP synchronously,
+// inline, on bubbletea's single event-loop goroutine (Update). If an earlier
+// /mcp launch approval was still pending — its goroutine blocked inside
+// approveGated while holding mcpMu — invalidateStaleMCP's Lock() would block
+// too. Since that call happens inside Update(), Update() would never return,
+// and since the pending approval can only be answered by Update() processing
+// the next keystroke, the whole TUI would freeze forever with no way to even
+// answer the original prompt.
+//
+// This test stands in for the event loop with a direct invalidateStaleMCP
+// call and asserts it completes promptly even while a launch approval is in
+// flight. It uses a goroutine + timeout (not a real infinite wait) so it
+// fails fast rather than hanging the suite if the deadlock regresses.
+func TestMCPClientLockNotHeldDuringApproval(t *testing.T) {
+	srv, _ := fakeMCPServer(t)
+
+	approver := &blockingApprover{release: make(chan struct{})}
+	a := &app{cfg: config.Default(), approver: approver}
+	a.cfg.McpServers = map[string]mcp.Server{"test": {URL: srv.URL}}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.mcpClient(context.Background(), a.cfg.McpServers, "test")
+	}()
+
+	// Wait for the launch approval to actually be in flight (and, on the old,
+	// unfixed code, for mcpMu to be held) before simulating the event loop's
+	// /login-triggered invalidateStaleMCP call.
+	for approver.calls.Load() == 0 {
+		time.Sleep(time.Millisecond)
+	}
+
+	invalidated := make(chan struct{})
+	go func() {
+		a.invalidateStaleMCP(a.cfg.McpServers)
+		close(invalidated)
+	}()
+
+	select {
+	case <-invalidated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("invalidateStaleMCP blocked while an MCP launch approval was pending — this is the /login-during-pending-/mcp-approval TUI deadlock: mcpMu must not be held across the approval wait")
+	}
+
+	close(approver.release) // let the pending approval finish so mcpClient's goroutine can exit
+	<-done
+}
+
 // Regression test for the bug this fix closes: reconfigure() (backing
 // /login and /init) replaced a.cfg wholesale but never touched the
 // mcpClient cache, so editing an MCP server's URL and reconfiguring left

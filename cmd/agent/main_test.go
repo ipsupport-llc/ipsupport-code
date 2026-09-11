@@ -1248,7 +1248,7 @@ func TestMCPClientGatesLaunchApproval(t *testing.T) {
 	a := &app{cfg: config.Default(), approver: inner}
 	a.cfg.McpServers = map[string]mcp.Server{"test": {URL: srv.URL}}
 
-	if _, err := a.mcpClient(context.Background(), "test"); err == nil {
+	if _, err := a.mcpClient(context.Background(), a.cfg.McpServers, "test"); err == nil {
 		t.Fatal("mcpClient should be denied by the approver before launching the server")
 	}
 	if inner.calls != 1 {
@@ -1259,14 +1259,14 @@ func TestMCPClientGatesLaunchApproval(t *testing.T) {
 	}
 
 	inner.reply = true
-	if _, err := a.mcpClient(context.Background(), "test"); err != nil {
+	if _, err := a.mcpClient(context.Background(), a.cfg.McpServers, "test"); err != nil {
 		t.Fatalf("mcpClient after approval: %v", err)
 	}
 	if inner.calls != 2 {
 		t.Fatalf("an approved launch should hit the approver exactly once, calls=%d", inner.calls)
 	}
 
-	if _, err := a.mcpClient(context.Background(), "test"); err != nil {
+	if _, err := a.mcpClient(context.Background(), a.cfg.McpServers, "test"); err != nil {
 		t.Fatalf("second call to an already-launched server: %v", err)
 	}
 	if inner.calls != 2 {
@@ -1334,7 +1334,7 @@ func TestReconfigureInvalidatesStaleMCPClient(t *testing.T) {
 	a := &app{cfg: config.Default(), workspace: workspace, approver: &countingApprover{reply: true}, tui: true}
 	a.cfg.McpServers = map[string]mcp.Server{"test": {URL: oldSrv.URL}}
 
-	c1, err := a.mcpClient(context.Background(), "test")
+	c1, err := a.mcpClient(context.Background(), a.cfg.McpServers, "test")
 	if err != nil {
 		t.Fatalf("initial mcpClient: %v", err)
 	}
@@ -1349,7 +1349,7 @@ func TestReconfigureInvalidatesStaleMCPClient(t *testing.T) {
 		t.Fatalf("reconfigure: %v", err)
 	}
 
-	c2, err := a.mcpClient(context.Background(), "test")
+	c2, err := a.mcpClient(context.Background(), a.cfg.McpServers, "test")
 	if err != nil {
 		t.Fatalf("mcpClient after reconfigure: %v", err)
 	}
@@ -1365,7 +1365,7 @@ func TestReconfigureInvalidatesStaleMCPClient(t *testing.T) {
 	if err := a.reconfigure(); err != nil {
 		t.Fatalf("second reconfigure: %v", err)
 	}
-	c3, err := a.mcpClient(context.Background(), "test")
+	c3, err := a.mcpClient(context.Background(), a.cfg.McpServers, "test")
 	if err != nil {
 		t.Fatalf("mcpClient after no-op reconfigure: %v", err)
 	}

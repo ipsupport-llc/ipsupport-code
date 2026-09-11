@@ -2522,7 +2522,7 @@ func (a *app) reflectTarget() (client *llm.OpenAIClient, lite, separate bool, pr
 			}
 			c, usable := a.cfg.LLM, true
 			if pp != "local" {
-				if rp, rok := config.ResolveProvider(a.cfg, pp); rok && rp.APIKey != "" {
+				if rp, rok := config.ResolveProvider(a.cfg, pp); rok && (rp.APIKey != "" || (config.IsCustomProvider(a.cfg, pp) && rp.BaseURL != "")) {
 					c = rp
 				} else {
 					usable = false

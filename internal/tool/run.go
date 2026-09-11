@@ -64,7 +64,7 @@ func (r *runTool) shell(ctx context.Context, a Args) Result {
 	case policy.Deny:
 		return Err("command denied by workspace policy: " + command)
 	case policy.Ask:
-		if !r.ap.Approve("run", command) {
+		if !r.ap.Approve(ctx, "run", command) {
 			return Err("command denied by user: " + command)
 		}
 	}

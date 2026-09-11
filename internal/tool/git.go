@@ -249,7 +249,7 @@ func (g *gitTool) checkout(ctx context.Context, a Args) Result {
 }
 
 func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ...string) Result {
-	if mutating && !g.ap.Approve("git", "git "+strings.Join(args, " ")) {
+	if mutating && !g.ap.Approve(ctx, "git", "git "+strings.Join(args, " ")) {
 		return Err("git " + action + " denied by user")
 	}
 	dir, err := g.pol.Resolve(".")

@@ -633,7 +633,9 @@ func setPath(root map[string]any, segs []string, val any) error {
 
 // readObject loads the config file as a generic JSON object, aborting (rather
 // than clobbering) if it exists but can't be parsed. A missing file yields an
-// empty object.
+// empty object — and so does a file whose content is the valid-JSON literal
+// `null`: json.Unmarshal sets root itself to nil in that case, and a nil map
+// panics on the first write a caller does into it.
 func readObject(path string) (map[string]any, error) {
 	root := map[string]any{}
 	data, err := os.ReadFile(path)
@@ -641,6 +643,9 @@ func readObject(path string) (map[string]any, error) {
 	case err == nil:
 		if err := json.Unmarshal(data, &root); err != nil {
 			return nil, fmt.Errorf("refusing to edit: %s is not valid JSON (%v) — fix or remove it first so your settings aren't lost", path, err)
+		}
+		if root == nil {
+			root = map[string]any{}
 		}
 	case errors.Is(err, fs.ErrNotExist):
 		// new file

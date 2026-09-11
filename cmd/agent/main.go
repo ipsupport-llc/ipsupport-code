@@ -284,21 +284,24 @@ type app struct {
 	workdir         string         // absolute session working dir (set by /cd); "" = workspace
 	subReg          *tool.Registry // tools for sub-agents (no `agent` tool → no recursion)
 	spawnSeq        atomic.Int64   // unique id per sub-agent spawn (for grouping its UI events)
-	mcpMu           sync.Mutex     // guards the lazy MCP client cache
+	mcpMu           sync.Mutex     // guards the lazy MCP client cache, in-flight connect attempts, and mcpShuttingDown
 	mcpClients      map[string]*mcp.Client
-	ckptMu          sync.Mutex    // guards checkpoints / the in-progress one
-	checkpoints     []*checkpoint // per-turn file+history snapshots for /rewind (session lifetime)
-	curCkpt         *checkpoint   // the checkpoint being filled during the running turn
-	instrSrc        string        // project instructions file in effect, "" if none
-	promptSrc       string        // "built-in" or the system.md override path
-	facts           []string      // durable project facts learned over time (per workspace)
-	planMode        bool          // plan (propose) vs auto (execute); survives re-wire
-	goal            goalState     // standing goal pursued by the judge loop (per workspace)
-	windowDetected  bool          // got the real loaded context window (vs a default/guess)
-	sessionRestored bool          // a saved session was restored at startup (TUI renders a recap)
-	historyToolOn   bool          // history tool is in the current tool list (see hasArchivedHistory, maybeRewireHistoryTool)
-	tui             bool          // running the TUI (detect the context window off-thread, not inline)
-	startNew        bool          // -new: skip the startup chooser, begin a fresh session
+	mcpInFlight     map[int]context.CancelFunc // connect attempts not yet cached or discarded — see mcpClient/closeMCP
+	mcpInFlightSeq  int                        // next key into mcpInFlight
+	mcpShuttingDown bool                       // set by closeMCP; once true, mcpClient discards instead of caching
+	ckptMu          sync.Mutex                 // guards checkpoints / the in-progress one
+	checkpoints     []*checkpoint              // per-turn file+history snapshots for /rewind (session lifetime)
+	curCkpt         *checkpoint                // the checkpoint being filled during the running turn
+	instrSrc        string                     // project instructions file in effect, "" if none
+	promptSrc       string                     // "built-in" or the system.md override path
+	facts           []string                   // durable project facts learned over time (per workspace)
+	planMode        bool                       // plan (propose) vs auto (execute); survives re-wire
+	goal            goalState                  // standing goal pursued by the judge loop (per workspace)
+	windowDetected  bool                       // got the real loaded context window (vs a default/guess)
+	sessionRestored bool                       // a saved session was restored at startup (TUI renders a recap)
+	historyToolOn   bool                       // history tool is in the current tool list (see hasArchivedHistory, maybeRewireHistoryTool)
+	tui             bool                       // running the TUI (detect the context window off-thread, not inline)
+	startNew        bool                       // -new: skip the startup chooser, begin a fresh session
 
 	tasks, steps, toolCalls int
 	lastPrompt, lastCompl   int // client usage snapshot for per-task ledger deltas
@@ -1702,7 +1705,27 @@ func (a *app) mcpClient(ctx context.Context, servers map[string]mcp.Server, name
 		a.mcpMu.Unlock()
 		return c, nil
 	}
+	if a.mcpShuttingDown {
+		a.mcpMu.Unlock()
+		return nil, fmt.Errorf("mcp server %q: shutting down", name)
+	}
+	// Register this attempt as in-flight BEFORE releasing mcpMu for the
+	// approval wait and dial below, so closeMCP can find and actively cancel
+	// it even though it isn't in mcpClients yet — see closeMCP.
+	attemptCtx, attemptCancel := context.WithCancel(ctx)
+	id := a.mcpInFlightSeq
+	a.mcpInFlightSeq++
+	if a.mcpInFlight == nil {
+		a.mcpInFlight = map[int]context.CancelFunc{}
+	}
+	a.mcpInFlight[id] = attemptCancel
 	a.mcpMu.Unlock()
+	defer func() {
+		a.mcpMu.Lock()
+		delete(a.mcpInFlight, id)
+		a.mcpMu.Unlock()
+		attemptCancel()
+	}()
 
 	srv, ok := servers[name]
 	if !ok {
@@ -1724,12 +1747,14 @@ func (a *app) mcpClient(ctx context.Context, servers map[string]mcp.Server, name
 	// event-loop goroutine, Update() never returns; and since the approval
 	// pending here can only be answered by Update() processing the next
 	// keystroke, the whole TUI deadlocks permanently. See
-	// TestMCPClientLockNotHeldDuringApproval.
-	approved := a.approveGated(ctx, "mcp launch", detail)
+	// TestMCPClientLockNotHeldDuringApproval. attemptCtx (rather than ctx)
+	// carries the wait so closeMCP can cut it short on shutdown instead of
+	// leaving the eventual connection an orphan with nothing left to close it.
+	approved := a.approveGated(attemptCtx, "mcp launch", detail)
 	if !approved {
 		return nil, fmt.Errorf("mcp server %q launch denied by user", name)
 	}
-	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	cctx, cancel := context.WithTimeout(attemptCtx, 20*time.Second)
 	defer cancel()
 	c, err := mcp.Connect(cctx, name, srv)
 	if err != nil {
@@ -1738,6 +1763,14 @@ func (a *app) mcpClient(ctx context.Context, servers map[string]mcp.Server, name
 
 	a.mcpMu.Lock()
 	defer a.mcpMu.Unlock()
+	if a.mcpShuttingDown {
+		// Shutdown began while this connect was in flight and closeMCP has
+		// already run (or is running) — it can't see this client since it was
+		// never in the cache. Close it ourselves rather than leave it running
+		// with nothing left to ever close it.
+		c.Close()
+		return nil, fmt.Errorf("mcp server %q: shutting down", name)
+	}
 	// Another goroutine may have raced in and cached a client for this same
 	// server while we were unlocked approving/dialing — reuse it and close
 	// the redundant one we just built, rather than leaking a duplicate
@@ -1775,14 +1808,43 @@ func (a *app) invalidateStaleMCP(old map[string]mcp.Server) {
 	}
 }
 
-// closeMCP shuts down every launched MCP server (called on exit).
+// mcpCloseTimeout bounds how long closeMCP waits for an in-flight connect
+// attempt to actually unwind after being cancelled — long enough for a
+// stdio subprocess to notice the cancellation and exit, short enough not to
+// hang process exit on a wedged one.
+const mcpCloseTimeout = 2 * time.Second
+
+// closeMCP shuts down every launched MCP server (called on exit). It also
+// cancels any connect attempt still in flight (approval wait or dial) and
+// marks shutdown started. Without this, closeMCP only ever saw connections
+// already cached in a.mcpClients — a connect still inside its approval-wait
+// or dial window (mcpClient releases mcpMu across both; see mcpClient) isn't
+// there yet, so its subprocess would survive as an orphan once this process
+// exits with nothing left to close it.
 func (a *app) closeMCP() {
 	a.mcpMu.Lock()
-	defer a.mcpMu.Unlock()
+	a.mcpShuttingDown = true
 	for _, c := range a.mcpClients {
 		c.Close()
 	}
 	a.mcpClients = nil
+	for _, cancel := range a.mcpInFlight {
+		cancel()
+	}
+	a.mcpMu.Unlock()
+
+	deadline := time.Now().Add(mcpCloseTimeout)
+	for a.mcpInFlightCount() > 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// mcpInFlightCount reports how many connect attempts are still in flight
+// (for closeMCP's shutdown wait).
+func (a *app) mcpInFlightCount() int {
+	a.mcpMu.Lock()
+	defer a.mcpMu.Unlock()
+	return len(a.mcpInFlight)
 }
 
 // mcpList is the catalog the `mcp` tool's list action returns. servers is the

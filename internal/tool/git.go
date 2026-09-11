@@ -48,17 +48,64 @@ func (g *gitTool) status(ctx context.Context, _ Args) Result {
 }
 
 func (g *gitTool) diff(ctx context.Context, a Args) Result {
-	args := []string{"diff"}
-	if a.Bool("staged") {
-		args = append(args, "--staged")
-	}
-	if p := a.Str("path"); p != "" {
+	staged := a.Bool("staged")
+	p := a.Str("path")
+	if p != "" {
 		if err := g.checkPathPolicy(p); err != nil {
 			return Err(err.Error())
 		}
-		args = append(args, "--", p)
 	}
-	return g.run(ctx, "diff", false, args...)
+
+	// checkPathPolicy(p) above only catches a path that IS the secret file
+	// itself. An omitted path (whole-repo diff) or "." (which resolves to the
+	// repo root DIRECTORY, never matched by the secret-file glob) can still
+	// span a tracked secret file among the changed ones, so find the actual
+	// changed files first and check each individually before diffing them.
+	nameArgs := []string{"diff", "--name-only"}
+	if staged {
+		nameArgs = append(nameArgs, "--staged")
+	}
+	if p != "" {
+		nameArgs = append(nameArgs, "--", p)
+	}
+	namesRes := g.run(ctx, "diff", false, nameArgs...)
+	if namesRes.IsError {
+		return namesRes
+	}
+
+	var allowed []string
+	blocked := 0
+	if namesRes.Content != "(ok, no output)" { // run()'s sentinel for empty output
+		for _, name := range strings.Split(namesRes.Content, "\n") {
+			if name = strings.TrimSpace(name); name == "" {
+				continue
+			}
+			if err := g.checkPathPolicy(name); err != nil {
+				blocked++
+				continue
+			}
+			allowed = append(allowed, name)
+		}
+	}
+
+	if len(allowed) == 0 {
+		if blocked > 0 {
+			return Ok(strconv.Itoa(blocked) + " file(s) excluded (secrets/credentials); no other changes")
+		}
+		return Ok("(ok, no output)")
+	}
+
+	args := []string{"diff"}
+	if staged {
+		args = append(args, "--staged")
+	}
+	args = append(args, "--")
+	args = append(args, allowed...)
+	res := g.run(ctx, "diff", false, args...)
+	if blocked > 0 && !res.IsError {
+		res.Content += "\n…[" + strconv.Itoa(blocked) + " secret/credential file(s) excluded from this diff]"
+	}
+	return res
 }
 
 // checkPathPolicy applies the SAME jail + secret-file checks file.read does to

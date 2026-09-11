@@ -177,6 +177,30 @@ func TestStatePersistsAcrossReopen(t *testing.T) {
 	}
 }
 
+// TestOpenNullStateFile covers a state.json whose content is the literal `null`
+// — valid JSON, so json.Unmarshal returns no error, but it sets s.state itself
+// to nil. seedBuiltins then panics writing into it unless Open guards against a
+// nil result.
+func TestOpenNullStateFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "state.json"), []byte("null"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	list := s.List()
+	if len(list) == 0 {
+		t.Fatal("expected built-in skills to be seeded, as on a fresh install")
+	}
+	for _, sk := range list {
+		if sk.Enabled {
+			t.Errorf("built-in %q seeded enabled; want disabled like a fresh install", sk.Name)
+		}
+	}
+}
+
 // TestStoreConcurrentAccess covers the real deployment shape: the same *Store
 // is wired into both the foreground and background/sub-agent tool registries,
 // so a mutator (SetEnabled) and readers (List, HasEnabled) run concurrently on

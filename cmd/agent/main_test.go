@@ -29,6 +29,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/sandbox"
+	"github.com/ipsupport-llc/ipsupport-code/internal/skill"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 	"github.com/ipsupport-llc/ipsupport-code/internal/usage"
@@ -3198,6 +3199,51 @@ func TestStartCompactSetsCancelForConfigGuards(t *testing.T) {
 	m.Update(msg)
 	if m.cancel != nil {
 		t.Error("m.cancel should be cleared once the compact finishes")
+	}
+}
+
+// skillsCmd's install path must set m.cancel and m.busyMsg exactly like
+// startCompact does — every "is something running behind this" guard (the
+// /config panel's closePanel/configActivate, esc's own busyMsg-can't-cancel
+// check) keys off m.cancel != nil. Without it, esc during an install was a
+// silent no-op (no cancel, no "can't be cancelled" message either), and
+// /config could race a fresh wire() against the install goroutine's
+// mutation of a.skills.
+func TestSkillInstallSetsCancelAndBusyMsg(t *testing.T) {
+	const md = "---\nname: my skill\ndescription: does a thing\n---\nFollow these steps."
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte(md))
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	sk, _ := skill.Open(t.TempDir(), srv.Client())
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, skills: sk,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	m := &tuiModel{app: a, ctx: context.Background(), input: textarea.New()}
+
+	_, cmd := m.skillsCmd("install " + srv.URL)
+	if m.cancel == nil {
+		t.Fatal("skill install should set m.cancel immediately, before the async install even runs")
+	}
+	if m.busyMsg == "" {
+		t.Error("skill install should set m.busyMsg immediately, so esc knows it's cancellable")
+	}
+
+	m.state = stConfig
+	if _, _ = m.closePanel(); m.state != stRunning {
+		t.Errorf("closePanel during an install = state %v, want stRunning (install still running)", m.state)
+	}
+
+	msg := cmd() // run the install against the test server
+	m.Update(msg)
+	if m.cancel != nil {
+		t.Error("m.cancel should be cleared once the install finishes")
 	}
 }
 

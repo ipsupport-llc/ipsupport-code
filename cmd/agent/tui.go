@@ -560,6 +560,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.idleDrain()
 
 	case skillsMsg:
+		m.cancel = nil // clear the guard set in skillsCmd, exactly like compactDoneMsg does
 		if msg.err != nil {
 			m.push(cErr.Render("install failed: " + msg.err.Error()))
 		} else {
@@ -1375,7 +1376,16 @@ func (m *tuiModel) skillsCmd(rest string) (tea.Model, tea.Cmd) {
 		}
 		m.state = stRunning
 		m.taskStart = time.Now()
-		ctx, src := m.ctx, arg
+		m.busyMsg = "installing " + arg
+		// A cancelable context + m.cancel set, exactly like startCompact: every
+		// "is something running behind this" guard (the /config panel's, esc's
+		// own busyMsg-can't-cancel check) keys off m.cancel != nil, and without
+		// this esc during an install was a silent no-op (no cancel, no "can't
+		// be cancelled" message either) — and /config could race a fresh wire()
+		// against the install goroutine's mutation of a.skills.
+		ctx, cancel := context.WithCancel(m.ctx)
+		m.cancel = cancel
+		src := arg
 		m.push(cDim.Render("installing " + src + " …"))
 		return m, func() tea.Msg {
 			names, err := m.app.skills.Install(ctx, src)

@@ -441,6 +441,38 @@ func TestGitDiffDoesNotRunTextconvDriver(t *testing.T) {
 	}
 }
 
+// A local .git/config binding core.fsmonitor to an arbitrary executable must
+// never be executed by the "status" action: it's a read-only action with no
+// approval gate, so a configured fsmonitor hook would otherwise let plain
+// "git status" run an arbitrary subprocess. Approver denies everything, to
+// make clear the hook's non-execution has nothing to do with approval
+// (status never asks in the first place).
+func TestGitStatusDoesNotRunFsmonitorHook(t *testing.T) {
+	dir := initRepo(t)
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	hook := filepath.Join(dir, "fsmonitor-hook.sh")
+	script := "#!/bin/sh\ntouch " + marker + "\necho 1\nexit 0\n"
+	if err := os.WriteFile(hook, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "config", "core.fsmonitor", hook).CombinedOutput(); err != nil {
+		t.Fatalf("config: %v\n%s", err, out)
+	}
+
+	tl := gitToolFor(t, dir, no())
+	r := tl.Call(context.Background(), "status", nil)
+	if r.IsError {
+		t.Fatalf("status: %s", r.Content)
+	}
+	if !strings.Contains(r.Content, "##") {
+		t.Errorf("status = %+v, want the usual --short --branch output (\"##\" branch line)", r)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("status ran the configured fsmonitor hook (marker file created): approval bypass via core.fsmonitor")
+	}
+}
+
 func TestGitMutatingDeniedByUser(t *testing.T) {
 	dir := initRepo(t)
 	tl := gitToolFor(t, dir, no())

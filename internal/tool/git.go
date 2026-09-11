@@ -45,7 +45,13 @@ func (g *gitTool) initRepo(ctx context.Context, _ Args) Result {
 }
 
 func (g *gitTool) status(ctx context.Context, _ Args) Result {
-	return g.run(ctx, "status", false, "status", "--short", "--branch")
+	// -c core.fsmonitor=: status is a read-only action with no approval gate,
+	// but a workspace's local .git/config can bind core.fsmonitor to an
+	// arbitrary executable (a legitimate perf feature for large repos) that
+	// plain "git status" would otherwise invoke as a subprocess. The override
+	// must come before the subcommand (git -c is a global option, unlike
+	// diff's --no-textconv/--no-ext-diff which are diff's own flags).
+	return g.run(ctx, "status", false, "-c", "core.fsmonitor=", "status", "--short", "--branch")
 }
 
 func (g *gitTool) diff(ctx context.Context, a Args) Result {

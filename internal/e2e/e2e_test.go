@@ -89,7 +89,7 @@ func call(action string, params map[string]any) map[string]any {
 
 type allowApprover struct{}
 
-func (allowApprover) Approve(_, _ string) bool { return true }
+func (allowApprover) Approve(_ context.Context, _, _ string) bool { return true }
 
 type recTracer struct {
 	mu     sync.Mutex

@@ -357,6 +357,117 @@ func TestFileReadPlainPathIsBounded(t *testing.T) {
 	}
 }
 
+// The windowed read (offset given, no limit) must stream a bounded
+// accumulation instead of collecting every line from offset to EOF into
+// `window` before textutil.Clip trims it back down — otherwise a large file
+// gets almost entirely loaded into memory despite the advertised maxReadBytes
+// cap. This creates a file far larger than the cap and checks two things: the
+// returned content is clipped exactly as before (same output contract), and —
+// via a runtime.MemStats delta around the call — that the read allocates only
+// a small, bounded amount of memory rather than one proportional to the
+// file's size (the old code would allocate roughly the whole remaining file).
+func TestFileReadWindowOffsetNoLimitIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+
+	const fileSize = 60 * maxReadBytes // ~12MB, far bigger than the cap
+	const pattern = "0123456789"
+	content := strings.Repeat(pattern, fileSize/len(pattern))
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	r := tl.Call(ctx, "read", map[string]any{"path": "big.txt", "offset": 1})
+	runtime.ReadMemStats(&after)
+
+	if r.IsError {
+		t.Fatalf("read: %s", r.Content)
+	}
+	// The whole file is one giant "line" (no newlines), so the window holds a
+	// single element and the header reports 1 of 1.
+	if !strings.Contains(r.Content, "of 1)") {
+		t.Errorf("missing/incorrect header: %q", firstLine(r.Content))
+	}
+	body := strings.TrimPrefix(r.Content, firstLine(r.Content)+"\n")
+	wantFooter := "\n…[truncated]"
+	if !strings.HasSuffix(body, wantFooter) {
+		t.Errorf("missing truncation marker in result (len %d)", len(body))
+	}
+	gotBody := strings.TrimSuffix(body, wantFooter)
+	if gotBody != content[:len(gotBody)] || len(gotBody) == 0 || len(gotBody) > maxReadBytes {
+		t.Errorf("clipped content mismatch: got %d bytes, want a non-empty prefix of the file capped at %d", len(gotBody), maxReadBytes)
+	}
+
+	if delta := after.TotalAlloc - before.TotalAlloc; delta > fileSize/2 {
+		t.Errorf("windowed read allocated %d bytes for a %d-byte file — looks like it accumulated the whole file into `window` instead of a bounded read", delta, fileSize)
+	}
+}
+
+// firstLine returns s up to (not including) its first newline.
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// A windowed read with BOTH offset and limit given must not pay to allocate a
+// fresh string for every line beyond the requested window just to keep
+// counting the file's total line count for the header — a plain
+// bufio.Reader.ReadString('\n') call for each of those lines allocates and
+// immediately discards it. This creates a small window near the START of a
+// large file (so most of the file lies beyond the window) and checks that the
+// content stops at the requested window (never reaching the file's tail)
+// while allocation stays small — proving the read isn't materializing a full
+// line for every one of the many lines past the window just to reach EOF.
+func TestFileReadWindowOffsetAndLimitIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+
+	const nLines = 400_000 // long lines keep the file far bigger than maxReadBytes
+	var b strings.Builder
+	for i := 1; i <= nLines; i++ {
+		fmt.Fprintf(&b, "line-%08d-abcdefghijklmnopqrstuvwxyz\n", i)
+	}
+	content := b.String()
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	r := tl.Call(ctx, "read", map[string]any{"path": "big.txt", "offset": 5, "limit": 3})
+	runtime.ReadMemStats(&after)
+
+	if r.IsError {
+		t.Fatalf("read: %s", r.Content)
+	}
+	if !strings.Contains(r.Content, "line-00000005") || !strings.Contains(r.Content, "line-00000007") {
+		t.Errorf("windowed read missing requested lines: %q", r.Content)
+	}
+	if strings.Contains(r.Content, "line-00000008") {
+		t.Errorf("window should stop at the requested limit: %q", r.Content)
+	}
+	if !strings.Contains(r.Content, fmt.Sprintf("of %d", nLines+1)) {
+		t.Errorf("missing/incorrect total in header: %q", r.Content)
+	}
+
+	// Each line is ~40 bytes; if the fix worked, allocation stays on the order
+	// of a handful of lines/buffers, nowhere near one allocation per line for
+	// all 400,000 lines (which the pre-fix ReadString-per-discarded-line
+	// behavior would rack up).
+	const perLineAllocIfUnfixed = 40
+	if delta := after.TotalAlloc - before.TotalAlloc; delta > nLines*perLineAllocIfUnfixed/10 {
+		t.Errorf("windowed read with offset+limit allocated %d bytes over %d lines — looks like it's still allocating a string per line past the requested window", delta, nLines)
+	}
+}
+
 func TestFileFind(t *testing.T) {
 	dir := t.TempDir()
 	tl := fileToolFor(t, dir, "allow", yes())

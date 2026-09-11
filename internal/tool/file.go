@@ -135,11 +135,55 @@ func (f *fileTool) readPlain(abs, path string) Result {
 	return Ok(out + fmt.Sprintf("\n…[truncated; %d bytes total]", total))
 }
 
+// readLine reads one '\n'-delimited record from br, like
+// bufio.Reader.ReadString('\n'), but retains at most max bytes of it — so a
+// single pathologically long "line" (many MB, no '\n') is read through
+// bufio's small fixed-size internal buffer in bounded fragments and
+// truncated rather than forcing one unbounded allocation. Bytes beyond max
+// are still consumed (to find the delimiter/EOF) but never copied. err is
+// io.EOF exactly when the stream ended, matching ReadString; the returned
+// line never includes the trailing '\n'.
+func readLine(br *bufio.Reader, max int) (line string, err error) {
+	var buf []byte
+	for {
+		frag, ferr := br.ReadSlice('\n')
+		if room := max - len(buf); room > 0 {
+			if len(frag) > room {
+				buf = append(buf, frag[:room]...)
+			} else {
+				buf = append(buf, frag...)
+			}
+		}
+		switch ferr {
+		case bufio.ErrBufferFull:
+			continue
+		case nil:
+			return strings.TrimSuffix(string(buf), "\n"), nil
+		case io.EOF:
+			return string(buf), io.EOF
+		default:
+			return "", ferr
+		}
+	}
+}
+
 // readWindow returns lines [offset, offset+limit) of the file at abs, streamed
 // line by line so a huge file never has to sit fully in memory just to serve a
 // small window near the end of it — only the requested lines (plus a running
 // line count) are held. Splitting semantics match strings.Split(content, "\n")
 // exactly, including its trailing empty element for content ending in "\n".
+//
+// The window's own accumulated content is capped at maxReadBytes+1 bytes as
+// it's built (windowCap below) — exactly enough for the textutil.Clip call at
+// the end (which only ever needs to see s[0..maxReadBytes] to make its
+// rune-safe cut) to reproduce byte-identical output to fully joining every
+// requested line first. Without this cap, `offset` with no `limit` on a huge
+// file held the whole rest of the file in `window` before being clipped back
+// down to size. Lines outside the window (or the part of an in-window line
+// past the cap) are read via readLine with room=0, so they're never copied
+// into a string at all — a plain ReadString there would allocate and
+// immediately discard a full line, unbounded for one pathologically long line
+// and wasted work for a large offset/limit.
 func (f *fileTool) readWindow(abs, path string, offset, limit int) Result {
 	file, err := os.Open(abs)
 	if err != nil {
@@ -155,18 +199,34 @@ func (f *fileTool) readWindow(abs, path string, offset, limit int) Result {
 	if limit > 0 {
 		end = start + limit
 	}
+	const windowCap = maxReadBytes + 1
 
 	br := bufio.NewReader(file)
 	var window []string
+	windowBytes := 0
 	total := 0
 	for {
-		line, rerr := br.ReadString('\n')
+		room := 0
+		if total >= start && (end < 0 || total < end) {
+			room = windowCap - windowBytes
+			if len(window) > 0 {
+				room-- // the "\n" this line will be joined with
+			}
+			if room < 0 {
+				room = 0
+			}
+		}
+		line, rerr := readLine(br, room)
 		if rerr != nil && rerr != io.EOF {
 			return Err("cannot read " + path + ": " + rerr.Error())
 		}
-		line = strings.TrimSuffix(line, "\n")
-		if total >= start && (end < 0 || total < end) {
+		if room > 0 {
+			sep := 0
+			if len(window) > 0 {
+				sep = 1
+			}
 			window = append(window, line)
+			windowBytes += sep + len(line)
 		}
 		total++
 		if rerr == io.EOF {

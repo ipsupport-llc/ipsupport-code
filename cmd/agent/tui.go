@@ -296,6 +296,10 @@ func (m *tuiModel) chooseActivate() (tea.Model, tea.Cmd) {
 		// Don't restore anything; take a fresh auto-named thread so we don't save
 		// the empty startup state over an existing session. Don't persist the name.
 		m.app.cfg.Name = m.app.autoSessionName()
+		if err := m.app.wire(); err != nil { // rebind the archiver/history-tool to the new name
+			m.push(cErr.Render("couldn't start new session: " + err.Error()))
+			return m, nil
+		}
 		m.app.ag.Reset()
 		m.app.ag.SetSystem(m.app.systemPrompt())
 		m.app.clearGoal() // an explicit fresh session must not inherit the old one's standing goal
@@ -1455,6 +1459,10 @@ func (m *tuiModel) rename(name string) {
 	m.app.cfg.Name = name
 	if err := config.SaveGlobal(name, m.app.cfg.LLM); err != nil {
 		m.push(cErr.Render("could not save name: " + err.Error()))
+		return
+	}
+	if err := m.app.wire(); err != nil { // rebind the archiver/history-tool to the new name
+		m.push(cErr.Render("could not rebind session: " + err.Error()))
 		return
 	}
 	m.push(m.accentBold().Render("renamed → " + name))

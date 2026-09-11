@@ -62,7 +62,12 @@ func (g *gitTool) diff(ctx context.Context, a Args) Result {
 	// repo root DIRECTORY, never matched by the secret-file glob) can still
 	// span a tracked secret file among the changed ones, so find the actual
 	// changed files first and check each individually before diffing them.
-	nameArgs := []string{"diff", "--name-only"}
+	//
+	// -z NUL-delimits the enumerated names instead of newlines, which also
+	// leaves them raw and unquoted: git otherwise C-quotes non-ASCII/special
+	// filenames in --name-only output, and a quoted name passed back to git
+	// as a pathspec is NOT unquoted, silently matching nothing.
+	nameArgs := []string{"diff", "--name-only", "-z"}
 	if staged {
 		nameArgs = append(nameArgs, "--staged")
 	}
@@ -77,15 +82,28 @@ func (g *gitTool) diff(ctx context.Context, a Args) Result {
 	var allowed []string
 	blocked := 0
 	if namesRes.Content != "(ok, no output)" { // run()'s sentinel for empty output
-		for _, name := range strings.Split(namesRes.Content, "\n") {
-			if name = strings.TrimSpace(name); name == "" {
+		// --name-only output is always repository-root-relative, regardless of
+		// the current effective directory (which cmd.Dir uses below for both
+		// this call and the real diff). Resolving each name against the repo
+		// root into an absolute path — rather than reusing it as-is — keeps
+		// the pathspec correct even when a "/cd" has moved cwd into a subdir.
+		root, err := g.repoRoot(ctx)
+		if err != nil {
+			return Err(err.Error())
+		}
+		// NUL-delimited entries need no trimming (that's the point of -z); a
+		// bare TrimSpace here would corrupt a legitimately whitespace-leading
+		// filename that git does NOT quote (plain spaces aren't special).
+		for _, name := range strings.Split(namesRes.Content, "\x00") {
+			if name == "" { // trailing delimiter after the last entry
 				continue
 			}
-			if err := g.checkPathPolicy(name); err != nil {
+			abs := filepath.Join(root, name)
+			if err := g.checkPathPolicy(abs); err != nil {
 				blocked++
 				continue
 			}
-			allowed = append(allowed, name)
+			allowed = append(allowed, abs)
 		}
 	}
 
@@ -122,6 +140,17 @@ func (g *gitTool) checkPathPolicy(path string) error {
 		return errors.New("reading " + path + " is blocked (it looks like a secrets/credentials file)")
 	}
 	return nil
+}
+
+// repoRoot returns the repository's absolute top-level directory. It's used
+// to resolve --name-only's repo-root-relative output into pathspecs that are
+// unambiguous regardless of the current effective directory.
+func (g *gitTool) repoRoot(ctx context.Context) (string, error) {
+	res := g.run(ctx, "diff", false, "rev-parse", "--show-toplevel")
+	if res.IsError {
+		return "", errors.New(res.Content)
+	}
+	return res.Content, nil
 }
 
 func (g *gitTool) log(ctx context.Context, a Args) Result {
@@ -196,24 +225,6 @@ func (g *gitTool) checkRevPathPolicy(ctx context.Context, path string) error {
 		return errors.New("reading " + path + " is blocked (it looks like a secrets/credentials file)")
 	}
 	return nil
-}
-
-// repoRoot returns the absolute path of the git repository containing the
-// resolved working directory, via "git rev-parse --show-toplevel".
-func (g *gitTool) repoRoot(ctx context.Context) (string, error) {
-	dir, err := g.pol.Resolve(".")
-	if err != nil {
-		return "", err
-	}
-	cctx, cancel := context.WithTimeout(ctx, defaultRunTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(cctx, "git", "rev-parse", "--show-toplevel")
-	cmd.Dir = dir
-	out, err := cmd.Output()
-	if err != nil {
-		return "", errors.New("could not determine the git repository root: " + err.Error())
-	}
-	return strings.TrimSpace(string(out)), nil
 }
 
 func (g *gitTool) add(ctx context.Context, a Args) Result {

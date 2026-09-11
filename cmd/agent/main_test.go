@@ -1959,6 +1959,64 @@ func TestSpawnAgentBackgroundExternalDirNoRace(t *testing.T) {
 	}
 }
 
+// TestRunSpawnPlanTracerNoRace: wire() unconditionally reassigns a.tracer (a
+// fresh trace.Multi(a.fileTracer, a.uiTracer)) with no lock on EVERY call —
+// not just at startup. wire() is invoked from 30+ places throughout a live
+// process (config-panel toggles, /model, /rename, skill toggles, session
+// switches...). Before the fix, runSpawnPlan read a.tracer directly (passed
+// into agent.New, and again via a.emit), so a background job's own goroutine
+// running runSpawnPlan raced any wire() call happening on the foreground
+// meanwhile — a data race under -race, not just a stale value. The fix
+// captures a.tracer into spawnPlan.tracer synchronously in resolveSpawn (same
+// goroutine as this test's driver loop), exactly like the reasoning params
+// above, so runSpawnPlan's own goroutine never touches a.tracer again. This
+// test launches many runSpawnPlan calls in their own goroutines back-to-back,
+// calling wire() after each launch — like a foreground settings change firing
+// while a previously-launched job is still running in the background — and
+// must be -race clean.
+func TestRunSpawnPlanTracerNoRace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(2 * time.Millisecond) // keep runs in flight long enough to overlap wire()
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = "" // plain OpenAI-compat (skip LM Studio detection)
+	cfg.Agents = map[string]config.AgentProfile{"loc": {Provider: "local"}}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		plan, external, _, err := a.resolveSpawn("loc", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if external {
+			t.Fatal("expected an LLM sub-agent plan")
+		}
+		wg.Add(1)
+		go func(p spawnPlan) {
+			defer wg.Done()
+			_, _ = a.runSpawnPlan(context.Background(), p, "go", nil)
+		}(plan)
+		// Simulates a foreground settings change (e.g. /model, a config-panel
+		// toggle) firing right after launch — while earlier launches' own
+		// goroutines may still be running runSpawnPlan.
+		if err := a.wire(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wg.Wait()
+}
+
 func TestBackgroundJobLifecycle(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()

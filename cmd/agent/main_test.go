@@ -3822,6 +3822,141 @@ func TestHistoryTrimResetsCheckpoints(t *testing.T) {
 	}
 }
 
+// /clear's TUI handler wipes a.ag's history via Reset() exactly like /new and
+// Compact do, so an open checkpoint's histLen is exactly as stale afterward —
+// but until this fix only /new, /sessions, and Compact called resetCheckpoints;
+// /clear left the checkpoint in place with an offset indexing a conversation
+// that no longer exists.
+func TestTuiClearResetsCheckpoints(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	cp := a.beginCheckpoint("do something")
+	a.endCheckpoint(cp)
+	if len(a.checkpoints) != 1 {
+		t.Fatal("checkpoint not recorded")
+	}
+
+	m := &tuiModel{app: a, input: textarea.New()}
+	m.runCommand("/clear")
+
+	if rows := a.rewindRows(); len(rows) != 0 {
+		t.Errorf("checkpoints = %d after /clear, want 0 — a checkpoint from before /clear indexes "+
+			"the wiped history, so a later /rewind must not silently misapply instead of being invalidated", len(rows))
+	}
+}
+
+// The plain (non-TUI) REPL's /clear handler has the identical gap: it wipes
+// a.ag's history the same way, but never called resetCheckpoints until this fix.
+func TestPlainClearResetsCheckpoints(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	cp := a.beginCheckpoint("do something")
+	a.endCheckpoint(cp)
+	if len(a.checkpoints) != 1 {
+		t.Fatal("checkpoint not recorded")
+	}
+
+	a.command(context.Background(), "/clear")
+
+	if rows := a.rewindRows(); len(rows) != 0 {
+		t.Errorf("checkpoints = %d after /clear, want 0 — a checkpoint from before /clear indexes "+
+			"the wiped history, so a later /rewind must not silently misapply instead of being invalidated", len(rows))
+	}
+}
+
+// The plain REPL's MANUAL /compact (unlike the TUI's compact handler, which
+// already called resetCheckpoints) never invalidated an open checkpoint either,
+// even though it replaces a.ag's history exactly the same way.
+func TestPlainCompactResetsCheckpoints(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag = agent.New(fakeSummaryLLM{}, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
+	a.ag.Run(context.Background(), "task 1")
+	a.ag.Run(context.Background(), "task 2")
+
+	cp := a.beginCheckpoint("do something")
+	a.endCheckpoint(cp)
+	if len(a.checkpoints) != 1 {
+		t.Fatal("checkpoint not recorded")
+	}
+
+	a.command(context.Background(), "/compact")
+
+	if rows := a.rewindRows(); len(rows) != 0 {
+		t.Errorf("checkpoints = %d after /compact, want 0 — a checkpoint from before /compact indexes "+
+			"the discarded history, so a later /rewind must not silently misapply instead of being invalidated", len(rows))
+	}
+}
+
+// runOne's end-of-task AUTOMATIC compaction is a fourth, distinct path (not the
+// TUI's auto-compact, not a manual /compact) that replaces a.ag's history the
+// same way Compact always has, but never called resetCheckpoints until this fix.
+func TestRunOneAutoCompactResetsCheckpoints(t *testing.T) {
+	// A canned reply whose usage.prompt_tokens (9000) sits well past 75% of a
+	// small 10000-token window, so shouldAutoCompact() fires for real inside
+	// runOne — not a hand-rolled stand-in for the gating logic.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],`+
+			`"usage":{"prompt_tokens":9000,"completion_tokens":5}}`)
+	}))
+	defer srv.Close()
+
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = ""
+	cfg.LLM.ContextWindow = 10000
+	cfg.ReflectDisabled = true // keep this test about auto-compact, not reflection
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Build up enough session length for autoCompactNeeded's floor (sessionLen
+	// >= 4) before taking the checkpoint under test.
+	a.ag.Run(context.Background(), "task 1")
+	a.ag.Run(context.Background(), "task 2")
+
+	cp := a.beginCheckpoint("do something")
+	a.endCheckpoint(cp)
+	if len(a.checkpoints) != 1 {
+		t.Fatal("checkpoint not recorded")
+	}
+
+	if err := a.runOne(context.Background(), "task 3"); err != nil {
+		t.Fatalf("runOne: %v", err)
+	}
+
+	if rows := a.rewindRows(); len(rows) != 0 {
+		t.Errorf("checkpoints = %d after runOne's auto-compact, want 0 — a checkpoint from before it "+
+			"indexes the discarded history, so a later /rewind must not silently misapply instead of being invalidated", len(rows))
+	}
+}
+
 func TestCdCommand(t *testing.T) {
 	ws := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(ws, "proj", "sub"), 0o755); err != nil {

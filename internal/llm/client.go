@@ -91,6 +91,15 @@ type OpenAIClient struct {
 	complTk      int
 	lastPromptTk int             // prompt size of the most recent request (context fullness)
 	live         strings.Builder // the current (or most recent) call's live output — reasoning text if the model streams any, else the answer text as it's generated
+
+	// liveReasoning/liveContent mirror live but keep each channel's text
+	// separate, so checkPhraseRepeat can compare a channel only against its
+	// own prior text — never across the reasoning→content boundary, where a
+	// model's reasoning legitimately drafts its final sentence and the
+	// content phase then restates that same sentence verbatim (a common CoT
+	// pattern), which is not a repetition loop.
+	liveReasoning strings.Builder
+	liveContent   strings.Builder
 }
 
 // deadlineConn arms a fresh read deadline before every Read, so a single read
@@ -379,8 +388,9 @@ func (e *phraseRepeatError) Error() string {
 }
 
 // checkPhraseRepeat reports a degenerate loop when the trailing
-// phraseRepeatMatchLen bytes of the model's full live output so far also
-// occur earlier within the preceding phraseRepeatWindow bytes.
+// phraseRepeatMatchLen bytes of ONE CHANNEL's live output so far (reasoning
+// text or content text — never both mixed together) also occur earlier
+// within that same channel's preceding phraseRepeatWindow bytes.
 func checkPhraseRepeat(all string) error {
 	if len(all) < phraseRepeatMatchLen*2 {
 		return nil
@@ -425,6 +435,8 @@ func isSingleRune(s string) bool {
 func (c *OpenAIClient) send(ctx context.Context, buf []byte) (Message, error, bool) {
 	c.mu.Lock()
 	c.live.Reset() // this attempt's own live output, not a dropped attempt's leftovers
+	c.liveReasoning.Reset()
+	c.liveContent.Reset()
 	c.mu.Unlock()
 
 	reqCtx, cancel := context.WithCancel(ctx)
@@ -575,13 +587,14 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 				// — Open WebUI shows what it's doing" for exactly this model).
 				c.mu.Lock()
 				c.live.WriteString(d.Content)
-				all := c.live.String()
+				c.liveContent.WriteString(d.Content)
+				chanAll := c.liveContent.String()
 				c.mu.Unlock()
 				if !c.disableLoopDetection {
 					if err := checkDegenerate(d.Content); err != nil {
 						return Message{}, err
 					}
-					if err := checkPhraseRepeat(all); err != nil {
+					if err := checkPhraseRepeat(chanAll); err != nil {
 						return Message{}, err
 					}
 				}
@@ -594,13 +607,14 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 			if rc := d.ReasoningContent; rc != "" {
 				c.mu.Lock()
 				c.live.WriteString(rc)
-				all := c.live.String()
+				c.liveReasoning.WriteString(rc)
+				chanAll := c.liveReasoning.String()
 				c.mu.Unlock()
 				if !c.disableLoopDetection {
 					if err := checkDegenerate(rc); err != nil {
 						return Message{}, err
 					}
-					if err := checkPhraseRepeat(all); err != nil {
+					if err := checkPhraseRepeat(chanAll); err != nil {
 						return Message{}, err
 					}
 				}
@@ -608,13 +622,14 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int) (Message
 			} else if rc := d.Reasoning; rc != "" {
 				c.mu.Lock()
 				c.live.WriteString(rc)
-				all := c.live.String()
+				c.liveReasoning.WriteString(rc)
+				chanAll := c.liveReasoning.String()
 				c.mu.Unlock()
 				if !c.disableLoopDetection {
 					if err := checkDegenerate(rc); err != nil {
 						return Message{}, err
 					}
-					if err := checkPhraseRepeat(all); err != nil {
+					if err := checkPhraseRepeat(chanAll); err != nil {
 						return Message{}, err
 					}
 				}

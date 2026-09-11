@@ -22,7 +22,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
@@ -5034,5 +5036,154 @@ func TestStdinOwnerConcurrentReadsNoCorruption(t *testing.T) {
 		if seen[want] != 1 {
 			t.Errorf("line %q delivered %d time(s), want exactly 1", want, seen[want])
 		}
+	}
+}
+
+// push() used to rebuild the ENTIRE wrapped log on every single call
+// (renderContent re-wrapped all of m.history from scratch) — so pushing one
+// more line into an already-large scrollback cost roughly as much as the
+// scrollback's whole size, making every push progressively slower over a
+// long-running session (O(n) per push, O(n²) over the session). It should
+// instead only do work proportional to the newly pushed lines.
+// push() still hands its content to viewport.SetContent on every call, and
+// that (vendored, unexported internals) library call is itself O(total log
+// length) — splitting and measuring every line — so push() can't be made
+// fully O(added lines) without forking it. What push() CAN avoid, and what
+// this test guards, is the extra, redundant full lipgloss re-wrap of the
+// WHOLE history (rewrapLog) that the old implementation did on top of that
+// unavoidable SetContent cost, on every single push.
+func TestPushDoesNotRewrapEntireLogEveryTime(t *testing.T) {
+	newLoaded := func() *tuiModel {
+		m := &tuiModel{ready: true, width: 80, height: 40, vp: viewport.New(80, 34)}
+		m.history = make([]string, 20000)
+		for i := range m.history {
+			m.history[i] = fmt.Sprintf("pre-existing line %d padding it out to a realistic length", i)
+		}
+		m.rewrapLog()
+		return m
+	}
+
+	// "Old style": rebuild the entire wrapped log from scratch on every push,
+	// exactly like push() did before it cached wrappedLog incrementally.
+	oldStyle := newLoaded()
+	start := time.Now()
+	for i := 0; i < 50; i++ {
+		oldStyle.history = append(oldStyle.history, fmt.Sprintf("line %d: some log text of ordinary length", i))
+		oldStyle.rewrapLog()
+		oldStyle.vp.SetContent(oldStyle.renderContent())
+	}
+	oldElapsed := time.Since(start)
+
+	newStyle := newLoaded()
+	start = time.Now()
+	for i := 0; i < 50; i++ {
+		newStyle.push(fmt.Sprintf("line %d: some log text of ordinary length", i))
+	}
+	newElapsed := time.Since(start)
+
+	// Both pay the vendored viewport's own SetContent cost, but the old style
+	// ALSO re-wraps all 20,000 existing lines with lipgloss on top of that,
+	// every single push. The incremental style should meaningfully beat it —
+	// a regression back to full-rewrap-per-push would erase that margin.
+	if newElapsed*3 > oldElapsed*2 { // new must be at least ~33% faster than old
+		t.Errorf("incremental push() (%v) isn't meaningfully faster than full-rewrap-per-push (%v) — "+
+			"push() may be re-wrapping the whole log again instead of appending incrementally",
+			newElapsed, oldElapsed)
+	}
+}
+
+// syncViewport used to call vp.SetContent on every invocation, even though it
+// only runs in response to a HEIGHT change (the pinned queue or the input box
+// grew/shrank) — content (m.history) is untouched. vp.SetContent is the
+// vendored bubbles/viewport's own cost, O(total log length): it re-splits and
+// re-measures every line. syncViewport is called from every View() via
+// syncInputHeight whenever the input's wrapped row count changes — which
+// happens repeatedly while a user types or backspaces near a wrap boundary —
+// so paying that full rescan there made typing itself cost O(scrollback
+// size). This test drives real Update()/View() keystrokes (crossing the
+// input's wrap boundary back and forth, to force syncInputHeight's row-count
+// branch repeatedly) against a large pre-existing log, and checks it costs
+// about the same as typing into an empty one.
+func TestSyncViewportDoesNotRescanLogOnInputHeightChange(t *testing.T) {
+	newModel := func(historyLines int) *tuiModel {
+		cfg := config.Default()
+		cfg.Workspace = t.TempDir()
+		kb, _ := knowledge.Open("")
+		a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+		if err := a.wire(); err != nil {
+			t.Fatal(err)
+		}
+		m := &tuiModel{app: a, state: stIdle, input: textarea.New(), spin: spinner.New()}
+		m.input.Focus()
+		model, _ := m.Update(tea.WindowSizeMsg{Width: 20, Height: 40})
+		m = model.(*tuiModel)
+		m.history = make([]string, historyLines)
+		for i := range m.history {
+			m.history[i] = fmt.Sprintf("pre-existing line %d padding it out to a realistic length", i)
+		}
+		m.rewrapLog()
+		m.vp.SetContent(m.renderContent())
+		return m
+	}
+
+	// Text long enough, at this narrow width, to cross the input's wrap
+	// boundary many times as it's typed in, then backspaced back out.
+	text := strings.Repeat("some words to type ", 10)
+
+	typeAndErase := func(m *tuiModel) time.Duration {
+		start := time.Now()
+		for _, r := range text {
+			model, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+			m = model.(*tuiModel)
+			_ = m.View()
+		}
+		for range text {
+			model, _ := m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+			m = model.(*tuiModel)
+			_ = m.View()
+		}
+		return time.Since(start)
+	}
+
+	baseline := typeAndErase(newModel(0))
+	loadedElapsed := typeAndErase(newModel(100000))
+
+	// A per-keystroke cost unrelated to log size (textarea/lipgloss internals)
+	// dominates the baseline itself, so compare the DELTA against the log size
+	// rather than a multiplier of that noisy baseline. If syncViewport still
+	// rescanned the whole log on every input-height change, the delta here
+	// measures in the hundreds of milliseconds (~450ms at 100,000 lines);
+	// fixed, it's noise (a few ms). 150ms leaves a wide margin either way.
+	if delta := loadedElapsed - baseline; delta > 150*time.Millisecond {
+		t.Errorf("typing+erasing %d chars against a 100,000-line log took %v longer than against an empty one (%v vs %v) — "+
+			"syncViewport looks like it's rescanning the whole log on every input-height change",
+			len(text), delta, loadedElapsed, baseline)
+	}
+}
+
+// renderContent's cached, incrementally-built output must match a full,
+// from-scratch re-wrap of the same history — the incremental-append fast
+// path (push) and the full-rebuild path (rewrapLog, used on resize) must
+// agree, or the log would silently drift from what a fresh re-wrap produces.
+func TestRenderContentIncrementalMatchesFullRewrap(t *testing.T) {
+	m := &tuiModel{ready: true, width: 20, vp: viewport.New(20, 10)}
+	lines := []string{
+		"short",
+		"this line is deliberately much longer than the twenty column width so it must be soft-wrapped",
+		"",
+		"another short one",
+		strings.Repeat("x", 45),
+	}
+	for _, ln := range lines {
+		m.push(ln)
+	}
+	incremental := m.renderContent()
+
+	m.rewrapLog()
+	fromScratch := m.renderContent()
+
+	if incremental != fromScratch {
+		t.Errorf("incremental push()-built log differs from a full rewrapLog() rebuild:\nincremental:\n%q\nfrom scratch:\n%q",
+			incremental, fromScratch)
 	}
 }

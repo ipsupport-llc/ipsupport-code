@@ -1813,6 +1813,59 @@ func TestSpawnAgentBackgroundResolvesBeforeGoroutine(t *testing.T) {
 	}
 }
 
+// TestSpawnAgentBackgroundReasoningNoMapRace: a.cfg.Reasoning is a live map that
+// /reasoning mutates (applyReasoning) from the foreground with no lock. Before
+// the fix, runSpawnPlan re-resolved reasoning params from INSIDE the background
+// job's own goroutine (a.withReasoning → a.cfg.Reasoning), so a job running
+// concurrently with a foreground /reasoning command was a concurrent map
+// read+write — a crash under -race, not just a stale value. The fix resolves
+// reasoning synchronously in resolveSpawn (same goroutine as this test's driver
+// loop, exactly like the a.cfg.Agents case above), so runSpawnPlan's own
+// goroutine never touches the map again. This test launches many background
+// jobs back-to-back, mutating a.cfg.Reasoning after each launch — like /reasoning
+// firing while a previously-launched job is still running in the background —
+// and must be -race clean.
+func TestSpawnAgentBackgroundReasoningNoMapRace(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(2 * time.Millisecond) // keep jobs in flight long enough to overlap
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = "" // plain OpenAI-compat (skip LM Studio detection)
+	cfg.Agents = map[string]config.AgentProfile{"loc": {Provider: "local"}}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	key := "local/" + a.cfg.LLM.Model
+	for i := 0; i < 50; i++ {
+		if _, err := a.spawnAgentBackground(context.Background(), "loc", "go", ""); err != nil {
+			t.Fatal(err)
+		}
+		// Simulates /reasoning's applyReasoning mutating the same map, from the
+		// same (foreground) goroutine that launched the job above — while
+		// earlier jobs' own goroutines may still be running runSpawnPlan.
+		if a.cfg.Reasoning == nil {
+			a.cfg.Reasoning = map[string]json.RawMessage{}
+		}
+		if i%2 == 0 {
+			a.cfg.Reasoning[key] = json.RawMessage(`{"reasoning_effort":"high"}`)
+		} else {
+			delete(a.cfg.Reasoning, key)
+		}
+	}
+	for i := 0; i < 500 && a.jobsPending() > 0; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestBackgroundJobLifecycle(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()

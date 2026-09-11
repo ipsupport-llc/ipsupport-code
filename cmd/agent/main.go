@@ -1727,6 +1727,24 @@ func (a *app) mcpClient(ctx context.Context, name string) (*mcp.Client, error) {
 	return c, nil
 }
 
+// invalidateStaleMCP evicts (and closes) any cached MCP client whose server
+// was removed from config, or whose spec changed, comparing against old — the
+// server map as of just before this reconfigure. mcpClient only ever checks
+// the cache, never the current config, once a client exists — so without this
+// a config reload (/login, /init) would leave calls going to a since-edited
+// server's stale URL/command/auth until the process restarted.
+func (a *app) invalidateStaleMCP(old map[string]mcp.Server) {
+	a.mcpMu.Lock()
+	defer a.mcpMu.Unlock()
+	for name, c := range a.mcpClients {
+		if spec, ok := a.cfg.McpServers[name]; ok && spec.Equal(old[name]) {
+			continue // unchanged — keep the live connection
+		}
+		c.Close()
+		delete(a.mcpClients, name)
+	}
+}
+
 // closeMCP shuts down every launched MCP server (called on exit).
 func (a *app) closeMCP() {
 	a.mcpMu.Lock()
@@ -2025,7 +2043,9 @@ func (a *app) reconfigure() error {
 	if err != nil {
 		return err
 	}
+	oldServers := a.cfg.McpServers
 	a.cfg = cfg
+	a.invalidateStaleMCP(oldServers)
 	if err := a.wire(); err != nil {
 		return err
 	}

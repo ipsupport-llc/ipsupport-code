@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -22,6 +24,16 @@ type Server struct {
 	Env     map[string]string `json:"env,omitempty"`
 	URL     string            `json:"url,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"`
+}
+
+// Equal reports whether s and o are the same server spec — used to tell a
+// genuinely edited server (URL/command/args/auth) from one just re-read
+// verbatim off disk after a config reload.
+func (s Server) Equal(o Server) bool {
+	return s.Command == o.Command && s.URL == o.URL &&
+		slices.Equal(s.Args, o.Args) &&
+		maps.Equal(s.Env, o.Env) &&
+		maps.Equal(s.Headers, o.Headers)
 }
 
 // Tool is one tool advertised by a server.

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -1270,6 +1271,109 @@ func TestMCPClientGatesLaunchApproval(t *testing.T) {
 	}
 	if inner.calls != 2 {
 		t.Errorf("an already-launched (cached) server must not re-ask for approval, calls=%d", inner.calls)
+	}
+}
+
+// fakeMCPServer is a minimal HTTP MCP server that counts the requests it
+// receives, so a test can tell whether a given connection actually dialed it.
+func fakeMCPServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
+	t.Helper()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			ID     *int   `json:"id"`
+			Method string `json:"method"`
+		}
+		_ = json.Unmarshal(body, &req)
+		if req.ID == nil { // a notification (initialized) → just accept it
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		result := `{}`
+		if req.Method == "tools/list" {
+			result = `{"tools":[]}`
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"jsonrpc":"2.0","id":%d,"result":%s}`, *req.ID, result)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, &hits
+}
+
+// Regression test for the bug this fix closes: reconfigure() (backing
+// /login and /init) replaced a.cfg wholesale but never touched the
+// mcpClient cache, so editing an MCP server's URL and reconfiguring left
+// calls going to the OLD connection until the process restarted. A changed
+// server's cached client must be closed and evicted so the next mcpClient
+// call reconnects using the new config; an unchanged server's cached client
+// must survive (caching still works for the normal, no-edit case).
+func TestReconfigureInvalidatesStaleMCPClient(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // isolate config.Load's global file from ~/.config
+
+	oldSrv, oldHits := fakeMCPServer(t)
+	newSrv, newHits := fakeMCPServer(t)
+
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceMCP := func(url string) {
+		data := fmt.Sprintf(`{"mcp_servers":{"test":{"url":%q}}}`, url)
+		if err := os.WriteFile(filepath.Join(workspace, ".agent", "config.json"), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeWorkspaceMCP(oldSrv.URL)
+
+	// tui:true skips reconfigure's synchronous context-window detection (that
+	// dial is orthogonal to this test and only ever runs off-thread for a real
+	// TUI session — see maybeDetectWindowSync).
+	a := &app{cfg: config.Default(), workspace: workspace, approver: &countingApprover{reply: true}, tui: true}
+	a.cfg.McpServers = map[string]mcp.Server{"test": {URL: oldSrv.URL}}
+
+	c1, err := a.mcpClient(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("initial mcpClient: %v", err)
+	}
+	if oldHits.Load() == 0 {
+		t.Fatal("expected the old server to have been dialed")
+	}
+
+	// Edit the server's URL (as /init rewriting .agent/config.json would) and
+	// reconfigure — the next mcpClient call must NOT return the stale client.
+	writeWorkspaceMCP(newSrv.URL)
+	if err := a.reconfigure(); err != nil {
+		t.Fatalf("reconfigure: %v", err)
+	}
+
+	c2, err := a.mcpClient(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("mcpClient after reconfigure: %v", err)
+	}
+	if c2 == c1 {
+		t.Fatal("mcpClient returned the stale cached client after the server's url changed")
+	}
+	if newHits.Load() == 0 {
+		t.Error("expected the NEW server to have been dialed after reconfigure")
+	}
+	hitsAfterReconnect := newHits.Load()
+
+	// Reconfigure again with NO change — the live connection must be reused.
+	if err := a.reconfigure(); err != nil {
+		t.Fatalf("second reconfigure: %v", err)
+	}
+	c3, err := a.mcpClient(context.Background(), "test")
+	if err != nil {
+		t.Fatalf("mcpClient after no-op reconfigure: %v", err)
+	}
+	if c3 != c2 {
+		t.Error("an unchanged server's cached client must survive reconfigure")
+	}
+	if got := newHits.Load(); got != hitsAfterReconnect {
+		t.Errorf("unchanged server got %d more requests after a no-op reconfigure — cache was not reused", got-hitsAfterReconnect)
 	}
 }
 

@@ -4414,3 +4414,111 @@ func TestCompleteDirSegments(t *testing.T) {
 		t.Errorf("path outside the jail must yield nothing, got %v", m)
 	}
 }
+
+// --- stdinOwner: single-owner stdin reads for the plain REPL -----------------
+//
+// Before stdinOwner existed, the REPL's command loop and stdinApprover's y/n
+// prompt each called ReadString directly on the SAME shared *bufio.Reader. A
+// background job's approval can fire from its own goroutine at any time,
+// including while the loop is itself blocked reading the next command — two
+// goroutines calling ReadString concurrently on one *bufio.Reader is a data
+// race on its internal buffer (undefined behavior: -race flags it, and in
+// practice a line typed for one can be silently handed to the other). These
+// tests exercise the fix: every read now goes through one owner goroutine.
+
+// TestStdinOwnerApprovalPriorityOverPendingCommand reproduces the exact
+// interleaving from the bug report deterministically (no sleeps): a command
+// read is already queued — mimicking the REPL loop blocked waiting for the
+// next typed line — when an approval read is ALSO queued — mimicking a
+// background job asking for a y/n answer at that same moment. The line that
+// arrives afterward must go to the approval, never to the stale command read,
+// confirming input is routed to the correct consumer rather than left to
+// whichever happened to call ReadString first.
+func TestStdinOwnerApprovalPriorityOverPendingCommand(t *testing.T) {
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	o := newStdinOwner(bufio.NewReader(pr))
+
+	// Queue the command request FIRST, chronologically, then the approval
+	// request — proving priority is decided by ROLE at delivery time, not by
+	// arrival order. Both channels are buffered (cap 1), so these sends
+	// complete immediately without needing a goroutine of their own.
+	cmdReply := make(chan lineResult, 1)
+	o.cmdReq <- cmdReply
+	approveReply := make(chan lineResult, 1)
+	o.approveReq <- approveReply
+
+	// Only now does any data become available to read — in a goroutine since
+	// io.Pipe's Write blocks until the owner's ReadString consumes it.
+	go func() { pw.Write([]byte("y\n")) }()
+
+	select {
+	case res := <-approveReply:
+		if res.err != nil || res.line != "y\n" {
+			t.Fatalf("approval got (%q, %v), want (\"y\\n\", nil)", res.line, res.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("approval never received a line — priority routing broken")
+	}
+
+	// The stale command request must NOT have been satisfied by this line.
+	select {
+	case res := <-cmdReply:
+		t.Fatalf("command request must not win over a pending approval, got %q", res.line)
+	default:
+	}
+}
+
+// TestStdinOwnerConcurrentReadsNoCorruption hammers a single owner from many
+// goroutines at once — half acting like the REPL loop (readCmdLine), half like
+// concurrent background-job approvals (readApproveLine) — and checks that
+// every line fed in is delivered exactly once, intact, to exactly one caller.
+// Run with -race, this is the test that would have caught the original bug:
+// unsynchronized concurrent ReadString calls on the same *bufio.Reader.
+func TestStdinOwnerConcurrentReadsNoCorruption(t *testing.T) {
+	const n = 200
+	lines := make([]string, n)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("line-%04d\n", i)
+	}
+	o := newStdinOwner(bufio.NewReader(strings.NewReader(strings.Join(lines, ""))))
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	seen := make(map[string]int, n)
+	readErrs := 0
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			var line string
+			var err error
+			if i%2 == 0 {
+				line, err = o.readCmdLine()
+			} else {
+				line, err = o.readApproveLine()
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				readErrs++
+				return
+			}
+			seen[line]++
+		}(i)
+	}
+	wg.Wait()
+
+	if readErrs != 0 {
+		t.Fatalf("unexpected read errors: %d", readErrs)
+	}
+	if len(seen) != n {
+		t.Fatalf("got %d distinct lines delivered, want %d (duplicate or corrupted delivery)", len(seen), n)
+	}
+	for _, want := range lines {
+		if seen[want] != 1 {
+			t.Errorf("line %q delivered %d time(s), want exactly 1", want, seen[want])
+		}
+	}
+}

@@ -210,6 +210,47 @@ func TestGitDiffExcludesSecretFilesFromWholeRepoDiff(t *testing.T) {
 	}
 }
 
+// A tracked file literally named "*" is a valid pathspec GLOB when passed
+// bare, and independently glob-matches every other file in the same
+// directory — including ".env", which checkPathPolicy already excluded from
+// "allowed" as a secret. Without marking "allowed" paths literal, git's own
+// pathspec expansion re-includes .env's real content in the diff anyway,
+// contradicting the tool's own "excluded" accounting.
+func TestGitDiffWildcardNamedFileDoesNotGlobMatchSecret(t *testing.T) {
+	dir := initRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "*"), []byte("star old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("API_KEY=hunter2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", "*", ".env").CombinedOutput(); err != nil {
+		t.Fatalf("add: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", dir, "commit", "-m", "initial").CombinedOutput(); err != nil {
+		t.Fatalf("commit: %v\n%s", err, out)
+	}
+	// Modify both, uncommitted, so a plain "git diff" covers each.
+	if err := os.WriteFile(filepath.Join(dir, "*"), []byte("star new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("API_KEY=hunter2_v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tl := gitToolFor(t, dir, yes())
+	r := tl.Call(context.Background(), "diff", nil)
+	if r.IsError {
+		t.Fatalf("diff: %s", r.Content)
+	}
+	if strings.Contains(r.Content, "hunter2") {
+		t.Errorf("diff = %+v, want .env's secret content excluded, not leaked via the \"*\"-named file's glob pathspec", r)
+	}
+	if !strings.Contains(r.Content, "star new") {
+		t.Errorf("diff = %+v, want the \"*\"-named file's own change included", r)
+	}
+}
+
 // git's own ":[<n>:]<path>" index-stage syntax (e.g. ":0:.env") names the SAME
 // path as "HEAD:.env" but bypassed the naive first-colon split (which read
 // ":0:.env" as path "0:.env", never matching the secret-file glob) and read

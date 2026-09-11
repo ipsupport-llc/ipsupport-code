@@ -144,7 +144,9 @@ func (k *KB) Purge(maxAgeDays int) int {
 	}
 	k.pitfalls = kept
 	k.pending = nil
-	k.overwrite = true
+	if dropped > 0 {
+		k.overwrite = true
+	}
 	return dropped
 }
 

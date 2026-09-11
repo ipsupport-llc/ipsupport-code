@@ -1,6 +1,7 @@
 package usage
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -267,5 +268,60 @@ func TestSaveKeepsPendingWhenWriteFails(t *testing.T) {
 	}
 	if !seen["p1/m"] || !seen["p2/m"] {
 		t.Errorf("ByModel keys = %v, want both p1/m and p2/m (the failed save's delta must survive to the next successful Save)", seen)
+	}
+}
+
+// A no-op Purge (nothing actually expired, the common case — the retention
+// check runs unconditionally at startup) must not leave overwrite stuck true
+// for the rest of the process's life: that would make every later Save() skip
+// the merge-read and clobber whatever a concurrent process wrote to the
+// shared file in the meantime.
+func TestNoopPurgeDoesNotPoisonMergeSafety(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	s, _ := Open(path)
+	s.Add("2026-06-27", "grok", "grok-4.3", 10, 10)
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Startup retention check: cutoff is in the far past, so nothing is old
+	// enough to expire — a no-op purge.
+	if n := s.Purge("2000-01-01"); n != 0 {
+		t.Fatalf("Purge = %d, want 0 (no-op)", n)
+	}
+
+	// A concurrent process writes its own entry straight to the shared file,
+	// bypassing this process's in-memory state entirely.
+	onDisk, err := readEntries(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	addEntry(&onDisk, "2026-06-27", "concurrent-process", "m", 99, 99)
+	data, err := json.MarshalIndent(onDisk, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Ordinary use later in the same process: an Add followed by a Save.
+	s.Add("2026-06-27", "grok", "grok-4.3", 1, 1)
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	final, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range final.ByModel() {
+		if m.Key == "concurrent-process/m" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("concurrent process's entry was clobbered — a no-op Purge left overwrite stuck true, so the next Save skipped its merge-read")
 	}
 }

@@ -207,7 +207,9 @@ func (s *Store) Purge(cutoff string) int {
 	}
 	s.entries = kept
 	s.pending = nil
-	s.overwrite = true
+	if removed > 0 {
+		s.overwrite = true
+	}
 	return removed
 }
 

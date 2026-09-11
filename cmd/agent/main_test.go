@@ -1007,7 +1007,12 @@ func TestResolveSpawnAllowsKeylessCustomProvider(t *testing.T) {
 		"ollama": {BaseURL: "http://localhost:11434/v1", Model: "qwen2.5-coder:7b"}, // no api_key
 	}
 	cfg.Agents = map[string]config.AgentProfile{"loc": {Provider: "ollama"}}
-	a := &app{cfg: cfg, workspace: cfg.Workspace}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
 
 	plan, external, _, err := a.resolveSpawn("loc", "")
 	if err != nil {
@@ -2610,6 +2615,55 @@ func TestResolveSpawnDefaultDirGetsIndependentPolicy(t *testing.T) {
 	// a.subReg wired once at startup.
 	if plan.subReg == a.subReg {
 		t.Error("default-dir delegate must get its own *tool.Registry, not the shared a.subReg")
+	}
+}
+
+// A default-dir delegate (no explicit dir param) must succeed when file.jail
+// is set to a subdirectory of the workspace and the session has never /cd'd.
+// resolveSpawn used to seed subWorkspace from a.effectiveDir(), which returns
+// the raw (unjailed) workspace root when a.workdir is unset — the workspace
+// root is the PARENT of the jail root, so subPol.SetWorkdir(subWorkspace)
+// always errored "escapes the workspace jail" in this config.
+func TestResolveSpawnDefaultDirRespectsJail(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "src", "marker.txt"), []byte("src"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.File.Jail = "src"
+	cfg.Agents = map[string]config.AgentProfile{"rev": {Provider: "local"}}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	// No /cd — a.workdir stays "".
+
+	plan, external, _, err := a.resolveSpawn("rev", "") // no explicit dir
+	if err != nil || external {
+		t.Fatalf("resolveSpawn = %+v, external=%v, err=%v", plan, external, err)
+	}
+	if plan.subWorkspace != filepath.Join(ws, "src") {
+		t.Errorf("subWorkspace = %q, want the jail root %q", plan.subWorkspace, filepath.Join(ws, "src"))
+	}
+
+	// PR #154's original fix must still hold: the delegate gets its own
+	// registry/policy engine, not the host's shared a.subReg.
+	if plan.subReg == a.subReg {
+		t.Error("default-dir delegate must get its own *tool.Registry, not the shared a.subReg")
+	}
+	res := plan.subReg.Dispatch(context.Background(), "file", "read", map[string]any{"path": "marker.txt"})
+	if res.IsError {
+		t.Fatalf("delegate read failed: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "src") {
+		t.Errorf("delegate resolved marker.txt = %q, want the jailed src/marker.txt", res.Content)
 	}
 }
 

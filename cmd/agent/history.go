@@ -61,6 +61,25 @@ func (a *app) hasArchivedHistory() bool {
 	return err == nil && fi.Size() > 0
 }
 
+// maybeRewireHistoryTool re-checks hasArchivedHistory() at the start of a
+// task. wire() only decides whether the `history` tool belongs in the tool
+// list once, at wiring time (see historyToolOn) — but a session that STARTS
+// with an empty archive gets its first entry archived only after its first
+// task completes (Archive() is called from remember(), right before Run()
+// returns). Without this check, nothing would ever notice the archive went
+// from empty to non-empty, and the tool would stay absent for the rest of the
+// running process.
+//
+// This must run at a task BOUNDARY, not from inside Archive() itself:
+// Archive() runs before remember() appends the just-finished turn to the
+// agent's live history, so rewiring synchronously from there would rebuild
+// a.ag (via wire()) from a history snapshot missing that turn.
+func (a *app) maybeRewireHistoryTool() {
+	if !a.historyToolOn && a.hasArchivedHistory() {
+		_ = a.wire()
+	}
+}
+
 // historySource adapts the on-disk archive to tool.HistorySource.
 type historySource struct{ path string }
 

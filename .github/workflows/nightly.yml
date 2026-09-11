@@ -11,6 +11,18 @@ on:
     - cron: '0 6 * * *' # 06:00 UTC daily (backstop)
   workflow_dispatch:
 
+# Same group across all three trigger types, so an overlapping run (a push
+# landing mid-cron, or two rapid pushes) cancels the older run before its
+# publish step can race the newer run's upload/delete-asset steps against
+# the same rolling "nightly" release. cancel-in-progress is safe here: the
+# publish step already tolerates being cut short at any point (that's just
+# a job failure, no different from a network blip) since it uploads today's
+# assets before deleting anything, and the next run's delete loop always
+# reconciles the release back to a consistent state.
+concurrency:
+  group: nightly-release
+  cancel-in-progress: true
+
 permissions:
   contents: write
 

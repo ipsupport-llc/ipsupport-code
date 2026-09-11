@@ -5530,3 +5530,23 @@ func TestFocusMsgReenablesMouseMode(t *testing.T) {
 		t.Errorf("Update(tea.FocusMsg{})'s Cmd produced %v, want %v (tea.EnableMouseCellMotion's message type)", got, want)
 	}
 }
+
+// thinkingView must not leak a stale Live() buffer from a PRIOR task into
+// non-task busy work (e.g. /update, /compact) that reuses stRunning with
+// busyMsg set — they never stream into that buffer themselves, so without
+// this guard the ctrl+t panel would show the last real task's leftover
+// reasoning text as if it were relevant to whatever is busy right now.
+func TestThinkingViewHiddenDuringNonTaskBusyWork(t *testing.T) {
+	url := tuiFakeServer(t, tuiContent("some leftover reasoning"))
+	app := tuiTestApp(t, url)
+	if err := app.wire(); err != nil {
+		t.Fatal(err)
+	}
+	// Populate Live() the way a real task would.
+	_, _ = app.client.Chat(context.Background(), []llm.Message{llm.User("hi")}, nil)
+
+	m := &tuiModel{app: app, showThinking: true, state: stRunning, busyMsg: "updating", width: 80}
+	if got := m.thinkingView(); got != nil {
+		t.Errorf("thinkingView() during non-task busy work = %v, want nil (must not show a prior task's leftover Live() text)", got)
+	}
+}

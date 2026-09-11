@@ -2692,6 +2692,57 @@ func TestNewNamedSessionResetsCheckpoints(t *testing.T) {
 	}
 }
 
+// fakeSummaryLLM stands in for a real model so Compact() can run in a test
+// without any network call: it always returns a short canned summary.
+type fakeSummaryLLM struct{}
+
+func (fakeSummaryLLM) Chat(_ context.Context, _ []llm.Message, _ []map[string]any) (llm.Message, error) {
+	return llm.Message{Role: "assistant", Content: "SUMMARY: did stuff"}, nil
+}
+
+// Compact() shrinks the agent's history down to a short LLM-written summary,
+// so an open checkpoint's histLen (captured against the old, long history) is
+// just as stale afterward as it is after switchSession/newNamedSession — but
+// unlike those two, the compactDoneMsg success handler never called
+// resetCheckpoints. Bug: applyRewind's existing len(hist) guard silently
+// clamped the stale histLen down to the new (short) length, so a later
+// /rewind reported "rewound" while trimming nothing from the conversation —
+// the checkpoint looked honored when it wasn't.
+func TestCompactResetsCheckpoints(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag = agent.New(fakeSummaryLLM{}, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
+	a.ag.Run(context.Background(), "task 1")
+	a.ag.Run(context.Background(), "task 2")
+
+	// A checkpoint taken mid-task, well into the (still long) history.
+	cp := a.beginCheckpoint("do something")
+	a.endCheckpoint(cp)
+	if len(a.checkpoints) != 1 {
+		t.Fatal("checkpoint not recorded")
+	}
+
+	m := &tuiModel{app: a, ctx: context.Background(), input: textarea.New()}
+	cmd := m.startCompact(false)
+	msg := cmd().(compactDoneMsg)
+	if msg.err != nil || msg.n == 0 {
+		t.Fatalf("compact = (n=%d, err=%v), want a real (non no-op) compact for this test", msg.n, msg.err)
+	}
+	m.Update(msg)
+
+	if rows := a.rewindRows(); len(rows) != 0 {
+		t.Errorf("checkpoints = %d after Compact, want 0 — a checkpoint from before Compact indexes "+
+			"the discarded history, so a later /rewind must not silently no-op instead of being invalidated", len(rows))
+	}
+}
+
 func TestCdCommand(t *testing.T) {
 	ws := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(ws, "proj", "sub"), 0o755); err != nil {

@@ -103,6 +103,9 @@ func (a *Agent) Reset() { a.history = nil }
 // so the next run uses it without a full re-wire.
 func (a *Agent) SetSystem(s string) { a.system = s }
 
+// System returns the current base system prompt.
+func (a *Agent) System() string { return a.system }
+
 // SetMaxHistory overrides how many recent session messages remember() keeps
 // verbatim before silently cutting the oldest ones — no LLM recap, no chance
 // to preserve anything (default 16, set in New). Cutting the front of the

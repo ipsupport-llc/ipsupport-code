@@ -1200,3 +1200,30 @@ func TestBeforeTurnInjectsBetweenTurns(t *testing.T) {
 		t.Errorf("beforeTurn called %d times, want it fired each turn", calls)
 	}
 }
+
+// TestAnswerAsideSnapshotDoesNotRaceWithReset reproduces the idle /btw data
+// race: the caller (mirroring tui.go's stIdle handler) launches AnswerAside on
+// its own goroutine while the user is free to run Reset() (/clear) from the
+// idle prompt. Before the fix, AnswerAside read a.history/a.system live from
+// that goroutine, racing Reset()'s unsynchronized write. The fix has the
+// caller capture base (System()+History()) synchronously, BEFORE starting the
+// goroutine, so the goroutine never touches Agent fields at all. Run with
+// -race: this must stay clean.
+func TestAnswerAsideSnapshotDoesNotRaceWithReset(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{}
+	a := New(fake, reg, nil, nil, "", 10)
+	a.SetHistory([]llm.Message{llm.User("g0"), {Role: "assistant", Content: "a0"}})
+
+	// Captured synchronously, before the goroutine starts — the snapshot the
+	// fix requires.
+	base := append([]llm.Message{llm.System(a.System())}, a.History()...)
+
+	done := make(chan struct{})
+	go func() {
+		a.AnswerAside(context.Background(), base, "what happened?")
+		close(done)
+	}()
+	a.Reset() // the idle /clear equivalent, run concurrently with the aside
+	<-done
+}

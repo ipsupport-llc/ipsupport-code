@@ -154,6 +154,7 @@ type compactDoneMsg struct {
 type skillsMsg struct {
 	names []string
 	err   error
+	epoch int64 // which run this install belonged to — a force-detached one's is stale
 }
 type updateMsg struct{ notice string }   // startup freshness check result
 type updateDoneMsg struct{ text string } // /update result
@@ -633,6 +634,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.idleDrain()
 
 	case skillsMsg:
+		if msg.epoch != m.epoch {
+			// A force-detached (orphaned) install finally landed — the UI moved on
+			// to a fresh agent long ago. Ignore it: don't clobber a newer run's
+			// cancel func, pollute its log, or wire() a stale skill list on top of it.
+			return m, nil
+		}
 		m.cancel = nil // clear the guard set in skillsCmd, exactly like compactDoneMsg does
 		if msg.err != nil {
 			m.push(cErr.Render("install failed: " + msg.err.Error()))
@@ -1530,9 +1537,10 @@ func (m *tuiModel) skillsCmd(rest string) (tea.Model, tea.Cmd) {
 		m.cancel = cancel
 		src := arg
 		m.push(cDim.Render("installing " + src + " …"))
+		ep := m.epoch // captured synchronously so a later force-detach can't shift it
 		return m, func() tea.Msg {
 			names, err := m.app.skills.Install(ctx, src)
-			return skillsMsg{names: names, err: err}
+			return skillsMsg{names: names, err: err, epoch: ep}
 		}
 	}
 	m.pushLines(m.app.skillsCommand(m.ctx, rest))

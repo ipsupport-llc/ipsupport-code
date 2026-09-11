@@ -446,6 +446,10 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	if p.Model != "" {
 		llmCfg.Model = p.Model
 	}
+	// Resolve reasoning params HERE too, synchronously — a.cfg.Reasoning is a
+	// live map that /reasoning (applyReasoning) mutates from the foreground with
+	// no lock, so runSpawnPlan's own goroutine must never read it again itself.
+	llmCfg = a.withReasoning(llmCfg, provider, "")
 
 	// Resolve the working directory (default: the session workspace). The path may
 	// point anywhere — ~ is expanded, relatives resolve against the session — but
@@ -494,7 +498,7 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 	}
 
 	id := fmt.Sprintf("sub%d", a.spawnSeq.Add(1)) // groups this sub-agent's UI events
-	client := llm.NewOpenAIClient(a.withReasoning(plan.llmCfg, plan.provider, ""))
+	client := llm.NewOpenAIClient(plan.llmCfg)    // reasoning params already resolved in resolveSpawn
 	sub := agent.New(client, plan.subReg, a.kb, a.tracer, a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt), plan.llmCfg.MaxSteps)
 	sub.SetPlanMode(plan.planMode)
 	sub.SetLabel(id)

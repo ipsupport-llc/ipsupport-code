@@ -267,6 +267,13 @@ type app struct {
 	// epoch it captured is still current — a force-detached run is orphaned.
 	taskEpoch atomic.Int64
 
+	// modelEpoch bumps whenever the active model/provider changes (/login,
+	// /ai <provider>, /model <name>). An in-flight windowMsg probe is honoured
+	// only while the epoch it captured is still current — a stale probe for a
+	// model that's no longer active is discarded instead of clobbering the
+	// newly active model's context-window state.
+	modelEpoch atomic.Int64
+
 	costMu         sync.Mutex // guards sessionCostUSD (parallel sub-agent spawns accrue too)
 	sessionCostUSD float64    // estimated spend this process run, for the SessionBudgetUSD guard
 
@@ -2024,6 +2031,7 @@ func (a *app) reconfigure() error {
 	}
 	a.loadSession()          // a fresh agent — restore the persisted session
 	a.windowDetected = false // model may have changed (/login) — re-detect
+	a.modelEpoch.Add(1)      // orphan any in-flight probe for the old model
 	a.maybeDetectWindowSync()
 	return nil
 }
@@ -3063,6 +3071,7 @@ func (a *app) setProvider(name string) []string {
 	}
 	a.cfg.Provider = name
 	a.windowDetected = false
+	a.modelEpoch.Add(1) // orphan any in-flight probe for the old provider/model
 	if err := config.SaveProviders(a.cfg.Provider, a.cfg.Providers); err != nil {
 		return []string{"error: " + err.Error()}
 	}
@@ -3230,6 +3239,7 @@ func (a *app) setModel(name string) []string {
 		_ = config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
 	}
 	a.windowDetected = false
+	a.modelEpoch.Add(1) // orphan any in-flight probe for the old model
 	if err := a.wire(); err != nil {
 		return []string{"error: " + err.Error()}
 	}

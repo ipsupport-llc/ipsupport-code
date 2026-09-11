@@ -452,7 +452,23 @@ func (m *tuiModel) waitApproval() tea.Cmd {
 	return func() tea.Msg { return approvalMsg(<-m.bridge.approvals) }
 }
 
+// tuiDebugTiming, set via IPSUPPORT_DEBUG_TIMING, logs any Update()/View()
+// call slow enough to be felt while typing — a diagnostic for tracking down
+// input lag reports that a synthetic benchmark doesn't reproduce (real
+// config/workspace/provider setup, not the benchmark's minimal stand-in).
+var tuiDebugTiming = os.Getenv("IPSUPPORT_DEBUG_TIMING") != ""
+
+const tuiDebugTimingThreshold = 15 * time.Millisecond
+
 func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if tuiDebugTiming {
+		start := time.Now()
+		defer func() {
+			if d := time.Since(start); d > tuiDebugTimingThreshold {
+				fmt.Fprintf(os.Stderr, "[timing] Update(%T) took %v\n", msg, d)
+			}
+		}()
+	}
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -1729,6 +1745,14 @@ func (m *tuiModel) runLoop(interval time.Duration, max int, goal string) tea.Cmd
 }
 
 func (m *tuiModel) View() string {
+	if tuiDebugTiming {
+		start := time.Now()
+		defer func() {
+			if d := time.Since(start); d > tuiDebugTimingThreshold {
+				fmt.Fprintf(os.Stderr, "[timing] View took %v\n", d)
+			}
+		}()
+	}
 	if !m.ready {
 		return "loading…"
 	}

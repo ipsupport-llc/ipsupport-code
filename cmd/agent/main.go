@@ -422,6 +422,13 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	profile = resolved
 	p := a.cfg.Agents[profile]
 	if p.Kind == "external" {
+		// External CLIs run outside our sandbox with their own permissions — there's
+		// no read-only mode to hand them the way SetPlanMode gives an LLM sub-agent
+		// (see runSpawnPlan), so plan mode can only keep its "stays read-only"
+		// guarantee (see the subagents skill) by refusing the launch outright.
+		if a.planMode {
+			return spawnPlan{}, true, p, fmt.Errorf("plan mode is ON — external agent %q was NOT launched (it runs outside the sandbox with no read-only mode); list it as a step in your plan, then finish", profile)
+		}
 		return spawnPlan{profile: profile}, true, p, nil
 	}
 	provider := p.Provider

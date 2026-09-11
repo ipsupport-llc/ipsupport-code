@@ -4108,6 +4108,41 @@ func TestActiveLLM(t *testing.T) {
 	}
 }
 
+// A window probe dispatched for the active local model must not apply if the
+// user switches to a different local model before it resolves — both report
+// provider "local", so the epoch captured at dispatch is what catches the
+// mismatch (see the windowMsg handler in tui.go).
+func TestStaleWindowProbeDiscardedAfterModelSwitch(t *testing.T) {
+	m := &tuiModel{app: &app{cfg: config.Config{LLM: config.LLM{Model: "model-a", ContextWindow: 4096}}}}
+	m.app.windowDetected = false
+
+	staleEpoch := m.app.modelEpoch.Load() // captured at dispatch time, for model-a
+
+	// user switches to model-b before the probe resolves (mirrors setModel)
+	m.app.cfg.LLM.Model = "model-b"
+	m.app.windowDetected = false
+	m.app.modelEpoch.Add(1)
+
+	// model-a's stale probe response lands
+	m.Update(windowMsg{provider: "local", tokens: 8192, epoch: staleEpoch})
+
+	if m.app.cfg.LLM.ContextWindow != 4096 {
+		t.Errorf("stale probe overwrote context window: got %d, want 4096 (model-a's value preserved)", m.app.cfg.LLM.ContextWindow)
+	}
+	if m.app.windowDetected {
+		t.Error("stale probe must not set windowDetected — model-b still needs its own probe")
+	}
+
+	// a fresh (non-stale) probe for model-b still applies normally
+	m.Update(windowMsg{provider: "local", tokens: 8192, epoch: m.app.modelEpoch.Load()})
+	if m.app.cfg.LLM.ContextWindow != 8192 {
+		t.Errorf("fresh probe for the active model should apply: got %d, want 8192", m.app.cfg.LLM.ContextWindow)
+	}
+	if !m.app.windowDetected {
+		t.Error("fresh probe for the active model should set windowDetected")
+	}
+}
+
 func TestAutoCompactNeeded(t *testing.T) {
 	if !autoCompactNeeded(6200, 8192, 4, 0.75) {
 		t.Error("76% of the window with history should trigger compaction")

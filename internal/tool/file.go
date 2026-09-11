@@ -101,15 +101,38 @@ func (f *fileTool) read(_ context.Context, a Args) Result {
 	if offset, limit := a.Int("offset", 0), a.Int("limit", 0); offset > 0 || limit > 0 {
 		return f.readWindow(abs, path, offset, limit)
 	}
-	data, err := os.ReadFile(abs)
+	return f.readPlain(abs, path)
+}
+
+// readPlain returns the whole file, capped at maxReadBytes — via a bounded
+// read instead of os.ReadFile, so a multi-gigabyte file in the workspace is
+// never loaded fully into memory just to be immediately clipped back down. It
+// reads at most maxReadBytes+1 bytes: enough to tell whether the file is
+// larger than the cap (for the "truncated" footer) without ever holding more
+// of it than that.
+func (f *fileTool) readPlain(abs, path string) Result {
+	file, err := os.Open(abs)
 	if err != nil {
 		return Err("cannot read " + path + ": " + err.Error())
 	}
-	out, truncated := textutil.Clip(string(data), maxReadBytes)
-	if truncated {
-		out += fmt.Sprintf("\n…[truncated; %d bytes total]", len(data))
+	defer file.Close()
+
+	buf := make([]byte, maxReadBytes+1)
+	n, err := io.ReadFull(file, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return Err("cannot read " + path + ": " + err.Error())
 	}
-	return Ok(out)
+	buf = buf[:n]
+	if n <= maxReadBytes {
+		return Ok(string(buf))
+	}
+
+	total := int64(n)
+	if info, statErr := file.Stat(); statErr == nil {
+		total = info.Size()
+	}
+	out, _ := textutil.Clip(string(buf), maxReadBytes)
+	return Ok(out + fmt.Sprintf("\n…[truncated; %d bytes total]", total))
 }
 
 // readWindow returns lines [offset, offset+limit) of the file at abs, streamed

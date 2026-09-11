@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -309,6 +310,50 @@ func TestFileReadWindowNearEndOfLargeFile(t *testing.T) {
 	}
 	if !strings.Contains(r.Content, "of 5001") { // 5000 real lines + trailing empty split element
 		t.Errorf("missing/incorrect total in header: %q", r.Content)
+	}
+}
+
+// The plain read path (no offset/limit) must stream a bounded read instead of
+// os.ReadFile-ing the whole file into memory before textutil.Clip trims it
+// back down — otherwise a multi-gigabyte file in the workspace gets fully
+// loaded despite the advertised maxReadBytes cap. This creates a file far
+// larger than the cap and checks two things: the returned content is clipped
+// exactly as before (same output contract), and — via a runtime.MemStats
+// delta around the call — that the read allocates only a small, bounded
+// amount of memory rather than one proportional to the file's size (the old
+// code would allocate roughly 2x the file size: the ReadFile buffer plus the
+// string(data) conversion).
+func TestFileReadPlainPathIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+
+	const fileSize = 50 * maxReadBytes // ~9.5MiB, far bigger than the cap
+	const pattern = "0123456789"
+	content := strings.Repeat(pattern, fileSize/len(pattern))
+	if err := os.WriteFile(filepath.Join(dir, "big.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	r := tl.Call(ctx, "read", map[string]any{"path": "big.txt"})
+	runtime.ReadMemStats(&after)
+
+	if r.IsError {
+		t.Fatalf("read: %s", r.Content)
+	}
+	wantFooter := fmt.Sprintf("\n…[truncated; %d bytes total]", len(content))
+	if !strings.HasSuffix(r.Content, wantFooter) {
+		t.Errorf("missing/incorrect truncation footer in result (len %d)", len(r.Content))
+	}
+	if gotBody := strings.TrimSuffix(r.Content, wantFooter); gotBody != content[:maxReadBytes] {
+		t.Errorf("clipped content mismatch: got %d bytes, want the first %d bytes of the file", len(gotBody), maxReadBytes)
+	}
+
+	if delta := after.TotalAlloc - before.TotalAlloc; delta > fileSize/2 {
+		t.Errorf("read allocated %d bytes for a %d-byte file — looks like the plain path loaded the whole file into memory instead of streaming a bounded read", delta, fileSize)
 	}
 }
 

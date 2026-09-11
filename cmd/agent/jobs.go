@@ -249,6 +249,31 @@ func (a *app) drainAsides() []string {
 	return qs
 }
 
+// shutdownJobsTimeout bounds how long shutdownJobs waits for cancelled jobs to
+// actually stop — long enough for an external agent's OS process to receive
+// and act on SIGKILL (see procgroup.Set in spawnExternalAgent), short enough
+// not to hang process exit on a wedged one.
+const shutdownJobsTimeout = 5 * time.Second
+
+// shutdownJobs cancels every active job and waits (bounded by
+// shutdownJobsTimeout) for them to finish before the process exits. Without
+// this, a job's context is never cancelled on exit at all — for an
+// external-agent job that leaves its OS subprocess (e.g. another CLI coding
+// agent) running and unsupervised, since Unix does not kill children when
+// their parent exits. Called from cleanup() in main.go.
+func (a *app) shutdownJobs() {
+	a.jobMu.Lock()
+	for _, j := range a.jobs {
+		j.cancel()
+	}
+	a.jobMu.Unlock()
+
+	deadline := time.Now().Add(shutdownJobsTimeout)
+	for a.jobsPending() > 0 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // jobsPending reports how many jobs are still running (for /status).
 func (a *app) jobsPending() int {
 	a.jobMu.Lock()

@@ -320,15 +320,15 @@ func build(workspace, sessionName string, reader *bufio.Reader) (*app, func(), e
 	}
 
 	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader}
-	a.approver = &stdinApprover{r: reader, app: a} // set after: it references the app for session-allow
-	cleanup := func() { a.closeMCP() }             // shut down any launched MCP servers on exit
-	a.applyUsageRetention()                        // honor usage_retention_days on startup
-	a.applyKnowledgeRetention()                    // honor knowledge_retention_days on startup
+	a.approver = &stdinApprover{r: reader, app: a}       // set after: it references the app for session-allow
+	cleanup := func() { a.shutdownJobs(); a.closeMCP() } // cancel background jobs (killing external-agent subprocesses too) and shut down any launched MCP servers on exit
+	a.applyUsageRetention()                              // honor usage_retention_days on startup
+	a.applyKnowledgeRetention()                          // honor knowledge_retention_days on startup
 	if ft, err := trace.NewFileTracer(cfg.TracePath, newRunID()); err != nil {
 		slog.Warn("trace disabled", "err", err)
 	} else {
 		a.fileTracer = ft
-		cleanup = func() { a.closeMCP(); _ = ft.Close() }
+		cleanup = func() { a.shutdownJobs(); a.closeMCP(); _ = ft.Close() }
 	}
 	a.loadFacts()      // learned project facts → folded into the prompt by wire()
 	a.loadGoal()       // standing goal (if any) → resumable across restarts

@@ -391,10 +391,43 @@ func (a *app) runTUI(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	tuiDebugHeartbeat(ctx)
 	// WithMouseCellMotion lets the wheel scroll the log in the alt-screen (without
 	// it the terminal swallows the wheel and nothing moves).
 	_, err = tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithContext(ctx)).Run()
 	return err
+}
+
+// tuiDebugHeartbeat, under IPSUPPORT_DEBUG_TIMING, runs an independent ticker
+// that has nothing to do with bubbletea's own message loop or renderer. If a
+// reported freeze shows up here too, the whole process (or the OS scheduling
+// it) is stalled — not something specific to bubbletea's input/render path,
+// which Update()/View() timing alone (see tuiDebugTiming above) can't tell
+// apart: bubbletea writes each frame to the terminal (p.renderer.write) OUTSIDE
+// of View(), so a slow terminal write would stall the whole event loop —
+// including reading the next keystroke — without ever showing up as a slow
+// Update() or View() call.
+func tuiDebugHeartbeat(ctx context.Context) {
+	if !tuiDebugTiming {
+		return
+	}
+	go func() {
+		const tick = 100 * time.Millisecond
+		last := time.Now()
+		t := time.NewTicker(tick)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-t.C:
+				if d := now.Sub(last); d > tick+tuiDebugTimingThreshold {
+					fmt.Fprintf(os.Stderr, "[timing] heartbeat gap %v — the process/OS stalled, not just bubbletea's render/input path\n", d)
+				}
+				last = now
+			}
+		}
+	}()
 }
 
 func (m *tuiModel) Init() tea.Cmd {

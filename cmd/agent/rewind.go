@@ -236,7 +236,15 @@ func (a *app) applyRewind(idx int) []string {
 		case s.tooBig:
 			skipped++
 		case s.existed:
-			if err := os.WriteFile(p, s.content, 0o644); err == nil {
+			// p was recorded at checkpoint time and never re-validated since —
+			// if it's been swapped for a symlink (or anything non-regular) in
+			// the meantime, os.WriteFile would follow it and clobber whatever
+			// it now points at instead of restoring the checkpointed file. A
+			// Lstat error here means the path is simply gone, which is fine:
+			// WriteFile below recreates it as a plain file.
+			if fi, err := os.Lstat(p); err == nil && !fi.Mode().IsRegular() {
+				failed = append(failed, p+" (no longer a plain file — refusing to restore through it)")
+			} else if err := os.WriteFile(p, s.content, 0o644); err == nil {
 				restored++
 			} else {
 				failed = append(failed, p)

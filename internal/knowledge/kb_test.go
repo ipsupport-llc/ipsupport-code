@@ -288,6 +288,96 @@ func TestSaveKeepsPendingWhenWriteFails(t *testing.T) {
 	}
 }
 
+// A Save() call with nothing newly pending (e.g. an idle/periodic flush, or
+// simply a second Save with no Add in between) used to skip the merge-read
+// entirely — that branch only ran when pending was non-empty — and fall
+// through to an unconditional write of k.pitfalls. That write has no fresh
+// read backing it, so it silently clobbers whatever a concurrent process
+// wrote to the shared file since this KB last read it. Save must instead
+// skip the write altogether when there's nothing of its own to persist.
+func TestSaveWithNothingPendingDoesNotClobberConcurrentWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k.json")
+	a, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Add(Pitfall{Domain: "file", ErrorPattern: "from a", ProvenFix: "x"})
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second process opens the same file (sees a's lesson), learns its own,
+	// and saves — correctly merging onto the fresh file (disk now has 2).
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Add(Pitfall{Domain: "file", ErrorPattern: "from b", ProvenFix: "y"})
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Back on the first process: it Saves again with NOTHING newly pending (no
+	// Add since its last Save). A blind overwrite would write a's stale
+	// in-memory snapshot (1 lesson) over b's already-persisted 2.
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	final, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(final.All()); got != 2 {
+		t.Errorf("final on-disk lessons = %d, want 2 (b's lesson must survive a's empty-pending Save)", got)
+	}
+}
+
+// The real call sites (/knowledge purge, /knowledge retain) always Save()
+// unconditionally after Purge, regardless of how many lessons it actually
+// dropped. A no-op Purge forces pending back to nil (see Purge), so that
+// Save() runs with nothing pending and !overwrite — the same empty-pending
+// gap as above, just reached via Purge instead of a plain second Save.
+func TestSaveAfterNoopPurgeDoesNotClobberConcurrentWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k.json")
+	a, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Add(Pitfall{Domain: "file", ErrorPattern: "from a", ProvenFix: "x"})
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A concurrent process writes its own lesson to the shared file.
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Add(Pitfall{Domain: "file", ErrorPattern: "from b", ProvenFix: "y"})
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Back on the first process: a no-op purge (nothing old enough to drop),
+	// immediately followed by an unconditional Save — mirroring /knowledge
+	// purge and /knowledge retain.
+	if n := a.Purge(3650); n != 0 {
+		t.Fatalf("Purge = %d, want 0 (no-op)", n)
+	}
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	final, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(final.All()); got != 2 {
+		t.Errorf("final on-disk lessons = %d, want 2 (b's lesson must survive a's no-op-purge Save)", got)
+	}
+}
+
 // A no-op Purge (nothing actually old enough to drop, the common case — the
 // retention check runs unconditionally at startup) must not leave overwrite
 // stuck true for the rest of the process's life: that would make every later

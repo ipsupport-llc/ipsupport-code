@@ -244,19 +244,28 @@ func readPitfalls(path string) ([]Pitfall, error) {
 // global KB could have one's learned lesson silently lost to the other's last
 // write (the mutex only protects against races WITHIN one process). Purge/
 // Clear set overwrite, skipping the merge: those are a deliberate replace of
-// the whole store. A file lock around the whole read-merge-write cycle keeps
-// two such processes from interleaving (one's read landing before the other's
-// write, so each only ever merges its own delta) the same way the in-process
-// mutex keeps two goroutines from interleaving; an in-memory KB (path=="")
-// skips it, since there's nothing on disk to serialize around. The write
-// itself is atomic (temp + rename) so a crash mid-write can't truncate the
-// lessons file either. pending/overwrite are only cleared once that write
+// the whole store. When neither applies — nothing pending and no overwrite
+// due — there is nothing of this KB's own to persist, so Save skips the write
+// entirely instead of falling through to an unconditional write of
+// k.pitfalls: that write would have no fresh read backing it, so a stale
+// in-memory snapshot (e.g. after an idle flush, or a no-op Purge, with no Add
+// in between) could silently clobber a fresher file a different process wrote
+// since this one last read it. A file lock around the whole read-merge-write
+// cycle keeps two such processes from interleaving (one's read landing before
+// the other's write, so each only ever merges its own delta) the same way the
+// in-process mutex keeps two goroutines from interleaving; an in-memory KB
+// (path=="") skips it, since there's nothing on disk to serialize around. The
+// write itself is atomic (temp + rename) so a crash mid-write can't truncate
+// the lessons file either. pending/overwrite are only cleared once that write
 // actually succeeds — if it fails, they're left intact so the next Save
 // replays them instead of silently losing them (a concurrent Add's own Save
 // wouldn't otherwise know to replay a lesson it never recorded).
 func (k *KB) Save() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if !k.overwrite && len(k.pending) == 0 {
+		return nil // nothing of ours to persist — see doc comment above
+	}
 	if k.path != "" {
 		unlock, err := filelock.Lock(k.path)
 		if err != nil {

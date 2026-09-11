@@ -64,6 +64,61 @@ func TestClientHandshakeListCall(t *testing.T) {
 	}
 }
 
+// pagedMCP is a fake MCP server whose tools/list is paginated: no cursor (or
+// an empty one) returns page 1 plus a nextCursor; cursor "page2" returns page
+// 2 with no nextCursor, ending the list.
+func pagedMCP(conn net.Conn) {
+	defer conn.Close()
+	br := bufio.NewReader(conn)
+	for {
+		line, err := br.ReadBytes('\n')
+		if err != nil {
+			return
+		}
+		var req struct {
+			ID     *int   `json:"id"`
+			Method string `json:"method"`
+			Params struct {
+				Cursor string `json:"cursor"`
+			} `json:"params"`
+		}
+		if json.Unmarshal(bytes.TrimSpace(line), &req) != nil || req.ID == nil {
+			continue // bad line or a notification (no response)
+		}
+		result := `{}`
+		if req.Method == "tools/list" {
+			if req.Params.Cursor == "" {
+				result = `{"tools":[{"name":"a","description":"tool a"}],"nextCursor":"page2"}`
+			} else {
+				result = `{"tools":[{"name":"b","description":"tool b"}]}`
+			}
+		}
+		fmt.Fprintf(conn, `{"jsonrpc":"2.0","id":%d,"result":%s}`+"\n", *req.ID, result)
+	}
+}
+
+func TestClientListToolsPaginates(t *testing.T) {
+	cConn, sConn := net.Pipe()
+	go pagedMCP(sConn)
+	c := newClient("fake", cConn, cConn, func() { cConn.Close() })
+	defer c.Close()
+
+	tools, err := c.listTools(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("tools = %+v, want 2 tools across both pages", tools)
+	}
+	got := map[string]bool{}
+	for _, tl := range tools {
+		got[tl.Name] = true
+	}
+	if !got["a"] || !got["b"] {
+		t.Fatalf("tools = %+v, want both page-1 tool %q and page-2 tool %q", tools, "a", "b")
+	}
+}
+
 func TestClientCallSurfacesToolError(t *testing.T) {
 	cConn, sConn := net.Pipe()
 	go func() { // a server whose tools/call reports isError

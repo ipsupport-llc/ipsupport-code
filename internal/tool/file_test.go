@@ -8,7 +8,9 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
@@ -181,6 +183,32 @@ func TestFileSearchSkipsSymlinks(t *testing.T) {
 	// query, so assert the symlink simply wasn't matched.
 	if strings.Contains(r.Content, "link.txt") {
 		t.Errorf("search followed a symlink out of the jail:\n%s", r.Content)
+	}
+}
+
+// search must skip FIFOs (named pipes) — os.ReadFile on one blocks forever
+// without a writer on the other end, and search's ctx is discarded so
+// cancellation can't unblock it. A FIFO reports Size() == 0, so only the size
+// filter let it through; the fix adds a regular-file check.
+func TestFileSearchSkipsFIFO(t *testing.T) {
+	dir := t.TempDir()
+	if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o600); err != nil {
+		t.Skipf("mkfifo unsupported here: %v", err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+
+	done := make(chan Result, 1)
+	go func() {
+		done <- tl.Call(context.Background(), "search", map[string]any{"query": "anything"})
+	}()
+
+	select {
+	case r := <-done:
+		if r.IsError {
+			t.Errorf("search errored: %s", r.Content)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("search hung reading a FIFO")
 	}
 }
 

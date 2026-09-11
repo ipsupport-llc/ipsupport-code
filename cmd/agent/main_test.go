@@ -3253,6 +3253,59 @@ func TestCompactResetsCheckpoints(t *testing.T) {
 	}
 }
 
+// remember()'s ordinary per-turn rolling-window trim (the FIFO cut once history
+// exceeds maxHistory, ~agent.go line 299) is a THIRD path — distinct from
+// session-switch and Compact — that shifts which messages a checkpoint's histLen
+// points at just as much as those two, but used to never call resetCheckpoints.
+// Bug: a checkpoint taken while history sat right at the cap survived every
+// ordinary trim afterward, so a later /rewind either silently no-op'd
+// (rewindPreview's trimmed count landed at 0 despite turns needing undoing) or
+// reverted against a stale offset that no longer indexed the same logical turn.
+func TestHistoryTrimResetsCheckpoints(t *testing.T) {
+	// A canned single-turn reply (no tool calls) from a fake OpenAI-compatible
+	// server, so a.wire() builds a REAL agent — exercising the actual SetOnTrim
+	// wiring in wire(), not a hand-rolled stand-in for it.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = ""
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag.SetMaxHistory(4) // small cap — a couple of turns are enough to reach it
+
+	a.ag.Run(context.Background(), "task 1")
+	a.ag.Run(context.Background(), "task 2") // history now sits AT the cap (4) — not yet over it
+
+	// A checkpoint taken here indexes a history that an ordinary (non-Compact)
+	// turn is about to trim out from under it.
+	cp := a.beginCheckpoint("do something")
+	a.endCheckpoint(cp)
+	if len(a.checkpoints) != 1 {
+		t.Fatal("checkpoint not recorded")
+	}
+
+	a.ag.Run(context.Background(), "task 3") // pushes past the cap → the ordinary FIFO trim fires
+
+	if rows := a.rewindRows(); len(rows) != 0 {
+		t.Errorf("checkpoints = %d after an ordinary history trim, want 0 — a checkpoint from before "+
+			"the trim indexes messages no longer at the front, so a later /rewind must not silently "+
+			"misapply instead of being invalidated", len(rows))
+	}
+	if out := strings.Join(a.rewindCommand("1"), " "); !strings.Contains(out, "nothing to rewind") {
+		t.Errorf("rewindCommand after a history trim = %q, want it to report nothing to rewind to "+
+			"(the checkpoint should be invalidated, not silently applied against a shifted history)", out)
+	}
+}
+
 func TestCdCommand(t *testing.T) {
 	ws := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(ws, "proj", "sub"), 0o755); err != nil {

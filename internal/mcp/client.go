@@ -116,17 +116,30 @@ func (c *Client) handshake(ctx context.Context) error {
 }
 
 func (c *Client) listTools(ctx context.Context) ([]Tool, error) {
-	raw, err := c.rpc(ctx, "tools/list", map[string]any{})
-	if err != nil {
-		return nil, err
+	var tools []Tool
+	cursor := ""
+	for {
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		raw, err := c.rpc(ctx, "tools/list", params)
+		if err != nil {
+			return nil, err
+		}
+		var out struct {
+			Tools      []Tool `json:"tools"`
+			NextCursor string `json:"nextCursor"`
+		}
+		if err := json.Unmarshal(raw, &out); err != nil {
+			return nil, err
+		}
+		tools = append(tools, out.Tools...)
+		if out.NextCursor == "" {
+			return tools, nil
+		}
+		cursor = out.NextCursor
 	}
-	var out struct {
-		Tools []Tool `json:"tools"`
-	}
-	if err := json.Unmarshal(raw, &out); err != nil {
-		return nil, err
-	}
-	return out.Tools, nil
 }
 
 // Call invokes a tool and returns its text content. A tool that reports an error

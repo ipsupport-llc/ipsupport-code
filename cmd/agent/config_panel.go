@@ -33,6 +33,7 @@ var configRows = []cfgRow{
 	{key: "temperature"},
 	{key: "top_p"},
 	{key: "loop_detection"},
+	{key: "idle_timeout"},
 	{header: "Behavior"},
 	{key: "mode"},
 	{key: "perm_files"},
@@ -273,6 +274,8 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		return "top_p", v, "enter: cycle nucleus sampling (0.95 · 1.0 = NVIDIA rec pair)"
 	case "loop_detection":
 		return "loop detection", onOff(!act.DisableLoopDetection), "enter: toggle (aborts a model stuck repeating itself)"
+	case "idle_timeout":
+		return "idle timeout", idleTimeoutLabel(act.IdleTimeoutSeconds), "enter: cycle (no response/stream data → retry)"
 	case "mode":
 		v := "⏵⏵ auto"
 		if m.app.planMode {
@@ -392,6 +395,8 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		} else if err := m.app.wire(); err != nil {
 			m.push(cErr.Render("  " + err.Error()))
 		}
+	case "idle_timeout":
+		m.cycleIdleTimeout()
 	case "model": // needs the live model list — hand off to /model
 		m.state = stIdle
 		return m.runCommand("/model")
@@ -516,6 +521,31 @@ var topPCycle = []float64{0, 0.7, 0.9, 0.95, 1.0}
 func (m *tuiModel) cycleTopP() {
 	next := nextFloat(m.app.activeLLM().TopP, topPCycle)
 	if err := m.app.setTopP(next); err != nil {
+		m.push(cErr.Render("  could not persist: " + err.Error()))
+		return
+	}
+	_ = m.app.wire()
+}
+
+// idleTimeoutCycle presets (seconds) for the /config "idle_timeout" row. 0 =
+// the client's built-in 90s default; the larger values suit a hosted
+// reasoning model that can think silently (no streamed deltas) for longer.
+var idleTimeoutCycle = []int{0, 60, 120, 180, 300, 600}
+
+// idleTimeoutLabel renders the idle timeout for the panel (0 = the built-in 90s).
+func idleTimeoutLabel(sec int) string {
+	if sec <= 0 {
+		return "90s (default)"
+	}
+	return (time.Duration(sec) * time.Second).String()
+}
+
+// cycleIdleTimeout advances the active provider's idle watchdog through preset
+// values, persists it (same local-vs-named-provider branching as
+// setTemperature/setTopP), and re-wires so the client picks it up.
+func (m *tuiModel) cycleIdleTimeout() {
+	next := nextInt(m.app.activeLLM().IdleTimeoutSeconds, idleTimeoutCycle)
+	if err := m.app.setIdleTimeout(next); err != nil {
 		m.push(cErr.Render("  could not persist: " + err.Error()))
 		return
 	}

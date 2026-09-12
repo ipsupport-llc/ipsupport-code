@@ -105,6 +105,17 @@ func (f *fileTool) read(_ context.Context, a Args) Result {
 	} else if !info.Mode().IsRegular() {
 		return Err("cannot read " + path + ": not a regular file")
 	}
+	// Same "one entry point, one check" reasoning as the regular-file guard
+	// above: reject binary content (a compiled executable, an image, an
+	// archive) before either read path below loads and returns raw bytes that
+	// were never going to be useful as text — wasted tokens on the model's
+	// side, and raw control/escape bytes that can visibly corrupt a terminal
+	// rendering the tool-call output on ours.
+	if binary, err := looksBinaryFile(abs); err != nil {
+		return Err("cannot read " + path + ": " + err.Error())
+	} else if binary {
+		return Err(path + " looks like a binary file, not text — reading its raw bytes wouldn't be useful. Use run (e.g. `file " + path + "`, `strings`, or a hex dump) if you need to inspect it.")
+	}
 	// Optional line window: stream a slice of a big file instead of loading the
 	// whole thing into memory, to keep the context lean (offset is 1-based;
 	// limit 0 = to the end).
@@ -112,6 +123,29 @@ func (f *fileTool) read(_ context.Context, a Args) Result {
 		return f.readWindow(abs, path, offset, limit)
 	}
 	return f.readPlain(abs, path)
+}
+
+// isBinarySniffLen is how much of a file looksBinaryFile inspects — enough to
+// reliably tell binary from text without reading a potentially huge file
+// twice in full.
+const isBinarySniffLen = 8000
+
+// looksBinaryFile reports whether the file at abs looks like binary content —
+// a NUL byte anywhere in its first isBinarySniffLen bytes, the same heuristic
+// git/grep use: NUL essentially never appears in real text but is common in
+// binary formats (executables, images, archives).
+func looksBinaryFile(abs string) (bool, error) {
+	file, err := os.Open(abs)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	buf := make([]byte, isBinarySniffLen)
+	n, err := io.ReadFull(file, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return false, err
+	}
+	return bytes.IndexByte(buf[:n], 0) >= 0, nil
 }
 
 // readPlain returns the whole file, capped at maxReadBytes — via a bounded

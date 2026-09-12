@@ -4796,6 +4796,24 @@ func TestSubagentResultRendersMarkdown(t *testing.T) {
 	}
 }
 
+// A tool call's displayed params must show the LITERAL characters the model
+// sent — plain json.Marshal HTML-escapes &, <, > (e.g. "&&" → "&&"),
+// which is meaningless outside an HTML context and makes an ordinary shell
+// command ("a && b", "a > out.txt") unreadable in the tool-call preview line.
+func TestToolCallDisplayDoesNotHTMLEscapeParams(t *testing.T) {
+	m := &tuiModel{width: 120, app: &app{cfg: config.Default()}}
+	got := strings.Join(m.renderEvent(uiEvent{kind: "tool_call", fields: map[string]any{
+		"tool": "run", "action": "shell",
+		"params": map[string]any{"command": "cd /tmp && go run main.go"},
+	}}), "\n")
+	if strings.Contains(got, "\\u0026") {
+		t.Errorf("params rendered HTML-escaped: %q", got)
+	}
+	if !strings.Contains(got, "&&") {
+		t.Errorf("literal && missing from rendered tool call: %q", got)
+	}
+}
+
 func TestRenderMarkdownKeepsContent(t *testing.T) {
 	out := renderMarkdown("Wrote **hello.sh** and ran it.", 80)
 	if !strings.Contains(out, "hello.sh") {

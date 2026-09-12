@@ -278,6 +278,23 @@ func TestContextTracksLastPrompt(t *testing.T) {
 	}
 }
 
+// A server that never reports usage at all (some local runtimes, e.g.
+// MLX-based ones, omit it entirely despite stream_options.include_usage)
+// must not leave Context() stuck at 0 forever — that would silently disable
+// auto-compact, since it would never see the context filling up. Chat falls
+// back to a request-size estimate (~4 bytes/token) in that case.
+func TestContextFallsBackToEstimateWhenServerReportsNoUsage(t *testing.T) {
+	url := sseServer(t, `{"choices":[{"delta":{"content":"hi"}}]}`) // no "usage" field at all
+	cl := NewOpenAIClient(config.LLM{BaseURL: url, Model: "fake"})
+	longPrompt := strings.Repeat("this is a fairly long user message ", 50)
+	if _, err := cl.Chat(context.Background(), []Message{User(longPrompt)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if cl.Context() <= 0 {
+		t.Errorf("Context() = %d, want a positive fallback estimate (not stuck at 0 forever)", cl.Context())
+	}
+}
+
 func TestChatStreamingToolCall(t *testing.T) {
 	url := sseServer(t,
 		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"calc","arguments":""}}]}}]}`,
@@ -415,7 +432,7 @@ func TestParseStreamTicksOnlyOnProgress(t *testing.T) {
 
 	// A comment/heartbeat, a blank data line, and an empty delta — no progress.
 	heartbeats := ": ping\n\ndata: \n\ndata: {\"choices\":[{\"delta\":{}}]}\n\ndata: [DONE]\n\n"
-	if _, err := cl.parseStream(strings.NewReader(heartbeats), tick, 0, new(int)); err != nil {
+	if _, err := cl.parseStream(strings.NewReader(heartbeats), tick, 0, new(int), 0); err != nil {
 		t.Fatal(err)
 	}
 	if ticks != 0 {
@@ -425,7 +442,7 @@ func TestParseStreamTicksOnlyOnProgress(t *testing.T) {
 	// A real content delta does reset it.
 	ticks = 0
 	real := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
-	if _, err := cl.parseStream(strings.NewReader(real), tick, 0, new(int)); err != nil {
+	if _, err := cl.parseStream(strings.NewReader(real), tick, 0, new(int), 0); err != nil {
 		t.Fatal(err)
 	}
 	if ticks != 1 {
@@ -445,7 +462,7 @@ func TestParseStreamAccumulatesLiveOutput(t *testing.T) {
 		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{\"content\":\"the answer\"}}]}\n\n" +
 		"data: [DONE]\n\n"
-	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, 0, new(int))
+	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, 0, new(int), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +476,7 @@ func TestParseStreamAccumulatesLiveOutput(t *testing.T) {
 	// OpenRouter's alternate reasoning key.
 	cl2 := NewOpenAIClient(config.LLM{Model: "x"})
 	sse2 := "data: {\"choices\":[{\"delta\":{\"reasoning\":\"pondering\"}}]}\n\ndata: [DONE]\n\n"
-	if _, err := cl2.parseStream(strings.NewReader(sse2), func() {}, 0, new(int)); err != nil {
+	if _, err := cl2.parseStream(strings.NewReader(sse2), func() {}, 0, new(int), 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := cl2.Live(); got != "pondering" {
@@ -470,7 +487,7 @@ func TestParseStreamAccumulatesLiveOutput(t *testing.T) {
 	// still populate Live() — this is the case that was reported empty live.
 	cl3 := NewOpenAIClient(config.LLM{Model: "x"})
 	sse3 := "data: {\"choices\":[{\"delta\":{\"content\":\"plain answer\"}}]}\n\ndata: [DONE]\n\n"
-	if _, err := cl3.parseStream(strings.NewReader(sse3), func() {}, 0, new(int)); err != nil {
+	if _, err := cl3.parseStream(strings.NewReader(sse3), func() {}, 0, new(int), 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := cl3.Live(); got != "plain answer" {
@@ -542,7 +559,7 @@ func TestStripChannelTokens(t *testing.T) {
 func TestParseStreamStripsLeakedChannelToken(t *testing.T) {
 	cl := NewOpenAIClient(config.LLM{Model: "x"})
 	sse := `data: {"choices":[{"delta":{"content":"<channel|>I'll help you build this."}}]}` + "\n\ndata: [DONE]\n\n"
-	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, 0, new(int))
+	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, 0, new(int), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

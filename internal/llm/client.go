@@ -489,8 +489,12 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return Message{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, oneLine(string(data))), false
 	}
+	// Estimate of the prompt we just sent (~4 bytes/token, this codebase's usual
+	// rough conversion — see e.g. the tool catalog budget) — the fallback below
+	// when a server never reports real usage numbers at all.
+	promptEstimate := len(buf) / 4
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		m, err := c.parseStream(resp.Body, tick, c.maxRespTk, reqCompl)
+		m, err := c.parseStream(resp.Body, tick, c.maxRespTk, reqCompl, promptEstimate)
 		if err != nil {
 			var re *runawayError
 			var de *degenerateOutputError
@@ -508,7 +512,7 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 		}
 		return m, nil, false
 	}
-	m, err := c.parseJSON(resp.Body) // server ignored stream (e.g. a test fake)
+	m, err := c.parseJSON(resp.Body, promptEstimate) // server ignored stream (e.g. a test fake)
 	return m, err, false
 }
 
@@ -518,8 +522,9 @@ func oneLine(s string) string { return textutil.OneLine(s, 150) }
 // parseStream reads an SSE stream, accumulating content and tool calls, and ticks
 // the live completion-token counter as deltas arrive so the UI updates in real
 // time (LM Studio sends roughly one token per chunk). The final usage chunk
-// reconciles the estimate with the real count.
-func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl *int) (Message, error) {
+// reconciles the estimate with the real count. promptEstimate is the fallback
+// used when the server never sends one at all (see below).
+func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl *int, promptEstimate int) (Message, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	var content strings.Builder
@@ -554,7 +559,8 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 		}
 		return nil
 	}
-	done := false // only set at a real "[DONE]" — see the check after the loop
+	done := false      // only set at a real "[DONE]" — see the check after the loop
+	usageSeen := false // did the server ever send a real usage chunk this call?
 	for sc.Scan() {
 		// reqCompl counts stream deltas, not true tokens (there's no per-chunk token
 		// count mid-stream). LM Studio sends ~1 token/chunk so the cap is accurate
@@ -661,6 +667,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 			}
 		}
 		if ch.Usage != nil {
+			usageSeen = true
 			c.mu.Lock()
 			c.promptTk += ch.Usage.PromptTokens
 			c.complTk += ch.Usage.CompletionTokens - *reqCompl
@@ -685,6 +692,20 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 		// failure — same bucket as a connection reset.
 		return Message{}, fmt.Errorf("llm stream ended without completing (no [DONE])")
 	}
+	if !usageSeen {
+		// A server that never reports usage at all (some local runtimes, e.g.
+		// MLX-based ones, omit it entirely despite stream_options.include_usage)
+		// would otherwise leave lastPromptTk at 0 forever — silently disabling
+		// auto-compact, since it never sees the context filling up. Completion
+		// tokens already have a reporting-independent estimate (bumpToken, one
+		// per streamed delta); prompt tokens don't, so fall back to the
+		// request-size estimate here. A real report, when one does arrive,
+		// always overwrites this.
+		c.mu.Lock()
+		c.promptTk += promptEstimate
+		c.lastPromptTk = promptEstimate
+		c.mu.Unlock()
+	}
 	msg := Message{Role: "assistant", Content: stripChannelTokens(content.String())}
 	for _, idx := range order {
 		c := *calls[idx]
@@ -694,7 +715,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 	return msg, nil
 }
 
-func (c *OpenAIClient) parseJSON(r io.Reader) (Message, error) {
+func (c *OpenAIClient) parseJSON(r io.Reader, promptEstimate int) (Message, error) {
 	data, err := io.ReadAll(r)
 	if err != nil {
 		return Message{}, err
@@ -715,10 +736,18 @@ func (c *OpenAIClient) parseJSON(r io.Reader) (Message, error) {
 		return Message{}, fmt.Errorf("llm returned no choices")
 	}
 	c.mu.Lock()
-	c.promptTk += out.Usage.PromptTokens
-	c.complTk += out.Usage.CompletionTokens
 	if out.Usage.PromptTokens > 0 {
+		c.promptTk += out.Usage.PromptTokens
+		c.complTk += out.Usage.CompletionTokens
 		c.lastPromptTk = out.Usage.PromptTokens
+	} else {
+		// No usage at all (this path has no per-delta estimate to fall back on
+		// the way streaming does) — see parseStream's matching fallback for why
+		// this matters: without it, lastPromptTk stays 0 forever and auto-compact
+		// never fires for a server that doesn't report usage.
+		c.promptTk += promptEstimate
+		c.lastPromptTk = promptEstimate
+		c.complTk += len(data) / 4
 	}
 	c.mu.Unlock()
 	msg := fromWire(out.Choices[0].Message)

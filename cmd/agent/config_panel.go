@@ -30,6 +30,8 @@ var configRows = []cfgRow{
 	{key: "model"},
 	{key: "apikey"},
 	{key: "reasoning"},
+	{key: "temperature"},
+	{key: "top_p"},
 	{key: "loop_detection"},
 	{header: "Behavior"},
 	{key: "mode"},
@@ -257,6 +259,18 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		return "api key", v, "enter: add/set a provider key"
 	case "reasoning":
 		return "reasoning", m.app.reasoningLevel(m.app.providerName(), act.Model), "enter: cycle off→high (trims a thinking model)"
+	case "temperature":
+		v := "server default"
+		if act.Temperature > 0 {
+			v = fmt.Sprintf("%g", act.Temperature)
+		}
+		return "temperature", v, "enter: cycle sampling temperature"
+	case "top_p":
+		v := "server default"
+		if act.TopP > 0 {
+			v = fmt.Sprintf("%g", act.TopP)
+		}
+		return "top_p", v, "enter: cycle nucleus sampling (0.95 · 1.0 = NVIDIA rec pair)"
 	case "loop_detection":
 		return "loop detection", onOff(!act.DisableLoopDetection), "enter: toggle (aborts a model stuck repeating itself)"
 	case "mode":
@@ -364,10 +378,14 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		m.cycleCompactThreshold()
 	case "reasoning": // cycle the active model's reasoning effort off→high
 		provider, model := m.app.providerName(), m.app.activeLLM().Model
-		next := nextReasoning(m.app.reasoningLevel(provider, model))
+		next := nextReasoning(provider, m.app.reasoningLevel(provider, model))
 		if _, ok := m.app.applyReasoning(provider+"/"+model, provider, next); !ok {
 			m.push(cDim.Render("  " + provider + " reasoning must be set raw in config.json (key " + provider + "/" + model + ")"))
 		}
+	case "temperature":
+		m.cycleTemperature()
+	case "top_p":
+		m.cycleTopP()
 	case "loop_detection": // toggle the active connection's repetition detectors
 		if err := m.app.toggleLoopDetection(); err != nil {
 			m.push(cErr.Render("  could not persist: " + err.Error()))
@@ -470,6 +488,38 @@ func (m *tuiModel) cycleCompactThreshold() {
 	if err := config.SaveCompactThreshold(m.app.cfg.CompactThreshold); err != nil {
 		m.push(cErr.Render("  could not persist: " + err.Error()))
 	}
+}
+
+// temperatureCycle presets for the /config "temperature" row. 0 = server
+// default (see Chat's c.temp > 0 gate); 1.0 is NVIDIA's recommended pairing
+// with top_p=0.95 below.
+var temperatureCycle = []float64{0, 0.2, 0.7, 1.0}
+
+// cycleTemperature advances the active provider's sampling temperature through
+// preset values, persists it (same local-vs-named-provider branching as
+// setModel), and re-wires so the client picks it up.
+func (m *tuiModel) cycleTemperature() {
+	next := nextFloat(m.app.activeLLM().Temperature, temperatureCycle)
+	if err := m.app.setTemperature(next); err != nil {
+		m.push(cErr.Render("  could not persist: " + err.Error()))
+		return
+	}
+	_ = m.app.wire()
+}
+
+// topPCycle presets for the /config "top_p" row. 0 = server default; 0.95 is
+// NVIDIA's recommended pairing with temperature=1.0 above.
+var topPCycle = []float64{0, 0.7, 0.9, 0.95, 1.0}
+
+// cycleTopP advances the active provider's nucleus-sampling top_p through
+// preset values, persists it, and re-wires.
+func (m *tuiModel) cycleTopP() {
+	next := nextFloat(m.app.activeLLM().TopP, topPCycle)
+	if err := m.app.setTopP(next); err != nil {
+		m.push(cErr.Render("  could not persist: " + err.Error()))
+		return
+	}
+	_ = m.app.wire()
 }
 
 // toggleChannel flips stable ⇄ nightly and persists it.

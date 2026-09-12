@@ -1671,15 +1671,26 @@ func (a *app) reasoningLevel(provider, model string) string {
 	return "custom"
 }
 
-// nextReasoning returns the next level in the cycle after cur (wrapping); a
-// non-level (default/custom) starts the cycle at its head.
-func nextReasoning(cur string) string {
-	for i, l := range reasoningLevels {
+// nextReasoning returns the next level in the cycle after cur (wrapping) for
+// provider; a non-level (default/custom) starts the cycle at its head. For a
+// provider whose "off" has no distinct wire shape (reasoningShape returns a
+// nil shape — local/openai/grok/groq), "off" and "default" are the exact same
+// request on the wire, so including "off" in the cycle is a permanent no-op:
+// applying it just deletes an already-absent key, the display never leaves
+// "default", and minimal/low/medium/high become unreachable. Those providers
+// cycle minimal→high only; "off" stays reachable (and meaningful) wherever it
+// has a real shape of its own.
+func nextReasoning(provider, cur string) string {
+	levels := reasoningLevels
+	if shape, known := reasoningShape(provider, "off"); known && shape == nil {
+		levels = reasoningLevels[1:]
+	}
+	for i, l := range levels {
 		if l == cur {
-			return reasoningLevels[(i+1)%len(reasoningLevels)]
+			return levels[(i+1)%len(levels)]
 		}
 	}
-	return reasoningLevels[0]
+	return levels[0]
 }
 
 // mcpServerNames lists configured MCP server names, sorted. servers is the
@@ -3413,6 +3424,41 @@ func (a *app) toggleLoopDetection() error {
 	}
 	p := a.cfg.Providers[a.cfg.Provider]
 	p.DisableLoopDetection = !p.DisableLoopDetection
+	a.cfg.Providers[a.cfg.Provider] = p
+	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+}
+
+// setTemperature sets the sampling temperature for the CURRENTLY ACTIVE
+// provider's connection and persists it — same local-vs-named-provider
+// branching as setModel. 0 means "unset" (server default — see Chat's
+// c.temp > 0 gate).
+func (a *app) setTemperature(v float64) error {
+	if a.isLocal() {
+		a.cfg.LLM.Temperature = v
+		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
+	}
+	if a.cfg.Providers == nil {
+		a.cfg.Providers = map[string]config.LLM{}
+	}
+	p := a.cfg.Providers[a.cfg.Provider]
+	p.Temperature = v
+	a.cfg.Providers[a.cfg.Provider] = p
+	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+}
+
+// setTopP sets nucleus-sampling top_p for the CURRENTLY ACTIVE provider's
+// connection and persists it — same branching as setTemperature. 0 means
+// "unset" (server default).
+func (a *app) setTopP(v float64) error {
+	if a.isLocal() {
+		a.cfg.LLM.TopP = v
+		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
+	}
+	if a.cfg.Providers == nil {
+		a.cfg.Providers = map[string]config.LLM{}
+	}
+	p := a.cfg.Providers[a.cfg.Provider]
+	p.TopP = v
 	a.cfg.Providers[a.cfg.Provider] = p
 	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
 }

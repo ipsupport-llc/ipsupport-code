@@ -48,6 +48,42 @@ func TestChatToolCall(t *testing.T) {
 	}
 }
 
+// temperature and top_p follow the same "only send when explicitly set (>0)"
+// convention: a zero value means the server's own default, so it must not
+// appear in the request body at all (some hosted models reject an explicit
+// default temperature/top_p with a 400).
+func TestChatSendsTemperatureAndTopPOnlyWhenSet(t *testing.T) {
+	const resp = `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&gotBody)
+		io.WriteString(w, resp)
+	}))
+	defer srv.Close()
+
+	c := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "test"})
+	if _, err := c.Chat(context.Background(), []Message{User("hi")}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if _, ok := gotBody["temperature"]; ok {
+		t.Errorf("unset temperature must be omitted, got %v", gotBody["temperature"])
+	}
+	if _, ok := gotBody["top_p"]; ok {
+		t.Errorf("unset top_p must be omitted, got %v", gotBody["top_p"])
+	}
+
+	c2 := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "test", Temperature: 1.0, TopP: 0.95})
+	if _, err := c2.Chat(context.Background(), []Message{User("hi")}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if gotBody["temperature"] != 1.0 {
+		t.Errorf("temperature = %v, want 1.0", gotBody["temperature"])
+	}
+	if gotBody["top_p"] != 0.95 {
+		t.Errorf("top_p = %v, want 0.95", gotBody["top_p"])
+	}
+}
+
 func TestChatContent(t *testing.T) {
 	const resp = `{"choices":[{"message":{"role":"assistant","content":"the answer is 4"}}]}`
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -59,6 +59,7 @@ type OpenAIClient struct {
 	model   string
 	apiKey  string
 	temp    float64
+	topP    float64
 	extra   map[string]any // extra top-level request params (per-model reasoning, etc.)
 	hc      *http.Client
 
@@ -134,6 +135,7 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 		model:   c.Model,
 		apiKey:  c.APIKey,
 		temp:    c.Temperature,
+		topP:    c.TopP,
 		extra:   c.Extra,
 		hc: &http.Client{
 			Transport: &http.Transport{
@@ -272,6 +274,10 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	// working, while local models still honor a configured value.
 	if c.temp > 0 {
 		body["temperature"] = c.temp
+	}
+	// Same "only send when explicitly set" convention as temperature above.
+	if c.topP > 0 {
+		body["top_p"] = c.topP
 	}
 	// Per-model reasoning controls (and any other extra params) — the user supplies
 	// the provider's own shape; we just merge it in. Doesn't clobber core fields.

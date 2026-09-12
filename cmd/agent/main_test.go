@@ -662,6 +662,70 @@ func TestConfigPanelLoopDetectionToggle(t *testing.T) {
 	}
 }
 
+// temperature/top_p must be settable from /config (not just by hand-editing
+// config.json), for the CURRENTLY ACTIVE connection, following the same
+// local-vs-named-provider persistence split as model/loop_detection.
+func TestConfigPanelTemperatureAndTopPCycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveGlobal/SaveProviders write the global config
+	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	cursorFor := func(key string) int {
+		for i, k := range cfgKeys() {
+			if k == key {
+				return i
+			}
+		}
+		t.Fatalf("no %q row in the config panel", key)
+		return -1
+	}
+
+	m.cfgCursor = cursorFor("temperature")
+	if m.app.cfg.LLM.Temperature != 0.2 {
+		t.Fatalf("config.Default() temperature = %v, want the built-in 0.2", m.app.cfg.LLM.Temperature)
+	}
+	m.configActivate() // 0.2 → 0.7 (temperatureCycle = {0, 0.2, 0.7, 1.0})
+	if m.app.cfg.LLM.Temperature != 0.7 {
+		t.Errorf("after one cycle, temperature = %v, want 0.7", m.app.cfg.LLM.Temperature)
+	}
+	m.configActivate() // 0.7 → 1.0 (NVIDIA rec)
+	if m.app.cfg.LLM.Temperature != 1.0 {
+		t.Errorf("after two cycles, temperature = %v, want 1.0", m.app.cfg.LLM.Temperature)
+	}
+
+	m.cfgCursor = cursorFor("top_p")
+	for i := 0; i < 3; i++ {
+		m.configActivate() // 0 → 0.7 → 0.9 → 0.95
+	}
+	if m.app.cfg.LLM.TopP != 0.95 {
+		t.Errorf("after three cycles, top_p = %v, want 0.95 (NVIDIA rec)", m.app.cfg.LLM.TopP)
+	}
+
+	// switching to a NAMED (non-local) provider must persist to cfg.Providers,
+	// not silently keep writing to cfg.LLM.
+	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://api.lab.co/v1"}}
+	m.app.cfg.Provider = "mylab"
+	m.cfgCursor = cursorFor("temperature")
+	m.configActivate() // 0 → 0.2
+	if m.app.cfg.Providers["mylab"].Temperature != 0.2 {
+		t.Errorf("named-provider temperature = %v, want 0.2", m.app.cfg.Providers["mylab"].Temperature)
+	}
+	if m.app.cfg.LLM.Temperature != 1.0 {
+		t.Errorf("switching provider must not touch local's temperature, still want 1.0, got %v", m.app.cfg.LLM.Temperature)
+	}
+
+	// reload from disk: both providers' values must have actually been persisted.
+	loaded, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LLM.Temperature != 1.0 || loaded.LLM.TopP != 0.95 {
+		t.Errorf("local sampler settings not persisted: temp=%v top_p=%v", loaded.LLM.Temperature, loaded.LLM.TopP)
+	}
+	if loaded.Providers["mylab"].Temperature != 0.2 {
+		t.Errorf("named-provider temperature not persisted: %v", loaded.Providers["mylab"].Temperature)
+	}
+}
+
 func TestResolveModelArg(t *testing.T) {
 	ids := []string{"openai/gpt-4o", "openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "x-ai/grok-4.3"}
 	// exact id → switch
@@ -3030,14 +3094,64 @@ func TestReasoningLevelAndCycle(t *testing.T) {
 		t.Errorf("unknown shape → %q, want custom", got)
 	}
 
-	if got := nextReasoning("off"); got != "minimal" {
-		t.Errorf("off → %q, want minimal", got)
+	// openrouter's "off" has its own real wire shape (reasoning.enabled=false),
+	// distinct from "never set" — so it stays a normal, reachable cycle stop.
+	if got := nextReasoning("openrouter", "off"); got != "minimal" {
+		t.Errorf("openrouter off → %q, want minimal", got)
 	}
-	if got := nextReasoning("high"); got != "off" {
-		t.Errorf("high → %q, want off (wrap)", got)
+	if got := nextReasoning("openrouter", "high"); got != "off" {
+		t.Errorf("openrouter high → %q, want off (wrap)", got)
 	}
-	if got := nextReasoning("default"); got != "off" {
-		t.Errorf("default → %q, want off (cycle head)", got)
+	if got := nextReasoning("openrouter", "default"); got != "off" {
+		t.Errorf("openrouter default → %q, want off (cycle head)", got)
+	}
+}
+
+// For local/openai/grok/groq, reasoningShape's "off" is nil — the request omits
+// reasoning_effort entirely, identical on the wire to never having set it — so
+// reasoningLevel can never distinguish "off" from "default" for these
+// providers. Including "off" in their /config cycle used to make the FIRST
+// Enter on the reasoning row a permanent no-op: applyReasoning("off") deletes
+// an already-absent key, the display stays "default", and nextReasoning always
+// recomputes "off" again from "default" — minimal/low/medium/high were
+// unreachable through the panel.
+func TestReasoningCycleDoesNotStickOnIndistinguishableOff(t *testing.T) {
+	for _, provider := range []string{"local", "openai", "grok", "groq"} {
+		got, seen := "default", map[string]bool{}
+		for i := 0; i < 4; i++ {
+			got = nextReasoning(provider, got)
+			seen[got] = true
+		}
+		for _, want := range []string{"minimal", "low", "medium", "high"} {
+			if !seen[want] {
+				t.Errorf("%s: cycling from default 4x never reached %q (seen=%v) — stuck", provider, want, seen)
+			}
+		}
+		if got := nextReasoning(provider, "high"); got != "minimal" {
+			t.Errorf("%s: high should wrap to minimal (off is a no-op here), got %q", provider, got)
+		}
+	}
+}
+
+// newTUIModel must load a previously-saved accent color (and restore its
+// cycle position, so a later plain Enter on the "color" row continues from
+// there instead of jumping back to the head of colorCycle).
+func TestNewTUIModelLoadsPersistedColor(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.Color = "10"
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(m.accent) != "10" {
+		t.Errorf("accent = %q, want the persisted color 10", m.accent)
+	}
+	if colorCycle[m.accentIdx] != "10" {
+		t.Errorf("accentIdx = %d (%s), want it aligned to the persisted color's cycle position", m.accentIdx, colorCycle[m.accentIdx])
 	}
 }
 

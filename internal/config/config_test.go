@@ -300,6 +300,23 @@ func TestSaveGlobalPreservesOtherKeys(t *testing.T) {
 	}
 }
 
+// The TUI's /color (and the /config "color" row) used to only change the
+// accent in memory — Config had no field for it, so nothing was ever saved,
+// even though the /config panel's own footer claims every row is persisted.
+func TestSaveColorRoundTrip(t *testing.T) {
+	isolate(t)
+	if err := SaveColor("10"); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Color != "10" {
+		t.Errorf("color not persisted: got %q, want \"10\"", cfg.Color)
+	}
+}
+
 func TestSaveProvidersRoundTrip(t *testing.T) {
 	isolate(t)
 	if err := SaveProviders("openai", map[string]LLM{"openai": {APIKey: "sk-x", Model: "gpt-4o"}}); err != nil {

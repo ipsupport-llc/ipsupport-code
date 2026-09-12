@@ -4397,6 +4397,52 @@ func TestReflectSeparateClientCountsTowardBudget(t *testing.T) {
 	}
 }
 
+// A dedicated reflect client's spend must be recorded even when its call
+// ultimately FAILS — a non-retriable failure (the model looping) still bills
+// real tokens already streamed before the error. Before this fix, the
+// separate-client accounting in reflectAndStore only ran on the success path;
+// an error returned before ever reaching it, silently losing those tokens
+// from both the usage ledger and the budget guard. This drives a real
+// non-retriable failure the same way TestRunOneFailedFirstRequestSignalsErrorAndRecordsUsage
+// does: stream the same rune past internal/llm's degenerateRunThreshold
+// (300), which aborts the call with a "looping" error only AFTER genuinely
+// bumping the completion-token counter for every chunk already streamed.
+func TestReflectSeparateClientRecordsUsageOnFailedCall(t *testing.T) {
+	const chunks = 310 // past degenerateRunThreshold (300)
+	var sse strings.Builder
+	for i := 0; i < chunks; i++ {
+		sse.WriteString(`data: {"choices":[{"delta":{"content":"0"}}]}` + "\n\n")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, sse.String())
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.LLM.BaseURL = srv.URL
+	cfg.LLM.Model = "gpt-4o-mini"                                                      // priced, so a nonzero session cost is a meaningful assertion
+	cfg.Reasoning = map[string]json.RawMessage{"reflect:local": json.RawMessage(`{}`)} // forces reflectTarget's separate=true path
+	u, _ := usage.Open("")
+	a := &app{cfg: cfg, usage: u}
+
+	tr := agent.Transcript{Messages: []llm.Message{
+		llm.User("do x"),
+		{Role: "tool", Name: "run", Content: "did x"}, // Reflect skips the model call without tool use
+	}, Final: "done"}
+
+	if learned := a.reflectAndStore(context.Background(), tr); learned != 0 {
+		t.Errorf("learned = %d, want 0 — the reflection call failed, nothing to learn", learned)
+	}
+
+	if tot := a.usage.Total().Tokens(); tot <= 0 {
+		t.Errorf("usage ledger total tokens = %d, want > 0 — a failed dedicated-reflection call's already-billed tokens must still be recorded", tot)
+	}
+	if a.sessionCost() <= 0 {
+		t.Errorf("sessionCostUSD = %v, want > 0 — the budget guard must see a failed dedicated-reflection call's spend too", a.sessionCost())
+	}
+}
+
 // A one-shot task whose very first model request fails outright must not be
 // silently swallowed. Here the fake server streams a single character well
 // past internal/llm's degenerateRunThreshold (300), so the client's
@@ -4478,6 +4524,195 @@ func TestRunOneRecordsDurationInUsageLedger(t *testing.T) {
 	}
 	if got := a.usage.Total().DurationMS; got < 20 {
 		t.Errorf("usage ledger DurationMS = %d, want >= 20 (the run's wall-clock time must be recorded)", got)
+	}
+}
+
+// toolCallRespWithUsage/contentRespWithUsage are tui_e2e_test.go's
+// tuiToolCall/tuiContent with an explicit prompt/completion usage count added,
+// so a test can assert on exact token deltas instead of the fallback estimate
+// send() falls back to when a response reports no usage at all.
+func toolCallRespWithUsage(name, argsJSON string, prompt, completion int) string {
+	b, _ := json.Marshal(map[string]any{
+		"choices": []map[string]any{{"message": map[string]any{
+			"role": "assistant", "content": "",
+			"tool_calls": []map[string]any{{"id": "c1", "type": "function",
+				"function": map[string]any{"name": name, "arguments": argsJSON}}},
+		}}},
+		"usage": map[string]any{"prompt_tokens": prompt, "completion_tokens": completion},
+	})
+	return string(b)
+}
+
+func contentRespWithUsage(text string, prompt, completion int) string {
+	b, _ := json.Marshal(map[string]any{
+		"choices": []map[string]any{{"message": map[string]any{"role": "assistant", "content": text}}},
+		"usage":   map[string]any{"prompt_tokens": prompt, "completion_tokens": completion},
+	})
+	return string(b)
+}
+
+// notFoundOffPOST answers any non-POST request (the LM Studio context-window
+// probe runOne's detectContextWindow issues is a GET) with 404 so it can never
+// consume one of a fake server's sequenced POST (chat-completion) responses —
+// it doesn't touch client token counters either way (detectContextWindow uses
+// its own parsing, not OpenAIClient's), but it WOULD otherwise desync a
+// counter-indexed switch keyed on call order.
+func notFoundOffPOST(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusNotFound)
+		return true
+	}
+	return false
+}
+
+// Reflection running on the SAME client as the main task (the default, no
+// reflect_profile/reflect reasoning-override configured) must have its tokens
+// land in the usage ledger before runOne returns — not only once picked up as
+// a delta by some LATER task's recordUsage call. Before this fix, recordUsage
+// fired exactly once per task, right after a.ag.Run() returned and BEFORE
+// reflectAndStore's own LLM call; a process that exits before another task
+// runs (one-shot mode, or /exit right after) lost those tokens for good.
+func TestReflectionTokensFlushedBeforeRunOneReturns(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if notFoundOffPOST(w, r) {
+			return
+		}
+		n++
+		io.Copy(io.Discard, r.Body)
+		switch n {
+		case 1: // the task's own tool call
+			io.WriteString(w, toolCallRespWithUsage("calc", `{"expression":"1+1"}`, 10, 5))
+		case 2: // the task's final answer
+			io.WriteString(w, contentRespWithUsage("the answer", 10, 5))
+		default: // reflection's own call — a big, distinctive token count
+			io.WriteString(w, contentRespWithUsage(`{"facts":[]}`, 1000, 500))
+		}
+	}))
+	defer srv.Close()
+
+	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	a.cfg.LLM.BaseURL, a.cfg.LLM.Model = srv.URL, "fake"
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := a.runOne(context.Background(), "do the thing"); err != nil {
+		t.Fatal(err)
+	}
+
+	// The reflection call alone reports 500 completion tokens — far more than
+	// the task's own two calls (5+5=10) — so this can only pass if reflection's
+	// tokens were flushed too, not just what was flushed before it ran.
+	if got := a.usage.Total().Completion; got < 500 {
+		t.Errorf("usage ledger completion tokens = %d, want >= 500 — reflection's tokens must be flushed before runOne returns, not left for a next task that may never come", got)
+	}
+}
+
+// Same as TestReflectionTokensFlushedBeforeRunOneReturns, but for the TUI's
+// streaming path (runTaskStreaming) — the other call site the fix touches.
+func TestReflectionTokensFlushedAfterRunTaskStreaming(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if notFoundOffPOST(w, r) {
+			return
+		}
+		n++
+		io.Copy(io.Discard, r.Body)
+		switch n {
+		case 1: // the task's own tool call
+			io.WriteString(w, toolCallRespWithUsage("calc", `{"expression":"1+1"}`, 10, 5))
+		case 2: // the task's final answer
+			io.WriteString(w, contentRespWithUsage("the answer", 10, 5))
+		default: // reflection's own call — a big, distinctive token count
+			io.WriteString(w, contentRespWithUsage(`{"facts":[]}`, 1000, 500))
+		}
+	}))
+	defer srv.Close()
+
+	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	a.cfg.LLM.BaseURL, a.cfg.LLM.Model = srv.URL, "fake"
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	a.runTaskStreaming(context.Background(), "do the thing", a.taskEpoch.Load())
+
+	if got := a.usage.Total().Completion; got < 500 {
+		t.Errorf("usage ledger completion tokens = %d, want >= 500 — reflection's tokens must be flushed by the time runTaskStreaming returns", got)
+	}
+}
+
+// A model switch between tasks must not misattribute a PRIOR task's unflushed
+// reflection tokens to the NEW model, nor price them at the new model's rate.
+// wire() seeds the new client with the old client's cumulative token COUNT so
+// it survives the switch, but recordUsage's own delta baseline (a.lastPrompt/
+// a.lastCompl) is untouched by wire() — so anything left unflushed under the
+// old model would otherwise surface in the new model's very first recordUsage
+// delta. Flushing reflection's tokens immediately (this fix) closes that gap:
+// it happens before the switch has any chance to occur.
+func TestModelSwitchDoesNotMisattributeReflectionTokens(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if notFoundOffPOST(w, r) {
+			return
+		}
+		n++
+		io.Copy(io.Discard, r.Body)
+		switch n {
+		case 1:
+			io.WriteString(w, toolCallRespWithUsage("calc", `{"expression":"1+1"}`, 10, 5))
+		case 2:
+			io.WriteString(w, contentRespWithUsage("the answer", 10, 5))
+		case 3: // reflection — still running on model-a
+			io.WriteString(w, contentRespWithUsage(`{"facts":[]}`, 1000, 500))
+		default: // the second task, after switching to model-b
+			io.WriteString(w, contentRespWithUsage("done", 7, 3))
+		}
+	}))
+	defer srv.Close()
+
+	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	a.cfg.LLM.BaseURL, a.cfg.LLM.Model = srv.URL, "model-a"
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.runOne(context.Background(), "do the thing"); err != nil {
+		t.Fatal(err)
+	}
+
+	a.cfg.LLM.Model = "model-b" // simulate /login switching models mid-session
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.runOne(context.Background(), "do another thing"); err != nil {
+		t.Fatal(err)
+	}
+
+	byModel := map[string]usage.Total{}
+	for _, tt := range a.usage.ByModel() {
+		byModel[tt.Key] = tt
+	}
+	if got := byModel["local/model-a"].Completion; got != 510 {
+		t.Errorf("model-a completion tokens = %d, want 510 (its task's 10 + reflection's 500, all attributed to the model actually active when they ran)", got)
+	}
+	if got := byModel["local/model-b"].Completion; got != 3 {
+		t.Errorf("model-b completion tokens = %d, want 3 (only its own task's tokens — not model-a's leftover reflection tokens misattributed, and mispriced at model-b's rate)", got)
 	}
 }
 

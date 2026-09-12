@@ -504,6 +504,20 @@ func TestSplitSuggestion(t *testing.T) {
 			t.Errorf("decorated NEXT %q → clean=%q sug=%q", in, c, s)
 		}
 	}
+	// The prompt says to skip the line when nothing fits, but a model can fill
+	// it with an honest "nothing to suggest" statement instead (reported live:
+	// shown as a real Tab-acceptable suggestion, which it isn't). Any such
+	// "no suggestion" phrasing must come back empty, not offered as one.
+	for _, in := range []string{
+		"Привет! Чем могу помочь?\nNEXT: — (no specific next step)",
+		"done\nNEXT: none",
+		"done\nNEXT: n/a",
+		"done\nNEXT: -",
+	} {
+		if _, s := splitSuggestion(in); s != "" {
+			t.Errorf("no-suggestion placeholder %q → suggestion=%q, want empty", in, s)
+		}
+	}
 }
 
 func TestParseArgsFoldsTopLevel(t *testing.T) {

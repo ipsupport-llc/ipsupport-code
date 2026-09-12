@@ -312,6 +312,12 @@ type app struct {
 	tui             bool                       // running the TUI (detect the context window off-thread, not inline)
 	startNew        bool                       // -new: skip the startup chooser, begin a fresh session
 
+	// statusMu guards tasks/steps/toolCalls below plus facts (above) and goal
+	// (above): recordRun/finishGoal/reflection's addFacts write them from the
+	// running task's own goroutine, while /status, /usage, and a bare /goal
+	// read them from the UI goroutine while that task is still running (or
+	// reflecting) — same brief-critical-section style as costMu/sessionMu.
+	statusMu                sync.Mutex
 	tasks, steps, toolCalls int
 	lastPrompt, lastCompl   int // client usage snapshot for per-task ledger deltas
 }
@@ -1159,12 +1165,22 @@ func (a *app) loadGoal() {
 	}
 	var g goalState
 	if json.Unmarshal(data, &g) == nil {
+		a.statusMu.Lock()
 		a.goal = g
+		a.statusMu.Unlock()
 	}
 }
 
+// goalSnapshot returns a copy of the current standing goal (guarded, see
+// statusMu) — safe to read while a task's own goroutine may be writing it.
+func (a *app) goalSnapshot() goalState {
+	a.statusMu.Lock()
+	defer a.statusMu.Unlock()
+	return a.goal
+}
+
 func (a *app) saveGoal() error {
-	data, _ := json.MarshalIndent(a.goal, "", "  ")
+	data, _ := json.MarshalIndent(a.goalSnapshot(), "", "  ")
 	return atomicfile.Write(a.goalPath(), data, 0o644)
 }
 
@@ -1177,7 +1193,8 @@ func (a *app) launchGoalText(rest string) (string, bool) {
 	}
 	switch strings.Fields(rest)[0] {
 	case "go", "resume": // resume the standing goal
-		return a.goal.Text, a.goal.Text != ""
+		text := a.goalSnapshot().Text
+		return text, text != ""
 	case "clear", "drop", "done", "ttl", "off", "on":
 		return "", false
 	}
@@ -1189,13 +1206,17 @@ func (a *app) launchGoalText(rest string) (string, bool) {
 // component) — so anything that starts a genuinely NEW session must call this,
 // or the old session's goal silently attaches to the fresh, unrelated thread.
 func (a *app) clearGoal() {
+	a.statusMu.Lock()
 	a.goal = goalState{}
+	a.statusMu.Unlock()
 	os.Remove(a.goalPath())
 }
 
 // setGoal records a new standing goal (active) and persists it.
 func (a *app) setGoal(text string) {
+	a.statusMu.Lock()
 	a.goal = goalState{Text: strings.TrimSpace(text), Status: "active"}
+	a.statusMu.Unlock()
 	if err := a.saveGoal(); err != nil {
 		slog.Warn("goal not persisted", "err", err)
 	}
@@ -1204,21 +1225,28 @@ func (a *app) setGoal(text string) {
 // finishGoal updates the standing goal's status from a finished run, but only when
 // that run was actually pursuing it (same text, still active).
 func (a *app) finishGoal(goal string, tr agent.Transcript) {
+	a.statusMu.Lock()
 	if a.goal.Status != "active" || strings.TrimSpace(goal) != a.goal.Text {
+		a.statusMu.Unlock()
 		return
 	}
 	// With the judge loop off (/goal off · ttl 0) GoalMet is never set — the model
 	// decides when it's done, so a clean uninterrupted finish counts as done
 	// (otherwise the goal stays "incomplete" and the resume prompt nags forever).
-	if (tr.GoalMet || a.cfg.GoalMaxReturns == 0) && !tr.Stopped && !tr.Cancelled {
+	done := (tr.GoalMet || a.cfg.GoalMaxReturns == 0) && !tr.Stopped && !tr.Cancelled
+	if done {
 		// Done: clear it entirely so it never resurfaces after a restart.
 		a.goal = goalState{}
+	} else {
+		// Still unfinished: re-arm one resume offer for the next restart (you
+		// just engaged it).
+		a.goal.Status, a.goal.Offered = "incomplete", false
+	}
+	a.statusMu.Unlock()
+	if done {
 		os.Remove(a.goalPath())
 		return
 	}
-	// Still unfinished: re-arm one resume offer for the next restart (you just
-	// engaged it), then persist.
-	a.goal.Status, a.goal.Offered = "incomplete", false
 	if err := a.saveGoal(); err != nil {
 		slog.Warn("goal status not persisted", "err", err)
 	}
@@ -1228,10 +1256,13 @@ func (a *app) finishGoal(goal string, tr agent.Transcript) {
 // restart, so it isn't re-offered on every subsequent start (until you engage it
 // again or set a new goal).
 func (a *app) markGoalOffered() {
+	a.statusMu.Lock()
 	if a.goal.Offered || a.goal.Text == "" {
+		a.statusMu.Unlock()
 		return
 	}
 	a.goal.Offered = true
+	a.statusMu.Unlock()
 	if err := a.saveGoal(); err != nil {
 		slog.Warn("goal offer-state not persisted", "err", err)
 	}
@@ -1247,7 +1278,7 @@ func (a *app) goalCommand(arg string) []string {
 	}
 	switch verb {
 	case "clear", "drop", "done":
-		had := a.goal.Text
+		had := a.goalSnapshot().Text
 		a.clearGoal()
 		if had == "" {
 			return []string{"no standing goal to clear"}
@@ -1293,14 +1324,15 @@ func (a *app) goalStatus() []string {
 	if a.cfg.GoalMaxReturns == 0 {
 		ttl = "loop off"
 	}
-	if a.goal.Text == "" {
+	g := a.goalSnapshot()
+	if g.Text == "" {
 		return []string{
 			"no standing goal · " + ttl,
 			"  /goal <text> sets one and pursues it · a judge re-feeds it until met · /goal ttl <n>",
 		}
 	}
 	out := []string{
-		fmt.Sprintf("goal [%s]: %s", a.goal.Status, a.goal.Text),
+		fmt.Sprintf("goal [%s]: %s", g.Status, g.Text),
 		"  " + ttl + " · /goal go to resume · /goal clear to drop · /goal ttl <n>",
 	}
 	return out
@@ -1310,7 +1342,8 @@ func (a *app) goalStatus() []string {
 // when the run is pursuing the active standing goal, else 0 (a plain task is one
 // run, no judge overhead).
 func (a *app) goalTTLFor(goal string) int {
-	if a.goal.Status == "active" && strings.TrimSpace(goal) == a.goal.Text {
+	g := a.goalSnapshot()
+	if g.Status == "active" && strings.TrimSpace(goal) == g.Text {
 		return a.cfg.GoalMaxReturns
 	}
 	return 0
@@ -2702,9 +2735,27 @@ func (a *app) loadFacts() {
 	if data, err := os.ReadFile(a.factsPath()); err == nil {
 		var f []string
 		if json.Unmarshal(data, &f) == nil {
+			a.statusMu.Lock()
 			a.facts = f
+			a.statusMu.Unlock()
 		}
 	}
+}
+
+// factsCount reads how many learned facts are stored (guarded, see statusMu).
+func (a *app) factsCount() int {
+	a.statusMu.Lock()
+	defer a.statusMu.Unlock()
+	return len(a.facts)
+}
+
+// factsSnapshot returns a copy of the learned facts (guarded, see statusMu) —
+// safe to read while a task's own goroutine may be appending to them
+// (reflectAndStore's addFacts).
+func (a *app) factsSnapshot() []string {
+	a.statusMu.Lock()
+	defer a.statusMu.Unlock()
+	return append([]string(nil), a.facts...)
 }
 
 // clearFacts drops every learned project fact for this workspace. Facts are
@@ -2713,13 +2764,16 @@ func (a *app) loadFacts() {
 // line of work (e.g. a build command for a subdirectory that no longer
 // exists) keeps leaking into the system prompt of every task after /clear.
 func (a *app) clearFacts() {
+	a.statusMu.Lock()
 	a.facts = nil
+	a.statusMu.Unlock()
 	_ = os.Remove(a.factsPath())
 }
 
 // addFacts dedupe-appends learned facts (most recent maxFacts kept), persists,
 // and returns the genuinely new ones.
 func (a *app) addFacts(facts []string) []string {
+	a.statusMu.Lock()
 	seen := map[string]bool{}
 	for _, f := range a.facts {
 		seen[strings.ToLower(f)] = true
@@ -2737,8 +2791,13 @@ func (a *app) addFacts(facts []string) []string {
 	if len(a.facts) > maxFacts {
 		a.facts = append([]string(nil), a.facts[len(a.facts)-maxFacts:]...)
 	}
+	var snapshot []string
 	if len(added) > 0 {
-		if data, err := json.Marshal(a.facts); err == nil {
+		snapshot = append([]string(nil), a.facts...)
+	}
+	a.statusMu.Unlock()
+	if snapshot != nil {
+		if data, err := json.Marshal(snapshot); err == nil {
 			_ = atomicfile.Write(a.factsPath(), data, 0o644)
 		}
 	}
@@ -2801,9 +2860,8 @@ func (a *app) systemPrompt() string {
 			out += "\n\n## Skills (load full instructions with the skill tool when the topic fits):\n" + idx
 		}
 	}
-	out += a.subagentTargetsPrompt() // dynamic roster of delegate targets (empty if none)
-	if len(a.facts) > 0 {            // learned project facts — keep the injected set small
-		facts := a.facts
+	out += a.subagentTargetsPrompt()                // dynamic roster of delegate targets (empty if none)
+	if facts := a.factsSnapshot(); len(facts) > 0 { // learned project facts — keep the injected set small
 		if len(facts) > 15 {
 			facts = facts[len(facts)-15:]
 		}
@@ -2819,6 +2877,7 @@ func (a *app) emit(kind string, fields map[string]any) {
 }
 
 func (a *app) recordRun(tr agent.Transcript) {
+	a.statusMu.Lock()
 	a.tasks++
 	a.steps += tr.Steps
 	for _, m := range tr.Messages {
@@ -2826,6 +2885,16 @@ func (a *app) recordRun(tr agent.Transcript) {
 			a.toolCalls++
 		}
 	}
+	a.statusMu.Unlock()
+}
+
+// usageCounts reads the session's task/step/tool-call counters (guarded, see
+// statusMu — written by recordRun from the task's own goroutine while /usage
+// may read them from the UI goroutine).
+func (a *app) usageCounts() (tasks, steps, toolCalls int) {
+	a.statusMu.Lock()
+	defer a.statusMu.Unlock()
+	return a.tasks, a.steps, a.toolCalls
 }
 
 // runDuration is elapsed time since start, minus any time spent BLOCKED on an
@@ -4110,7 +4179,7 @@ func (a *app) statusText() string {
 		a.cfg.Workspace, a.cfg.File.Jail, a.cfg.Run.Default, a.cfg.File.Default,
 		promptOrDefault(a.promptSrc), instr, a.ag.SessionLen(),
 		a.goalStatusLine(), a.budgetStatusLine(), a.jobsPending(),
-		a.cfg.KBPath, len(a.kb.All()), len(a.facts), a.cfg.TracePath)
+		a.cfg.KBPath, len(a.kb.All()), a.factsCount(), a.cfg.TracePath)
 }
 
 // budgetStatusLine is the one-line spend summary shown in /status.
@@ -4127,10 +4196,11 @@ func (a *app) goalStatusLine() string {
 	if a.cfg.GoalMaxReturns == 0 {
 		ttl = "loop off"
 	}
-	if a.goal.Text == "" {
+	g := a.goalSnapshot()
+	if g.Text == "" {
 		return "(none) · " + ttl
 	}
-	return fmt.Sprintf("%s [%s] · %s", oneLine(a.goal.Text, 50), a.goal.Status, ttl)
+	return fmt.Sprintf("%s [%s] · %s", oneLine(g.Text, 50), g.Status, ttl)
 }
 
 // promptOrDefault labels the system-prompt source for /status.
@@ -4151,6 +4221,7 @@ func channelOf(cfg config.Config) string {
 
 func (a *app) usageText() string {
 	p, c := a.client.Usage()
+	tasks, steps, toolCalls := a.usageCounts()
 	var b strings.Builder
 	fmt.Fprintf(&b, `usage (this session):
   tasks       %d
@@ -4158,7 +4229,7 @@ func (a *app) usageText() string {
   tool calls  %d
   tokens      %d prompt + %d completion = %d
   lessons     %d in knowledge base
-`, a.tasks, a.steps, a.toolCalls, p, c, p+c, len(a.kb.All()))
+`, tasks, steps, toolCalls, p, c, p+c, len(a.kb.All()))
 	if roll := a.usageRollups(); len(roll) > 0 {
 		b.WriteString("\ntokens (cumulative, saved · $ estimated):\n")
 		for _, r := range roll {

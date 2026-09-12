@@ -1171,8 +1171,28 @@ func envelopeText(raw json.RawMessage) string {
 
 // decodeObj unmarshals s into a JSON object, or nil if it isn't one.
 func decodeObj(s string) map[string]any {
+	s = strings.TrimSpace(s)
+	if m := decodeObjStrict(s); m != nil {
+		return m
+	}
+	// Some models wrap the JSON in their own tool-call convention instead of
+	// emitting it bare (reported live: the whole arguments string was literally
+	// "<parameter=params>\n{\"url\": \"...\"}\n</parameter>") — a tagging scheme
+	// this project never asked for leaking through from different training.
+	// Recovering the embedded object is far more useful than giving up outright,
+	// and can't make a genuinely malformed call any worse: if there's no valid
+	// object hiding in there either, this still returns nil like before.
+	if i, j := strings.IndexByte(s, '{'), strings.LastIndexByte(s, '}'); i >= 0 && j > i {
+		if m := decodeObjStrict(s[i : j+1]); m != nil {
+			return m
+		}
+	}
+	return nil
+}
+
+func decodeObjStrict(s string) map[string]any {
 	var m map[string]any
-	if json.Unmarshal([]byte(strings.TrimSpace(s)), &m) != nil {
+	if json.Unmarshal([]byte(s), &m) != nil {
 		return nil
 	}
 	return m

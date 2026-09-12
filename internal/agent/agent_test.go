@@ -980,6 +980,34 @@ func TestRunStopsOnRepeatedIdenticalCalls(t *testing.T) {
 	}
 }
 
+// Reported live: a task that burns its whole step budget on turns that keep
+// succeeding at DIFFERENT things (so neither the "all failed" nor the
+// "repeating" stuck-guard ever fires) but never write any chat content ended
+// in TOTAL SILENCE in the TUI — nothing on screen, nothing in the log
+// distinguishing it from any other ending, because tr.Final was simply "".
+// The plain (one-shot) path already had its own fallback for this; the TUI
+// path had none, since it only ever sees this same emitted "final" event.
+func TestRunStepBudgetExhaustedWithNoContentGetsAFallbackMessage(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	replies := []llm.Message{
+		toolCallReply("c1", "calc", `{"action":"calculate","params":{"expression":"1+1"}}`),
+		toolCallReply("c2", "calc", `{"action":"calculate","params":{"expression":"2+2"}}`),
+		toolCallReply("c3", "calc", `{"action":"calculate","params":{"expression":"3+3"}}`),
+	}
+	a := New(&scriptLLM{replies: replies}, reg, nil, nil, "", 3) // maxSteps=3, exactly len(replies)
+
+	tr, err := a.Run(context.Background(), "keep calculating")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !tr.Stopped {
+		t.Error("want Stopped=true — ran out of steps")
+	}
+	if !strings.Contains(tr.Final, "step budget exhausted") {
+		t.Errorf("final = %q, want a fallback message naming the step budget, not silence", tr.Final)
+	}
+}
+
 func TestUnwrapEnvelope(t *testing.T) {
 	// nested content.text (the reported leak)
 	if got := unwrapEnvelope(`{"role":"assistant","content":{"text":"hello there"}}`); got != "hello there" {

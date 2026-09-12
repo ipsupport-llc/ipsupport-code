@@ -5485,6 +5485,25 @@ func TestShouldAutoCompactRawMemory(t *testing.T) {
 }
 
 // wire() must raise the Agent's trim cap for memory=raw — otherwise the FIFO
+// wire() must tell the rebuilt Agent the active connection's real context
+// window, so a single long task can watch its own growing tool-call trail
+// against it (Agent.SetContextWindow / trimIfNearWindow) — otherwise a
+// complex task's own back-and-forth could silently outgrow the window with
+// nothing watching until the NEXT task's auto-compact gets a chance to fire.
+func TestWirePropagatesContextWindowToAgent(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.ContextWindow = 65536
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.ag.ContextWindow(); got != 65536 {
+		t.Errorf("Agent.ContextWindow() = %d, want 65536", got)
+	}
+}
+
 // cut (which breaks a local server's KV-cache prefix reuse just like a
 // summary compact does) fires on every turn past the default cap instead of
 // being the rare backstop raw mode is supposed to give you.

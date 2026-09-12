@@ -88,6 +88,117 @@ func TestRunInjectsPitfall(t *testing.T) {
 	}
 }
 
+// trimIfNearWindow must never touch the system prompt, the original goal, or
+// assistant text — only large, OLD tool-result content — and must never touch
+// the most recent trimKeepRecent messages regardless of size, since the model
+// is actively working with those right now.
+func TestTrimIfNearWindowProtectsRecentAndNonToolMessages(t *testing.T) {
+	big := strings.Repeat("x", trimMinResultSize*4)
+	msgs := []llm.Message{
+		{Role: "system", Content: big},          // never touched
+		{Role: "user", Content: "do the thing"}, // never touched
+		{Role: "assistant", Content: big},       // never touched — not a tool result
+		{Role: "tool", Content: big},            // old + big + tool → eligible
+		{Role: "tool", Content: "tiny"},         // too small to bother trimming
+		{Role: "assistant", Content: ""},        // recent — protected regardless
+		{Role: "tool", Content: big},            // recent — protected regardless
+		{Role: "assistant", Content: ""},        // recent
+		{Role: "tool", Content: big},            // recent
+		{Role: "assistant", Content: ""},        // recent
+		{Role: "tool", Content: big},            // recent (index 10, within last 6 of 11)
+	}
+	freed := trimIfNearWindow(msgs, 10) // tiny window forces trimming
+	if freed <= 0 {
+		t.Fatal("expected trimIfNearWindow to free something")
+	}
+	if msgs[0].Content != big {
+		t.Error("system prompt must never be trimmed")
+	}
+	if msgs[1].Content != "do the thing" {
+		t.Error("the user goal must never be trimmed")
+	}
+	if msgs[2].Content != big {
+		t.Error("assistant text must never be trimmed")
+	}
+	if msgs[3].Content == big {
+		t.Error("the old, large, eligible tool result should have been trimmed")
+	}
+	if msgs[4].Content != "tiny" {
+		t.Error("a tool result under trimMinResultSize must be left alone")
+	}
+	for i := 6; i <= 10; i += 2 { // the recent tool messages (protected zone)
+		if msgs[i].Content != big {
+			t.Errorf("recent tool message at index %d must be protected, got %q", i, msgs[i].Content)
+		}
+	}
+}
+
+// Below inTaskTrimRatio of the window, trimIfNearWindow must be a no-op —
+// it's a rare backstop, not everyday routine.
+func TestTrimIfNearWindowNoopWhenUnderThreshold(t *testing.T) {
+	msgs := []llm.Message{
+		{Role: "system", Content: "short"},
+		{Role: "tool", Content: strings.Repeat("x", trimMinResultSize*2)},
+	}
+	before := append([]llm.Message(nil), msgs...)
+	if freed := trimIfNearWindow(msgs, 1_000_000); freed != 0 {
+		t.Errorf("freed = %d, want 0 (well under threshold)", freed)
+	}
+	for i := range msgs {
+		if msgs[i].Content != before[i].Content {
+			t.Errorf("message %d changed when nothing should have been trimmed", i)
+		}
+	}
+}
+
+// A single task with many large tool results must actually complete (not
+// error or hang) even when its own tool-call trail alone would organically
+// exceed a small context window — and the request sent for the FINAL turn
+// must show early results trimmed, proving the mid-task mechanism actually
+// engaged during a real Run(), not just in isolation.
+func TestRunTrimsOldLargeToolResultsMidTask(t *testing.T) {
+	blobSize := trimMinResultSize * 6
+	bigBlob := func(ctx context.Context, a tool.Args) tool.Result { return tool.Ok(strings.Repeat("x", blobSize)) }
+	reg := tool.NewRegistry(tool.NewDomain(tool.DomainSpec{
+		Name: "big", Summary: "test-only: returns a large fixed blob",
+		Actions: []tool.Action{{Name: "get", Run: bigBlob}},
+	}))
+
+	const rounds = 8
+	var replies []llm.Message
+	for i := 0; i < rounds; i++ {
+		// Each call's params differ (n=i) so the loop-detector's "repeating the
+		// exact same call" check doesn't trip — this test is isolating the
+		// context-window trim mechanism, not the (separate, already-correct)
+		// stuck-loop nudge.
+		args := fmt.Sprintf(`{"action":"get","params":{"n":%d}}`, i)
+		replies = append(replies, toolCallReply(fmt.Sprintf("c%d", i), "big", args))
+	}
+	replies = append(replies, llm.Message{Role: "assistant", Content: "done"})
+	fake := &scriptLLM{replies: replies}
+
+	a := New(fake, reg, nil, nil, "", rounds+2)
+	a.SetContextWindow(1000) // tiny relative to rounds*blobSize of raw tool output
+
+	tr, err := a.Run(context.Background(), "fetch the big thing repeatedly")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if tr.Final != "done" {
+		t.Fatalf("final = %q, the task must still complete cleanly", tr.Final)
+	}
+
+	trimmedCount := 0
+	for _, m := range fake.lastMsgs {
+		if m.Role == "tool" && strings.Contains(m.Content, "trimmed") {
+			trimmedCount++
+		}
+	}
+	if trimmedCount == 0 {
+		t.Error("expected at least one early tool result to have been trimmed by the time of the final request")
+	}
+}
+
 func TestHintsRequireErrorPatternMatch(t *testing.T) {
 	kb, _ := knowledge.Open(filepath.Join(t.TempDir(), "k.json"))
 	kb.Add(knowledge.Pitfall{

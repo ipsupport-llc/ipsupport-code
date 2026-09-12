@@ -3305,6 +3305,120 @@ func TestDiffCommand(t *testing.T) {
 	}
 }
 
+// A local .git/config binding core.fsmonitor to an arbitrary executable must
+// never be executed by /diff's gitOut: internal/tool/git.go's git tool
+// disables it on every invocation (see git.go's run()), but gitOut used to
+// carry no such guard at all — a workspace's local config could silently run
+// the hook as a subprocess with no approval gate (this path has none to
+// begin with).
+func TestGitOutDoesNotRunFsmonitorHook(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Skipf("git unavailable: %v\n%s", err, out)
+		}
+	}
+	git("init")
+	git("config", "user.email", "a@b.c")
+	git("config", "user.name", "t")
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\n"), 0o644)
+	git("add", "-A")
+	git("commit", "-m", "init")
+	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("two\n"), 0o644) // modified, so diff has real work to do
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	hook := filepath.Join(dir, "fsmonitor-hook.sh")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\ntouch "+marker+"\nprintf '1\\0'\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git("config", "core.fsmonitor", hook)
+
+	a := &app{cfg: config.Default(), workspace: dir}
+	out := strings.Join(a.diffCommand(), "\n")
+	if !strings.Contains(out, "a.txt") {
+		t.Fatalf("/diff = %q, want the usual diff mentioning a.txt", out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("/diff ran the configured fsmonitor hook (marker file created): gitOut doesn't disable core.fsmonitor")
+	}
+}
+
+// A .gitattributes diff/textconv driver bound in the local git config must
+// never be executed by /diff's gitOut either — same class of risk as the
+// fsmonitor hook above, guarded in internal/tool/git.go by --no-textconv
+// --no-ext-diff on its own "diff" calls.
+func TestGitOutDoesNotRunTextconvDriver(t *testing.T) {
+	dir := t.TempDir()
+	git := func(args ...string) {
+		if out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
+			t.Skipf("git unavailable: %v\n%s", err, out)
+		}
+	}
+	git("init")
+	git("config", "user.email", "a@b.c")
+	git("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("data.bin diff=marker\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data.bin"), []byte("v1\x00binary\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", "-A")
+	git("commit", "-m", "add data.bin")
+
+	marker := filepath.Join(t.TempDir(), "marker")
+	driver := filepath.Join(dir, "textconv-driver.sh")
+	if err := os.WriteFile(driver, []byte("#!/bin/sh\ntouch "+marker+"\ncat \"$1\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	git("config", "diff.marker.textconv", driver)
+
+	if err := os.WriteFile(filepath.Join(dir, "data.bin"), []byte("v2\x00binary\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := &app{cfg: config.Default(), workspace: dir}
+	out := strings.Join(a.diffCommand(), "\n")
+	if !strings.Contains(out, "data.bin") {
+		t.Fatalf("/diff = %q, want it to mention data.bin", out)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Error("/diff ran the configured textconv driver (marker file created): gitOut doesn't pass --no-textconv/--no-ext-diff")
+	}
+}
+
+// gitOut must never hang indefinitely: diffCommand calls it straight from the
+// bubbletea UI goroutine, which has no timeout/cancellation of its own — a
+// wedged git subprocess (a stuck fsmonitor hook, a hung external diff/merge
+// tool) would otherwise freeze the whole TUI forever. This swaps in a fake
+// "git" that just sleeps, and shrinks gitOutTimeout so the test doesn't have
+// to wait out the real few-second default, to prove gitOut returns instead of
+// blocking forever regardless of what the subprocess does.
+func TestGitOutTimesOutOnHungProcess(t *testing.T) {
+	old := gitOutTimeout
+	gitOutTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { gitOutTimeout = old })
+
+	fakeBinDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "git"), []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	done := make(chan struct{})
+	go func() {
+		gitOut(t.TempDir(), "diff")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// returned instead of hanging forever — good.
+	case <-time.After(3 * time.Second): // gitOutTimeout(200ms) plus generous slack
+		t.Fatal("gitOut did not return within 3s of a hung git process — no timeout is bounding it")
+	}
+}
+
 func TestColorizeDiff(t *testing.T) {
 	if colorizeDiff("context line") != "context line" {
 		t.Error("plain lines should pass through unchanged")

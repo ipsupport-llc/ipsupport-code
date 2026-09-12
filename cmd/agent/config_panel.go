@@ -33,6 +33,7 @@ var configRows = []cfgRow{
 	{key: "reasoning"},
 	{key: "temperature"},
 	{key: "top_p"},
+	{key: "max_output_tokens"},
 	{key: "loop_detection"},
 	{key: "idle_timeout"},
 	{header: "Behavior"},
@@ -277,6 +278,12 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 			v = fmt.Sprintf("%g", act.TopP)
 		}
 		return "top_p", v, "enter: cycle nucleus sampling (0.95 · 1.0 = NVIDIA rec pair)"
+	case "max_output_tokens":
+		v := "server default"
+		if act.MaxOutputTokens > 0 {
+			v = fmt.Sprintf("%d", act.MaxOutputTokens)
+		}
+		return "max output", v, "enter: cycle (server's own cap can cut a reasoning model off early)"
 	case "loop_detection":
 		return "loop detection", onOff(!act.DisableLoopDetection), "enter: toggle (aborts a model stuck repeating itself)"
 	case "idle_timeout":
@@ -410,6 +417,8 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		m.cycleTemperature()
 	case "top_p":
 		m.cycleTopP()
+	case "max_output_tokens":
+		m.cycleMaxOutputTokens()
 	case "loop_detection": // toggle the active connection's repetition detectors
 		if err := m.app.toggleLoopDetection(); err != nil {
 			m.push(cErr.Render("  could not persist: " + err.Error()))
@@ -576,6 +585,23 @@ var topPCycle = []float64{0, 0.7, 0.9, 0.95, 1.0}
 func (m *tuiModel) cycleTopP() {
 	next := nextFloat(m.app.activeLLM().TopP, topPCycle)
 	if err := m.app.setTopP(next); err != nil {
+		m.push(cErr.Render("  could not persist: " + err.Error()))
+		return
+	}
+	_ = m.app.wire()
+}
+
+// maxOutputTokensCycle presets for the /config "max_output_tokens" row. 0 =
+// server default (often too small for a reasoning model's own thinking phase —
+// observed live: a reply cut off, finish_reason=length, mid-reasoning, well
+// under the context window's own limit).
+var maxOutputTokensCycle = []int{0, 2000, 4000, 8000, 16000, 32000}
+
+// cycleMaxOutputTokens advances the active provider's max_tokens override
+// through presets, persists it, and re-wires.
+func (m *tuiModel) cycleMaxOutputTokens() {
+	next := nextInt(m.app.activeLLM().MaxOutputTokens, maxOutputTokensCycle)
+	if err := m.app.setMaxOutputTokens(next); err != nil {
 		m.push(cErr.Render("  could not persist: " + err.Error()))
 		return
 	}

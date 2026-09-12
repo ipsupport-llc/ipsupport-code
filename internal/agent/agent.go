@@ -747,6 +747,21 @@ func splitSuggestion(text string) (clean, suggestion string) {
 	if strings.HasPrefix(suggestion, "<") && strings.HasSuffix(suggestion, ">") {
 		suggestion = strings.TrimSpace(suggestion[1 : len(suggestion)-1])
 	}
+	// The prompt says to skip the line entirely when nothing fits, but a model
+	// sometimes fills it with an honest "nothing to suggest" statement instead
+	// (observed: "NEXT: — (no specific next step)") — that's not a real
+	// suggestion to offer Tab-acceptable in the input, it's the model saying
+	// there isn't one. Unwrap a fully-parenthesized form the same way as the
+	// bracketed placeholder above, then treat an actual "no suggestion"
+	// statement as no suggestion.
+	core := strings.TrimSpace(strings.TrimLeft(suggestion, "—–- \t"))
+	if strings.HasPrefix(core, "(") && strings.HasSuffix(core, ")") {
+		core = strings.TrimSpace(core[1 : len(core)-1])
+	}
+	if core == "" || strings.HasPrefix(strings.ToLower(core), "no ") ||
+		strings.EqualFold(core, "none") || strings.EqualFold(core, "n/a") {
+		suggestion = ""
+	}
 	if nl < 0 {
 		return "", suggestion
 	}

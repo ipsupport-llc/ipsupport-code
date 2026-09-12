@@ -714,9 +714,22 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if msg.tokens > 0 {
-			m.app.applyWindow(msg.provider, msg.tokens)
+			changed := m.app.applyWindow(msg.provider, msg.tokens)
 			if msg.provider == m.app.providerName() {
 				m.app.windowDetected = true
+				// Re-wire so the live agent/client immediately pick up the new
+				// window (step budget, history cap, mid-task trim threshold,
+				// per-turn generation cap) instead of waiting on some unrelated
+				// later trigger. Only when nothing is running: wire() reassigns
+				// a.ag/a.client, and reading/rebuilding those out from under an
+				// in-flight task would race it (see wire()'s doc comment). If a
+				// task IS running, this detection's cfg write above still stands
+				// — the next wire() (task end, /model, /login) picks it up.
+				if changed && m.state != stRunning {
+					if err := m.app.wire(); err != nil {
+						m.push(cErr.Render("context window re-wire failed: " + err.Error()))
+					}
+				}
 			}
 		}
 		return m, nil

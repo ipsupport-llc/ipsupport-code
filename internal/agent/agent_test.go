@@ -1263,6 +1263,58 @@ func calcCall() llm.Message {
 	return toolCallReply("c", "calc", `{"action":"calculate","params":{"expression":"1+1"}}`)
 }
 
+// ctxLLM wraps scriptLLM with a Context() reading that changes after every
+// Chat call, mirroring OpenAIClient's real last-write-wins Context() field —
+// so a test can prove Run() snapshots Transcript.PromptTokens from the MAIN
+// turn's own Chat call, before a later same-iteration call (judgeGoal, which
+// shares the same Chatter absent a dedicated judge model) gets a chance to
+// overwrite that reading with its own, much shorter prompt.
+type ctxLLM struct {
+	scriptLLM
+	ctxByCall []int // Context() reading to report after each Chat call, indexed by call order (0-based)
+	ctx       int
+}
+
+func (c *ctxLLM) Chat(ctx context.Context, msgs []llm.Message, tools []map[string]any) (llm.Message, error) {
+	msg, err := c.scriptLLM.Chat(ctx, msgs, tools)
+	if i := c.scriptLLM.i - 1; i >= 0 && i < len(c.ctxByCall) {
+		c.ctx = c.ctxByCall[i]
+	}
+	return msg, err
+}
+
+func (c *ctxLLM) Context() int { return c.ctx }
+
+// Reproduces the bug: the goal judge (judgeGoal) calls a.llm.Chat again in the
+// SAME iteration a final answer was produced, sharing the main client absent a
+// dedicated judge model. Its own reply is much shorter, so it would otherwise
+// leave the client's Context() reading far too low. Transcript.PromptTokens
+// must reflect the MAIN turn's own reading (7000), not the judge's (1000).
+func TestRunPromptTokensSnapshotBeforeJudgeClobbersContext(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &ctxLLM{
+		scriptLLM: scriptLLM{replies: []llm.Message{
+			calcCall(),                             // step 1: act — call index 0
+			{Role: "assistant", Content: "did it"}, // step 2: finalize (MAIN turn) — call index 1
+			{Role: "assistant", Content: "DONE"},   // judgeGoal's own call — call index 2
+		}},
+		ctxByCall: []int{500, 7000, 1000},
+	}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+
+	tr, err := a.Run(context.Background(), "do it")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if tr.Final != "did it" || !tr.GoalMet {
+		t.Fatalf("final = %q, GoalMet = %v — want %q / true (judge said DONE)", tr.Final, tr.GoalMet, "did it")
+	}
+	if tr.PromptTokens != 7000 {
+		t.Errorf("PromptTokens = %d, want 7000 (the MAIN turn's own Context(), not the judge's clobbered 1000)", tr.PromptTokens)
+	}
+}
+
 // The goal loop re-feeds the goal when the judge says it isn't met, then accepts it
 // once the judge says DONE. Returns counts the re-feeds; GoalMet records the verdict.
 func TestRunGoalLoopRefeedsUntilJudgeSaysDone(t *testing.T) {

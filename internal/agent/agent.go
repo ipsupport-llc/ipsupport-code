@@ -920,6 +920,18 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	tr.Stopped = true // ran out of steps before a clean answer
 	tr.Returns = returns
 	clean, suggest := splitSuggestion(lastAssistantContent(msgs))
+	if strings.TrimSpace(clean) == "" {
+		// Reported live: a task that burns its whole step budget on turns that
+		// never produce non-empty content (all reasoning/tool-calls — e.g. a
+		// long unproductive exploration) ended in TOTAL SILENCE in the TUI: no
+		// message on screen, nothing in the log distinguishing this ending from
+		// any other. runOne (the plain/one-shot path) already had its own
+		// fallback text for this exact case; the TUI path only ever sees this
+		// same emitted "final" event's text and renders nothing when it's
+		// empty — so a real, common ending mode was completely invisible
+		// there. Setting it here, at the source, means every caller gets it.
+		clean = fmt.Sprintf("(no final answer — step budget exhausted after %d steps)", a.maxSteps)
+	}
 	tr.Final = clean
 	tr.PromptTokens = promptTokens
 	a.emit("final", map[string]any{"text": clean, "suggest": suggest, "exhausted": true})

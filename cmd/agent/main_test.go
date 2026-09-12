@@ -3407,6 +3407,50 @@ func TestSessionsKeyedByName(t *testing.T) {
 	}
 }
 
+// An active /cd used to be pure in-memory state: saveSession only ever wrote
+// the message history, so restarting the process (or switching away and back
+// to a session) silently dropped it back to the workspace root — losing half
+// of "continue where you left off" for a coding agent pointed at a
+// subdirectory. It must now survive a fresh process (new *app, same
+// workspace/session name) restoring the session.
+func TestCdWorkdirPersistsAcrossSessionRestore(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, "backend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Workspace = ws
+
+	mk := func() *app {
+		kb, _ := knowledge.Open("")
+		c := cfg
+		a := &app{cfg: c, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+		if err := a.wire(); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+
+	first := mk()
+	if lines := first.cdCommand("backend"); strings.Contains(lines[0], "cd:") {
+		t.Fatalf("cd failed: %v", lines)
+	}
+	first.ag.SetHistory([]llm.Message{llm.User("g0"), {Role: "assistant", Content: "a0"}})
+	first.saveSession()
+
+	second := mk() // a fresh process, same workspace/session name
+	second.loadSession()
+
+	wantDir, _ := filepath.EvalSymlinks(filepath.Join(ws, "backend"))
+	gotDir, _ := filepath.EvalSymlinks(second.effectiveDir())
+	if gotDir != wantDir {
+		t.Errorf("effectiveDir() after restore = %q, want %q (the workspace root means /cd was lost)", gotDir, wantDir)
+	}
+	if !strings.Contains(second.ag.System(), gotDir) {
+		t.Errorf("restored working dir must also reach the model's own system prompt, got: %s", second.ag.System())
+	}
+}
+
 func TestNewSessionPreservesOld(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // newNamedSession(persist) writes the global config
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

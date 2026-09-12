@@ -1241,6 +1241,40 @@ func TestRunNudgesThenStops(t *testing.T) {
 	}
 }
 
+// Reported live: a pasted transcript showed a failing run, a file write, then
+// a SUCCESSFUL run, immediately followed by the "Stopped — it kept
+// repeating..." message with no visible nudge line in between — looking like
+// a false trigger from the outside. There was no way to tell, from the debug
+// log alone, whether stuck/nudged carried over from turns earlier than
+// whatever got pasted, or whether the reset-on-progress logic actually ran.
+// This "stuck check" debug line must appear every turn (not just when a
+// stuck/nudge/stop decision is made) so the counter's whole history —
+// including a reset back to 0 on real progress — is reconstructable.
+func TestStuckCheckDebugLogShowsCounterHistory(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	reg := tool.NewRegistry(tool.NewCalc())
+	bad := toolCallReply("c", "calc", `{"action":"","params":{}}`) // empty action → always errors
+	good := toolCallReply("c", "calc", `{"action":"calculate","params":{"expression":"2+2"}}`)
+	fake := &scriptLLM{replies: []llm.Message{bad, good, {Role: "assistant", Content: "done"}}}
+	a := New(fake, reg, nil, nil, "", 5)
+
+	if _, err := a.Run(context.Background(), "do something"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, `msg="stuck check" step=1 all_failed=true repeating=false stuck_before=0 nudged=false`) {
+		t.Errorf("debug log missing the first (failing) turn's stuck state, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, `msg="stuck check" step=2 all_failed=false repeating=false stuck_before=1 nudged=false`) {
+		t.Errorf("debug log missing the second (successful) turn's stuck state (must show stuck_before=1 from the prior failure), got:\n%s", logged)
+	}
+}
+
 // If the nudge unsticks the model (it answers), the run recovers instead of
 // stopping.
 func TestStuckNudgeRecovers(t *testing.T) {

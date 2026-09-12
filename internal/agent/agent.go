@@ -879,7 +879,18 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		sig := callSig(assistant.ToolCalls)
 		repeating := sig != "" && sig == lastSig
 		lastSig = sig
-		if nErr == len(assistant.ToolCalls) || repeating {
+		// Forensic trail for the "Stopped — it kept repeating..." message below:
+		// reported live, a debug log showed the visible transcript (a failing run,
+		// a file write, then a SUCCESSFUL run) followed immediately by that stop
+		// message, with no visible nudge line in between — looking like a false
+		// trigger. Without this line there was no way to tell whether stuck/nudged
+		// carried over from turns earlier than whatever was pasted, or whether the
+		// reset-on-progress logic below actually ran. Logged every turn (not just
+		// on a stuck/nudge/stop decision) so the counter's whole history is
+		// reconstructable, not just its final value.
+		allFailed := nErr == len(assistant.ToolCalls)
+		slog.Debug("stuck check", "step", step+1, "all_failed", allFailed, "repeating", repeating, "stuck_before", stuck, "nudged", nudged)
+		if allFailed || repeating {
 			if stuck++; stuck >= maxStuckTurns {
 				if !nudged {
 					msgs = append(msgs, llm.User(stuckNudgeFor(repeating)))

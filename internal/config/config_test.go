@@ -357,6 +357,64 @@ func TestSetFileValueOnNullRootDoesNotPanic(t *testing.T) {
 	}
 }
 
+// ApplyOverride backs the CLI's -override/-skip-permissions flags: a per-run
+// change that must be invisible to anything reading the config FILE — a
+// later plain launch, with no override flags, must see exactly what was
+// there before.
+func TestApplyOverrideChangesValueInMemoryOnly(t *testing.T) {
+	isolate(t)
+	dir := t.TempDir()
+	if err := SaveGlobal("mymodel", LLM{BaseURL: "http://localhost:1234", Temperature: 0}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := ApplyOverride(&cfg, "llm.temperature", "0.7"); err != nil {
+		t.Fatalf("ApplyOverride: %v", err)
+	}
+	if cfg.LLM.Temperature != 0.7 {
+		t.Errorf("in-memory cfg.LLM.Temperature = %v, want 0.7", cfg.LLM.Temperature)
+	}
+
+	reloaded, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.LLM.Temperature != 0 {
+		t.Errorf("ApplyOverride leaked to disk: a fresh Load sees temperature=%v, want the original 0 (unpersisted)", reloaded.LLM.Temperature)
+	}
+}
+
+// An unknown key (a typo, like `config set` already guards against) must be
+// rejected, not silently accepted into a struct field that doesn't exist and
+// then dropped on the next marshal.
+func TestApplyOverrideRejectsUnknownKey(t *testing.T) {
+	isolate(t)
+	cfg := Default()
+	beforeJSON, _ := json.Marshal(cfg)
+	if err := ApplyOverride(&cfg, "llm.not_a_real_field", "x"); err == nil {
+		t.Error("want an error for an unknown key, got nil")
+	}
+	afterJSON, _ := json.Marshal(cfg)
+	if string(afterJSON) != string(beforeJSON) {
+		t.Errorf("cfg mutated despite a rejected override:\nbefore: %s\nafter:  %s", beforeJSON, afterJSON)
+	}
+}
+
+// A type mismatch (a string where the field is a bool) must be rejected the
+// same way `config set` rejects it via validateConfigObject, not accepted
+// and left to fail confusingly somewhere else at runtime.
+func TestApplyOverrideRejectsTypeMismatch(t *testing.T) {
+	isolate(t)
+	cfg := Default()
+	if err := ApplyOverride(&cfg, "offline", "\"not-a-bool\""); err == nil {
+		t.Error("want an error for a bool field given a string, got nil")
+	}
+}
+
 // UnsetFileValue reads and deletes rather than writing into the root map, so
 // it doesn't panic on a nil root, but it must still behave correctly (no-op,
 // no error) on the same null-root file rather than erroring or misbehaving.

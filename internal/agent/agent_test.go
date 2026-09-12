@@ -107,7 +107,11 @@ func TestTrimIfNearWindowProtectsRecentAndNonToolMessages(t *testing.T) {
 		{Role: "assistant", Content: ""},        // recent
 		{Role: "tool", Content: big},            // recent (index 10, within last 6 of 11)
 	}
-	freed := trimIfNearWindow(msgs, 10) // tiny window forces trimming
+	// Small enough to force trimming, but not so extreme that the main pass
+	// alone can't get under budget — that "protected zone still doesn't fit"
+	// case is the overflow-fallback pass's job, covered separately by
+	// TestTrimIfNearWindowOverflowFallback (which does reach into this zone).
+	freed := trimIfNearWindow(msgs, 3500)
 	if freed <= 0 {
 		t.Fatal("expected trimIfNearWindow to free something")
 	}
@@ -196,6 +200,102 @@ func TestRunTrimsOldLargeToolResultsMidTask(t *testing.T) {
 	}
 	if trimmedCount == 0 {
 		t.Error("expected at least one early tool result to have been trimmed by the time of the final request")
+	}
+}
+
+// Bug repro: a tool call's Arguments (e.g. a file.write's large embedded
+// "content" param) gets resent verbatim on every subsequent request — see
+// client.go's toWire(), which copies ToolCall.Arguments into the wire
+// message's Function.Arguments — so estimateMsgTokens must count it, not
+// just m.Content, or a huge write/edit/run payload is an invisible blind spot.
+func TestEstimateMsgTokensCountsToolCallArguments(t *testing.T) {
+	bigArgs := fmt.Sprintf(`{"action":"write","params":{"path":"f.txt","content":%q}}`, strings.Repeat("x", 50_000))
+	msgs := []llm.Message{
+		{Role: "user", Content: "write a big file"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "c1", Name: "file", Arguments: bigArgs}}},
+	}
+	want := (len("write a big file") + len(bigArgs)) / 4
+	if got := estimateMsgTokens(msgs); got != want {
+		t.Errorf("estimateMsgTokens = %d, want %d — must count ToolCalls[].Arguments as well as Content", got, want)
+	}
+}
+
+// Bug repro: when len(msgs) <= trimKeepRecent, protectFrom <= 0 and the main
+// pass trims nothing at all — so a handful of "recent" messages that alone
+// exceed the whole context window (e.g. a single large file.read result, no
+// bigger than the file tool's own maxReadBytes cap) go completely unaddressed.
+// The overflow-fallback pass must still make progress here, sparing only the
+// single most recent message.
+func TestTrimIfNearWindowOverflowFallback(t *testing.T) {
+	huge := strings.Repeat("x", 200_000) // matches the file tool's maxReadBytes cap
+	msgs := []llm.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "do the thing"},
+		{Role: "assistant", Content: ""},
+		{Role: "tool", Content: huge}, // oversized but "recent" — index 3
+		{Role: "assistant", Content: ""},
+		{Role: "tool", Content: "small final result"}, // the single most recent message
+	}
+	contextWindow := 8192
+	if protectFrom := len(msgs) - trimKeepRecent; protectFrom > 0 {
+		t.Fatalf("test setup: expected len(msgs) <= trimKeepRecent so the main pass is a no-op (protectFrom=%d)", protectFrom)
+	}
+
+	freed := trimIfNearWindow(msgs, contextWindow)
+	if freed <= 0 {
+		t.Fatal("expected the overflow fallback to free something")
+	}
+	if msgs[3].Content == huge {
+		t.Error("the oversized 'recent' tool result must be trimmed by the overflow fallback")
+	}
+	if msgs[5].Content != "small final result" {
+		t.Error("the single most recent message must still be spared")
+	}
+	if limit := int(float64(contextWindow) * inTaskTrimRatio); estimateMsgTokens(msgs) >= limit {
+		t.Errorf("estimate still over limit after overflow fallback: %d >= %d", estimateMsgTokens(msgs), limit)
+	}
+}
+
+// Bug repro: trimIfNearWindow's placeholder must preserve enough of a FAILED
+// run result's content that runFailureReason — which actionsDigest (called by
+// remember() at the end of Run(), to build the durable cross-task digest)
+// uses to find the "— FAILED: ..." tag — still finds the failure after the
+// trim. The placeholder alone has no "\n" at all, so runFailureReason's
+// strings.Cut(content, "\n") failed and it silently returned "".
+func TestTrimIfNearWindowPreservesFailureSignal(t *testing.T) {
+	body := "go: cannot find module providing package foo\n" + strings.Repeat("more build output\n", 40)
+	failContent := "exit 1\n" + body
+	if len(failContent) < trimMinResultSize {
+		t.Fatalf("test setup: failContent too small to be trim-eligible (%d bytes)", len(failContent))
+	}
+	msgs := []llm.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "fix the build"},
+		toolCallReply("c0", "run", `{"action":"shell","params":{"command":"go test ./..."}}`),
+		{Role: "tool", Content: failContent}, // old, big, FAILED — index 3, eligible for trimming
+	}
+	// Pad with enough small recent turns to push the failing pair (indices 2,3)
+	// outside the protected trimKeepRecent window — 16 messages total, matching
+	// the confirmed repro.
+	for i := 0; i < trimKeepRecent; i++ {
+		msgs = append(msgs, llm.Message{Role: "assistant", Content: fmt.Sprintf("thinking %d", i)})
+		msgs = append(msgs, llm.Message{Role: "tool", Content: "ok"})
+	}
+	if protectFrom := len(msgs) - trimKeepRecent; protectFrom <= 3 {
+		t.Fatalf("test setup: the failing result at index 3 must be outside the protected zone (protectFrom=%d)", protectFrom)
+	}
+
+	freed := trimIfNearWindow(msgs, 10) // tiny window forces trimming
+	if freed <= 0 {
+		t.Fatal("test setup: expected trimIfNearWindow to trim something")
+	}
+	if !strings.Contains(msgs[3].Content, "trimmed") {
+		t.Fatalf("test setup: expected the old failing result at index 3 to have been trimmed, got %q", msgs[3].Content)
+	}
+
+	digest := actionsDigest(msgs)
+	if !strings.Contains(digest, "FAILED") {
+		t.Errorf("digest lost the FAILED marker after mid-task trim: %q", digest)
 	}
 }
 

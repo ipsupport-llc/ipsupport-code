@@ -101,6 +101,86 @@ func TestChatContent(t *testing.T) {
 	}
 }
 
+func TestChatJSONCapturesFinishReason(t *testing.T) {
+	const resp = `{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"length"}]}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, resp)
+	}))
+	defer srv.Close()
+
+	c := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "test"})
+	msg, err := c.Chat(context.Background(), []Message{User("hi")}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if msg.FinishReason != "length" {
+		t.Errorf("FinishReason = %q, want length", msg.FinishReason)
+	}
+}
+
+// A reasoning model's streamed thinking (reasoning/reasoning_content deltas)
+// and the server's own finish_reason must reach the returned Message — an
+// empty Content with no tool calls is otherwise indistinguishable in a debug
+// log between "the model reasoned its way to nothing" and "no idea what
+// happened".
+func TestChatStreamingCapturesReasoningAndFinishReason(t *testing.T) {
+	url := sseServer(t,
+		`{"choices":[{"delta":{"reasoning":"let me think about this"}}]}`,
+		`{"choices":[{"delta":{"content":"the answer"},"finish_reason":"stop"}]}`,
+	)
+	cl := NewOpenAIClient(config.LLM{BaseURL: url, Model: "fake"})
+	msg, err := cl.Chat(context.Background(), []Message{User("hi")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Reasoning != "let me think about this" {
+		t.Errorf("Reasoning = %q, want %q", msg.Reasoning, "let me think about this")
+	}
+	if msg.FinishReason != "stop" {
+		t.Errorf("FinishReason = %q, want stop", msg.FinishReason)
+	}
+	if msg.Content != "the answer" {
+		t.Errorf("Content = %q, want 'the answer'", msg.Content)
+	}
+}
+
+// Also works via reasoning_content (the other real-world key some providers
+// use instead of "reasoning" — see streamChunk's Delta).
+func TestChatStreamingCapturesReasoningContentVariant(t *testing.T) {
+	url := sseServer(t, `{"choices":[{"delta":{"reasoning_content":"thinking..."}}]}`)
+	cl := NewOpenAIClient(config.LLM{BaseURL: url, Model: "fake"})
+	msg, err := cl.Chat(context.Background(), []Message{User("hi")}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Reasoning != "thinking..." {
+		t.Errorf("Reasoning = %q, want %q", msg.Reasoning, "thinking...")
+	}
+}
+
+// A stream that dies mid-generation (no "[DONE]") must report a diagnosable
+// error — not just "didn't complete", which is indistinguishable between
+// "died before a single byte arrived" and "died after a lengthy generation".
+// Calls parseStream directly (bypassing Chat's retry loop, whose exponential
+// backoff would make an always-failing case slow) since the error message
+// itself, not the retry behavior, is under test here.
+func TestParseStreamIncompleteErrorReportsDiagnostics(t *testing.T) {
+	raw := "data: {\"choices\":[{\"delta\":{\"reasoning\":\"thinking a bit\"}}]}\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n"
+	cl := NewOpenAIClient(config.LLM{BaseURL: "http://unused", Model: "fake"})
+	var reqCompl int
+	_, err := cl.parseStream(strings.NewReader(raw), func() {}, 100000, &reqCompl, 0)
+	if err == nil {
+		t.Fatal("expected an error for a stream with no [DONE]")
+	}
+	msg := err.Error()
+	for _, want := range []string{"2 chunks", "7 content bytes", "14 reasoning bytes", "0 tool-call arg bytes"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q missing %q", msg, want)
+		}
+	}
+}
+
 func sseServer(t *testing.T, chunks ...string) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

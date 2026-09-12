@@ -765,11 +765,21 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		}
 		// At IPS_LOG=debug this shows exactly what the model returned each turn —
 		// the actual tool calls, or text with NO tool calls (e.g. a chat model
-		// refusing to edit instead of calling file.edit).
+		// refusing to edit instead of calling file.edit). reasoning/finish_reason
+		// are the difference between "content empty, no idea why" and an actual
+		// diagnosis: a model that reasoned its way to nothing, one the server cut
+		// off (finish_reason=length) vs. one that just quietly matched "stop".
+		// context_tokens is this same turn's prompt size (see promptTokens above),
+		// so a degenerate-empty-reply pattern can be correlated with the context
+		// actually being near full — the exact failure mode auto-compact exists
+		// to prevent.
 		slog.Debug("model turn", "step", step+1,
 			"tool_calls", toolCallNames(assistant.ToolCalls),
 			"args", toolCallArgs(assistant.ToolCalls),
-			"content", clip(strings.TrimSpace(assistant.Content), 240))
+			"content", clip(strings.TrimSpace(assistant.Content), 240),
+			"reasoning", clip(strings.TrimSpace(assistant.Reasoning), 500),
+			"finish_reason", assistant.FinishReason,
+			"context_tokens", promptTokens)
 		assistant.Content = unwrapEnvelope(assistant.Content) // salvage envelope-as-content leaks
 		msgs = append(msgs, assistant)
 

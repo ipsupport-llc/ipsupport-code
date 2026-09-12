@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -65,6 +67,37 @@ func TestRunFiresToolThenFinal(t *testing.T) {
 	obs := toolObservation(tr.Messages)
 	if len(obs) != 1 || !strings.Contains(obs[0].Content, "4") {
 		t.Errorf("tool observation = %+v, want result containing 4", obs)
+	}
+}
+
+// The "model turn" debug log is the main tool for diagnosing a degenerate
+// empty reply (empty content, no tool calls, no clue why) — it must actually
+// show the model's own reasoning text, the server's stated finish_reason, and
+// the current context fullness, not just the (possibly blank) final content.
+func TestModelTurnDebugLogIncludesReasoningFinishReasonAndContext(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "", Reasoning: "thinking it over", FinishReason: "stop"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	if _, err := a.Run(context.Background(), "do something"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, `reasoning="thinking it over"`) {
+		t.Errorf("debug log missing the model's reasoning text, got: %s", logged)
+	}
+	if !strings.Contains(logged, "finish_reason=stop") {
+		t.Errorf("debug log missing finish_reason, got: %s", logged)
+	}
+	if !strings.Contains(logged, "context_tokens=") {
+		t.Errorf("debug log missing context_tokens, got: %s", logged)
 	}
 }
 

@@ -100,6 +100,12 @@ func (r *Registry) Dispatch(ctx context.Context, name, action string, params map
 		if a := inferAction(t, t.Actions(), params); a != "" {
 			return t.Call(ctx, a, params)
 		}
+		// The domain may have exactly one action with exactly one required
+		// param — then there's nowhere else the garbled action string could
+		// have meant to go but that param (see Domain.soleRequiredParam).
+		if fixedAction, fixedParams, ok := garbledActionAsParam(t, action, params); ok {
+			return t.Call(ctx, fixedAction, fixedParams)
+		}
 		return Err(fmt.Sprintf("%s: unknown action %q; valid actions: %s", name, action, strings.Join(t.Actions(), ", ")))
 	}
 	return t.Call(ctx, action, params)
@@ -116,6 +122,31 @@ func inferAction(t Tool, acts []string, params map[string]any) string {
 		return a
 	}
 	return ""
+}
+
+// garbledActionAsParam recovers a call where the model dumped its intended
+// value directly into "action" instead of params (see Domain.
+// soleRequiredParam's doc). Safe specifically because it only fires for a
+// domain with exactly one action and exactly one required param — there's
+// nowhere else the garbled string could have meant to go — and dispatch
+// still goes through the tool's own normal approval/policy gate afterward
+// via the ordinary t.Call path: this only fixes ROUTING, never bypasses
+// authorization.
+func garbledActionAsParam(t Tool, action string, params map[string]any) (fixedAction string, fixedParams map[string]any, ok bool) {
+	d, isDomain := t.(*Domain)
+	if !isDomain {
+		return "", nil, false
+	}
+	soleAction, soleParam, hasOne := d.soleRequiredParam()
+	if !hasOne || !isEmpty(params[soleParam]) {
+		return "", nil, false // the param was already given explicitly — don't clobber a real value
+	}
+	out := make(map[string]any, len(params)+1)
+	for k, v := range params {
+		out[k] = v
+	}
+	out[soleParam] = action
+	return soleAction, out, true
 }
 
 // toolChoice phrases which tool to call for a hint. An action owned by

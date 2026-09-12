@@ -115,6 +115,51 @@ func TestDispatchInfersActionFromGarbledAction(t *testing.T) {
 	}
 }
 
+// Reported live: a local model repeatedly put the ENTIRE shell command into
+// the top-level "action" field instead of action="shell",
+// params={"command":...}. run has exactly one action ("shell") with exactly
+// one required param ("command"), so there's nowhere else the garbled
+// string could have meant to go — Dispatch should recover it instead of
+// just erroring.
+func TestDispatchRecoversGarbledActionAsSoleParamRun(t *testing.T) {
+	rt := runToolFor(t, t.TempDir(), "allow", yes(), nil)
+	r := NewRegistry(rt).Dispatch(context.Background(), "run", "echo hi", map[string]any{})
+	if r.IsError || !strings.Contains(r.Content, "hi") {
+		t.Errorf("res = %+v, want a successful shell run of the garbled action as the command", r)
+	}
+}
+
+// Same recovery, for calc: exactly one action ("calculate") with exactly one
+// required param ("expression").
+func TestDispatchRecoversGarbledActionAsSoleParamCalc(t *testing.T) {
+	r := NewRegistry(NewCalc()).Dispatch(context.Background(), "calc", "2+2", map[string]any{})
+	if r.IsError || r.Content != "4" {
+		t.Errorf("res = %+v, want 4 (as if action=calculate, params={expression:2+2})", r)
+	}
+}
+
+// A multi-action tool (git has 9 actions) is genuinely ambiguous about which
+// action a garbled string was meant for — the recovery must NOT fire, and the
+// normal "unknown action" error must still surface unchanged.
+func TestDispatchDoesNotRecoverGarbledActionForMultiActionTool(t *testing.T) {
+	gt := gitToolFor(t, t.TempDir(), yes())
+	r := NewRegistry(gt).Dispatch(context.Background(), "git", "do the thing", map[string]any{})
+	if !r.IsError || !strings.Contains(r.Content, `unknown action "do the thing"`) {
+		t.Errorf("res = %+v, want the unchanged unknown-action error", r)
+	}
+}
+
+// If params already carries a non-empty value for the sole required param,
+// the model DID use params correctly — the action name is wrong for some
+// other reason. Don't guess/overwrite; fall through to the normal error.
+func TestDispatchDoesNotOverwriteAlreadyGivenSoleParam(t *testing.T) {
+	rt := runToolFor(t, t.TempDir(), "allow", yes(), nil)
+	r := NewRegistry(rt).Dispatch(context.Background(), "run", "foo", map[string]any{"command": "ls -la /tmp"})
+	if !r.IsError || !strings.Contains(r.Content, `unknown action "foo"`) {
+		t.Errorf("res = %+v, want the unchanged unknown-action error, not a silent overwrite", r)
+	}
+}
+
 func TestOpenAIToolsSchema(t *testing.T) {
 	r := NewRegistry(&fakeTool{name: "calc", actions: []string{"calculate"}})
 	tools := r.OpenAITools()

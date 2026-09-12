@@ -121,3 +121,31 @@ func TestWebOfflineRefuses(t *testing.T) {
 		}
 	}
 }
+
+// inferWebAction is the fallback for a model whose own tool-call convention
+// leaks a URL or query text through under the wrong shape (garbled action,
+// unexpected param keys) instead of ours — reported live: a model wrapping a
+// URL in "<parameter=params>{...}</parameter>"-style tags. Any URL-looking
+// value anywhere in params means fetch; any other non-empty text means
+// search; nothing usable gives up rather than guessing.
+func TestInferWebAction(t *testing.T) {
+	cases := []struct {
+		name   string
+		params map[string]any
+		want   string
+	}{
+		{"url under the right key", map[string]any{"url": "https://example.com"}, "fetch"},
+		{"url under a garbled key", map[string]any{"params": "http://example.com/page"}, "fetch"},
+		{"query text", map[string]any{"query": "golang tool calling"}, "search"},
+		{"text under a garbled key", map[string]any{"parameter": "golang tool calling"}, "search"},
+		{"nothing usable", map[string]any{"limit": 8}, ""},
+		{"empty", map[string]any{}, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := inferWebAction(c.params); got != c.want {
+				t.Errorf("inferWebAction(%v) = %q, want %q", c.params, got, c.want)
+			}
+		})
+	}
+}

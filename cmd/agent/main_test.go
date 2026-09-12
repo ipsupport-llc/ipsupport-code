@@ -1936,6 +1936,135 @@ func TestPlanReviewHandshake(t *testing.T) {
 	}
 }
 
+// A task that finishes with something queued behind it must still check
+// auto-compact before draining the queue — otherwise any task/command left
+// queued behind a finishing task perpetually skips the between-task
+// compaction check (see the taskDoneMsg handler).
+func TestQueuedTaskChecksAutoCompactBeforeDraining(t *testing.T) {
+	// Same canned-usage trick as TestRunOneAutoCompactResetsCheckpoints: a
+	// prompt_tokens well past 75% of a small window makes shouldAutoCompact()
+	// fire for real, not a hand-rolled stand-in for the gating logic.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],`+
+			`"usage":{"prompt_tokens":9000,"completion_tokens":5}}`)
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = ""
+	cfg.LLM.ContextWindow = 10000
+	cfg.ReflectDisabled = true
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.windowDetected = true // skip the detect probe — the window is already known here
+
+	// Build session length >= 4 (autoCompactNeeded's floor) before the task under test.
+	a.ag.Run(context.Background(), "task 1")
+	a.ag.Run(context.Background(), "task 2")
+	if !a.shouldAutoCompact() {
+		t.Fatal("test setup: expected shouldAutoCompact() to be true after the warm-up runs")
+	}
+
+	m := &tuiModel{app: a, state: stRunning, width: 80, input: textarea.New(), ctx: context.Background()}
+	m.epoch = a.taskEpoch.Add(1)
+	m.queued = []string{"/help"} // something queued behind this finishing task
+
+	_, cmd := m.Update(taskDoneMsg{epoch: m.epoch})
+
+	if m.state != stRunning {
+		t.Fatalf("taskDoneMsg with a queued item and auto-compact due → state=%v, want stRunning (compacting first)", m.state)
+	}
+	if len(m.queued) != 1 {
+		t.Fatalf("queue drained before the pending compaction ran: %v", m.queued)
+	}
+	if cmd == nil {
+		t.Fatal("expected a compact cmd, got nil")
+	}
+	msg, ok := cmd().(compactDoneMsg)
+	if !ok {
+		t.Fatalf("cmd() = %T, want compactDoneMsg", msg)
+	}
+	if msg.err != nil || msg.n == 0 {
+		t.Fatalf("compact = (n=%d, err=%v), want a real (non no-op) compact for this test", msg.n, msg.err)
+	}
+
+	// Compaction finishing must then drain the queue that was deferred behind it.
+	m.Update(msg)
+	if len(m.queued) != 0 {
+		t.Errorf("queue never drained once compaction finished: %v", m.queued)
+	}
+	if m.state != stIdle {
+		t.Errorf("after draining the queued /help, state = %v, want stIdle", m.state)
+	}
+	if !strings.Contains(strings.Join(m.history, "\n"), "commands") {
+		t.Error("the queued /help should have executed on drain")
+	}
+}
+
+// runLoop emits exactly one taskDoneMsg for the WHOLE loop, so the TUI's only
+// compact trigger (the taskDoneMsg handler) never fires between iterations.
+// runLoop must therefore check auto-compact itself, inline, after every
+// iteration — not just once when the loop finally ends.
+func TestRunLoopChecksAutoCompactEachIteration(t *testing.T) {
+	var reqs atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reqs.Add(1)
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],`+
+			`"usage":{"prompt_tokens":9000,"completion_tokens":5}}`)
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = ""
+	cfg.LLM.ContextWindow = 10000
+	cfg.ReflectDisabled = true
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.windowDetected = true
+
+	// Warm up past autoCompactNeeded's sessionLen floor (>= 4), same trick as
+	// TestRunOneAutoCompactResetsCheckpoints.
+	a.ag.Run(context.Background(), "warmup 1")
+	a.ag.Run(context.Background(), "warmup 2")
+	if !a.shouldAutoCompact() {
+		t.Fatal("test setup: expected shouldAutoCompact() to be true after the warm-up runs")
+	}
+	warmupReqs := reqs.Load()
+
+	m := &tuiModel{app: a, input: textarea.New(), bridge: newBridge(), ctx: context.Background()}
+
+	const iterations = 3
+	cmd := m.runLoop(time.Millisecond, iterations, "loop goal")
+	msg := cmd() // run all iterations synchronously, on this goroutine
+
+	if done, ok := msg.(taskDoneMsg); !ok || done.epoch != m.epoch {
+		t.Fatalf("runLoop's cmd returned %#v, want taskDoneMsg{epoch: %d}", msg, m.epoch)
+	}
+
+	// Each iteration should cost one Run request plus one Compact request
+	// (shouldAutoCompact stays true throughout: every Run pushes session
+	// length back over the floor, and every response reports the same
+	// over-threshold usage). Without a per-iteration check, only `iterations`
+	// Run requests would happen and Compact would never run at all.
+	got := reqs.Load() - warmupReqs
+	want := int64(2 * iterations)
+	if got != want {
+		t.Errorf("requests made during the loop = %d, want %d (a Run + a Compact per iteration)", got, want)
+	}
+}
+
 func TestReverseSearch(t *testing.T) {
 	app := &app{promptHist: []string{"fix the parser", "add tests", "fix the ci build", "write docs"}}
 	m := &tuiModel{input: textarea.New(), app: app}

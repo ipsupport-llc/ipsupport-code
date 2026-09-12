@@ -633,12 +633,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.planTask = false
 		m.state = stIdle
+		if m.app.shouldAutoCompact() { // context near the limit — fold it down before draining the queue
+			return m, tea.Batch(detect, m.startCompact(true))
+		}
 		if len(m.queued) > 0 { // drain the next pending message(s): tasks + /commands
 			model, cmd := m.drainQueue()
 			return model, tea.Batch(detect, cmd)
-		}
-		if m.app.shouldAutoCompact() { // context near the limit — fold it down
-			return m, tea.Batch(detect, m.startCompact(true))
 		}
 		return m, tea.Batch(detect, m.input.Focus())
 
@@ -1808,6 +1808,15 @@ func (m *tuiModel) runLoop(interval time.Duration, max int, goal string) tea.Cmd
 			}
 			m.bridge.Emit("loop", map[string]any{"i": i + 1, "max": max, "every": interval.String()})
 			m.app.runTaskStreaming(tctx, goal, ep)
+			// runLoop emits taskDoneMsg only once, after every iteration — the
+			// per-task auto-compact check in the taskDoneMsg handler never fires
+			// mid-loop, so check inline here instead, exactly like runOne does
+			// synchronously for the plain (non-TUI) path.
+			if m.app.shouldAutoCompact() {
+				if n, err := m.app.ag.Compact(tctx); err == nil && n > 0 {
+					m.app.saveSession()
+				}
+			}
 		}
 		return taskDoneMsg{epoch: ep}
 	}

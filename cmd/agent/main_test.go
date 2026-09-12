@@ -726,6 +726,58 @@ func TestConfigPanelTemperatureAndTopPCycle(t *testing.T) {
 	}
 }
 
+// The server's own default max_tokens can cut a reasoning model off mid-
+// thought (observed live: finish_reason=length well under the context
+// window's own limit) — max_output_tokens must be settable from /config,
+// persisted with the same local-vs-named-provider split, and survive a reload.
+func TestConfigPanelMaxOutputTokensCycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	cursorFor := func(key string) int {
+		for i, k := range cfgKeys() {
+			if k == key {
+				return i
+			}
+		}
+		t.Fatalf("no %q row in the config panel", key)
+		return -1
+	}
+
+	m.cfgCursor = cursorFor("max_output_tokens")
+	if m.app.cfg.LLM.MaxOutputTokens != 0 {
+		t.Fatalf("default max_output_tokens = %v, want 0 (server default)", m.app.cfg.LLM.MaxOutputTokens)
+	}
+	for i := 0; i < 3; i++ {
+		m.configActivate() // 0 → 2000 → 4000 → 8000
+	}
+	if m.app.cfg.LLM.MaxOutputTokens != 8000 {
+		t.Errorf("after three cycles, max_output_tokens = %v, want 8000", m.app.cfg.LLM.MaxOutputTokens)
+	}
+
+	// named (non-local) provider must persist to cfg.Providers, not cfg.LLM.
+	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://api.lab.co/v1"}}
+	m.app.cfg.Provider = "mylab"
+	m.configActivate() // 0 → 2000 for mylab
+	if m.app.cfg.Providers["mylab"].MaxOutputTokens != 2000 {
+		t.Errorf("named-provider max_output_tokens = %v, want 2000", m.app.cfg.Providers["mylab"].MaxOutputTokens)
+	}
+	if m.app.cfg.LLM.MaxOutputTokens != 8000 {
+		t.Errorf("switching provider must not touch local's max_output_tokens, still want 8000, got %v", m.app.cfg.LLM.MaxOutputTokens)
+	}
+
+	loaded, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LLM.MaxOutputTokens != 8000 {
+		t.Errorf("local max_output_tokens not persisted: %v", loaded.LLM.MaxOutputTokens)
+	}
+	if loaded.Providers["mylab"].MaxOutputTokens != 2000 {
+		t.Errorf("named-provider max_output_tokens not persisted: %v", loaded.Providers["mylab"].MaxOutputTokens)
+	}
+}
+
 // The idle watchdog (how long a request waits with no response/stream data
 // before it's treated as a hiccup and retried) was config.json-only, same gap
 // temperature/top_p had — must be settable from /config, persisted with the

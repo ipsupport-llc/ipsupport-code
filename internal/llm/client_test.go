@@ -71,8 +71,11 @@ func TestChatSendsTemperatureAndTopPOnlyWhenSet(t *testing.T) {
 	if _, ok := gotBody["top_p"]; ok {
 		t.Errorf("unset top_p must be omitted, got %v", gotBody["top_p"])
 	}
+	if _, ok := gotBody["max_tokens"]; ok {
+		t.Errorf("unset max_tokens must be omitted, got %v", gotBody["max_tokens"])
+	}
 
-	c2 := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "test", Temperature: 1.0, TopP: 0.95})
+	c2 := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "test", Temperature: 1.0, TopP: 0.95, MaxOutputTokens: 8000})
 	if _, err := c2.Chat(context.Background(), []Message{User("hi")}, nil); err != nil {
 		t.Fatalf("Chat: %v", err)
 	}
@@ -81,6 +84,9 @@ func TestChatSendsTemperatureAndTopPOnlyWhenSet(t *testing.T) {
 	}
 	if gotBody["top_p"] != 0.95 {
 		t.Errorf("top_p = %v, want 0.95", gotBody["top_p"])
+	}
+	if gotBody["max_tokens"] != 8000.0 { // JSON numbers decode as float64
+		t.Errorf("max_tokens = %v, want 8000", gotBody["max_tokens"])
 	}
 }
 

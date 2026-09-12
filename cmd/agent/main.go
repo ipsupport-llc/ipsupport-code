@@ -3806,6 +3806,25 @@ func (a *app) setTopP(v float64) error {
 	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
 }
 
+// setMaxOutputTokens sets the request's max_tokens for the CURRENTLY ACTIVE
+// provider's connection and persists it — same local-vs-named-provider
+// branching as setTemperature/setTopP. 0 means "unset" (the server's own
+// default, which can be too small for a reasoning model's thinking phase —
+// see Config.LLM.MaxOutputTokens).
+func (a *app) setMaxOutputTokens(v int) error {
+	if a.isLocal() {
+		a.cfg.LLM.MaxOutputTokens = v
+		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
+	}
+	if a.cfg.Providers == nil {
+		a.cfg.Providers = map[string]config.LLM{}
+	}
+	p := a.cfg.Providers[a.cfg.Provider]
+	p.MaxOutputTokens = v
+	a.cfg.Providers[a.cfg.Provider] = p
+	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+}
+
 // setIdleTimeout sets the idle watchdog (seconds with NO response/stream data
 // before a request is treated as a hiccup and retried) for the CURRENTLY
 // ACTIVE provider's connection and persists it — same local-vs-named-provider

@@ -69,13 +69,14 @@ func ToolResult(callID, name, content string) Message {
 
 // OpenAIClient talks to an OpenAI-compatible /chat/completions endpoint.
 type OpenAIClient struct {
-	baseURL string
-	model   string
-	apiKey  string
-	temp    float64
-	topP    float64
-	extra   map[string]any // extra top-level request params (per-model reasoning, etc.)
-	hc      *http.Client
+	baseURL      string
+	model        string
+	apiKey       string
+	temp         float64
+	topP         float64
+	maxOutputTok int            // request's max_tokens; 0 = omit, server's own default
+	extra        map[string]any // extra top-level request params (per-model reasoning, etc.)
+	hc           *http.Client
 
 	// OnRetry, if set, is called before each backoff so the UI can show that
 	// we're retrying/backing off (e.g. while LM Studio reloads an unloaded
@@ -145,12 +146,13 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 		idle = time.Duration(c.IdleTimeoutSeconds) * time.Second
 	}
 	return &OpenAIClient{
-		baseURL: strings.TrimRight(c.BaseURL, "/"),
-		model:   c.Model,
-		apiKey:  c.APIKey,
-		temp:    c.Temperature,
-		topP:    c.TopP,
-		extra:   c.Extra,
+		baseURL:      strings.TrimRight(c.BaseURL, "/"),
+		model:        c.Model,
+		apiKey:       c.APIKey,
+		temp:         c.Temperature,
+		topP:         c.TopP,
+		maxOutputTok: c.MaxOutputTokens,
+		extra:        c.Extra,
 		hc: &http.Client{
 			Transport: &http.Transport{
 				Proxy: http.ProxyFromEnvironment,
@@ -292,6 +294,9 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	// Same "only send when explicitly set" convention as temperature above.
 	if c.topP > 0 {
 		body["top_p"] = c.topP
+	}
+	if c.maxOutputTok > 0 {
+		body["max_tokens"] = c.maxOutputTok
 	}
 	// Per-model reasoning controls (and any other extra params) — the user supplies
 	// the provider's own shape; we just merge it in. Doesn't clobber core fields.

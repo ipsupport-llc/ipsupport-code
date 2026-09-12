@@ -31,6 +31,18 @@ type LLM struct {
 	// TopP is nucleus-sampling top_p (0 = unset — the server's own default; the
 	// client omits the field below that, same convention as Temperature).
 	TopP float64 `json:"top_p,omitempty"`
+	// MaxOutputTokens caps how many tokens the SERVER is told it may generate
+	// for one reply (the request's max_tokens) — 0 (the default) omits the
+	// field entirely, leaving the server's own default in charge. That default
+	// is often too small for a reasoning model's own thinking phase: observed
+	// live, a local server cut a reply off (finish_reason=length) mid-reasoning
+	// well before it ever reached an answer, at a context size nowhere near
+	// the window limit — nothing to do with auto-compact, purely the server's
+	// own conservative output cap. This is a request-visible knob, unlike
+	// MaxSteps/MaxHistory (our own client-side bookkeeping) — the client
+	// itself never limits generation length except via the (much larger)
+	// runaway-abort cap in internal/llm's maxResponseTokens.
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
 	// MaxSteps caps tool-call rounds per goal pursuit for THIS connection. 0
 	// (the default) auto-scales from ContextWindow — see cmd/agent's
 	// stepBudget/autoStepBudget — a flat number here would be oblivious to how

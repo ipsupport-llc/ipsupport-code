@@ -1014,6 +1014,30 @@ func TestParseArgsNestedObject(t *testing.T) {
 	}
 }
 
+// A model can wrap the params object in a needless singleton array — reported
+// live (twice, real debug logs, LM Studio/nemotron): args was literally
+// `{"action":"write","params":[{"path":"README.md","content":"..."}]}`. Before
+// this fix, the params switch only matched map[string]any/string, so a []any
+// fell through to the flattened-top-level branch and silently produced an
+// EMPTY params map — action="write" survived but path/content vanished,
+// dispatch failed with a missing-param error, and the model had to burn a
+// whole extra step reasoning "I need to provide the path parameter properly.
+// Let me try again..." (verbatim from the log) before self-correcting. A
+// singleton array wrapping one object is unambiguous — there is exactly one
+// way to read it — so unwrapping it is a safe shape fix, not a guess.
+func TestParseArgsUnwrapsSingletonArrayParams(t *testing.T) {
+	action, params := parseArgs(`{"action":"write","params":[{"path":"README.md","content":"x"}]}`)
+	if action != "write" || params["path"] != "README.md" || params["content"] != "x" {
+		t.Errorf("array-wrapped params: action=%q params=%v, want write/README.md/x", action, params)
+	}
+	// A multi-element array has no single unambiguous reading — must NOT guess,
+	// leave params empty so the tool's own "missing param" error fires normally.
+	action, params = parseArgs(`{"action":"write","params":[{"path":"a"},{"path":"b"}]}`)
+	if action != "write" || len(params) != 0 {
+		t.Errorf("multi-element array params: action=%q params=%v, want action=write and empty params", action, params)
+	}
+}
+
 // A model can wrap the whole arguments string in its own tool-call convention
 // instead of emitting bare JSON — reported live: the raw arguments string was
 // literally "<parameter=params>\n{\"url\": \"...\"}\n</parameter>", which fails

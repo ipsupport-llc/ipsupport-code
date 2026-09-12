@@ -5551,6 +5551,24 @@ func TestWireRaisesMaxHistoryForRawMemory(t *testing.T) {
 	}
 }
 
+// The raw-mode floor exists to backstop the auto-scale path, not to override
+// a user's own explicit choice — memory=raw must not raise a smaller explicit
+// Config.MaxHistory up to rawMemoryMaxHistory.
+func TestWireRawMemoryDoesNotOverrideExplicitMaxHistory(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.Memory = "raw"
+	cfg.MaxHistory = 32
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.ag.MaxHistory(); got != 32 {
+		t.Errorf("memory=raw with explicit MaxHistory=32: MaxHistory() = %d, want the explicit 32", got)
+	}
+}
+
 // autoStepBudget must reproduce the historical flat default (80) at the
 // historical default context window (8192) — a typical/default setup must see
 // NO behavior change — while scaling proportionally for a bigger or smaller

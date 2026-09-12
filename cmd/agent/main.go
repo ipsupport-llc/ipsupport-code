@@ -2224,9 +2224,9 @@ func (a *app) wire() error {
 	hist := a.cfg.MaxHistory
 	if hist <= 0 {
 		hist = autoMaxHistory(a.activeLLM().ContextWindow)
-	}
-	if a.cfg.Memory == "raw" && hist < rawMemoryMaxHistory {
-		hist = rawMemoryMaxHistory
+		if a.cfg.Memory == "raw" && hist < rawMemoryMaxHistory {
+			hist = rawMemoryMaxHistory
+		}
 	}
 	a.ag.SetMaxHistory(hist)
 	return nil

@@ -320,6 +320,13 @@ type app struct {
 	statusMu                sync.Mutex
 	tasks, steps, toolCalls int
 	lastPrompt, lastCompl   int // client usage snapshot for per-task ledger deltas
+
+	// lastRealContext is the real conversation's prompt-token fullness (from the
+	// last Agent.Run's Transcript.PromptTokens), snapshotted right after Run
+	// succeeds and BEFORE reflectAndStore/judgeGoal get a chance to clobber the
+	// shared client's own Context() reading with their own (much shorter) Chat
+	// calls. shouldAutoCompact reads this instead of a.client.Context() fresh.
+	lastRealContext int
 }
 
 func build(workspace, sessionName string, reader *bufio.Reader) (*app, func(), error) {
@@ -366,6 +373,11 @@ func build(workspace, sessionName string, reader *bufio.Reader) (*app, func(), e
 	}
 	// The prior session is restored by the caller: interactively via chooseSession
 	// (restore/new/delete), or auto-loaded in non-interactive modes.
+	// windowDetected always starts at its Go zero-value (false) on a fresh
+	// process — seed it from the persisted ContextWindowManual flag so a
+	// deliberate /config override survives a restart instead of getting
+	// silently overwritten by the auto-detect pass below (see setContextWindow).
+	a.windowDetected = a.activeLLM().ContextWindowManual
 	a.detectContextWindow() // ask LM Studio for the real window (auto-compact sizing)
 	return a, cleanup, nil
 }
@@ -2097,21 +2109,26 @@ func (a *app) maybeDetectWindowSync() {
 
 // applyWindow records a detected context window for a provider (UI thread, so it
 // never races View/auto-compact). "local" sets the LM Studio connection; any
-// other name sets that provider's preset.
-func (a *app) applyWindow(provider string, tokens int) {
+// other name sets that provider's preset. Returns whether the value actually
+// changed from what was already in effect, so a caller can decide whether a
+// re-wire is worth it.
+func (a *app) applyWindow(provider string, tokens int) bool {
 	if tokens <= 0 {
-		return
+		return false
 	}
 	if provider == "local" {
+		changed := a.cfg.LLM.ContextWindow != tokens
 		a.cfg.LLM.ContextWindow = tokens
-		return
+		return changed
 	}
 	if a.cfg.Providers == nil {
 		a.cfg.Providers = map[string]config.LLM{}
 	}
 	p := a.cfg.Providers[provider]
+	changed := p.ContextWindow != tokens
 	p.ContextWindow = tokens
 	a.cfg.Providers[provider] = p
+	return changed
 }
 
 // detectContextWindow learns the active model's context window so the status bar
@@ -2130,9 +2147,11 @@ func (a *app) detectContextWindow() {
 			return
 		}
 		if w := llm.DetectContextWindow(ctx, a.cfg.LLM.BaseURL, a.cfg.LLM.Model, http.DefaultClient); w > 0 {
+			changed := a.cfg.LLM.ContextWindow != w
 			a.cfg.LLM.ContextWindow = w
 			a.windowDetected = true
 			slog.Info("detected context window", "tokens", w, "model", a.cfg.LLM.Model)
+			a.rewireAfterWindowChange(changed)
 		}
 		return
 	}
@@ -2142,10 +2161,28 @@ func (a *app) detectContextWindow() {
 			a.cfg.Providers = map[string]config.LLM{}
 		}
 		p := a.cfg.Providers[a.cfg.Provider]
+		changed := p.ContextWindow != w
 		p.ContextWindow = w
 		a.cfg.Providers[a.cfg.Provider] = p
 		a.windowDetected = true
 		slog.Info("detected context window", "tokens", w, "model", act.Model, "provider", a.providerName())
+		a.rewireAfterWindowChange(changed)
+	}
+}
+
+// rewireAfterWindowChange re-wires the live agent/client after detection
+// changes ContextWindow — otherwise wire() (which bakes ContextWindow into the
+// Agent's step budget/history cap/mid-task trim threshold and the client's
+// per-turn generation cap) stays frozen at whatever value was in effect at the
+// LAST wire() call until some unrelated later trigger (a /model switch,
+// /login) happens to call it again. Best-effort: a re-wire failure here is
+// logged, not fatal — detection already updated a.cfg either way.
+func (a *app) rewireAfterWindowChange(changed bool) {
+	if !changed {
+		return
+	}
+	if err := a.wire(); err != nil {
+		slog.Warn("re-wire after context window detection failed", "err", err)
 	}
 }
 
@@ -2397,7 +2434,7 @@ func (a *app) shouldAutoCompact() bool {
 	if a.cfg.Memory == "raw" {
 		return false
 	}
-	return autoCompactNeeded(a.client.Context(), a.activeLLM().ContextWindow, a.ag.SessionLen(), compactThreshold(a.cfg.CompactThreshold))
+	return autoCompactNeeded(a.lastRealContext, a.activeLLM().ContextWindow, a.ag.SessionLen(), compactThreshold(a.cfg.CompactThreshold))
 }
 
 // Session memory persists per workspace AND per agent name, so each named agent
@@ -3114,6 +3151,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return err
 	}
+	a.lastRealContext = tr.PromptTokens // snapshot the real fullness before reflectAndStore (below) can clobber the shared client's own Context()
 	a.recordRun(tr)
 	a.finishGoal(goal, tr)
 	a.recordUsage(dur)
@@ -3178,6 +3216,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 		a.emit("error", map[string]any{"text": err.Error()})
 		return
 	}
+	a.lastRealContext = tr.PromptTokens // snapshot the real fullness before reflectAndStore (below) can clobber the shared client's own Context()
 	a.recordRun(tr)
 	a.finishGoal(goal, tr)
 	a.recordUsage(dur)
@@ -3797,6 +3836,7 @@ func (a *app) setContextWindow(v int) error {
 	a.windowDetected = v > 0
 	if a.isLocal() {
 		a.cfg.LLM.ContextWindow = v
+		a.cfg.LLM.ContextWindowManual = v > 0 // persisted twin of windowDetected — survives a restart, see ContextWindowManual
 		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
 	}
 	if a.cfg.Providers == nil {
@@ -3804,6 +3844,7 @@ func (a *app) setContextWindow(v int) error {
 	}
 	p := a.cfg.Providers[a.cfg.Provider]
 	p.ContextWindow = v
+	p.ContextWindowManual = v > 0
 	a.cfg.Providers[a.cfg.Provider] = p
 	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
 }

@@ -29,6 +29,13 @@ type Transcript struct {
 	Stopped   bool // ended before a clean answer (cancel / runaway / stuck / maxSteps / mid-run error) → no reflection
 	Returns   int  // goal re-feeds the judge triggered this run
 	GoalMet   bool // a goal-loop ran and the judge confirmed the goal was met
+	// PromptTokens is the real conversation's prompt size, snapshotted right
+	// after the last successful MAIN-turn llm.Chat call (before judgeGoal, which
+	// shares the same client absent a dedicated judge/reflect model, gets a
+	// chance to overwrite the client's own last-request reading). Callers that
+	// need to know how full the context actually is (e.g. auto-compact) should
+	// read this instead of asking the client directly.
+	PromptTokens int
 }
 
 // Agent holds the wiring for a run. The knowledge base and tracer may be nil.
@@ -705,6 +712,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	goalMet := false          // the judge confirmed the goal was met
 	refusalNudged := false    // already pushed back on a "can't edit / here are the files" dodge?
 	idleNudged := false       // already pushed a no-progress model once since the last re-feed?
+	promptTokens := 0         // last known real prompt size from a MAIN-turn Chat call — see Transcript.PromptTokens
 	for step := 0; step < a.maxSteps; step++ {
 		tr.Steps = step + 1
 
@@ -736,13 +744,24 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 				tr.Cancelled, tr.Stopped = cancelled, true
 				tr.Returns = returns
 				tr.Final = stopNote(msgs, cancelled, err)
+				tr.PromptTokens = promptTokens
 				a.emit("final", map[string]any{"text": tr.Final})
 				if acted {
 					a.remember(goal, tr.Final, msgs)
 				}
 				return tr, nil
 			}
+			tr.PromptTokens = promptTokens
 			return tr, fmt.Errorf("llm chat (step %d): %w", step+1, err)
+		}
+		// Snapshot the real conversation's fullness right after this MAIN-turn call
+		// succeeds — BEFORE judgeGoal (below, same iteration) gets a chance to run.
+		// judgeGoal shares this same a.llm when no dedicated judge/reflect model is
+		// configured, and its own (typically much shorter) Chat call would
+		// otherwise clobber the client's last-request Context() reading before
+		// anyone reads it for auto-compact sizing.
+		if cr, ok := a.llm.(interface{ Context() int }); ok {
+			promptTokens = cr.Context()
 		}
 		// At IPS_LOG=debug this shows exactly what the model returned each turn —
 		// the actual tool calls, or text with NO tool calls (e.g. a chat model
@@ -820,6 +839,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 			tr.Final = clean
 			tr.Messages = msgs
 			tr.Returns, tr.GoalMet = returns, goalMet
+			tr.PromptTokens = promptTokens
 			a.emit("final", map[string]any{"text": clean, "suggest": suggest})
 			a.remember(goal, clean, msgs)
 			return tr, nil
@@ -860,6 +880,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 					tr.Final, tr.Stopped = msg, true
 					tr.Returns = returns
 					tr.Messages = msgs
+					tr.PromptTokens = promptTokens
 					a.emit("final", map[string]any{"text": msg, "suggest": stuckSuggest, "exhausted": true})
 					a.remember(goal, msg, msgs)
 					return tr, nil
@@ -879,6 +900,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	tr.Returns = returns
 	clean, suggest := splitSuggestion(lastAssistantContent(msgs))
 	tr.Final = clean
+	tr.PromptTokens = promptTokens
 	a.emit("final", map[string]any{"text": clean, "suggest": suggest, "exhausted": true})
 	a.remember(goal, clean, msgs)
 	return tr, nil

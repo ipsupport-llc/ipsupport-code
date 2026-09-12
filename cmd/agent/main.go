@@ -275,6 +275,14 @@ type app struct {
 	// newly active model's context-window state.
 	modelEpoch atomic.Int64
 
+	// approvalWaitNS accumulates nanoseconds spent BLOCKED in an approval
+	// prompt (approveGated), across every tool call and every concurrent
+	// sub-agent — never decremented. A caller measuring one run's own
+	// duration snapshots this before and after and subtracts the delta, so a
+	// human taking 30s to approve a file write doesn't get counted as 30s of
+	// "the model was thinking/generating" in tok/s (internal/usage).
+	approvalWaitNS atomic.Int64
+
 	costMu         sync.Mutex // guards sessionCostUSD (parallel sub-agent spawns accrue too)
 	sessionCostUSD float64    // estimated spend this process run, for the SessionBudgetUSD guard
 
@@ -591,9 +599,10 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 		plan.tracer.Emit("subagent", map[string]any{"agent": id, "profile": plan.profile, "provider": plan.provider, "model": plan.llmCfg.Model, "dir": plan.subWorkspace, "task": oneLine(task, 80)})
 	}
 
+	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()
 	tr, err := sub.Run(ctx, task)
-	dur := time.Since(start)
+	dur := a.runDuration(start, waitSnapshot)
 	if a.usage != nil { // the sub-agent's spend counts too
 		pt, ct := client.Usage()
 		a.usage.Add(today(), plan.provider, plan.llmCfg.Model, pt, ct, dur)
@@ -2627,6 +2636,20 @@ func (a *app) recordRun(tr agent.Transcript) {
 	}
 }
 
+// runDuration is elapsed time since start, minus any time spent BLOCKED on an
+// approval prompt in that span (waitSnapshot is a.approvalWaitNS.Load() taken
+// right before start) — so a human's approval delay isn't folded into the
+// run's duration and counted as model "thinking"/generating time, which would
+// understate tok/s (see approveGated, internal/usage). Never negative.
+func (a *app) runDuration(start time.Time, waitSnapshot int64) time.Duration {
+	dur := time.Since(start)
+	dur -= time.Duration(a.approvalWaitNS.Load() - waitSnapshot)
+	if dur < 0 {
+		dur = 0
+	}
+	return dur
+}
+
 // recordUsage attributes the tokens spent since the last call to today's
 // provider/model bucket in the persistent ledger. Best-effort; called once a
 // task (and its reflection) has finished. The client's cumulative count carries
@@ -2817,9 +2840,10 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
+	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()
 	tr, err := a.ag.Run(ctx, goal)
-	dur := time.Since(start)
+	dur := a.runDuration(start, waitSnapshot)
 	if err != nil {
 		a.recordUsage(dur) // the failed attempt may have burned real tokens — don't drop them
 		slog.Error("run failed", "err", err)
@@ -2868,9 +2892,10 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
+	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()
 	tr, err := a.ag.Run(ctx, goal)
-	dur := time.Since(start)
+	dur := a.runDuration(start, waitSnapshot)
 	if a.taskEpoch.Load() != epoch {
 		return // force-detached mid-run — its results belong to a run the UI abandoned
 	}
@@ -4391,7 +4416,10 @@ func (a *app) approveGated(ctx context.Context, kind, detail string) bool {
 	if a.sessionAllowed(kind) {
 		return true
 	}
-	return a.approver.Approve(ctx, kind, detail)
+	start := time.Now()
+	ok := a.approver.Approve(ctx, kind, detail)
+	a.approvalWaitNS.Add(int64(time.Since(start)))
+	return ok
 }
 
 // gatedApprover adapts approveGated to the tool.Approver interface.

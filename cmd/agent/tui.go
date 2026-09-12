@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -2994,11 +2995,17 @@ func compactJSON(v any) string {
 	if v == nil {
 		return ""
 	}
-	b, err := json.Marshal(v)
-	if err != nil {
+	// json.Marshal HTML-escapes &, <, > into \uXXXX by default (meant for
+	// embedding JSON in an HTML <script> tag) — irrelevant here, and it turns an
+	// ordinary shell command like "a && b" into an unreadable escape sequence
+	// in the tool-call preview.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
 		return ""
 	}
-	s := string(b)
+	s := strings.TrimRight(buf.String(), "\n") // Encoder appends a trailing newline
 	if s == "{}" || s == "null" {
 		return ""
 	}

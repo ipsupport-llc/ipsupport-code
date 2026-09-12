@@ -49,18 +49,32 @@ import (
 // and `make release`); "dev" for a plain `go build`.
 var version = "dev"
 
+// overrideFlags collects repeated -override key=value flags (flag.Value, not
+// flag.StringVar — the stdlib flag package has no built-in repeatable string
+// flag, and this is the standard way to add one: Set is called once per
+// occurrence instead of just replacing a single value).
+type overrideFlags []string
+
+func (o *overrideFlags) String() string { return strings.Join(*o, ",") }
+func (o *overrideFlags) Set(v string) error {
+	*o = append(*o, v)
+	return nil
+}
+
 func main() {
 	// Landlock re-exec leg (Linux): when the run tool wraps a command in the
 	// sandbox, it re-runs THIS binary, which self-restricts and execs the real
 	// command. Must run first; a normal launch falls straight through.
 	sandbox.MaybeExecConfined()
 	var (
-		workspace   string
-		doInit      bool
-		showVersion bool
-		dumpPrompt  bool
-		newSession  bool
-		sessionName string
+		workspace       string
+		doInit          bool
+		showVersion     bool
+		dumpPrompt      bool
+		newSession      bool
+		sessionName     string
+		skipPermissions bool
+		overrides       overrideFlags
 	)
 	flag.StringVar(&workspace, "C", ".", "workspace directory")
 	flag.BoolVar(&doInit, "init", false, "re-run first-time setup (server URL, API key, model)")
@@ -68,6 +82,8 @@ func main() {
 	flag.BoolVar(&dumpPrompt, "dump-prompt", false, "print the built-in system prompt and exit (e.g. > .agent/system.md to start editing)")
 	flag.BoolVar(&newSession, "new", false, "start a fresh session (don't restore the saved one)")
 	flag.StringVar(&sessionName, "session", "", "use a named session (a separate saved thread)")
+	flag.BoolVar(&skipPermissions, "skip-permissions", false, "don't ask before file writes or shell commands this run (equivalent to -override run.default=allow -override file.default=allow); not persisted")
+	flag.Var(&overrides, "override", "override a config key for this run only, key=value (repeatable, e.g. -override llm.temperature=0.7); same dotted keys as `config set`, never persisted")
 	flag.Usage = printUsage
 	flag.Parse()
 	if showVersion {
@@ -105,13 +121,20 @@ func main() {
 	}
 	maybeInit(reader, doInit)
 
+	// -skip-permissions is just sugar for the two -override key=values it's
+	// documented as — expanding it here, before build(), means there's only
+	// ONE application path (build()'s override loop) to keep correct, not two.
+	if skipPermissions {
+		overrides = append(overrides, "run.default=allow", "file.default=allow")
+	}
+
 	// -session selects a named thread for this run (its own saved file); passed
 	// into build() so it's applied to cfg.Name BEFORE wire() runs — wire() bakes
 	// the session name into the archiver/history tool paths once, at
 	// construction time, so applying it after wire() (as a prior version of
 	// this code did) left those two pointed at the previous name's archive for
 	// the whole run even though the session file itself picked up the change.
-	app, cleanup, err := build(workspace, sessionName, reader)
+	app, cleanup, err := build(workspace, sessionName, []string(overrides), reader)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -329,10 +352,24 @@ type app struct {
 	lastRealContext int
 }
 
-func build(workspace, sessionName string, reader *bufio.Reader) (*app, func(), error) {
+func build(workspace, sessionName string, overrides []string, reader *bufio.Reader) (*app, func(), error) {
 	cfg, err := config.Load(workspace)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load config: %w", err)
+	}
+	// -override/-skip-permissions apply in memory ONLY, right after loading and
+	// before anything else reads cfg (wire(), the session-name override just
+	// below, etc.) — same key=value shape as `config set`, but never written to
+	// disk: a later plain launch with no override flags must see exactly what
+	// was there before.
+	for _, kv := range overrides {
+		key, val, ok := strings.Cut(kv, "=")
+		if !ok {
+			return nil, nil, fmt.Errorf("invalid -override %q: want key=value", kv)
+		}
+		if err := config.ApplyOverride(&cfg, key, val); err != nil {
+			return nil, nil, fmt.Errorf("-override %s: %w", key, err)
+		}
 	}
 	if sessionName != "" { // must land before wire() — see the call site in main()
 		cfg.Name = sessionName

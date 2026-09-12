@@ -583,6 +583,37 @@ func SetFileValue(path string, perm os.FileMode, dotted, raw string) error {
 	return writeObject(path, perm, root)
 }
 
+// ApplyOverride sets one dotted-path key on cfg IN MEMORY ONLY — no file I/O,
+// nothing persisted. Same key/value semantics and validation as SetFileValue
+// (a value that parses as JSON keeps its type, else it's the literal string;
+// an unknown key or a type mismatch is rejected) — but for a per-invocation
+// CLI override (e.g. -override run.default=allow, or the -skip-permissions
+// shorthand), which must leave zero trace in config.json: a later plain
+// launch, with no override flags, must see exactly the settings from before.
+func ApplyOverride(cfg *Config, dotted, raw string) error {
+	segs, err := splitPath(dotted)
+	if err != nil {
+		return err
+	}
+	root := toObject(*cfg)
+	if err := setPath(root, segs, parseValue(raw)); err != nil {
+		return err
+	}
+	if err := validateConfigObject(root); err != nil {
+		return err
+	}
+	data, err := json.Marshal(root)
+	if err != nil {
+		return err
+	}
+	var next Config
+	if err := json.Unmarshal(data, &next); err != nil {
+		return err
+	}
+	*cfg = next
+	return nil
+}
+
 // UnsetFileValue removes the dotted-path key from the config file at path. A key
 // that isn't present is a no-op (not an error). The read-merge-write cycle is
 // locked (see mergeJSONFile) against concurrent callers racing on the same file.

@@ -955,7 +955,7 @@ func TestManualContextWindowSurvivesRestart(t *testing.T) {
 
 	// Simulate a restart: a brand-new app, windowDetected back at its Go
 	// zero-value before build() seeds it from the persisted flag.
-	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -966,6 +966,55 @@ func TestManualContextWindowSurvivesRestart(t *testing.T) {
 	}
 	if !a.windowDetected {
 		t.Error("windowDetected should be seeded true from the persisted manual override on startup, so a later auto-detect pass doesn't clobber it either")
+	}
+}
+
+// build()'s -override plumbing (backing the CLI's -override/-skip-permissions
+// flags) must apply to the in-memory cfg used for the rest of this run, and
+// must never touch the config file on disk — a later plain build() with no
+// overrides must load exactly what was there before.
+func TestBuildAppliesOverridesInMemoryNotToFile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ws := t.TempDir()
+
+	a, cleanup, err := build(ws, "", []string{"run.default=allow", "llm.temperature=0.7"}, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+
+	if a.cfg.Run.Default != "allow" {
+		t.Errorf("run.default = %q, want allow (from -override)", a.cfg.Run.Default)
+	}
+	if a.cfg.LLM.Temperature != 0.7 {
+		t.Errorf("llm.temperature = %v, want 0.7 (from -override)", a.cfg.LLM.Temperature)
+	}
+
+	// A fresh build with NO overrides must see the untouched defaults — proving
+	// the overrides above never reached disk.
+	plain, cleanup2, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup2()
+	if plain.cfg.Run.Default == "allow" {
+		t.Error("-override leaked to disk: a fresh build() with no overrides still sees run.default=allow")
+	}
+	if plain.cfg.LLM.Temperature == 0.7 {
+		t.Error("-override leaked to disk: a fresh build() with no overrides still sees the overridden temperature")
+	}
+}
+
+// An -override without a "key=value" shape (e.g. a bare word, or a missing
+// "=") must fail loudly at startup, not silently do nothing.
+func TestBuildRejectsMalformedOverride(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	_, _, err := build(t.TempDir(), "", []string{"not-a-key-value-pair"}, bufio.NewReader(strings.NewReader("")))
+	if err == nil {
+		t.Error("want an error for a malformed -override, got nil")
 	}
 }
 
@@ -4428,7 +4477,7 @@ func TestBuildAppliesSessionNameBeforeWire(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, cleanup, err := build(ws, "myname", bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "myname", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4464,7 +4513,7 @@ func TestRenameRebindsArchive(t *testing.T) {
 	}
 
 	ws := t.TempDir()
-	a, cleanup, err := build(ws, "old-name", bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "old-name", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4705,7 +4754,7 @@ func TestRunOneFailedFirstRequestSignalsErrorAndRecordsUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4737,7 +4786,7 @@ func TestRunOneRecordsDurationInUsageLedger(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4820,7 +4869,7 @@ func TestReflectionTokensFlushedBeforeRunOneReturns(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4864,7 +4913,7 @@ func TestReflectionTokensFlushedAfterRunTaskStreaming(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4911,7 +4960,7 @@ func TestModelSwitchDoesNotMisattributeReflectionTokens(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6311,7 +6360,7 @@ func TestLastRealContextSurvivesReflectionClobber(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6365,7 +6414,7 @@ func TestDetectContextWindowReWiresLiveAgentOnChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7154,7 +7203,7 @@ func TestSaveSessionHappensBeforeSlowReflection(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}

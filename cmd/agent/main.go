@@ -4603,24 +4603,46 @@ func (g gatedApprover) Approve(ctx context.Context, kind, detail string) bool {
 // meant for each other; `stdin` (a *stdinOwner, shared with the plain REPL's
 // command loop) additionally keeps this from ever racing the loop's OWN read
 // of the same underlying reader — see stdinOwner. `a` grants the kind's
-// category for the whole session (via the app's session-allow set). ctx is
-// unused: this is the plain (non-TUI) prompt, a synchronous stdin read with no
-// way to interrupt it.
+// category for the whole session (via the app's session-allow set). The
+// underlying stdin read can't be interrupted (there's no way to cancel a
+// blocking ReadString), so Approve runs it on a helper goroutine and races it
+// against ctx.Done(), denying and returning promptly on cancellation — see
+// below.
 type stdinApprover struct {
 	mu    sync.Mutex
 	stdin *stdinOwner
 	app   *app
 }
 
-func (s *stdinApprover) Approve(_ context.Context, kind, detail string) bool {
+// Approve blocks until the operator answers or ctx is cancelled (e.g.
+// Ctrl-C), whichever comes first. The actual stdin read happens on a
+// detached goroutine: if ctx is cancelled first, Approve denies and returns
+// immediately WITHOUT waiting for that goroutine, which may then sit blocked
+// on readApproveLine forever — same as any real interactive terminal read
+// nobody's listening for the result of anymore. That's fine: this process is
+// exiting shortly anyway (SIGINT), and forcibly closing stdin here would break
+// the REPL's own later reads.
+func (s *stdinApprover) Approve(ctx context.Context, kind, detail string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fmt.Fprintf(os.Stderr, "\n[approve %s] %s\n  allow? [y/N/a=all %s this session] ", kind, detail, categoryLabel(approvalCategory(kind)))
-	line, err := s.stdin.readApproveLine()
-	if err != nil {
+
+	result := make(chan lineResult, 1) // buffered: the read goroutine must never block sending here, even if abandoned
+	go func() {
+		line, err := s.stdin.readApproveLine()
+		result <- lineResult{line, err}
+	}()
+
+	var res lineResult
+	select {
+	case res = <-result:
+	case <-ctx.Done():
 		return false
 	}
-	switch strings.TrimSpace(strings.ToLower(line)) {
+	if res.err != nil {
+		return false
+	}
+	switch strings.TrimSpace(strings.ToLower(res.line)) {
 	case "y", "yes":
 		return true
 	case "a", "all", "always":

@@ -434,6 +434,7 @@ type spawnPlan struct {
 	spawnDefault   string
 	tracer         trace.Tracer
 	priceOverrides map[string]usage.Price
+	goalMaxSteps   int
 }
 
 // resolveSpawn resolves profile/dir into a spawnPlan (or, for an external CLI
@@ -560,7 +561,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	return spawnPlan{
 		profile: profile, provider: provider, llmCfg: llmCfg, rolePrompt: p.Prompt,
 		subReg: subReg, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default,
-		tracer: tracer, priceOverrides: priceOverrides,
+		tracer: tracer, priceOverrides: priceOverrides, goalMaxSteps: a.cfg.GoalMaxSteps,
 	}, false, p, nil
 }
 
@@ -592,7 +593,7 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 
 	id := fmt.Sprintf("sub%d", a.spawnSeq.Add(1)) // groups this sub-agent's UI events
 	client := llm.NewOpenAIClient(plan.llmCfg)    // reasoning params already resolved in resolveSpawn
-	sub := agent.New(client, plan.subReg, a.kb, plan.tracer, a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt), stepBudget(plan.llmCfg))
+	sub := agent.New(client, plan.subReg, a.kb, plan.tracer, a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt), resolveStepBudget(plan.goalMaxSteps, plan.llmCfg))
 	sub.SetPlanMode(plan.planMode)
 	sub.SetLabel(id)
 	sub.SetContextWindow(plan.llmCfg.ContextWindow)
@@ -1525,10 +1526,20 @@ func (a *app) diffCommand() []string {
 // per-connection budget (stepBudget — an explicit MaxSteps, or auto-scaled
 // from its context window).
 func (a *app) goalSteps() int {
-	if a.cfg.GoalMaxSteps > 0 {
-		return a.cfg.GoalMaxSteps
+	return resolveStepBudget(a.cfg.GoalMaxSteps, a.activeLLM())
+}
+
+// resolveStepBudget applies the full override-precedence chain for the
+// tool-call-round budget: an explicit top-level GoalMaxSteps wins, else the
+// connection's own stepBudget (its own explicit MaxSteps, or auto-scaled from
+// its context window). Both the main agent (goalSteps) and sub-agent
+// construction (runSpawnPlan) must go through this — a sub-agent is still
+// bound by the same top-level GoalMaxSteps override as the main agent.
+func resolveStepBudget(goalMaxSteps int, l config.LLM) int {
+	if goalMaxSteps > 0 {
+		return goalMaxSteps
 	}
-	return stepBudget(a.activeLLM())
+	return stepBudget(l)
 }
 
 // stepBudget resolves the tool-call-round budget for one connection: an

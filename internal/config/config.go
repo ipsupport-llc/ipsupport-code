@@ -38,7 +38,11 @@ type LLM struct {
 	Type string `json:"type,omitempty"`
 	// ContextWindow is the model's context size in tokens; auto-compact triggers
 	// as the prompt approaches it. 0 disables auto-compact.
-	ContextWindow int `json:"context_window,omitempty"`
+	// No omitempty: Default() sets this to a nonzero 8192, so an explicit 0
+	// (clear the override, let auto-detect decide) must round-trip as a real
+	// "context_window":0 in the file — omitempty would drop the key entirely,
+	// and mergeFile's merge-over-Default() would then silently refill 8192.
+	ContextWindow int `json:"context_window"`
 	// IdleTimeoutSeconds bounds how long a request waits with NO response/stream
 	// data before it's aborted and retried. 0 uses the default (90s). Raise it for a
 	// hosted reasoning model that can think silently (no streamed deltas) for longer.

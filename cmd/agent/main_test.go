@@ -782,6 +782,70 @@ func TestConfigPanelIdleTimeoutCycle(t *testing.T) {
 	}
 }
 
+// context_window must be settable from /config (not just by hand-editing
+// config.json's raw LLM struct) — same gap temperature/top_p/idle_timeout had.
+// A manual nonzero override must also mark the window as "already detected" so
+// the next task's best-effort auto-detect doesn't silently clobber it; cycling
+// back to 0 must un-mark it so auto-detect can run again.
+func TestConfigPanelContextWindowCycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	cursorFor := func(key string) int {
+		for i, k := range cfgKeys() {
+			if k == key {
+				return i
+			}
+		}
+		t.Fatalf("no %q row in the config panel", key)
+		return -1
+	}
+
+	m.cfgCursor = cursorFor("context_window")
+	if m.app.cfg.LLM.ContextWindow != 8192 {
+		t.Fatalf("config.Default() context window = %v, want the built-in 8192", m.app.cfg.LLM.ContextWindow)
+	}
+	m.configActivate() // 8192 → 16384
+	if m.app.cfg.LLM.ContextWindow != 16384 {
+		t.Errorf("after one cycle, context window = %v, want 16384", m.app.cfg.LLM.ContextWindow)
+	}
+	if !m.app.windowDetected {
+		t.Error("a manual nonzero override must mark the window as already detected — otherwise the next task's auto-detect silently overwrites it")
+	}
+
+	for i := 0; i < 4; i++ {
+		m.configActivate() // 16384 → 32768 → 65536 → 131072 → 0 (wraps)
+	}
+	if m.app.cfg.LLM.ContextWindow != 0 {
+		t.Errorf("after five cycles (wrapping), context window = %v, want 0", m.app.cfg.LLM.ContextWindow)
+	}
+	if m.app.windowDetected {
+		t.Error("cycling back to 0 (clear override) must let auto-detect run again")
+	}
+
+	// named (non-local) provider must persist to cfg.Providers, not cfg.LLM.
+	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://api.lab.co/v1"}}
+	m.app.cfg.Provider = "mylab"
+	m.configActivate() // 0 → 4096 for mylab
+	if m.app.cfg.Providers["mylab"].ContextWindow != 4096 {
+		t.Errorf("named-provider context window = %v, want 4096", m.app.cfg.Providers["mylab"].ContextWindow)
+	}
+	if m.app.cfg.LLM.ContextWindow != 0 {
+		t.Errorf("switching provider must not touch local's context window, still want 0, got %v", m.app.cfg.LLM.ContextWindow)
+	}
+
+	loaded, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LLM.ContextWindow != 0 {
+		t.Errorf("local context window not persisted: %v", loaded.LLM.ContextWindow)
+	}
+	if loaded.Providers["mylab"].ContextWindow != 4096 {
+		t.Errorf("named-provider context window not persisted: %v", loaded.Providers["mylab"].ContextWindow)
+	}
+}
+
 func TestResolveModelArg(t *testing.T) {
 	ids := []string{"openai/gpt-4o", "openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "x-ai/grok-4.3"}
 	// exact id → switch

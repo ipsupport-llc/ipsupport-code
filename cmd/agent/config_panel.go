@@ -29,6 +29,7 @@ var configRows = []cfgRow{
 	{key: "addprovider"},
 	{key: "model"},
 	{key: "apikey"},
+	{key: "context_window"},
 	{key: "reasoning"},
 	{key: "temperature"},
 	{key: "top_p"},
@@ -258,6 +259,8 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 			v = "● set"
 		}
 		return "api key", v, "enter: add/set a provider key"
+	case "context_window":
+		return "context window", ctxLabel(act.ContextWindow), "enter: cycle (0 = auto-detect / provider default)"
 	case "reasoning":
 		return "reasoning", m.app.reasoningLevel(m.app.providerName(), act.Model), "enter: cycle off→high (trims a thinking model)"
 	case "temperature":
@@ -407,6 +410,8 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		m.state = stIdle
 		m.input.SetValue("/ai key ")
 		m.input.CursorEnd()
+	case "context_window":
+		m.cycleContextWindow()
 	case "name":
 		m.state = stIdle
 		m.input.SetValue("/rename ")
@@ -546,6 +551,24 @@ func idleTimeoutLabel(sec int) string {
 func (m *tuiModel) cycleIdleTimeout() {
 	next := nextInt(m.app.activeLLM().IdleTimeoutSeconds, idleTimeoutCycle)
 	if err := m.app.setIdleTimeout(next); err != nil {
+		m.push(cErr.Render("  could not persist: " + err.Error()))
+		return
+	}
+	_ = m.app.wire()
+}
+
+// contextWindowCycle presets (tokens) for the /config "context_window" row. 0
+// clears the override (falls back to auto-detect / the provider's default);
+// the rest cover common local and hosted model window sizes.
+var contextWindowCycle = []int{0, 4096, 8192, 16384, 32768, 65536, 131072}
+
+// cycleContextWindow advances the active provider's context-window override
+// through preset sizes, persists it (same local-vs-named-provider branching as
+// the other per-connection rows), and re-wires so auto-compact/maxRespTk sizing
+// picks it up immediately.
+func (m *tuiModel) cycleContextWindow() {
+	next := nextInt(m.app.activeLLM().ContextWindow, contextWindowCycle)
+	if err := m.app.setContextWindow(next); err != nil {
 		m.push(cErr.Render("  could not persist: " + err.Error()))
 		return
 	}

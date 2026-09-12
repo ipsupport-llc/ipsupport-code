@@ -3507,6 +3507,28 @@ func (a *app) setIdleTimeout(v int) error {
 	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
 }
 
+// setContextWindow sets the model's context size (tokens) for the CURRENTLY
+// ACTIVE provider's connection and persists it — same local-vs-named-provider
+// branching as setTemperature/setTopP/setIdleTimeout. A nonzero value also
+// marks the window as already "detected", so the next task's best-effort
+// auto-detect (detectContextWindow) doesn't silently overwrite a deliberate
+// manual override; setting it back to 0 clears that, letting auto-detect run
+// again.
+func (a *app) setContextWindow(v int) error {
+	a.windowDetected = v > 0
+	if a.isLocal() {
+		a.cfg.LLM.ContextWindow = v
+		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
+	}
+	if a.cfg.Providers == nil {
+		a.cfg.Providers = map[string]config.LLM{}
+	}
+	p := a.cfg.Providers[a.cfg.Provider]
+	p.ContextWindow = v
+	a.cfg.Providers[a.cfg.Provider] = p
+	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+}
+
 // configOverview is the control panel: current settings + the command to change
 // each, so the config file never needs hand-editing.
 func (a *app) configOverview() []string {

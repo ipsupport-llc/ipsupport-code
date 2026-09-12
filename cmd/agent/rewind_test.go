@@ -1,14 +1,25 @@
 package main
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
+	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 )
+
+// alwaysApprove is a trivial Approver for tests that don't exercise "ask" policy.
+type alwaysApprove struct{}
+
+func (alwaysApprove) Approve(_ context.Context, _, _ string) bool { return true }
 
 // TestApplyRewindRefusesToRestoreThroughSymlink reproduces a TOCTOU: a file is
 // checkpointed, then — after the checkpoint but before /rewind runs — swapped
@@ -189,5 +200,69 @@ func TestApplyRewindRefusesToDeleteThroughAncestorSymlink(t *testing.T) {
 
 	if joined := strings.Join(out, "\n"); !strings.Contains(joined, "file.txt") {
 		t.Errorf("rewind output doesn't clearly flag the skipped file, got: %v", out)
+	}
+}
+
+// TestSnapFileSkipsFIFO reproduces the checkpoint-snapshot hang: snapFile
+// stats then os.ReadFile's a file's prior content before a mutation —
+// unguarded, this blocks forever reading a FIFO with no writer, the same
+// class of bug internal/tool/file.go's read() was fixed against earlier
+// (see !info.Mode().IsRegular() there). This exercises the REAL wiring: the
+// file tool's Snapshotter callback is a.snapFile in production (see
+// tool.NewFile(pol, gatedApprover{a}, a.snapFile) in main.go), so this
+// constructs the file tool the same way and drives it through the "append"
+// action (which, unlike "write"/"edit", does no OTHER read of prior content —
+// isolating the hang to snapFile's own read, not a second unrelated one).
+//
+// Actually writing to a FIFO also needs a reader on the other end (opening it
+// for write blocks until one shows up) — a background goroutine drains it,
+// standing in for a real consumer already reading from the pipe. Without the
+// fix, snapFile's own read deadlocks before that write-side open is ever
+// reached, so the drain goroutine never unblocks either.
+func TestSnapFileSkipsFIFO(t *testing.T) {
+	ws := t.TempDir()
+	fifoPath := filepath.Join(ws, "pipe")
+	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
+		t.Skipf("mkfifo unsupported here: %v", err)
+	}
+
+	c := config.Default()
+	c.Workspace = ws
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	pol, err := policy.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a := &app{workspace: ws, cfg: config.Config{Name: "default"}, ag: agent.New(nil, nil, nil, nil, "", 0)}
+	tl := tool.NewFile(pol, alwaysApprove{}, a.snapFile)
+
+	go func() {
+		f, err := os.Open(fifoPath)
+		if err != nil {
+			return
+		}
+		defer f.Close()
+		io.Copy(io.Discard, f)
+	}()
+
+	cp := a.beginCheckpoint("test")
+
+	done := make(chan tool.Result, 1)
+	go func() {
+		done <- tl.Call(context.Background(), "append", map[string]any{"path": "pipe", "content": "x"})
+	}()
+
+	// endCheckpoint is deliberately NOT deferred here: if snapFile is broken
+	// (holds ckptMu forever), calling it would block right along with it —
+	// this select must be able to time out on its own regardless.
+	select {
+	case r := <-done:
+		a.endCheckpoint(cp)
+		if r.IsError {
+			t.Errorf("append to FIFO errored: %s", r.Content)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("append hung snapshotting a FIFO")
 	}
 }

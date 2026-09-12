@@ -2938,16 +2938,19 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 	start := time.Now()
 	lessons, err := refl.Reflect(ctx, tr)
 	dur := time.Since(start)
-	if err != nil {
-		slog.Warn("reflection failed", "err", err)
-		return 0
-	}
-	if separate && a.usage != nil { // a dedicated reflect model's spend isn't in the main client
+	if separate && a.usage != nil { // a dedicated reflect model's spend isn't in the main client —
+		// recorded even on a failed call below: tokens already streamed/billed
+		// before the error still cost real money and must not vanish from the
+		// ledger/budget guard just because the call ultimately errored.
 		if p, c := client.Usage(); p > 0 || c > 0 {
 			a.usage.Add(today(), provider, model, p, c, dur)
 			a.addSessionCost(model, p, c, a.priceOverrides()) // for the budget guard
 			_ = a.usage.Save()
 		}
+	}
+	if err != nil {
+		slog.Warn("reflection failed", "err", err)
+		return 0
 	}
 	learned := 0
 	for _, p := range lessons.Pitfalls {
@@ -3009,13 +3012,23 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 		fmt.Println("(no final answer — step budget exhausted)")
 	}
 	if !tr.Stopped {
-		if learned := a.reflectAndStore(ctx, tr); learned > 0 {
+		reflStart := time.Now()
+		learned := a.reflectAndStore(ctx, tr)
+		// Reflection is itself a real LLM call (or two, on a dedicated client) —
+		// flush its tokens into the ledger/budget guard right now, before control
+		// returns anywhere a next task (which may never come — one-shot mode, or
+		// /exit right after) would otherwise be the only thing left to pick them up.
+		a.recordUsage(time.Since(reflStart))
+		if learned > 0 {
 			fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
 		}
 	}
 	a.detectContextWindow() // the model is loaded now — confirm the real window
 	if a.shouldAutoCompact() {
-		if n, err := a.ag.Compact(ctx); err == nil && n > 0 {
+		compactStart := time.Now()
+		n, err := a.ag.Compact(ctx)
+		a.recordUsage(time.Since(compactStart)) // compaction is a real LLM call too — flush it now, even on failure
+		if err == nil && n > 0 {
 			a.saveSession()
 			fmt.Fprintf(os.Stderr, "(auto-compacted %d messages to free context)\n", n)
 		}
@@ -3061,7 +3074,12 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	// part the user actually sees and cares about) reaches disk before that race even
 	// becomes possible, instead of depending on reflection finishing first.
 	if !tr.Stopped { // reflect only on a clean finish, not on any premature stop
+		reflStart := time.Now()
 		a.reflectAndStore(ctx, tr)
+		// Flush reflection's own tokens now — same reasoning as runOne's matching
+		// flush (see there): a next task's recordUsage delta may never come (the
+		// process could exit right after), so this can't wait for that.
+		a.recordUsage(time.Since(reflStart))
 	}
 }
 

@@ -184,6 +184,14 @@ func (a *app) snapFile(abs string) {
 		cp.files[abs] = fileSnap{existed: true, tooBig: true}
 		return
 	}
+	// Reject non-regular files (FIFOs etc.) — os.ReadFile below blocks forever
+	// on a FIFO with no writer, same class of bug as the file tool's read()
+	// path (see !info.Mode().IsRegular() there). Treat it like the tooBig
+	// case: record that the prior state wasn't captured, don't block.
+	if !info.Mode().IsRegular() {
+		cp.files[abs] = fileSnap{existed: true, tooBig: true}
+		return
+	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		// Stat just succeeded, so the file definitely exists — a read

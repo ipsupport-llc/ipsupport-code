@@ -84,6 +84,17 @@ func (r *Registry) Dispatch(ctx context.Context, name, action string, params map
 		if a := inferAction(t, acts, params); a != "" {
 			return t.Call(ctx, a, params)
 		}
+		// A domain with exactly one action and exactly one required param (run,
+		// calc, help) is unambiguous even with "action" missing entirely — but
+		// only once that required param actually has a value. An empty action
+		// AND empty params means nothing useful was given at all, and the terse
+		// "no action given" message below (not a verbose required-param error)
+		// is the more useful nudge — same as it's always been.
+		if d, isDomain := t.(*Domain); isDomain {
+			if a, p, ok := d.soleRequiredParam(); ok && !isEmpty(params[p]) {
+				return t.Call(ctx, a, params)
+			}
+		}
 		// Lead with the full action list (so a model that meant "edit" isn't nudged
 		// toward the first action), then a shape example.
 		return Err(fmt.Sprintf(`%s: no action given — set "action" to one of: %s. Shape: {"action":"<one of those>","params":{...}}`,

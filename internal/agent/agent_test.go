@@ -1050,6 +1050,61 @@ func TestParseArgsRecoversObjectWrappedInModelOwnTags(t *testing.T) {
 	}
 }
 
+// A model can also leak the same "<parameter=NAME>value</parameter>" tag
+// convention into just the "action" field's own value, inside otherwise
+// perfectly valid JSON — reported live, twice: a bare action name
+// ("<parameter=action>\nlist\n</parameter>") and a whole params object
+// mislabeled as the action ("<parameter=params>\n{\"command\": \"ls -la\", ...}").
+// decodeObj's own recovery doesn't help here, since the OUTER JSON parses
+// just fine — the garbled text is a normal string value, not a parse failure.
+// Before this fix the entire tag text became the action's value verbatim;
+// for run (single action, single required param) garbledActionAsParam then
+// ran the literal tag text as a shell command ("sh: syntax error"), and for
+// file it surfaced as an unknown action.
+func TestParseArgsRecoversActionFieldWrappedInModelOwnTags(t *testing.T) {
+	action, params := parseArgs(`{"action":"<parameter=action>\nlist\n</parameter>","params":{"path":"."}}`)
+	if action != "list" || params["path"] != "." {
+		t.Errorf("bare tag: action=%q params=%v, want action=list params.path=.", action, params)
+	}
+
+	action, params = parseArgs(`{"action":"<parameter=params>\n{\"command\": \"ls -la\", \"cwd\": \"/Users/roman220/test\"}\n</parameter>"}`)
+	if action != "" || params["command"] != "ls -la" || params["cwd"] != "/Users/roman220/test" {
+		t.Errorf("object tag: action=%q params=%v, want action=\"\" command=\"ls -la\" cwd=\"/Users/roman220/test\"", action, params)
+	}
+
+	// Same object-tag shape, reported live for file (a multi-action domain):
+	// no "action" key inside the recovered object, so parseArgs alone can't
+	// pick which of file's 8 actions was meant — that's the registry's job
+	// (inferAction, or the terse "no action given" error), not parseArgs'.
+	// This just confirms the params (path=".") still come through clean.
+	action, params = parseArgs(`{"action":"<parameter=params>\n{\"path\": \".\"}\n</parameter>"}`)
+	if action != "" || params["path"] != "." {
+		t.Errorf("file object tag: action=%q params=%v, want action=\"\" path=\".\"", action, params)
+	}
+}
+
+// End-to-end version of the object-tag case above: parseArgs alone recovers
+// the params but leaves action="" (no "action" key inside the mislabeled
+// object); the registry's empty-action soleRequiredParam fallback (internal/
+// tool) must then resolve that empty action to calc's one action
+// ("calculate") for the whole pipeline to actually work, matching what a
+// real Agent.Run does with a real Registry — not just parseArgs in isolation.
+func TestRunRecoversActionTagWrappedAroundParamsEndToEnd(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	call := toolCallReply("c1", "calc", `{"action":"<parameter=params>\n{\"expression\": \"2+2\"}\n</parameter>"}`)
+	fake := &scriptLLM{replies: []llm.Message{call, {Role: "assistant", Content: "done"}}}
+	a := New(fake, reg, nil, nil, "", 5)
+
+	tr, err := a.Run(context.Background(), "what is 2+2")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	obs := toolObservation(tr.Messages)
+	if len(obs) != 1 || !strings.Contains(obs[0].Content, "4") {
+		t.Errorf("observation = %+v, want a successful calculate of 2+2=4", obs)
+	}
+}
+
 func TestRunConcurrentToolCallsStayOrdered(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
 	twoCalls := llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{

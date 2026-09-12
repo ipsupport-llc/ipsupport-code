@@ -207,7 +207,18 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	if name == "" {
 		name = "ipsupport-code"
 	}
-	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: lipgloss.Color("13"), inputLines: 1}
+	accent := lipgloss.Color("13")
+	accentIdx := 0
+	if a.cfg.Color != "" {
+		accent = lipgloss.Color(a.cfg.Color)
+		for i, c := range colorCycle {
+			if c == a.cfg.Color {
+				accentIdx = i
+				break
+			}
+		}
+	}
+	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: accent, accentIdx: accentIdx, inputLines: 1}
 	m.histIdx = len(a.promptHist) // start "not browsing": first ↑ recalls the most recent prompt
 	act := a.activeLLM()
 	m.history = bannerLines(name, version, a.providerName(), act.Model, a.workspace, act.ContextWindow, m.accent)
@@ -1992,6 +2003,9 @@ func (m *tuiModel) setColor(arg string) {
 		m.accent = lipgloss.Color(colorNames[arg])
 	default:
 		m.accent = lipgloss.Color(arg) // raw ANSI 256 code
+	}
+	if err := config.SaveColor(string(m.accent)); err != nil {
+		m.push(cErr.Render("  could not persist: " + err.Error()))
 	}
 	m.push(lipgloss.NewStyle().Foreground(m.accent).Render("frame color → " + string(m.accent)))
 }

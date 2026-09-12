@@ -28,8 +28,11 @@ type LLM struct {
 	BaseURL     string  `json:"base_url"`
 	Model       string  `json:"model"`
 	Temperature float64 `json:"temperature"`
-	MaxSteps    int     `json:"max_steps"`
-	APIKey      string  `json:"api_key,omitempty"`
+	// TopP is nucleus-sampling top_p (0 = unset — the server's own default; the
+	// client omits the field below that, same convention as Temperature).
+	TopP     float64 `json:"top_p,omitempty"`
+	MaxSteps int     `json:"max_steps"`
+	APIKey   string  `json:"api_key,omitempty"`
 	// Type selects extra capabilities: "lmstudio" uses LM Studio's native API
 	// (rich model list, context detection); anything else is plain OpenAI-compat.
 	Type string `json:"type,omitempty"`
@@ -109,6 +112,7 @@ type FilePolicy struct {
 type Config struct {
 	Name      string         `json:"name,omitempty"`      // display name (renameable)
 	Channel   string         `json:"channel,omitempty"`   // update channel: stable | nightly
+	Color     string         `json:"color,omitempty"`     // TUI accent (ANSI code or /color name) — "" = default
 	Provider  string         `json:"provider,omitempty"`  // active provider ("" / "local" = LLM below)
 	LLM       LLM            `json:"llm"`                 // the local connection (the "local" provider)
 	Providers map[string]LLM `json:"providers,omitempty"` // external provider presets
@@ -432,6 +436,9 @@ func mergeJSONFile(path string, perm os.FileMode, kv map[string]any) error {
 
 // SaveChannel persists the update channel (stable|nightly).
 func SaveChannel(channel string) error { return mergeGlobalKeys(map[string]any{"channel": channel}) }
+
+// SaveColor persists the TUI accent color (an ANSI code or /color name).
+func SaveColor(color string) error { return mergeGlobalKeys(map[string]any{"color": color}) }
 
 // SaveUsageRetention persists the usage-ledger retention window (days; 0 = keep
 // forever).

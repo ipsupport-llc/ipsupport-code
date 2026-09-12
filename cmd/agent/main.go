@@ -34,6 +34,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
+	"github.com/ipsupport-llc/ipsupport-code/internal/procgroup"
 	"github.com/ipsupport-llc/ipsupport-code/internal/reflect"
 	"github.com/ipsupport-llc/ipsupport-code/internal/sandbox"
 	"github.com/ipsupport-llc/ipsupport-code/internal/selfupdate"
@@ -1476,9 +1477,36 @@ func (a *app) completeDir(prefix string) (string, []string) {
 	return longestCommonPrefix(matches), matches
 }
 
-// gitOut runs a read-only git command in dir and returns its stdout.
+// gitOutTimeout bounds every gitOut call. A var (not const) so tests can
+// shrink it to keep a hung-subprocess test fast; production never overrides
+// it. A few seconds is generous for what's always a quick, read-only query
+// (rev-parse/diff/ls-files) — and unlike internal/tool's git tool (which runs
+// under the caller's own cancellable context), gitOut is called straight from
+// the bubbletea UI goroutine with no timeout of its own, so this is the only
+// thing standing between a wedged git subprocess and an indefinite hang.
+var gitOutTimeout = 5 * time.Second
+
+// gitOut runs a read-only git command in dir and returns its stdout. It
+// applies the same guards internal/tool/git.go's git tool applies to every
+// invocation against a workspace: "-c core.fsmonitor=" (a local .git/config
+// can bind core.fsmonitor to an arbitrary executable that git would
+// otherwise run as a subprocess on commands like status/diff — with no
+// approval gate at all here) and, for a "diff" subcommand, "--no-textconv
+// --no-ext-diff" (a .gitattributes textconv/ext-diff driver is the same kind
+// of unapproved-subprocess risk). It also bounds the call with gitOutTimeout
+// and kills the whole process group on expiry (internal/procgroup), so a
+// stuck hook/driver/pager can't hang the caller.
 func gitOut(dir string, args ...string) (string, error) {
-	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).Output()
+	if len(args) > 0 && args[0] == "diff" {
+		extended := append([]string{"diff", "--no-textconv", "--no-ext-diff"}, args[1:]...)
+		args = extended
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), gitOutTimeout)
+	defer cancel()
+	gitArgs := append([]string{"-C", dir, "-c", "core.fsmonitor="}, args...)
+	cmd := exec.CommandContext(ctx, "git", gitArgs...)
+	procgroup.Set(cmd)
+	out, err := cmd.Output()
 	return string(out), err
 }
 
@@ -1489,8 +1517,14 @@ func mustGit(dir string, args ...string) string { s, _ := gitOut(dir, args...); 
 // diffCommand shows the uncommitted working-tree changes in the current dir — a
 // quick "what did the agent change" review without leaving the TUI. The caller
 // colorizes the lines. Caps very large diffs so the log doesn't flood.
-func (a *app) diffCommand() []string {
-	dir := a.effectiveDir()
+func (a *app) diffCommand() []string { return diffLinesForDir(a.effectiveDir()) }
+
+// diffLinesForDir is diffCommand's logic, parameterized on dir. The async
+// /diff dispatch (runDiffCmd in tui.go) snapshots a.effectiveDir() on the UI
+// goroutine and runs this in a background goroutine — reading a.effectiveDir()
+// again from that goroutine would race a concurrent /cd — so this must not
+// touch any other app state.
+func diffLinesForDir(dir string) []string {
 	if out, err := gitOut(dir, "rev-parse", "--is-inside-work-tree"); err != nil || strings.TrimSpace(out) != "true" {
 		return []string{"/diff needs a git repo here — nothing to compare against"}
 	}

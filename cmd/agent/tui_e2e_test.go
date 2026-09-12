@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -253,6 +254,60 @@ func TestMCPCommand_ReturnsCmdWithoutBlocking(t *testing.T) {
 	}
 	if cmd == nil {
 		t.Fatal(`runCommand("/mcp") returned a nil tea.Cmd — the connect+approval must be dispatched asynchronously`)
+	}
+}
+
+// TestDiffCommandReturnsCmdWithoutBlocking is a regression test for /diff
+// freezing the whole TUI: diffCommand's gitOut calls used to run
+// synchronously, inline in Update, with no timeout — a wedged or merely slow
+// git subprocess (a stuck fsmonitor hook, a big repo on a slow disk) would
+// freeze bubbletea's single event-loop goroutine (no rendering, no input).
+// The fix dispatches those calls through a tea.Cmd (runDiffCmd), the same
+// pattern runShellCmd already used for !cmd and /mcp's own async fix uses
+// (see TestMCPCommand_ReturnsCmdWithoutBlocking above). This proves
+// runCommand("/diff") itself never blocks even against a slow git call, and
+// that the returned Cmd's own goroutine is where the wait actually happens
+// and still delivers output.
+func TestDiffCommandReturnsCmdWithoutBlocking(t *testing.T) {
+	// A fake "git" that sleeps before answering every invocation — standing in
+	// for a git call that's merely slow (not necessarily wedged forever), long
+	// enough that a synchronous call in Update would visibly block, short
+	// enough to keep this test itself fast. Its output ("true") is enough for
+	// diffCommand's initial rev-parse check to proceed into the rest of its
+	// (otherwise don't-care) git calls.
+	fakeBinDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(fakeBinDir, "git"), []byte("#!/bin/sh\nsleep 0.3\necho true\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBinDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	a := tuiTestApp(t, tuiFakeServer(t))
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	_, cmd := m.runCommand("/diff")
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Fatalf(`runCommand("/diff") took %v — the git calls must not run inline`, elapsed)
+	}
+	if cmd == nil {
+		t.Fatal(`runCommand("/diff") returned a nil tea.Cmd — /diff must be dispatched asynchronously`)
+	}
+
+	// The fix's other half: the Cmd's own goroutine must actually complete and
+	// deliver a diffMsg (proving the async dispatch really runs the work,
+	// rather than silently dropping it).
+	done := make(chan tea.Msg, 1)
+	go func() { done <- cmd() }() // bubbletea would run this on its own goroutine
+	select {
+	case msg := <-done:
+		if _, ok := msg.(diffMsg); !ok {
+			t.Fatalf("cmd() returned %T, want diffMsg", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the /diff Cmd never completed")
 	}
 }
 

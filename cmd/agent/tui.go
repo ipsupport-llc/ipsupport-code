@@ -161,6 +161,7 @@ type updateMsg struct{ notice string }   // startup freshness check result
 type updateDoneMsg struct{ text string } // /update result
 type shellDoneMsg struct{}               // returned from a drop-to-shell
 type shellCmdMsg struct{ out string }    // output of a one-off !cmd
+type diffMsg struct{ lines []string }    // output of /diff
 type windowMsg struct {                  // re-detected context window for a provider
 	provider string
 	tokens   int
@@ -694,6 +695,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case shellCmdMsg:
 		if msg.out != "" {
 			m.push(outputLines(msg.out, "→", cOk)...)
+		}
+		return m, nil
+
+	case diffMsg:
+		for _, l := range msg.lines {
+			m.push(colorizeDiff(l))
 		}
 		return m, nil
 
@@ -1308,6 +1315,25 @@ func (m *tuiModel) runShellCmd(cmdline string) tea.Cmd {
 	}
 }
 
+// runDiffCmd runs /diff's git calls off the UI goroutine — same pattern as
+// runShellCmd above. /diff shells out (gitOut/mustGit), which used to run
+// synchronously, inline in Update, with no timeout: a wedged git subprocess
+// (a stuck fsmonitor hook, a hung external diff/merge tool) would freeze
+// bubbletea's single event-loop goroutine indefinitely (no rendering, no
+// input) — gitOut is now bounded (see gitOutTimeout), but dispatching here
+// too means even a merely slow git call (a big repo, a slow disk) can't stall
+// the UI. effectiveDir() is snapshotted here, on the UI goroutine, rather
+// than read again inside the goroutine: /diff is one of the commands allowed
+// to run while a task is already busy (commandWhileBusy), and a /cd typed
+// right after would otherwise race a live write of a.workdir against this
+// goroutine's read of it.
+func (m *tuiModel) runDiffCmd() tea.Cmd {
+	dir := m.app.effectiveDir()
+	return func() tea.Msg {
+		return diffMsg{lines: diffLinesForDir(dir)}
+	}
+}
+
 func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	cmd, rest := splitCommand(line)
 	switch cmd {
@@ -1474,10 +1500,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "/diff":
-		for _, l := range m.app.diffCommand() {
-			m.push(colorizeDiff(l))
-		}
-		return m, nil
+		return m, m.runDiffCmd()
 	case "/reasoning":
 		m.pushLines(m.app.reasoningCommand(rest))
 		return m, nil

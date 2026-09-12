@@ -592,7 +592,7 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 
 	id := fmt.Sprintf("sub%d", a.spawnSeq.Add(1)) // groups this sub-agent's UI events
 	client := llm.NewOpenAIClient(plan.llmCfg)    // reasoning params already resolved in resolveSpawn
-	sub := agent.New(client, plan.subReg, a.kb, plan.tracer, a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt), plan.llmCfg.MaxSteps)
+	sub := agent.New(client, plan.subReg, a.kb, plan.tracer, a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt), stepBudget(plan.llmCfg))
 	sub.SetPlanMode(plan.planMode)
 	sub.SetLabel(id)
 	if plan.tracer != nil {
@@ -1519,13 +1519,85 @@ func (a *app) diffCommand() []string {
 	return out
 }
 
-// goalSteps is the hard step backstop for one goal pursuit, falling back to the
-// model's own per-task cap if it isn't configured.
+// goalSteps is the hard tool-call-round backstop for one goal pursuit: an
+// explicit GoalMaxSteps override wins, else the active connection's own
+// per-connection budget (stepBudget — an explicit MaxSteps, or auto-scaled
+// from its context window).
 func (a *app) goalSteps() int {
 	if a.cfg.GoalMaxSteps > 0 {
 		return a.cfg.GoalMaxSteps
 	}
-	return a.activeLLM().MaxSteps
+	return stepBudget(a.activeLLM())
+}
+
+// stepBudget resolves the tool-call-round budget for one connection: an
+// explicit l.MaxSteps wins, else auto-scale from its context window.
+func stepBudget(l config.LLM) int {
+	if l.MaxSteps > 0 {
+		return l.MaxSteps
+	}
+	return autoStepBudget(l.ContextWindow)
+}
+
+// refContextWindow/refStepBudget anchor autoStepBudget to today's long-standing
+// behavior at the historical default context window (8192 → 80 steps), so a
+// typical/default setup sees no change; a bigger window scales the budget up
+// proportionally (a bigger KV cache affords more tool-call rounds before a
+// complex task's own accumulated back-and-forth threatens to fill it), and a
+// smaller one scales it down, within floor/ceiling. The ceiling exists because
+// a task genuinely needing hundreds of rounds is almost certainly stuck in a
+// loop, not legitimately working, regardless of how much room is available.
+const (
+	refContextWindow = 8192
+	refStepBudget    = 80
+	minStepBudget    = 40
+	maxStepBudget    = 400
+)
+
+// autoStepBudget derives the per-goal tool-call-round budget from a
+// connection's real context window when no explicit MaxSteps/GoalMaxSteps
+// override is set.
+func autoStepBudget(contextWindow int) int {
+	if contextWindow <= 0 {
+		return refStepBudget
+	}
+	n := refStepBudget * contextWindow / refContextWindow
+	if n < minStepBudget {
+		n = minStepBudget
+	}
+	if n > maxStepBudget {
+		n = maxStepBudget
+	}
+	return n
+}
+
+// refMaxHistory anchors autoMaxHistory the same way autoStepBudget anchors the
+// step budget: unchanged at the historical default window, scaling up for a
+// bigger one. remember()'s FIFO trim (unlike Compact) has no summarization
+// step, so it's meant as a rare backstop, not everyday routine — scaling it
+// with the window means a big-context session naturally keeps proportionally
+// more real cross-task memory before that backstop ever has to fire.
+const (
+	refMaxHistory     = 16
+	minMaxHistory     = 16
+	maxAutoMaxHistory = rawMemoryMaxHistory // same ceiling memory=raw already uses
+)
+
+// autoMaxHistory derives Agent.remember's cross-task message cap from a
+// connection's real context window when no explicit override (Config.
+// MaxHistory) is set.
+func autoMaxHistory(contextWindow int) int {
+	if contextWindow <= 0 {
+		return refMaxHistory
+	}
+	n := refMaxHistory * contextWindow / refContextWindow
+	if n < minMaxHistory {
+		n = minMaxHistory
+	}
+	if n > maxAutoMaxHistory {
+		n = maxAutoMaxHistory
+	}
+	return n
 }
 
 // reasoningParams resolves the merge-params for (provider, model). scope ""
@@ -2139,14 +2211,22 @@ func (a *app) wire() error {
 	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
 	a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
-	if a.cfg.Memory == "raw" {
-		// A local server's KV-cache only helps while the prompt PREFIX stays
-		// identical between requests; remember()'s trim cuts from the front,
-		// which breaks that just like a summary compact would. Raw mode's whole
-		// point is fewer surprises, not a cache-breaking cut on every turn past
-		// the default cap — so make it a rare backstop instead.
-		a.ag.SetMaxHistory(rawMemoryMaxHistory)
+	// A local server's KV-cache only helps while the prompt PREFIX stays
+	// identical between requests; remember()'s trim cuts from the front, which
+	// breaks that just like a summary compact would — so the cap is meant as a
+	// rare backstop, not everyday routine. An explicit Config.MaxHistory wins;
+	// otherwise it auto-scales from the context window (a bigger window
+	// affords keeping proportionally more real cross-task memory before that
+	// backstop ever needs to fire), floored at raw mode's own minimum since raw
+	// opts out of auto-compact entirely and leans on this cap alone.
+	hist := a.cfg.MaxHistory
+	if hist <= 0 {
+		hist = autoMaxHistory(a.activeLLM().ContextWindow)
 	}
+	if a.cfg.Memory == "raw" && hist < rawMemoryMaxHistory {
+		hist = rawMemoryMaxHistory
+	}
+	a.ag.SetMaxHistory(hist)
 	return nil
 }
 

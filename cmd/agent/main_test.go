@@ -846,6 +846,55 @@ func TestConfigPanelContextWindowCycle(t *testing.T) {
 	}
 }
 
+// max_steps/max_history must be settable from /config as an explicit override
+// on top of auto-scaling (0 = auto), and must persist and survive a reload —
+// same conventions as the other numeric /config rows, but as top-level
+// settings (not per-connection), so no local-vs-named-provider split applies.
+func TestConfigPanelMaxStepsAndMaxHistoryCycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	cursorFor := func(key string) int {
+		for i, k := range cfgKeys() {
+			if k == key {
+				return i
+			}
+		}
+		t.Fatalf("no %q row in the config panel", key)
+		return -1
+	}
+
+	m.cfgCursor = cursorFor("max_steps")
+	if m.app.cfg.GoalMaxSteps != 0 {
+		t.Fatalf("default GoalMaxSteps = %v, want 0 (auto-scale)", m.app.cfg.GoalMaxSteps)
+	}
+	m.configActivate() // 0 → 40
+	if m.app.cfg.GoalMaxSteps != 40 {
+		t.Errorf("after one cycle, GoalMaxSteps = %v, want 40", m.app.cfg.GoalMaxSteps)
+	}
+
+	m.cfgCursor = cursorFor("max_history")
+	if m.app.cfg.MaxHistory != 0 {
+		t.Fatalf("default MaxHistory = %v, want 0 (auto-scale)", m.app.cfg.MaxHistory)
+	}
+	m.configActivate() // 0 → 16
+	m.configActivate() // 16 → 32
+	if m.app.cfg.MaxHistory != 32 {
+		t.Errorf("after two cycles, MaxHistory = %v, want 32", m.app.cfg.MaxHistory)
+	}
+
+	loaded, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.GoalMaxSteps != 40 {
+		t.Errorf("GoalMaxSteps not persisted: %v", loaded.GoalMaxSteps)
+	}
+	if loaded.MaxHistory != 32 {
+		t.Errorf("MaxHistory not persisted: %v", loaded.MaxHistory)
+	}
+}
+
 func TestResolveModelArg(t *testing.T) {
 	ids := []string{"openai/gpt-4o", "openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "x-ai/grok-4.3"}
 	// exact id → switch
@@ -5457,6 +5506,105 @@ func TestWireRaisesMaxHistoryForRawMemory(t *testing.T) {
 	}
 	if got := a.ag.MaxHistory(); got != rawMemoryMaxHistory {
 		t.Errorf("memory=raw: MaxHistory() = %d, want %d", got, rawMemoryMaxHistory)
+	}
+	a.cfg.Memory = ""
+
+	// A bigger context window auto-scales the default-mode cap up, not just
+	// raw mode's flat backstop.
+	a.cfg.LLM.ContextWindow = 65536
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := a.ag.MaxHistory(), autoMaxHistory(65536); got != want {
+		t.Errorf("bigger window: MaxHistory() = %d, want the auto-scaled %d", got, want)
+	}
+	if a.ag.MaxHistory() <= 16 {
+		t.Error("a much bigger context window should afford more cross-task memory than the small-window default")
+	}
+
+	// An explicit Config.MaxHistory override wins over auto-scale entirely.
+	a.cfg.MaxHistory = 42
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.ag.MaxHistory(); got != 42 {
+		t.Errorf("explicit MaxHistory override = %d, want 42", got)
+	}
+}
+
+// autoStepBudget must reproduce the historical flat default (80) at the
+// historical default context window (8192) — a typical/default setup must see
+// NO behavior change — while scaling proportionally for a bigger or smaller
+// real window, within its floor/ceiling.
+func TestAutoStepBudget(t *testing.T) {
+	cases := []struct {
+		ctxWindow int
+		want      int
+	}{
+		{0, refStepBudget},                      // unknown window → today's historical default
+		{refContextWindow, refStepBudget},       // 8192 → 80, unchanged from before this feature
+		{refContextWindow * 2, 160},             // 16384 → 2x the reference budget (still under the ceiling)
+		{2048, minStepBudget},                   // a small window floors, doesn't starve to near-zero
+		{refContextWindow * 100, maxStepBudget}, // a huge window ceilings — hundreds of rounds is stuck, not working
+	}
+	for _, c := range cases {
+		if got := autoStepBudget(c.ctxWindow); got != c.want {
+			t.Errorf("autoStepBudget(%d) = %d, want %d", c.ctxWindow, got, c.want)
+		}
+	}
+}
+
+func TestAutoMaxHistory(t *testing.T) {
+	cases := []struct {
+		ctxWindow int
+		want      int
+	}{
+		{0, refMaxHistory},
+		{refContextWindow, refMaxHistory},              // 8192 → 16, unchanged from before this feature
+		{refContextWindow * 8, 128},                    // 65536 → 8x the reference cap
+		{1000, minMaxHistory},                          // a tiny window still floors at 16
+		{refContextWindow * 1000, rawMemoryMaxHistory}, // a huge window ceilings at the same cap raw mode uses
+	}
+	for _, c := range cases {
+		if got := autoMaxHistory(c.ctxWindow); got != c.want {
+			t.Errorf("autoMaxHistory(%d) = %d, want %d", c.ctxWindow, got, c.want)
+		}
+	}
+}
+
+// An explicit per-connection MaxSteps always wins over auto-scaling from its
+// context window — this is the override an operator reaches for when the
+// auto-scaled default genuinely doesn't fit their model.
+func TestStepBudgetPrefersExplicitOverride(t *testing.T) {
+	l := config.LLM{ContextWindow: 65536, MaxSteps: 25}
+	if got := stepBudget(l); got != 25 {
+		t.Errorf("stepBudget with explicit MaxSteps = %d, want 25 (override, not auto-scaled 640)", got)
+	}
+	l.MaxSteps = 0
+	if got, want := stepBudget(l), autoStepBudget(65536); got != want {
+		t.Errorf("stepBudget with MaxSteps unset = %d, want the auto-scaled %d", got, want)
+	}
+}
+
+// goalSteps must prefer an explicit top-level GoalMaxSteps override over the
+// active connection's own stepBudget (explicit MaxSteps, or auto-scale).
+func TestGoalStepsPrefersExplicitOverrides(t *testing.T) {
+	cfg := config.Default()
+	cfg.LLM.ContextWindow = 65536
+	a := &app{cfg: cfg}
+
+	if got, want := a.goalSteps(), autoStepBudget(65536); got != want {
+		t.Errorf("no override anywhere: goalSteps() = %d, want the auto-scaled %d", got, want)
+	}
+
+	a.cfg.LLM.MaxSteps = 30
+	if got := a.goalSteps(); got != 30 {
+		t.Errorf("connection-level MaxSteps override: goalSteps() = %d, want 30", got)
+	}
+
+	a.cfg.GoalMaxSteps = 99
+	if got := a.goalSteps(); got != 99 {
+		t.Errorf("top-level GoalMaxSteps must win over the connection-level override: goalSteps() = %d, want 99", got)
 	}
 }
 

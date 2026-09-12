@@ -635,7 +635,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		if nErr == len(assistant.ToolCalls) || repeating {
 			if stuck++; stuck >= maxStuckTurns {
 				if !nudged {
-					msgs = append(msgs, llm.User(stuckNudge))
+					msgs = append(msgs, llm.User(stuckNudgeFor(repeating)))
 					a.emit("nudge", map[string]any{})
 					nudged = true // keep stuck high: one more dud turn now stops it
 				} else {
@@ -757,9 +757,26 @@ func splitSuggestion(text string) (clean, suggestion string) {
 // nudge (and, if it doesn't help, the stop).
 const maxStuckTurns = 3
 
-// stuckNudge is the one self-correction injected before giving up — with an
-// escape hatch so the model answers in words instead of looping.
-const stuckNudge = `You're repeating the same tool call(s) without making progress. Stop and re-read the last result: if it errored, it says exactly what's wrong (the call format, or a missing param) — fix that; if it succeeded, you already have what you need, so act on it or finish. Take a different approach. If you genuinely cannot proceed, reply in ONE sentence explaining what's blocking you, and do NOT call a tool.`
+// stuckNudgeRepeat is injected when the model sent the exact same tool
+// call(s) as last turn — a literal repeat, whether it keeps failing or
+// keeps (uselessly) succeeding again.
+const stuckNudgeRepeat = `You're repeating the same tool call(s) without making progress. Stop and re-read the last result: if it errored, it says exactly what's wrong (the call format, or a missing param) — fix that; if it succeeded, you already have what you need, so act on it or finish. Take a different approach. If you genuinely cannot proceed, reply in ONE sentence explaining what's blocking you, and do NOT call a tool.`
+
+// stuckNudgeFailing is injected when several turns in a row each failed with
+// a DIFFERENT tool call — not a literal repeat (telling the model it's
+// "repeating" here would be false and undermine the rest of the nudge), but
+// still zero progress. Guessing a new shape each time instead of reading the
+// error is the actual failure mode this is pushing back on.
+const stuckNudgeFailing = `You've made several different tool calls in a row and every one of them failed. Stop guessing new shapes — re-read the LAST error message closely: it says exactly what's wrong (unknown tool/action, or a missing param) and usually shows the exact shape expected. Fix that specific problem. If you genuinely cannot proceed, reply in ONE sentence explaining what's blocking you, and do NOT call a tool.`
+
+// stuckNudgeFor picks the accurate framing for why the stuck counter tripped —
+// see stuckNudgeRepeat / stuckNudgeFailing.
+func stuckNudgeFor(repeating bool) string {
+	if repeating {
+		return stuckNudgeRepeat
+	}
+	return stuckNudgeFailing
+}
 
 // stuckSuggest is offered to the user (one tap) when even the nudge didn't help.
 const stuckSuggest = "take a different approach — outline the steps first"

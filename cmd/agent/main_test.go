@@ -1342,6 +1342,40 @@ func TestSessionAllowGate(t *testing.T) {
 	}
 }
 
+// sleepyApprover simulates a human taking sleepFor to answer an approval prompt.
+type sleepyApprover struct{ sleepFor time.Duration }
+
+func (s sleepyApprover) Approve(context.Context, string, string) bool {
+	time.Sleep(s.sleepFor)
+	return true
+}
+
+// Time spent blocked on an approval prompt (a human deciding whether to allow a
+// file write or shell command) must NOT be counted as the run's own duration —
+// otherwise a slow human makes tok/s (internal/usage) look like the MODEL was
+// slow, when it was just waiting. approveGated accumulates the wait into
+// a.approvalWaitNS; runDuration subtracts it back out.
+func TestRunDurationExcludesApprovalWait(t *testing.T) {
+	const wait = 50 * time.Millisecond
+	a := &app{cfg: config.Default(), approver: sleepyApprover{sleepFor: wait}}
+
+	waitSnapshot := a.approvalWaitNS.Load()
+	start := time.Now()
+	time.Sleep(10 * time.Millisecond) // some real "model" work before the prompt
+	if !a.approveGated(context.Background(), "write", "x") {
+		t.Fatal("sleepyApprover always approves")
+	}
+	time.Sleep(10 * time.Millisecond) // more real work after the prompt
+	dur := a.runDuration(start, waitSnapshot)
+
+	if dur >= 40*time.Millisecond {
+		t.Errorf("runDuration = %v, want well under the ~%v elapsed — the %v approval wait should be subtracted out", dur, time.Since(start), wait)
+	}
+	if dur < 5*time.Millisecond {
+		t.Errorf("runDuration = %v, subtracted too much — the ~20ms of real work either side should still count", dur)
+	}
+}
+
 // The plain (non-TUI) REPL's /clear must reset session-allow grants exactly
 // like the TUI's /clear does — otherwise an "allow all this session" grant
 // from before /clear silently keeps auto-approving after the thread is

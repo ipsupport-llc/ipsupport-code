@@ -2079,7 +2079,12 @@ func TestQueuedTaskChecksAutoCompactBeforeDraining(t *testing.T) {
 
 	// Build session length >= 4 (autoCompactNeeded's floor) before the task under test.
 	a.ag.Run(context.Background(), "task 1")
-	a.ag.Run(context.Background(), "task 2")
+	tr, _ := a.ag.Run(context.Background(), "task 2")
+	// shouldAutoCompact reads a.lastRealContext (a snapshot taken right after
+	// Run(), before reflection/judge calls can clobber the shared client's own
+	// Context() — see runOne/runTaskStreaming), not the client directly, so the
+	// warm-up must set it exactly like those callers do.
+	a.lastRealContext = tr.PromptTokens
 	if !a.shouldAutoCompact() {
 		t.Fatal("test setup: expected shouldAutoCompact() to be true after the warm-up runs")
 	}
@@ -2150,7 +2155,12 @@ func TestRunLoopChecksAutoCompactEachIteration(t *testing.T) {
 	// Warm up past autoCompactNeeded's sessionLen floor (>= 4), same trick as
 	// TestRunOneAutoCompactResetsCheckpoints.
 	a.ag.Run(context.Background(), "warmup 1")
-	a.ag.Run(context.Background(), "warmup 2")
+	tr, _ := a.ag.Run(context.Background(), "warmup 2")
+	// shouldAutoCompact reads a.lastRealContext (a snapshot taken right after
+	// Run(), before reflection/judge calls can clobber the shared client's own
+	// Context() — see runOne/runTaskStreaming), not the client directly, so the
+	// warm-up must set it exactly like those callers do.
+	a.lastRealContext = tr.PromptTokens
 	if !a.shouldAutoCompact() {
 		t.Fatal("test setup: expected shouldAutoCompact() to be true after the warm-up runs")
 	}

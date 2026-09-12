@@ -3918,6 +3918,59 @@ func TestCdWorkdirPersistsAcrossSessionRestore(t *testing.T) {
 	}
 }
 
+// The startup banner's "cwd" row is built from a.workspace directly, which /cd
+// never touches (only a.workdir does) — so a restored /cd was correctly applied
+// everywhere else (effectiveDir, the system prompt, /cd with no args) but the
+// banner kept showing the bare workspace root, contradicting the rest of the UI.
+func TestBannerShowsRestoredWorkdirNotWorkspaceRoot(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, "backend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Workspace = ws
+
+	mk := func() *app {
+		kb, _ := knowledge.Open("")
+		c := cfg
+		a := &app{cfg: c, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+		if err := a.wire(); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+
+	first := mk()
+	if lines := first.cdCommand("backend"); strings.Contains(lines[0], "cd:") {
+		t.Fatalf("cd failed: %v", lines)
+	}
+	first.ag.SetHistory([]llm.Message{llm.User("g0"), {Role: "assistant", Content: "a0"}})
+	first.saveSession()
+
+	second := mk() // a fresh process, same workspace/session name
+	second.loadSession()
+	second.sessionRestored = true
+
+	m, err := second.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := stripAnsi(strings.Join(m.history, "\n"))
+	var cwdLine string
+	for _, line := range strings.Split(joined, "\n") {
+		if strings.Contains(line, "cwd") {
+			cwdLine = line
+			break
+		}
+	}
+	if cwdLine == "" {
+		t.Fatalf("no cwd row found in banner:\n%s", joined)
+	}
+	if !strings.Contains(cwdLine, "backend") {
+		t.Errorf("banner cwd row = %q, want it to show the restored /cd target (…/backend), not the bare workspace root", cwdLine)
+	}
+}
+
 func TestNewSessionPreservesOld(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // newNamedSession(persist) writes the global config
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

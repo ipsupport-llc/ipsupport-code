@@ -223,7 +223,7 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: accent, accentIdx: accentIdx, inputLines: 1}
 	m.histIdx = len(a.promptHist) // start "not browsing": first ↑ recalls the most recent prompt
 	act := a.activeLLM()
-	m.history = bannerLines(name, version, a.providerName(), act.Model, a.workspace, act.ContextWindow, m.accent)
+	m.history = bannerLines(name, version, a.providerName(), act.Model, a.effectiveDir(), act.ContextWindow, m.accent)
 	// Surface an unfinished standing goal AT MOST ONCE per restart: the passive
 	// banner line below is shown here (cheap, no side effect); the interactive
 	// offer — and marking it offered so it doesn't re-nag — happens wherever

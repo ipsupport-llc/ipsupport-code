@@ -152,6 +152,30 @@ func (d *Domain) Call(ctx context.Context, action string, params map[string]any)
 	return a.Run(ctx, Args{m: params})
 }
 
+// soleRequiredParam returns the sole action's name and its ONE required
+// param's name, if this domain has EXACTLY one action with EXACTLY one
+// required param — the case where a garbled top-level "action" string (a
+// model dumping its intended value there instead of into params, e.g.
+// run's action="ls -la /tmp" instead of action="shell",
+// params={"command":"ls -la /tmp"}) can be recovered UNAMBIGUOUSLY: there's
+// nowhere else the garbled string could have meant to go.
+func (d *Domain) soleRequiredParam() (action, param string, ok bool) {
+	if len(d.spec.Actions) != 1 {
+		return "", "", false
+	}
+	a := d.spec.Actions[0]
+	var required []Param
+	for _, p := range a.Params {
+		if p.Required {
+			required = append(required, p)
+		}
+	}
+	if len(required) != 1 {
+		return "", "", false
+	}
+	return a.Name, required[0].Name, true
+}
+
 // renderParams turns the declared params into the contract shown to the model,
 // e.g. {"path": str, "content": str} or {"path"?: str="."}.
 func renderParams(ps []Param) string {

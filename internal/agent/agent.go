@@ -46,6 +46,11 @@ type Agent struct {
 	detached atomic.Bool
 	system   string
 	maxSteps int
+	// contextWindow is the active connection's real context size (0 = unknown),
+	// used ONLY to keep a single long task's own growing tool-call trail inside
+	// it (see trimIfNearWindow) — auto-compact (Compact) is the analogous
+	// backstop BETWEEN tasks, not within one.
+	contextWindow int
 
 	history    []llm.Message
 	maxHistory int
@@ -124,6 +129,13 @@ func (a *Agent) System() string { return a.system }
 // into a rare safety backstop instead of everyday routine.
 func (a *Agent) SetMaxHistory(n int) { a.maxHistory = n }
 
+// SetContextWindow tells the agent the active connection's real context size
+// (tokens), so a single long-running task can watch its OWN growing tool-call
+// trail against it (trimIfNearWindow) instead of only being bounded by
+// Compact/remember's cross-task cap, which never runs mid-task. 0 (the
+// default) disables this — no window known, nothing to check against.
+func (a *Agent) SetContextWindow(n int) { a.contextWindow = n }
+
 // SetGoalLoop configures goal pursuit: when the model finalizes, a judge decides
 // whether the goal is met; if not, re-feed the goal and keep going, up to
 // maxReturns times (a TTL). 0 disables it — one run, the model's finish stands.
@@ -189,6 +201,10 @@ func (a *Agent) SessionLen() int { return len(a.history) }
 
 // MaxHistory reports the current trim cap (see SetMaxHistory).
 func (a *Agent) MaxHistory() int { return a.maxHistory }
+
+// ContextWindow reports the context window this agent was told about (see
+// SetContextWindow); 0 means none is known.
+func (a *Agent) ContextWindow() int { return a.contextWindow }
 
 // History returns a copy of the session conversation (for persistence).
 func (a *Agent) History() []llm.Message { return append([]llm.Message(nil), a.history...) }
@@ -296,6 +312,73 @@ func extractActionsDigest(content string) string {
 		return ""
 	}
 	return strings.TrimSpace(content[i:])
+}
+
+// inTaskTrimRatio is how full the estimated prompt must be (relative to
+// contextWindow) before trimIfNearWindow starts trimming — high enough that
+// it's a rare backstop for a genuinely long, complex task, not everyday
+// routine (Compact/remember's cross-task cap is the everyday mechanism;
+// contextWindow only exists for the mid-task case those two never see).
+const inTaskTrimRatio = 0.85
+
+// trimKeepRecent is how many of the most recent messages trimIfNearWindow
+// never touches, regardless of size — the model is actively working with
+// this part of the conversation right now.
+const trimKeepRecent = 6
+
+// trimMinResultSize is the smallest tool-result content trimIfNearWindow will
+// bother trimming (bytes) — an already-small result isn't worth the churn.
+const trimMinResultSize = 500
+
+// estimateMsgTokens is a rough, deterministic token-count proxy: the same
+// ~4-bytes-per-token convention used elsewhere in this codebase (see
+// internal/llm's promptEstimate, TestCatalogTokenBudget) — good enough to
+// decide "getting close", not meant to be exact.
+func estimateMsgTokens(msgs []llm.Message) int {
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Content)
+	}
+	return n / 4
+}
+
+// trimIfNearWindow keeps a SINGLE long task's own growing tool-call trail from
+// silently outgrowing the model's real context window mid-run — the auto-
+// compact/remember mechanisms in cmd/agent only ever check BETWEEN tasks, so a
+// genuinely complex task (many tool-call rounds) could otherwise organically
+// fill the window with nothing watching until the NEXT task got a chance to
+// notice.
+//
+// It trims deterministically, not with an LLM summary: once past
+// inTaskTrimRatio of contextWindow, it walks the OLDEST eligible messages
+// (never the system prompt, the original goal, assistant text, or the most
+// recent trimKeepRecent messages) and shrinks large tool RESULT contents down
+// to a short placeholder, stopping as soon as the estimate is back under the
+// threshold. This is safe specifically because tools are idempotent: if the
+// model still needs that detail, it can just re-run the call — unlike an
+// LLM-written recap, there's no risk of silently dropping or misremembering a
+// fact the model is still relying on. Mutates msgs in place; returns bytes
+// freed (0 if nothing was trimmed).
+func trimIfNearWindow(msgs []llm.Message, contextWindow int) int {
+	limit := int(float64(contextWindow) * inTaskTrimRatio)
+	if estimateMsgTokens(msgs) < limit {
+		return 0
+	}
+	protectFrom := len(msgs) - trimKeepRecent
+	freed := 0
+	for i := 0; i < protectFrom; i++ {
+		m := &msgs[i]
+		if m.Role != "tool" || len(m.Content) < trimMinResultSize {
+			continue
+		}
+		freed += len(m.Content)
+		m.Content = fmt.Sprintf("[%d bytes of this tool result trimmed to stay within the context window — re-run the call if you still need the detail]", len(m.Content))
+		freed -= len(m.Content)
+		if estimateMsgTokens(msgs) < limit {
+			break
+		}
+	}
+	return freed
 }
 
 // stopNote describes a run that stopped before a clean answer, so the next turn
@@ -620,6 +703,11 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		actedSinceReturn = true
 		results, nErr := a.runToolCalls(ctx, assistant.ToolCalls)
 		msgs = append(msgs, results...)
+		if a.contextWindow > 0 {
+			if freed := trimIfNearWindow(msgs, a.contextWindow); freed > 0 {
+				a.emit("context_trim", map[string]any{"bytes_freed": freed})
+			}
+		}
 
 		// A model burns steps either by repeating calls that all fail (e.g. empty
 		// action) OR by repeating the exact same call(s) that already succeeded,

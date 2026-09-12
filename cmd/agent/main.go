@@ -595,6 +595,7 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 	sub := agent.New(client, plan.subReg, a.kb, plan.tracer, a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt), stepBudget(plan.llmCfg))
 	sub.SetPlanMode(plan.planMode)
 	sub.SetLabel(id)
+	sub.SetContextWindow(plan.llmCfg.ContextWindow)
 	if plan.tracer != nil {
 		plan.tracer.Emit("subagent", map[string]any{"agent": id, "profile": plan.profile, "provider": plan.provider, "model": plan.llmCfg.Model, "dir": plan.subWorkspace, "task": oneLine(task, 80)})
 	}
@@ -2211,6 +2212,7 @@ func (a *app) wire() error {
 	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
 	a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
+	a.ag.SetContextWindow(a.activeLLM().ContextWindow) // so a single long task can watch its OWN growing trail mid-run
 	// A local server's KV-cache only helps while the prompt PREFIX stays
 	// identical between requests; remember()'s trim cuts from the front, which
 	// breaks that just like a summary compact would — so the cap is meant as a

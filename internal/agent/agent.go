@@ -52,6 +52,12 @@ type Agent struct {
 	// backstop BETWEEN tasks, not within one.
 	contextWindow int
 
+	// historyMu guards history: SessionLen/History let a caller (e.g. the TUI
+	// rendering /status) inspect the session from a different goroutine than
+	// the one running Run(), while remember() (called from Run) appends to it
+	// concurrently. Brief critical sections only — never held across a
+	// model/tool call.
+	historyMu  sync.Mutex
 	history    []llm.Message
 	maxHistory int
 	planMode   bool
@@ -120,7 +126,12 @@ func New(l llm.Chatter, reg *tool.Registry, kb *knowledge.KB, tr trace.Tracer, s
 }
 
 // Reset clears the session conversation memory.
-func (a *Agent) Reset() { a.history = nil; a.historyGen.Add(1) }
+func (a *Agent) Reset() {
+	a.historyMu.Lock()
+	a.history = nil
+	a.historyMu.Unlock()
+	a.historyGen.Add(1)
+}
 
 // SetSystem swaps the base system prompt (e.g. after learning new project facts),
 // so the next run uses it without a full re-wire.
@@ -189,10 +200,13 @@ func (a *Agent) askAside(ctx context.Context, base []llm.Message, question strin
 // AnswerAside answers a side question when no task is running, against base —
 // a snapshot of the session (system prompt + history) the caller must capture
 // synchronously (e.g. via System()+History()) BEFORE calling this, rather than
-// having it read a.system/a.history itself: those fields have no lock, and a
-// caller that answers the aside on its own goroutine (so the UI stays
-// responsive) could otherwise race a concurrent Reset/SetHistory/SetSystem
-// call mutating them from the main goroutine while no task is running.
+// having it read a.system/a.history itself: a.system has no lock (a caller
+// answering the aside on its own goroutine, so the UI stays responsive, could
+// otherwise race a concurrent SetSystem call from the main goroutine), and even
+// though History() is itself guarded (see historyMu), reading it separately
+// from System() here could still pair a NEW system prompt with an OLD history
+// (or vice versa) if a Reset/SetHistory/SetSystem lands in between — the
+// caller's single synchronous snapshot keeps the pair consistent.
 func (a *Agent) AnswerAside(ctx context.Context, base []llm.Message, question string) string {
 	return a.askAside(ctx, base, question)
 }
@@ -206,7 +220,11 @@ func (a *Agent) SetPlanMode(on bool) { a.planMode = on }
 func (a *Agent) PlanMode() bool { return a.planMode }
 
 // SessionLen reports how many remembered messages are in the current session.
-func (a *Agent) SessionLen() int { return len(a.history) }
+func (a *Agent) SessionLen() int {
+	a.historyMu.Lock()
+	defer a.historyMu.Unlock()
+	return len(a.history)
+}
 
 // MaxHistory reports the current trim cap (see SetMaxHistory).
 func (a *Agent) MaxHistory() int { return a.maxHistory }
@@ -216,13 +234,19 @@ func (a *Agent) MaxHistory() int { return a.maxHistory }
 func (a *Agent) ContextWindow() int { return a.contextWindow }
 
 // History returns a copy of the session conversation (for persistence).
-func (a *Agent) History() []llm.Message { return append([]llm.Message(nil), a.history...) }
+func (a *Agent) History() []llm.Message {
+	a.historyMu.Lock()
+	defer a.historyMu.Unlock()
+	return append([]llm.Message(nil), a.history...)
+}
 
 // SetHistory restores a session conversation (e.g. loaded from disk, or
 // carried forward into a rebuilt Agent) — a discontinuous replacement, so it
 // bumps historyGen (see HistoryGen).
 func (a *Agent) SetHistory(h []llm.Message) {
+	a.historyMu.Lock()
 	a.history = append([]llm.Message(nil), h...)
+	a.historyMu.Unlock()
 	a.historyGen.Add(1)
 }
 
@@ -237,6 +261,8 @@ func (a *Agent) TruncateHistory(n int) {
 	if n < 0 {
 		n = 0
 	}
+	a.historyMu.Lock()
+	defer a.historyMu.Unlock()
 	if n < len(a.history) {
 		a.history = append([]llm.Message(nil), a.history[:n]...)
 	}
@@ -280,7 +306,9 @@ func (a *Agent) SeedHistoryGen(g int64) { a.historyGen.Store(g) }
 // like a fresh start, and the very next task blindly repeated the exact
 // command that had already failed every time.
 func (a *Agent) Compact(ctx context.Context) (int, error) {
+	a.historyMu.Lock()
 	if len(a.history) < 2 {
+		a.historyMu.Unlock()
 		return 0, nil
 	}
 	var b strings.Builder
@@ -304,6 +332,7 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 			digests = append(digests, d)
 		}
 	}
+	a.historyMu.Unlock()
 	reply, err := a.llm.Chat(ctx, []llm.Message{
 		llm.System("Summarize the conversation so far into a compact recap that preserves the key facts, decisions, files touched, and context needed to keep going. A few sentences, no preamble."),
 		llm.User(b.String()),
@@ -311,7 +340,6 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	n := len(a.history)
 	summary := "[Summary of earlier conversation]\n" + reply.Content
 	if len(digests) > 0 {
 		// Starts with actionsDigestMarker (not bespoke wording) so a LATER Compact
@@ -319,10 +347,13 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 		summary += actionsDigestMarker + " — exact record of actions across those turns, kept verbatim regardless of the summary above — do not repeat a command marked FAILED, it will fail the same way again:\n" +
 			strings.Join(digests, "\n") + ")"
 	}
+	a.historyMu.Lock()
+	n := len(a.history)
 	a.history = []llm.Message{
 		{Role: "user", Content: summary},
 		{Role: "assistant", Content: "Got it — I have that context."},
 	}
+	a.historyMu.Unlock()
 	a.historyGen.Add(1)
 	return n, nil
 }
@@ -509,12 +540,14 @@ func (a *Agent) remember(goal, final string, msgs []llm.Message) {
 	if a.archiver != nil {
 		a.archiver.Archive(goal, entry)
 	}
+	a.historyMu.Lock()
 	a.history = append(a.history, llm.User(goal), llm.Message{Role: "assistant", Content: entry})
 	if a.maxHistory > 0 && len(a.history) > a.maxHistory {
 		dropped := len(a.history) - a.maxHistory
 		a.history = append([]llm.Message(nil), a.history[len(a.history)-a.maxHistory:]...)
 		a.frontTrim.Add(int64(dropped))
 	}
+	a.historyMu.Unlock()
 }
 
 // actionsDigest scans a finished turn's tool calls for a short, deterministic
@@ -652,12 +685,13 @@ const planDirective = `PLAN MODE is ON. Do NOT change anything. You may investig
 // tool calls), maxSteps is reached, or the context is cancelled.
 func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	a.emit("goal", map[string]any{"text": goal})
-	msgs := make([]llm.Message, 0, len(a.history)+3)
+	hist := a.History() // guarded snapshot — see historyMu
+	msgs := make([]llm.Message, 0, len(hist)+3)
 	msgs = append(msgs, llm.System(a.system))
 	if a.planMode {
 		msgs = append(msgs, llm.System(planDirective))
 	}
-	msgs = append(msgs, a.history...) // session memory
+	msgs = append(msgs, hist...) // session memory
 	msgs = append(msgs, llm.User(goal))
 	tools := a.reg.OpenAITools()
 	slog.Debug("run start", "goal", clip(goal, 120), "tools", toolNames(tools), "plan_mode", a.planMode)

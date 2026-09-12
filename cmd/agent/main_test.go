@@ -1241,6 +1241,48 @@ func TestGoalOfferOnce(t *testing.T) {
 	}
 }
 
+// Regression test for a data race: /status, /usage, and a bare /goal are
+// permitted to run WHILE a task is active (see commandWhileBusy), reading
+// a.tasks/a.steps/a.toolCalls/a.goal/a.facts with no synchronization while the
+// task's own goroutine concurrently writes them via recordRun, finishGoal, and
+// addFacts (standing in for reflection's fact writes). Confirmed with
+// `go test -race`: reverting the statusMu guard around those fields makes this
+// test fail under -race.
+func TestStatusUsageGoalDontRaceRunningTask(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.GoalMaxReturns = 0 // one-shot finish: keeps finishGoal's write path deterministic
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag = agent.New(fakeSummaryLLM{}, tool.NewRegistry(), nil, nil, "", 5) // finalizes in one step, no tools
+	m := &tuiModel{app: a}
+
+	const iterations = 300
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < iterations; i++ {
+			a.setGoal("keep going") // re-arm so finishGoal's write path runs every iteration
+			a.runTaskStreaming(context.Background(), "keep going", a.taskEpoch.Load())
+			a.addFacts([]string{fmt.Sprintf("fact %d", i)}) // stands in for reflection's fact writes
+		}
+	}()
+	for {
+		select {
+		case <-done:
+			return
+		default:
+			m.renderStatus()
+			m.renderUsage()
+			m.app.goalCommand("")
+		}
+	}
+}
+
 // A provider defined purely in config with NO api_key (a local Ollama/vLLM/etc.)
 // must be usable: listed for switching and connectable. Only a custom provider
 // missing base_url is rejected — with a clear message.

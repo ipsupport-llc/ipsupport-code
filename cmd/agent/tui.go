@@ -230,9 +230,10 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 	// offerGoalResume() actually ends up firing (directly below when idle, or
 	// later in chooseActivate once the user picks/opens a session), never both,
 	// never neither.
-	showBanner := a.goal.Text != "" && a.goal.Status == "active" && !a.goal.Offered
+	g := a.goalSnapshot()
+	showBanner := g.Text != "" && g.Status == "active" && !g.Offered
 	if showBanner {
-		m.history = append(m.history, cDim.Render("◎ standing goal: "+oneLine(a.goal.Text, 60)+"  — /goal go to resume"))
+		m.history = append(m.history, cDim.Render("◎ standing goal: "+oneLine(g.Text, 60)+"  — /goal go to resume"))
 	}
 	switch {
 	case a.sessionRestored: // -session restored it already
@@ -252,7 +253,7 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 // goalPending reports whether there's a standing goal worth resuming that
 // hasn't been offered yet.
 func (m *tuiModel) goalPending() bool {
-	g := m.app.goal
+	g := m.app.goalSnapshot()
 	return g.Text != "" && (g.Status == "active" || g.Status == "incomplete") && !g.Offered
 }
 
@@ -268,7 +269,7 @@ func (m *tuiModel) offerGoalResume() {
 		return
 	}
 	m.state = stGoalResume
-	m.push("  " + m.attention("◎ RESUME GOAL") + " " + oneLine(m.app.goal.Text, 60) +
+	m.push("  " + m.attention("◎ RESUME GOAL") + " " + oneLine(m.app.goalSnapshot().Text, 60) +
 		"  — enter: resume · esc: not now")
 	m.app.markGoalOffered()
 }
@@ -928,7 +929,7 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case stGoalResume:
 		switch k.String() {
 		case "enter", "y": // resume the standing goal
-			text := m.app.goal.Text
+			text := m.app.goalSnapshot().Text
 			m.app.setGoal(text) // re-activate + persist
 			m.push(cYou.Render("❯ ") + text)
 			return m, m.runTask(text)
@@ -2552,7 +2553,7 @@ func (m *tuiModel) renderStatus() []string {
 		{"budget", m.app.budgetStatusLine()},
 		{"jobs", fmt.Sprintf("%d running (/jobs)", m.app.jobsPending())},
 		{"knowledge", fmt.Sprintf("%s (%d lessons)", c.KBPath, len(m.app.kb.All()))},
-		{"facts", fmt.Sprintf("%s (%d learned)", m.app.factsPath(), len(m.app.facts))},
+		{"facts", fmt.Sprintf("%s (%d learned)", m.app.factsPath(), m.app.factsCount())},
 		{"trace", c.TracePath},
 	}
 	if c.Offline {
@@ -2563,10 +2564,11 @@ func (m *tuiModel) renderStatus() []string {
 
 func (m *tuiModel) renderUsage() []string {
 	p, c := m.app.client.Usage()
+	tasks, steps, toolCalls := m.app.usageCounts()
 	out := m.renderKV("usage (this session)", [][2]string{
-		{"tasks", fmt.Sprintf("%d", m.app.tasks)},
-		{"steps", fmt.Sprintf("%d", m.app.steps)},
-		{"tool calls", fmt.Sprintf("%d", m.app.toolCalls)},
+		{"tasks", fmt.Sprintf("%d", tasks)},
+		{"steps", fmt.Sprintf("%d", steps)},
+		{"tool calls", fmt.Sprintf("%d", toolCalls)},
 		{"tokens", fmt.Sprintf("%d + %d = %d", p, c, p+c)},
 		{"lessons", fmt.Sprintf("%d", len(m.app.kb.All()))},
 	})

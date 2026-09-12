@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -259,6 +260,65 @@ func TestFileReadWindowSkipsFIFO(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("windowed read hung opening a FIFO")
+	}
+}
+
+// Reading a binary file (a compiled executable, in this case) as "text" used
+// to just dump its raw bytes back — huge, useless to the model, and capable
+// of corrupting the terminal that renders the tool-call output (embedded
+// control/escape bytes). It must be rejected with a clear, actionable error
+// instead.
+func TestFileReadRejectsBinary(t *testing.T) {
+	dir := t.TempDir()
+	blob := append([]byte("\x7fELF"), bytes.Repeat([]byte{0, 1, 2, 3}, 100)...)
+	if err := os.WriteFile(filepath.Join(dir, "app"), blob, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+
+	r := tl.Call(context.Background(), "read", map[string]any{"path": "app"})
+	if !r.IsError {
+		t.Errorf("read of a binary file should be rejected, got: %s", r.Content)
+	}
+	if !strings.Contains(r.Content, "binary") {
+		t.Errorf("error should explain it's binary, got: %s", r.Content)
+	}
+}
+
+// Same as TestFileReadRejectsBinary, but through the windowed (offset/limit)
+// read path — readWindow has its own os.Open call, distinct from readPlain's,
+// but both go through the shared looksBinaryFile check in read() first.
+func TestFileReadWindowRejectsBinary(t *testing.T) {
+	dir := t.TempDir()
+	blob := append([]byte("\x7fELF"), bytes.Repeat([]byte{0, 1, 2, 3}, 100)...)
+	if err := os.WriteFile(filepath.Join(dir, "app"), blob, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+
+	r := tl.Call(context.Background(), "read", map[string]any{"path": "app", "offset": 1})
+	if !r.IsError {
+		t.Errorf("windowed read of a binary file should be rejected, got: %s", r.Content)
+	}
+}
+
+// A plain text file — even one containing high-bit / non-ASCII bytes (UTF-8
+// content, e.g. non-English text) — must NOT be flagged as binary. Only a
+// genuine NUL byte should trip the heuristic.
+func TestFileReadDoesNotFlagUTF8AsBinary(t *testing.T) {
+	dir := t.TempDir()
+	content := "hello — привет — 日本語\nsecond line\n"
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+
+	r := tl.Call(context.Background(), "read", map[string]any{"path": "notes.txt"})
+	if r.IsError {
+		t.Fatalf("plain UTF-8 text was rejected as binary: %s", r.Content)
+	}
+	if r.Content != content {
+		t.Errorf("content = %q, want %q", r.Content, content)
 	}
 }
 

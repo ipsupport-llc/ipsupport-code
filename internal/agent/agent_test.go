@@ -655,6 +655,18 @@ func TestParseArgsNestedObject(t *testing.T) {
 	}
 }
 
+// A model can wrap the whole arguments string in its own tool-call convention
+// instead of emitting bare JSON — reported live: the raw arguments string was
+// literally "<parameter=params>\n{\"url\": \"...\"}\n</parameter>", which fails
+// json.Unmarshal outright (doesn't even start with "{"). decodeObj falls back
+// to the embedded object instead of giving up and losing the params entirely.
+func TestParseArgsRecoversObjectWrappedInModelOwnTags(t *testing.T) {
+	action, params := parseArgs("<parameter=params>\n{\"url\": \"https://example.com\"}\n</parameter>")
+	if params["url"] != "https://example.com" {
+		t.Errorf("action=%q params=%v, want url recovered from the tag-wrapped JSON", action, params)
+	}
+}
+
 func TestRunConcurrentToolCallsStayOrdered(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
 	twoCalls := llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{

@@ -726,6 +726,62 @@ func TestConfigPanelTemperatureAndTopPCycle(t *testing.T) {
 	}
 }
 
+// The idle watchdog (how long a request waits with no response/stream data
+// before it's treated as a hiccup and retried) was config.json-only, same gap
+// temperature/top_p had — must be settable from /config, persisted with the
+// same local-vs-named-provider split, and survive a reload.
+func TestConfigPanelIdleTimeoutCycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	cursorFor := func(key string) int {
+		for i, k := range cfgKeys() {
+			if k == key {
+				return i
+			}
+		}
+		t.Fatalf("no %q row in the config panel", key)
+		return -1
+	}
+
+	m.cfgCursor = cursorFor("idle_timeout")
+	if m.app.cfg.LLM.IdleTimeoutSeconds != 0 {
+		t.Fatalf("default idle timeout = %v, want 0 (client's built-in 90s)", m.app.cfg.LLM.IdleTimeoutSeconds)
+	}
+	m.configActivate() // 0 → 60
+	if m.app.cfg.LLM.IdleTimeoutSeconds != 60 {
+		t.Errorf("after one cycle, idle timeout = %v, want 60", m.app.cfg.LLM.IdleTimeoutSeconds)
+	}
+	for i := 0; i < 4; i++ {
+		m.configActivate() // 60 → 120 → 180 → 300 → 600
+	}
+	if m.app.cfg.LLM.IdleTimeoutSeconds != 600 {
+		t.Errorf("after five cycles, idle timeout = %v, want 600", m.app.cfg.LLM.IdleTimeoutSeconds)
+	}
+
+	// named (non-local) provider must persist to cfg.Providers, not cfg.LLM.
+	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://api.lab.co/v1"}}
+	m.app.cfg.Provider = "mylab"
+	m.configActivate() // 0 → 60 for mylab
+	if m.app.cfg.Providers["mylab"].IdleTimeoutSeconds != 60 {
+		t.Errorf("named-provider idle timeout = %v, want 60", m.app.cfg.Providers["mylab"].IdleTimeoutSeconds)
+	}
+	if m.app.cfg.LLM.IdleTimeoutSeconds != 600 {
+		t.Errorf("switching provider must not touch local's idle timeout, still want 600, got %v", m.app.cfg.LLM.IdleTimeoutSeconds)
+	}
+
+	loaded, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LLM.IdleTimeoutSeconds != 600 {
+		t.Errorf("local idle timeout not persisted: %v", loaded.LLM.IdleTimeoutSeconds)
+	}
+	if loaded.Providers["mylab"].IdleTimeoutSeconds != 60 {
+		t.Errorf("named-provider idle timeout not persisted: %v", loaded.Providers["mylab"].IdleTimeoutSeconds)
+	}
+}
+
 func TestResolveModelArg(t *testing.T) {
 	ids := []string{"openai/gpt-4o", "openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "x-ai/grok-4.3"}
 	// exact id → switch

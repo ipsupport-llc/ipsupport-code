@@ -3463,6 +3463,25 @@ func (a *app) setTopP(v float64) error {
 	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
 }
 
+// setIdleTimeout sets the idle watchdog (seconds with NO response/stream data
+// before a request is treated as a hiccup and retried) for the CURRENTLY
+// ACTIVE provider's connection and persists it — same local-vs-named-provider
+// branching as setTemperature/setTopP. 0 means "unset" (the client's built-in
+// 90s default).
+func (a *app) setIdleTimeout(v int) error {
+	if a.isLocal() {
+		a.cfg.LLM.IdleTimeoutSeconds = v
+		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
+	}
+	if a.cfg.Providers == nil {
+		a.cfg.Providers = map[string]config.LLM{}
+	}
+	p := a.cfg.Providers[a.cfg.Provider]
+	p.IdleTimeoutSeconds = v
+	a.cfg.Providers[a.cfg.Provider] = p
+	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+}
+
 // configOverview is the control panel: current settings + the command to change
 // each, so the config file never needs hand-editing.
 func (a *app) configOverview() []string {

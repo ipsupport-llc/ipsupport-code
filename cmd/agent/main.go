@@ -2293,6 +2293,32 @@ func (a *app) existingSessionPath() string {
 	return ""
 }
 
+// sessionFile is the on-disk shape of a saved session: the message history
+// plus the one bit of app-level state worth resuming alongside it — an active
+// /cd, so switching back to a session lands you back in the directory you
+// were working in, not the workspace root. Older files are a bare JSON array
+// of messages (the pre-Workdir format); decodeSessionFile falls back to that.
+type sessionFile struct {
+	History []llm.Message `json:"history"`
+	Workdir string        `json:"workdir,omitempty"`
+}
+
+// decodeSessionFile parses a saved session file. A legacy bare-array file
+// fails to unmarshal into the (object-shaped) sessionFile — that failure is
+// the reliable signal to fall back to the old format, not a heuristic on the
+// content.
+func decodeSessionFile(data []byte) (sessionFile, bool) {
+	var sf sessionFile
+	if json.Unmarshal(data, &sf) == nil {
+		return sf, true
+	}
+	var h []llm.Message
+	if json.Unmarshal(data, &h) == nil {
+		return sessionFile{History: h}, true
+	}
+	return sessionFile{}, false
+}
+
 func (a *app) loadSession() {
 	path := a.existingSessionPath()
 	if path == "" {
@@ -2302,10 +2328,33 @@ func (a *app) loadSession() {
 	if err != nil {
 		return
 	}
-	var h []llm.Message
-	if json.Unmarshal(data, &h) == nil {
-		a.ag.SetHistory(h)
+	sf, ok := decodeSessionFile(data)
+	if !ok {
+		return
 	}
+	a.ag.SetHistory(sf.History)
+	a.restoreWorkdir(sf.Workdir)
+}
+
+// restoreWorkdir re-applies a saved /cd — best-effort, silently keeping the
+// workspace root if the directory no longer exists or now falls outside the
+// jail (e.g. the project moved, or the workspace's own jail policy changed).
+func (a *app) restoreWorkdir(dir string) {
+	if dir == "" {
+		return
+	}
+	abs, err := a.pol.Resolve(dir)
+	if err != nil {
+		return
+	}
+	if fi, err := os.Stat(abs); err != nil || !fi.IsDir() {
+		return
+	}
+	if _, err := a.pol.SetWorkdir(dir); err != nil {
+		return
+	}
+	a.workdir = abs
+	a.ag.SetSystem(a.systemPrompt()) // let the model see the restored working dir
 }
 
 // newNamedSession saves the current thread (so it stays returnable via /sessions),
@@ -2364,9 +2413,25 @@ func humanizeAgo(t time.Time) string {
 }
 
 func (a *app) saveSession() {
-	if data, err := json.Marshal(a.ag.History()); err == nil {
+	sf := sessionFile{History: a.ag.History(), Workdir: a.workdirRel()}
+	if data, err := json.Marshal(sf); err == nil {
 		_ = atomicfile.Write(a.sessionPath(), data, 0o644)
 	}
+}
+
+// workdirRel is the active /cd, relative to the workspace root, for
+// persistence — portable across a workspace that gets moved or checked out at
+// a different absolute path (a bare absolute a.workdir would not survive
+// that). "" if no /cd is active or it can't be made relative.
+func (a *app) workdirRel() string {
+	if a.workdir == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(a.workspace, a.workdir)
+	if err != nil {
+		return ""
+	}
+	return rel
 }
 
 // sessionMeta describes one saved session for the /sessions list.
@@ -2387,11 +2452,11 @@ func readSessionMeta(path string) (count int, mod time.Time) {
 	if err != nil {
 		return 0, time.Time{}
 	}
-	var h []llm.Message
-	if json.Unmarshal(data, &h) != nil {
+	sf, ok := decodeSessionFile(data)
+	if !ok {
 		return 0, time.Time{}
 	}
-	return len(h), fi.ModTime()
+	return len(sf.History), fi.ModTime()
 }
 
 // listSessions returns every saved session in this workspace (the per-name files

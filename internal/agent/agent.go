@@ -1354,6 +1354,18 @@ func parseArgs(raw string) (string, map[string]any) {
 	}
 	action, _ := m["action"].(string)
 
+	// A singleton array wrapping one object ("params":[{...}]) has exactly one
+	// unambiguous reading — unwrap it before the switch below so it's handled
+	// the same as a plain object. Anything else (0 or 2+ elements, or a
+	// non-object element) is genuinely ambiguous: leave it alone, which falls
+	// through to the flattened branch below and yields empty params — a
+	// normal "missing param" dispatch error rather than a guess.
+	if arr, ok := m["params"].([]any); ok && len(arr) == 1 {
+		if obj, ok := arr[0].(map[string]any); ok {
+			m["params"] = obj
+		}
+	}
+
 	switch p := m["params"].(type) {
 	case map[string]any:
 		if a, ok := p["action"].(string); ok && action == "" {

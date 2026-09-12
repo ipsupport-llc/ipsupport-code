@@ -67,8 +67,26 @@ func TestDispatchActionCalledAsTopLevelToolHint(t *testing.T) {
 	if !res.IsError {
 		t.Fatal("expected an error result")
 	}
-	if !strings.Contains(res.Content, `action of "web"`) || !strings.Contains(res.Content, `action="fetch"`) {
+	if !strings.Contains(res.Content, `action of web`) || !strings.Contains(res.Content, `call "web" with action="fetch"`) {
 		t.Errorf("missing action-called-as-tool hint: %q", res.Content)
+	}
+}
+
+// The same hint, but for an action shared by more than one tool (e.g.
+// "search" — file, web, and history all have one): naming just the
+// first-registered owner would be a confident-sounding but often-wrong guess
+// (reported live: it pointed a model looking for a live web API at file's
+// local-content search instead). All owners should be named, not just one.
+func TestDispatchActionCalledAsTopLevelToolHintAmbiguousOwner(t *testing.T) {
+	file := &fakeTool{name: "file", actions: []string{"read", "search"}}
+	web := &fakeTool{name: "web", actions: []string{"search", "fetch"}}
+	r := NewRegistry(file, web)
+	res := r.Dispatch(context.Background(), "search", "", nil)
+	if !res.IsError {
+		t.Fatal("expected an error result")
+	}
+	if !strings.Contains(res.Content, `whichever of "file"/"web" actually fits`) {
+		t.Errorf("expected an ambiguous-owner hint naming both tools, got: %q", res.Content)
 	}
 }
 

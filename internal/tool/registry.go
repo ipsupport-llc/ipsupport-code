@@ -65,8 +65,8 @@ func (r *Registry) Dispatch(ctx context.Context, name, action string, params map
 		// instead of "web" with action="fetch") — actionToTool already indexes every
 		// action's real owner(s) for the sibling hint below, so reuse it here too.
 		if owners := r.actionToTool[name]; len(owners) > 0 {
-			return Err(fmt.Sprintf("no tool named %q — %q is an action of %q, not its own tool; call %q with action=%q instead",
-				name, name, strings.Join(owners, "/"), owners[0], name))
+			return Err(fmt.Sprintf("no tool named %q — %q is an action of %s, not its own tool; call %s with action=%q instead",
+				name, name, strings.Join(owners, "/"), toolChoice(owners), name))
 		}
 		return Err(fmt.Sprintf("unknown tool %q; available tools: %s", name, strings.Join(r.order, ", ")))
 	}
@@ -91,8 +91,8 @@ func (r *Registry) Dispatch(ctx context.Context, name, action string, params map
 	}
 	if !contains(t.Actions(), action) {
 		if owners := otherOwners(r.actionToTool[action], name); len(owners) > 0 {
-			return Err(fmt.Sprintf("action %q belongs to tool %q, not %q; call %q with that action instead",
-				action, strings.Join(owners, "/"), name, owners[0]))
+			return Err(fmt.Sprintf("action %q belongs to tool %q, not %q; call %s with that action instead",
+				action, strings.Join(owners, "/"), name, toolChoice(owners)))
 		}
 		// The action string itself may be garbled rather than just missing (e.g.
 		// a model's own tool-call convention leaking through instead of ours) —
@@ -116,6 +116,25 @@ func inferAction(t Tool, acts []string, params map[string]any) string {
 		return a
 	}
 	return ""
+}
+
+// toolChoice phrases which tool to call for a hint. An action owned by
+// exactly one tool names it with confidence; an action shared by several
+// (e.g. "search" — file, web, and history all have one) doesn't pick the
+// first alphabetically/registration-order owner as if it were obviously
+// right — reported live: that guess sent a model looking for a live web API
+// to file's local-content search instead. Naming all of them and asking the
+// model to pick lets it use context we don't have, instead of a confident
+// but often-wrong single suggestion.
+func toolChoice(owners []string) string {
+	if len(owners) == 1 {
+		return fmt.Sprintf("%q", owners[0])
+	}
+	quoted := make([]string, len(owners))
+	for i, o := range owners {
+		quoted[i] = fmt.Sprintf("%q", o)
+	}
+	return "whichever of " + strings.Join(quoted, "/") + " actually fits"
 }
 
 // otherOwners returns the action's owner tools excluding self.

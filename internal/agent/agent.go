@@ -276,10 +276,14 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 			if strings.TrimSpace(m.Content) != "" {
 				b.WriteString("Assistant: " + m.Content + "\n")
 			}
-			if d := extractActionsDigest(m.Content); d != "" && !seenDigest[d] {
-				seenDigest[d] = true
-				digests = append(digests, d)
-			}
+		}
+		// Checked regardless of role: Compact's OWN digest block (below) is
+		// embedded in a "user"-role summary message, not "assistant" — a later
+		// Compact call must still re-harvest it, or the exact-action records it
+		// carries evaporate the moment the LLM's own prose summary drops them.
+		if d := extractActionsDigest(m.Content); d != "" && !seenDigest[d] {
+			seenDigest[d] = true
+			digests = append(digests, d)
 		}
 	}
 	reply, err := a.llm.Chat(ctx, []llm.Message{
@@ -292,7 +296,9 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 	n := len(a.history)
 	summary := "[Summary of earlier conversation]\n" + reply.Content
 	if len(digests) > 0 {
-		summary += "\n\n(exact record of actions across those turns, kept verbatim regardless of the summary above — do not repeat a command marked FAILED, it will fail the same way again:\n" +
+		// Starts with actionsDigestMarker (not bespoke wording) so a LATER Compact
+		// call's scan above recognizes and re-harvests this whole block too.
+		summary += actionsDigestMarker + " — exact record of actions across those turns, kept verbatim regardless of the summary above — do not repeat a command marked FAILED, it will fail the same way again:\n" +
 			strings.Join(digests, "\n") + ")"
 	}
 	a.history = []llm.Message{
@@ -303,11 +309,20 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 	return n, nil
 }
 
+// actionsDigestMarker is the literal marker actionsDigest's writer side always
+// prepends its digest block with, and extractActionsDigest's reader side scans
+// for — a single shared constant so writer and reader can never drift apart.
+// Compact's own digest block (see Compact) is deliberately written with this
+// SAME marker, so a LATER Compact call's scan (which uses extractActionsDigest)
+// re-harvests it too, not just the per-turn digests actionsDigest produces —
+// otherwise Compact's own exact-action records would only ever survive a
+// single compaction.
+const actionsDigestMarker = "\n\n(actions this turn"
+
 // extractActionsDigest pulls the "(actions this turn — ...)" suffix
 // actionsDigest appends to a remembered entry's content, or "" if it has none.
 func extractActionsDigest(content string) string {
-	const marker = "\n\n(actions this turn"
-	i := strings.Index(content, marker)
+	i := strings.Index(content, actionsDigestMarker)
 	if i < 0 {
 		return ""
 	}
@@ -454,8 +469,16 @@ func (a *Agent) remember(goal, final string, msgs []llm.Message) {
 // the same one across calls, which silently broke ID-based lookups on some
 // turns but not others.
 func actionsDigest(msgs []llm.Message) string {
-	var files, cmds []string
-	seenFile, seenCmd := map[string]bool{}, map[string]bool{}
+	var files []string
+	seenFile := map[string]bool{}
+	// First-seen order (cmdOrder), latest-seen outcome (cmdEntry, overwritten on
+	// each repeat): a command retried later in the SAME task — e.g. it failed,
+	// got fixed, then succeeded — must be recorded with its LATEST result, not
+	// frozen on its first occurrence. Otherwise a fixed-and-passing command stays
+	// permanently tagged FAILED, and Compact strengthens that stale record into
+	// an instruction to never repeat it — actively wrong.
+	var cmdOrder []string
+	cmdEntry := map[string]string{}
 	for i, m := range msgs {
 		if len(m.ToolCalls) == 0 {
 			continue
@@ -472,24 +495,30 @@ func actionsDigest(msgs []llm.Message) string {
 					files = append(files, p)
 				}
 			case "run":
-				if c, _ := params["command"].(string); c != "" && !seenCmd[c] {
-					seenCmd[c] = true
+				if c, _ := params["command"].(string); c != "" {
 					entry := clip(c, 100) // long enough that a compound "mkdir && cd && go mod init X" isn't cut before the part that actually identifies it
 					if k := i + 1 + j; k < len(msgs) && msgs[k].Role == "tool" {
 						if reason := runFailureReason(msgs[k].Content); reason != "" {
 							entry += " — FAILED: " + reason
 						}
 					}
-					cmds = append(cmds, entry)
+					if _, ok := cmdEntry[c]; !ok {
+						cmdOrder = append(cmdOrder, c)
+					}
+					cmdEntry[c] = entry
 				}
 			}
 		}
 	}
-	if len(files) == 0 && len(cmds) == 0 {
+	if len(files) == 0 && len(cmdOrder) == 0 {
 		return ""
 	}
+	cmds := make([]string, len(cmdOrder))
+	for i, c := range cmdOrder {
+		cmds[i] = cmdEntry[c]
+	}
 	var b strings.Builder
-	b.WriteString("\n\n(actions this turn —")
+	b.WriteString(actionsDigestMarker + " —")
 	if len(files) > 0 {
 		fmt.Fprintf(&b, " files touched: %s;", strings.Join(files, ", "))
 	}

@@ -44,6 +44,8 @@ var configRows = []cfgRow{
 	{key: "offline"},
 	{key: "memory"},
 	{key: "compact_threshold"},
+	{key: "max_steps"},
+	{key: "max_history"},
 	{header: "Sub-agents"},
 	{key: "agents"},
 	{key: "spawn"},
@@ -308,6 +310,18 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 	case "compact_threshold":
 		v := fmt.Sprintf("%.0f%% of context", compactThreshold(m.app.cfg.CompactThreshold)*100)
 		return "compact at", v, "enter: cycle (only used in summary memory)"
+	case "max_steps":
+		v := fmt.Sprintf("auto (%d)", m.app.goalSteps())
+		if m.app.cfg.GoalMaxSteps > 0 {
+			v = fmt.Sprintf("%d", m.app.cfg.GoalMaxSteps)
+		}
+		return "max steps/task", v, "enter: cycle (0 = auto-scale from context window)"
+	case "max_history":
+		v := fmt.Sprintf("auto (%d)", autoMaxHistory(act.ContextWindow))
+		if m.app.cfg.MaxHistory > 0 {
+			v = fmt.Sprintf("%d", m.app.cfg.MaxHistory)
+		}
+		return "max history", v, "enter: cycle (0 = auto-scale from context window)"
 	case "agents":
 		return "profiles", fmt.Sprintf("%d configured", len(m.app.cfg.Agents)), "enter: add (provider → model)"
 	case "spawn":
@@ -382,6 +396,10 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		_ = m.app.wire() // raw needs a much higher history cap (see wire) — apply it now
 	case "compact_threshold":
 		m.cycleCompactThreshold()
+	case "max_steps":
+		m.cycleMaxSteps()
+	case "max_history":
+		m.cycleMaxHistory()
 	case "reasoning": // cycle the active model's reasoning effort off→high
 		provider, model := m.app.providerName(), m.app.activeLLM().Model
 		next := nextReasoning(provider, m.app.reasoningLevel(provider, model))
@@ -498,6 +516,38 @@ func (m *tuiModel) cycleCompactThreshold() {
 	if err := config.SaveCompactThreshold(m.app.cfg.CompactThreshold); err != nil {
 		m.push(cErr.Render("  could not persist: " + err.Error()))
 	}
+}
+
+// maxStepsCycle presets for the /config "max_steps" row. 0 clears the manual
+// override, letting the per-goal step budget auto-scale from the active
+// connection's context window again (see stepBudget/autoStepBudget).
+var maxStepsCycle = []int{0, 40, 80, 120, 200, 400}
+
+// cycleMaxSteps advances the manual GoalMaxSteps override through presets,
+// persists it, and re-wires so the rebuilt Agent picks up the new budget.
+func (m *tuiModel) cycleMaxSteps() {
+	m.app.cfg.GoalMaxSteps = nextInt(m.app.cfg.GoalMaxSteps, maxStepsCycle)
+	if err := config.SaveGoalMaxSteps(m.app.cfg.GoalMaxSteps); err != nil {
+		m.push(cErr.Render("  could not persist: " + err.Error()))
+		return
+	}
+	_ = m.app.wire()
+}
+
+// maxHistoryCycle presets for the /config "max_history" row. 0 clears the
+// manual override, letting the cross-task memory cap auto-scale from the
+// active connection's context window again (see autoMaxHistory).
+var maxHistoryCycle = []int{0, 16, 32, 64, 128, 256, rawMemoryMaxHistory}
+
+// cycleMaxHistory advances the manual Config.MaxHistory override through
+// presets, persists it, and re-wires so Agent.remember picks up the new cap.
+func (m *tuiModel) cycleMaxHistory() {
+	m.app.cfg.MaxHistory = nextInt(m.app.cfg.MaxHistory, maxHistoryCycle)
+	if err := config.SaveMaxHistory(m.app.cfg.MaxHistory); err != nil {
+		m.push(cErr.Render("  could not persist: " + err.Error()))
+		return
+	}
+	_ = m.app.wire()
 }
 
 // temperatureCycle presets for the /config "temperature" row. 0 = server

@@ -105,8 +105,18 @@ func (m *tuiModel) configAddKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		switch m.cfgPhase {
 		case cfgPhaseName:
-			if strings.TrimSpace(m.cfgDraft.name) == "" {
+			name := strings.TrimSpace(m.cfgDraft.name)
+			if name == "" {
 				return m, nil // a name is required
+			}
+			// Editing an already-added provider: prefill its current URL/model so
+			// the form shows what's on file instead of forcing a blank retype of
+			// the exact original values (the key is deliberately left blank —
+			// configAddSave only touches it when something new is typed).
+			if config.IsCustomProvider(m.app.cfg, name) && m.cfgDraft.url == "" {
+				p := m.app.cfg.Providers[name]
+				m.cfgDraft.url = p.BaseURL
+				m.cfgDraft.model = p.Model
 			}
 			m.cfgPhase = cfgPhaseURL
 		case cfgPhaseURL:
@@ -166,13 +176,19 @@ func (m *tuiModel) renderAddProviderForm(accent lipgloss.Style) []string {
 		}
 		return "  " + line
 	}
+	header := "add provider — any OpenAI-compatible endpoint"
+	keyHint := "optional — empty = keyless (Ollama/vLLM)"
+	if name := strings.TrimSpace(m.cfgDraft.name); config.IsCustomProvider(m.app.cfg, name) {
+		header = fmt.Sprintf("edit provider %q — current values prefilled", name)
+		keyHint = "optional — leave blank to keep the current key"
+	}
 	return []string{
-		accent.Bold(true).Render("add provider — any OpenAI-compatible endpoint"),
+		accent.Bold(true).Render(header),
 		"",
 		row(cfgPhaseName, "name", m.cfgDraft.name, "e.g. ollama · enter next"),
 		row(cfgPhaseURL, "base URL", m.cfgDraft.url, "e.g. http://localhost:11434/v1"),
 		row(cfgPhaseModel, "model", m.cfgDraft.model, "optional — /model lists them later"),
-		row(cfgPhaseKey, "api key", m.cfgDraft.key, "optional — empty = keyless (Ollama/vLLM)"),
+		row(cfgPhaseKey, "api key", m.cfgDraft.key, keyHint),
 		"",
 		cDim.Render("  enter next/save · esc back"),
 	}

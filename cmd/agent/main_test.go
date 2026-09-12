@@ -1999,6 +1999,58 @@ func TestConfigAddProviderFlow(t *testing.T) {
 	}
 }
 
+// Re-opening "add provider" and typing the name of an ALREADY-configured custom
+// provider must prefill its current base URL/model — otherwise the same form is
+// unusable for editing (the user would have to retype the exact original URL
+// from memory, with no way to see what it currently is), and a key already on
+// file must survive an edit that leaves the key field blank.
+func TestConfigAddProviderFlowPrefillsExistingForEdit(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := &tuiModel{state: stConfig, width: 100, input: textarea.New(),
+		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	m.app.cfg.Providers = map[string]config.LLM{
+		"ollama": {BaseURL: "http://localhost:11434/v1", Model: "llama3", APIKey: "sk-existing"},
+	}
+	for i, k := range cfgKeys() {
+		if k == "addprovider" {
+			m.cfgCursor = i
+		}
+	}
+	typeIn := func(s string) {
+		for _, r := range s {
+			m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		}
+	}
+	enter := func() { m.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) }
+
+	m.configActivate() // opens the form fresh
+	typeIn("ollama")
+	enter() // name → URL: should prefill from the existing entry
+	if m.cfgDraft.url != "http://localhost:11434/v1" || m.cfgDraft.model != "llama3" {
+		t.Fatalf("editing an existing provider must prefill url/model, got draft=%+v", m.cfgDraft)
+	}
+	accent := lipgloss.NewStyle()
+	if hdr := m.renderAddProviderForm(accent)[0]; !strings.Contains(hdr, "edit") || !strings.Contains(hdr, "ollama") {
+		t.Errorf("header should announce editing the existing provider, got %q", hdr)
+	}
+	enter()           // keep the prefilled URL unchanged
+	typeIn("-vision") // append to the prefilled model instead of retyping it
+	enter()
+	enter() // leave the key field blank — must NOT clear the existing key
+
+	p, ok := m.app.cfg.Providers["ollama"]
+	if !ok || p.BaseURL != "http://localhost:11434/v1" {
+		t.Errorf("base URL should be preserved when re-saved unchanged, got %+v", p)
+	}
+	if p.Model != "llama3-vision" {
+		t.Errorf("model should be the edited value, got %q", p.Model)
+	}
+	if p.APIKey != "sk-existing" {
+		t.Errorf("blank key field on edit must keep the existing key, got %q", p.APIKey)
+	}
+}
+
 // insertedText is the shared helper the hand-rolled single-line fields (config
 // panel, agents panel, reverse-search) use instead of the textarea widget. A
 // bracketed paste arrives as ONE KeyMsg carrying every pasted rune, wrapped in

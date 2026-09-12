@@ -290,6 +290,44 @@ func TestSetMaxHistoryOverridesTrimCap(t *testing.T) {
 	}
 }
 
+// remember()'s routine FIFO trim must count every message it drops into
+// FrontTrimCount, but — unlike Reset/SetHistory/Compact — must NOT bump
+// HistoryGen: a routine trim only shifts a prefix, it doesn't replace history
+// wholesale, so a checkpoint indexing into it should be remappable (see
+// cmd/agent's checkpointValid/effectiveHistLen) instead of invalidated
+// outright.
+func TestFrontTrimCountTracksRoutineTrimNotHistoryGen(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "answer 1"},
+		{Role: "assistant", Content: "answer 2"},
+		{Role: "assistant", Content: "answer 3"},
+		{Role: "assistant", Content: "answer 4"},
+		{Role: "assistant", Content: "answer 5"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	a.SetMaxHistory(4) // 2 turns' worth (goal + final each)
+	startGen := a.HistoryGen()
+
+	if a.FrontTrimCount() != 0 {
+		t.Fatalf("FrontTrimCount() = %d before any trim, want 0", a.FrontTrimCount())
+	}
+	for i := range fake.replies {
+		if _, err := a.Run(context.Background(), fake.replies[i].Content+" goal"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Runs 1-2 fill the cap exactly (no trim); runs 3-5 each push 2 over the
+	// cap and trim exactly 2 back off — 3 trims × 2 dropped = 6.
+	if got := a.FrontTrimCount(); got != 6 {
+		t.Errorf("FrontTrimCount() = %d after 5 runs at maxHistory=4, want 6", got)
+	}
+	if got := a.HistoryGen(); got != startGen {
+		t.Errorf("HistoryGen() = %d after routine trims only, want unchanged at %d — routine trims must "+
+			"not be conflated with a genuine reshape (Reset/SetHistory/Compact)", got, startGen)
+	}
+}
+
 func TestSessionMemoryCarriesAcrossRuns(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
 	fake := &scriptLLM{replies: []llm.Message{

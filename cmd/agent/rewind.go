@@ -35,7 +35,7 @@ func (a *app) rewindPreview(idx int) ([]rewindPreviewItem, int) {
 			}
 		}
 	}
-	histLen := a.checkpoints[idx].histLen
+	histLen, _ := a.effectiveHistLen(a.checkpoints[idx])
 	a.ckptMu.Unlock()
 
 	trimmed := a.ag.SessionLen() - histLen
@@ -103,17 +103,42 @@ type checkpoint struct {
 	histLen int
 	// gen is Agent.HistoryGen() at capture time. Applying histLen only makes
 	// sense against the same history it indexed — if the generation has since
-	// moved on (Reset, SetHistory, Compact, or an ordinary rolling trim all
-	// bump it), this checkpoint is stale and must be treated as invalid,
-	// structurally, regardless of whether whatever changed history remembered
-	// to say so.
-	gen   int64
-	files map[string]fileSnap // absolute path → prior state
+	// moved on (Reset, SetHistory, or Compact, all of which bump it), this
+	// checkpoint is stale and must be treated as invalid, structurally,
+	// regardless of whether whatever changed history remembered to say so.
+	gen int64
+	// frontTrimAtCapture is Agent.FrontTrimCount() at capture time. Unlike gen,
+	// a later routine front-trim doesn't invalidate this checkpoint outright —
+	// it only shifts what histLen must be read against, remapped via
+	// effectiveHistLen.
+	frontTrimAtCapture int64
+	files              map[string]fileSnap // absolute path → prior state
 }
 
 // checkpointValid reports whether cp still indexes the CURRENT history: its
-// captured generation must match Agent.HistoryGen() exactly.
-func (a *app) checkpointValid(cp *checkpoint) bool { return cp.gen == a.ag.HistoryGen() }
+// captured generation must match Agent.HistoryGen() exactly (a genuine
+// reshape — Reset/SetHistory/Compact — invalidates outright), and its target
+// boundary must not have been trimmed away by a later routine front-trim (see
+// effectiveHistLen).
+func (a *app) checkpointValid(cp *checkpoint) bool {
+	if cp.gen != a.ag.HistoryGen() {
+		return false
+	}
+	_, ok := a.effectiveHistLen(cp)
+	return ok
+}
+
+// effectiveHistLen remaps cp's captured histLen forward across every routine
+// front-trim (see Agent.FrontTrimCount) that has happened since cp was
+// captured — each one shifts what index 0 of the current history means, so
+// the raw cp.histLen no longer points at the right place once even one has
+// fired since. ok is false if the checkpoint's own target boundary was itself
+// trimmed away by a later front-trim (not necessarily the one from its own
+// task) — genuinely stale, not just shifted.
+func (a *app) effectiveHistLen(cp *checkpoint) (n int, ok bool) {
+	n = cp.histLen - int(a.ag.FrontTrimCount()-cp.frontTrimAtCapture)
+	return n, n >= 0
+}
 
 type fileSnap struct {
 	content []byte
@@ -134,7 +159,8 @@ const (
 func (a *app) beginCheckpoint(goal string) *checkpoint {
 	a.ckptMu.Lock()
 	defer a.ckptMu.Unlock()
-	cp := &checkpoint{goal: oneLine(goal, 60), histLen: a.ag.SessionLen(), gen: a.ag.HistoryGen(), files: map[string]fileSnap{}}
+	cp := &checkpoint{goal: oneLine(goal, 60), histLen: a.ag.SessionLen(), gen: a.ag.HistoryGen(),
+		frontTrimAtCapture: a.ag.FrontTrimCount(), files: map[string]fileSnap{}}
 	a.checkpoints = append(a.checkpoints, cp)
 	if len(a.checkpoints) > maxCheckpoints {
 		a.checkpoints = a.checkpoints[len(a.checkpoints)-maxCheckpoints:]
@@ -245,7 +271,7 @@ func (a *app) applyRewind(idx int) []string {
 			}
 		}
 	}
-	histLen := a.checkpoints[idx].histLen
+	histLen, _ := a.effectiveHistLen(a.checkpoints[idx])
 	a.ckptMu.Unlock()
 
 	restored, deleted, skipped := 0, 0, 0

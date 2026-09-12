@@ -77,14 +77,23 @@ type Agent struct {
 	// history — see Archiver.
 	archiver Archiver
 	// historyGen counts discontinuous changes to history: Reset, SetHistory,
-	// Compact's replacement, and remember's rolling-window trim all bump it —
-	// an ordinary append does not. A checkpoint that captures this alongside its
-	// history length can tell, structurally, whether that length still indexes
-	// the same history it was taken against: any caller that discontinuously
-	// changes history (however it does so, now or in the future) automatically
-	// invalidates every outstanding checkpoint, without needing to separately
-	// remember to say so.
+	// and Compact's replacement all bump it — an ordinary append does not, and
+	// (see frontTrim) neither does remember's routine rolling-window trim, which
+	// only ever shifts a prefix rather than replacing history wholesale. A
+	// checkpoint that captures this alongside its history length can tell,
+	// structurally, whether that length still indexes the same history it was
+	// taken against: any caller that discontinuously changes history (however it
+	// does so, now or in the future) automatically invalidates every outstanding
+	// checkpoint, without needing to separately remember to say so.
 	historyGen atomic.Int64
+	// frontTrim cumulatively counts every message remember()'s routine FIFO trim
+	// has ever dropped from the front of history. Unlike historyGen, this alone
+	// doesn't invalidate a checkpoint: a checkpoint's captured history length can
+	// be remapped forward by the delta in this counter since capture (see
+	// cmd/agent's checkpointValid/effectiveHistLen) to still point at the right
+	// place after a routine trim, instead of being discarded outright the way a
+	// genuine reshape (Reset/SetHistory/Compact) must be.
+	frontTrim atomic.Int64
 }
 
 // Archiver durably records every (goal, final answer + actions digest) pair
@@ -234,14 +243,23 @@ func (a *Agent) TruncateHistory(n int) {
 }
 
 // HistoryGen returns the current history generation: a counter bumped by every
-// discontinuous change to history (Reset, SetHistory, Compact, and remember's
-// rolling-window trim) but not by an ordinary append. A checkpoint that
-// captured this at take-time, alongside a history length, can compare it here
-// to tell — structurally — whether that length still indexes the same
-// history, instead of relying on every caller capable of discontinuously
-// changing history to separately remember to invalidate outstanding
-// checkpoints.
+// discontinuous change to history (Reset, SetHistory, Compact) but not by an
+// ordinary append, nor by remember's routine rolling-window trim (see
+// FrontTrimCount for that). A checkpoint that captured this at take-time,
+// alongside a history length, can compare it here to tell — structurally —
+// whether that length still indexes the same history, instead of relying on
+// every caller capable of discontinuously changing history to separately
+// remember to invalidate outstanding checkpoints.
 func (a *Agent) HistoryGen() int64 { return a.historyGen.Load() }
+
+// FrontTrimCount returns the total number of messages remember()'s routine
+// FIFO trim has ever dropped from the front of history, cumulative across the
+// agent's whole lifetime. Distinct from HistoryGen: a routine trim only shifts
+// where index 0 points, so a checkpoint's captured history length can be
+// remapped forward by the delta in this counter since it was captured, rather
+// than being invalidated outright the way HistoryGen's discontinuous changes
+// must be.
+func (a *Agent) FrontTrimCount() int64 { return a.frontTrim.Load() }
 
 // SeedHistoryGen carries the history generation counter forward from a
 // previous Agent, so rebuilding the stack (a /permissions or /skills toggle,
@@ -431,8 +449,9 @@ func (a *Agent) remember(goal, final string, msgs []llm.Message) {
 	}
 	a.history = append(a.history, llm.User(goal), llm.Message{Role: "assistant", Content: entry})
 	if a.maxHistory > 0 && len(a.history) > a.maxHistory {
+		dropped := len(a.history) - a.maxHistory
 		a.history = append([]llm.Message(nil), a.history[len(a.history)-a.maxHistory:]...)
-		a.historyGen.Add(1)
+		a.frontTrim.Add(int64(dropped))
 	}
 }
 

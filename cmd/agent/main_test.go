@@ -4722,16 +4722,21 @@ func TestCompactResetsCheckpoints(t *testing.T) {
 }
 
 // remember()'s ordinary per-turn rolling-window trim (the FIFO cut once history
-// exceeds maxHistory, ~agent.go line 299) is a THIRD path — distinct from
-// session-switch and Compact — that shifts which messages a checkpoint's histLen
-// points at just as much as those two, but used to rely on an easy-to-miss
-// explicit resetCheckpoints call (wired via a SetOnTrim hook). Bug: a
-// checkpoint taken while history sat right at the cap survived every ordinary
-// trim afterward, so a later /rewind either silently no-op'd (rewindPreview's
-// trimmed count landed at 0 despite turns needing undoing) or reverted against
-// a stale offset that no longer indexed the same logical turn. Now the trim
-// itself bumps Agent.historyGen directly — no external hook needed.
-func TestHistoryTrimResetsCheckpoints(t *testing.T) {
+// exceeds maxHistory) is a THIRD path — distinct from session-switch and
+// Compact — that shifts which messages a checkpoint's histLen points at. But
+// unlike those two (a genuine reshape that discards the ENTIRE prior history),
+// a routine trim only drops a PREFIX: a checkpoint's target boundary can be
+// REMAPPED forward across it instead of invalidated outright — see
+// Agent.FrontTrimCount / checkpointValid / effectiveHistLen.
+//
+// This reproduces the original bug precisely: a checkpoint opened for a turn
+// whose OWN end-of-turn remember() call is what triggers the very trim that
+// used to invalidate it (historyGen used to bump on every trim, not just a
+// genuine reshape) — often the instant that turn finishes, before the user
+// ever gets a chance to use /rewind. Worst right after a session restore: the
+// restored history already sits at (or near) the cap, so the very FIRST
+// post-restore task trips this immediately, every time.
+func TestHistoryTrimRemapsOwnTaskCheckpoint(t *testing.T) {
 	// A canned single-turn reply (no tool calls) from a fake OpenAI-compatible
 	// server, so a.wire() builds a REAL agent — exercising the actual rolling
 	// trim inside remember(), not a hand-rolled stand-in for it.
@@ -4755,24 +4760,81 @@ func TestHistoryTrimResetsCheckpoints(t *testing.T) {
 	a.ag.Run(context.Background(), "task 1")
 	a.ag.Run(context.Background(), "task 2") // history now sits AT the cap (4) — not yet over it
 
-	// A checkpoint taken here indexes a history that an ordinary (non-Compact)
-	// turn is about to trim out from under it.
-	cp := a.beginCheckpoint("do something")
+	// A checkpoint taken here, for task 3 — the SAME task whose own end-of-turn
+	// trim is about to fire.
+	cp := a.beginCheckpoint("task 3")
 	a.endCheckpoint(cp)
 	if len(a.checkpoints) != 1 {
 		t.Fatal("checkpoint not recorded")
 	}
 
-	a.ag.Run(context.Background(), "task 3") // pushes past the cap → the ordinary FIFO trim fires
+	a.ag.Run(context.Background(), "task 3") // pushes past the cap → task 3's OWN trim fires
+
+	if rows := a.rewindRows(); len(rows) != 1 {
+		t.Fatalf("checkpoints = %d after task 3's own trim, want 1 — a checkpoint must survive the "+
+			"very trim its own task triggered, or /rewind is broken the instant a task finishes", len(rows))
+	}
+	out := strings.Join(a.rewindCommand("1"), " ")
+	if strings.Contains(out, "nothing to rewind") {
+		t.Fatalf("rewindCommand = %q, want it to actually apply the rewind, not report it as invalid", out)
+	}
+	// maxHistory=4: task 1 + task 2 leave history at exactly 4 (H=4 at capture,
+	// frontTrimAtCapture=0). Task 3 appends 2 more (6 total) and its trim drops
+	// the oldest 2 — task 1's pair — back down to 4, bumping FrontTrimCount to 2.
+	// effectiveHistLen = 4 - (2-0) = 2: task 1's pair is gone for good (a real,
+	// unrecoverable cap eviction, unrelated to rewind) but task 2's pair is
+	// exactly what should remain after undoing task 3.
+	if got := a.ag.SessionLen(); got != 2 {
+		t.Errorf("SessionLen after rewind = %d, want 2 (task 3 undone, task 2's pair kept)", got)
+	}
+}
+
+// A checkpoint's target boundary can also be trimmed away by a LATER task's
+// front-trim — not the one from its own task (see
+// TestHistoryTrimRemapsOwnTaskCheckpoint for that, now-fixed, case). That must
+// still be correctly rejected: effectiveHistLen goes negative once the trimmed
+// prefix has grown past the checkpoint's own captured boundary, and the
+// checkpoint's target state genuinely no longer exists anywhere in history.
+func TestHistoryTrimInvalidatesEarlierCheckpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer srv.Close()
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = ""
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag.SetMaxHistory(4)
+
+	a.ag.Run(context.Background(), "task 1") // history: 2
+
+	// A checkpoint taken before task 2 — its target boundary (histLen=2) sits
+	// right after task 1's pair.
+	cp := a.beginCheckpoint("task 2")
+	a.endCheckpoint(cp)
+	if len(a.checkpoints) != 1 {
+		t.Fatal("checkpoint not recorded")
+	}
+
+	a.ag.Run(context.Background(), "task 2") // history: 4, still at the cap — no trim yet
+	a.ag.Run(context.Background(), "task 3") // history: 6 → trims away task 1's pair (2 dropped)
+	a.ag.Run(context.Background(), "task 4") // history: 6 → trims away task 2's pair (2 dropped) —
+	// exactly the pair the checkpoint's boundary sat right after, so it's now
+	// genuinely gone, not just shifted.
 
 	if rows := a.rewindRows(); len(rows) != 0 {
-		t.Errorf("checkpoints = %d after an ordinary history trim, want 0 — a checkpoint from before "+
-			"the trim indexes messages no longer at the front, so a later /rewind must not silently "+
-			"misapply instead of being invalidated", len(rows))
+		t.Errorf("checkpoints = %d, want 0 — the checkpoint's target boundary was itself trimmed away "+
+			"by a LATER task's trim (not its own), so it must still be rejected as stale", len(rows))
 	}
 	if out := strings.Join(a.rewindCommand("1"), " "); !strings.Contains(out, "nothing to rewind") {
-		t.Errorf("rewindCommand after a history trim = %q, want it to report nothing to rewind to "+
-			"(the checkpoint should be invalidated, not silently applied against a shifted history)", out)
+		t.Errorf("rewindCommand = %q, want it to report nothing to rewind to", out)
 	}
 }
 

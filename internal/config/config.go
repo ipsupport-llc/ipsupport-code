@@ -47,6 +47,15 @@ type LLM struct {
 	// "context_window":0 in the file — omitempty would drop the key entirely,
 	// and mergeFile's merge-over-Default() would then silently refill 8192.
 	ContextWindow int `json:"context_window"`
+	// ContextWindowManual marks ContextWindow as a deliberate user override (set
+	// via the /config panel) rather than an auto-detected value, so a fresh
+	// process (where the in-memory "already detected" flag always starts false)
+	// knows not to let the next best-effort auto-detect pass silently overwrite
+	// it. false is the correct zero-value default (an ordinary config predating
+	// this field, or one that never had a manual override, should auto-detect
+	// normally) — unlike ContextWindow, omitempty here doesn't need Default()'s
+	// workaround.
+	ContextWindowManual bool `json:"context_window_manual,omitempty"`
 	// IdleTimeoutSeconds bounds how long a request waits with NO response/stream
 	// data before it's aborted and retried. 0 uses the default (90s). Raise it for a
 	// hosted reasoning model that can think silently (no streamed deltas) for longer.

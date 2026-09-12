@@ -846,6 +846,77 @@ func TestConfigPanelContextWindowCycle(t *testing.T) {
 	}
 }
 
+// setContextWindow must persist the "manually set" bit alongside the value
+// itself (not just the in-memory windowDetected bool), and clear it back to
+// false when the override is cleared to 0 (auto) — see ContextWindowManual.
+func TestSetContextWindowPersistsManualFlag(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ws := t.TempDir()
+	a := &app{cfg: config.Default(), workspace: ws}
+
+	if err := a.setContextWindow(4096); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.Load(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !loaded.LLM.ContextWindowManual {
+		t.Error("context_window_manual not persisted true after a manual nonzero override")
+	}
+
+	if err := a.setContextWindow(0); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err = config.Load(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.LLM.ContextWindowManual {
+		t.Error("context_window_manual should clear back to false when the override is cleared (0 = auto)")
+	}
+}
+
+// A manual context_window override must survive a restart: windowDetected
+// always starts at its Go zero-value (false) on a fresh process, so without
+// seeding it from the persisted ContextWindowManual flag, build()'s startup
+// auto-detect would silently overwrite the user's deliberate choice with
+// whatever the server reports.
+func TestManualContextWindowSurvivesRestart(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"data":[{"id":"fake-model","state":"loaded","loaded_context_length":32768,"max_context_length":131072}]}`)
+	}))
+	defer srv.Close()
+
+	// Simulate a PREVIOUS run where the user manually set context_window=4096
+	// via /config — setContextWindow persists ContextWindowManual alongside it.
+	if err := config.SaveGlobal("", config.LLM{
+		BaseURL: srv.URL + "/v1", Type: "lmstudio", Model: "fake-model",
+		ContextWindow: 4096, ContextWindowManual: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a restart: a brand-new app, windowDetected back at its Go
+	// zero-value before build() seeds it from the persisted flag.
+	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if a.cfg.LLM.ContextWindow != 4096 {
+		t.Errorf("context window = %d, want the manual override 4096 preserved (not silently overwritten by auto-detect's 32768)", a.cfg.LLM.ContextWindow)
+	}
+	if !a.windowDetected {
+		t.Error("windowDetected should be seeded true from the persisted manual override on startup, so a later auto-detect pass doesn't clobber it either")
+	}
+}
+
 // max_steps/max_history must be settable from /config as an explicit override
 // on top of auto-scaling (0 = auto), and must persist and survive a reload —
 // same conventions as the other numeric /config rows, but as top-level
@@ -6066,6 +6137,79 @@ func TestShouldAutoCompactRawMemory(t *testing.T) {
 	}
 }
 
+// shouldAutoCompact must decide off the real conversation's own prompt size
+// (a.lastRealContext, snapshotted from Transcript.PromptTokens right after
+// Agent.Run — see runOne/runTaskStreaming), not a.client.Context() fresh: a
+// same-session reflection/judge pass reuses the shared client for its own
+// (typically much shorter) Chat call, which would otherwise silently
+// overwrite the client's last-request reading before auto-compact ever gets
+// to see it.
+func TestShouldAutoCompactUsesLastRealContext(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.ContextWindow = 8000
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag.SetHistory([]llm.Message{llm.User("g0"), {Role: "assistant", Content: "a0"}, llm.User("g1"), {Role: "assistant", Content: "a1"}})
+
+	// a.client never made a real request, so its own Context() reads 0. If
+	// shouldAutoCompact read that directly (the pre-fix behavior), it would
+	// never trigger here regardless of how full the real conversation is.
+	a.lastRealContext = 7000
+	if !a.shouldAutoCompact() {
+		t.Error("shouldAutoCompact() = false, want true — it must read a.lastRealContext (7000/8000), not the client's own untouched Context() (0)")
+	}
+}
+
+// End-to-end reproduction of the bug: reflection reuses the main client for
+// its own (much shorter) Chat call after the task finishes. Before the fix,
+// shouldAutoCompact read a.client.Context() fresh and saw reflection's small
+// prompt instead of the real conversation's — silently suppressing
+// auto-compact. lastRealContext, snapshotted right after Run() succeeds and
+// before reflectAndStore runs, must survive that clobber.
+func TestLastRealContextSurvivesReflectionClobber(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		switch calls.Add(1) {
+		case 1: // main task, step 1: call the calc tool (so reflection has tool use to learn from)
+			io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"",`+
+				`"tool_calls":[{"id":"c1","type":"function","function":{"name":"calc",`+
+				`"arguments":"{\"action\":\"calculate\",\"params\":{\"expression\":\"1+1\"}}"}}]}}],`+
+				`"usage":{"prompt_tokens":500,"completion_tokens":10}}`)
+		case 2: // main task, step 2: the final answer — the REAL conversation's fullness
+			io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}],`+
+				`"usage":{"prompt_tokens":7000,"completion_tokens":5}}`)
+		default: // the reflection pass's own, much shorter Chat call — must not clobber lastRealContext
+			io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"{\"facts\":[]}"}}],`+
+				`"usage":{"prompt_tokens":1000,"completion_tokens":5}}`)
+		}
+	}))
+	defer srv.Close()
+
+	if err := config.SaveGlobal("", config.LLM{BaseURL: srv.URL + "/v1", Type: "openai", Model: "fake", ContextWindow: 8000}); err != nil {
+		t.Fatal(err)
+	}
+
+	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if err := a.runOne(context.Background(), "do the thing"); err != nil {
+		t.Fatal(err)
+	}
+	if a.lastRealContext != 7000 {
+		t.Errorf("lastRealContext = %d, want 7000 (the main task's own prompt size — the reflection pass's own Chat call, which reuses the shared client, must not clobber it)", a.lastRealContext)
+	}
+}
+
 // wire() must raise the Agent's trim cap for memory=raw — otherwise the FIFO
 // wire() must tell the rebuilt Agent the active connection's real context
 // window, so a single long task can watch its own growing tool-call trail
@@ -6083,6 +6227,95 @@ func TestWirePropagatesContextWindowToAgent(t *testing.T) {
 	}
 	if got := a.ag.ContextWindow(); got != 65536 {
 		t.Errorf("Agent.ContextWindow() = %d, want 65536", got)
+	}
+}
+
+// detectContextWindow must not just update a.cfg — wire() (the only place
+// that propagates ContextWindow into the live Agent's step budget/history
+// cap/mid-task trim threshold and the client's per-turn generation cap)
+// already ran BEFORE detection at startup, so those derived values stay
+// frozen at the pre-detection value until detection re-wires too.
+func TestDetectContextWindowReWiresLiveAgentOnChange(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, `{"data":[{"id":"fake-model","state":"loaded","loaded_context_length":32768,"max_context_length":131072}]}`)
+	}))
+	defer srv.Close()
+
+	if err := config.SaveGlobal("", config.LLM{
+		BaseURL: srv.URL + "/v1", Type: "lmstudio", Model: "fake-model", ContextWindow: 8192,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	a, cleanup, err := build(t.TempDir(), "", bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if a.cfg.LLM.ContextWindow != 32768 {
+		t.Fatalf("sanity: detected context window = %d, want 32768", a.cfg.LLM.ContextWindow)
+	}
+	if got := a.ag.ContextWindow(); got != 32768 {
+		t.Errorf("live Agent.ContextWindow() = %d, want 32768 — detection changing a.cfg must re-wire the live agent, not leave it frozen at wire()'s earlier value", got)
+	}
+}
+
+// The TUI's windowMsg handler (the off-UI-thread re-detect path) must re-wire
+// on the same terms as detectContextWindow — but only while idle: wire()
+// reassigns a.ag/a.client, and doing that while a task goroutine is using
+// them would race it (see wire()'s doc comment).
+func TestWindowMsgReWiresLiveAgentOnChangeWhileIdle(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.ContextWindow = 8192
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.ag.ContextWindow(); got != 8192 {
+		t.Fatalf("sanity: ContextWindow() = %d, want 8192", got)
+	}
+
+	m := &tuiModel{app: a, state: stIdle}
+	ep := a.modelEpoch.Load()
+	m.Update(windowMsg{provider: "local", tokens: 65536, epoch: ep})
+
+	if a.cfg.LLM.ContextWindow != 65536 {
+		t.Fatalf("cfg not updated: got %d, want 65536", a.cfg.LLM.ContextWindow)
+	}
+	if got := a.ag.ContextWindow(); got != 65536 {
+		t.Errorf("live Agent.ContextWindow() = %d, want 65536 — a changed detection must re-wire the live agent while idle, not just update cfg", got)
+	}
+}
+
+// While a task is running, the windowMsg handler must still record the
+// detected value in cfg (best-effort — the next wire() picks it up) but must
+// NOT re-wire: that would reassign a.ag/a.client out from under the running
+// task, racing it.
+func TestWindowMsgDoesNotReWireWhileTaskRunning(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.ContextWindow = 8192
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	m := &tuiModel{app: a, state: stRunning} // a task (or other busy work) is in flight
+	ep := a.modelEpoch.Load()
+	m.Update(windowMsg{provider: "local", tokens: 65536, epoch: ep})
+
+	if a.cfg.LLM.ContextWindow != 65536 {
+		t.Errorf("cfg should still record the detected value while busy: got %d, want 65536", a.cfg.LLM.ContextWindow)
+	}
+	if got := a.ag.ContextWindow(); got != 8192 {
+		t.Errorf("live Agent.ContextWindow() = %d, want unchanged 8192 — re-wiring while busy would race the agent/client a running task is using", got)
 	}
 }
 

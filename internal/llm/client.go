@@ -39,6 +39,20 @@ type Message struct {
 	ToolCalls  []ToolCall // assistant → tools
 	ToolCallID string     // tool → which call this answers
 	Name       string     // tool name (on role=tool)
+	// FinishReason is the server's own stated reason for ending this reply
+	// (e.g. "stop", "length", "tool_calls") — only ever set on an assistant
+	// reply the client parsed, never sent back on a request. Diagnostic only:
+	// makes an empty-content, no-tool-call reply distinguishable in logs from
+	// one that got cut off for length vs. one the server just calls "stop".
+	FinishReason string
+	// Reasoning is a reasoning model's streamed thinking text (reasoning/
+	// reasoning_content deltas), same diagnostic-only status as FinishReason:
+	// never sent back to the model (toWire maps only the fields it explicitly
+	// lists), only ever set on a parsed assistant reply. Shows WHAT the model
+	// was thinking when it ends up with empty Content and no tool calls — a
+	// refusal, a trailed-off thought, or nothing at all are very different
+	// failures that empty Content alone can't tell apart.
+	Reasoning string
 }
 
 // Chatter is the one-method abstraction over any chat model with tool calling.
@@ -536,6 +550,22 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 	var content strings.Builder
 	calls := map[int]*ToolCall{}
 	var order []int
+	// chunks/finishReason are diagnostics only: chunks counts every "data:"
+	// line seen (parsed or not) so a mid-stream failure's error can say how
+	// much actually happened before it died, instead of a bare "didn't
+	// complete" that's indistinguishable from "died before a single byte
+	// arrived". finishReason is the server's own stated reason for stopping
+	// (once a real reply is returned) — surfaced so a debug log showing empty
+	// content can say the model quietly matched "stop" vs. got cut off.
+	chunks := 0
+	var finishReason string
+	// reasoning accumulates this call's own reasoning/thinking text — still
+	// never sent back to the model (toWire only maps the fields it explicitly
+	// lists), but surfaced on the returned Message so a debug log can show
+	// WHAT the model was thinking when it ends up with empty content: a
+	// refusal, a trailed-off thought, or nothing at all are very different
+	// failures that "content=\"\"" alone can't tell apart.
+	var reasoning strings.Builder
 	// progress marks a REAL token delta: it counts it and pushes the idle deadline
 	// back. Only real progress resets the watchdog — SSE heartbeats / keep-alive
 	// comments (": ping", blank lines from proxies) must NOT, or a wedged-but-
@@ -590,6 +620,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 			done = true
 			break
 		}
+		chunks++
 		var ch streamChunk
 		if err := json.Unmarshal([]byte(payload), &ch); err != nil {
 			// A chunk we can't parse is DROPPED — if that ever bites again (a
@@ -598,6 +629,9 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 			continue
 		}
 		if len(ch.Choices) > 0 {
+			if fr := ch.Choices[0].FinishReason; fr != "" {
+				finishReason = fr
+			}
 			d := ch.Choices[0].Delta
 			if d.Content != "" {
 				content.WriteString(d.Content)
@@ -628,6 +662,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 			// so a UI tick can show it live (see Live) — never sent to the model
 			// or included in the final Message, just for display.
 			if rc := d.ReasoningContent; rc != "" {
+				reasoning.WriteString(rc)
 				c.mu.Lock()
 				c.live.WriteString(rc)
 				c.liveReasoning.WriteString(rc)
@@ -643,6 +678,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 				}
 				progress()
 			} else if rc := d.Reasoning; rc != "" {
+				reasoning.WriteString(rc)
 				c.mu.Lock()
 				c.live.WriteString(rc)
 				c.liveReasoning.WriteString(rc)
@@ -707,7 +743,12 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 		// The caller's retry classification (client.go's roundTrip) already
 		// treats a plain error like this as a transient, retriable mid-stream
 		// failure — same bucket as a connection reset.
-		return Message{}, fmt.Errorf("llm stream ended without completing (no [DONE])")
+		var argsLen int
+		for _, idx := range order {
+			argsLen += len(calls[idx].Arguments)
+		}
+		return Message{}, fmt.Errorf("llm stream ended without completing (no [DONE]): %d chunks, %d content bytes, %d reasoning bytes, %d tool-call arg bytes accumulated before it cut off",
+			chunks, content.Len(), reasoning.Len(), argsLen)
 	}
 	// Only now — stream confirmed complete — commit to shared state.
 	c.mu.Lock()
@@ -728,7 +769,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 		c.lastPromptTk = promptEstimate
 	}
 	c.mu.Unlock()
-	msg := Message{Role: "assistant", Content: stripChannelTokens(content.String())}
+	msg := Message{Role: "assistant", Content: stripChannelTokens(content.String()), Reasoning: reasoning.String(), FinishReason: finishReason}
 	for _, idx := range order {
 		c := *calls[idx]
 		c.Arguments = validArgs(c.Arguments)
@@ -744,7 +785,8 @@ func (c *OpenAIClient) parseJSON(r io.Reader, promptEstimate int) (Message, erro
 	}
 	var out struct {
 		Choices []struct {
-			Message wireMessage `json:"message"`
+			Message      wireMessage `json:"message"`
+			FinishReason string      `json:"finish_reason"`
 		} `json:"choices"`
 		Usage struct {
 			PromptTokens     int `json:"prompt_tokens"`
@@ -774,6 +816,7 @@ func (c *OpenAIClient) parseJSON(r io.Reader, promptEstimate int) (Message, erro
 	c.mu.Unlock()
 	msg := fromWire(out.Choices[0].Message)
 	msg.Content = stripChannelTokens(msg.Content)
+	msg.FinishReason = out.Choices[0].FinishReason
 	return msg, nil
 }
 
@@ -816,7 +859,14 @@ func stripChannelTokens(s string) string {
 
 type streamChunk struct {
 	Choices []struct {
-		Delta struct {
+		// FinishReason is the server's own stated reason for stopping this
+		// choice (e.g. "stop", "length", "tool_calls", "content_filter") — only
+		// ever present on the last chunk of a choice, if at all. Surfaced
+		// purely for diagnostics (see agent.go's "model turn" debug log): an
+		// empty final Content is a lot less mysterious once you know whether
+		// the server called that "stop" or "length".
+		FinishReason string `json:"finish_reason"`
+		Delta        struct {
 			Content string `json:"content"`
 			// Reasoning models stream their hidden thinking here before any
 			// content/tool calls (xAI: reasoning_content; OpenRouter: reasoning).

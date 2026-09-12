@@ -5645,6 +5645,45 @@ func TestGoalStepsPrefersExplicitOverrides(t *testing.T) {
 	}
 }
 
+// A sub-agent used to be built via a bare stepBudget(plan.llmCfg) at the
+// spawn call site, which never consulted the top-level GoalMaxSteps override
+// at all — only the main interactive agent (goalSteps) did. So a global
+// GoalMaxSteps=99 silently got ignored for every sub-agent, which instead got
+// the auto-scaled budget (80 at the default 8192 context window). Sub-agent
+// construction must apply the same GoalMaxSteps-first precedence as the main
+// agent.
+func TestResolveSpawnAppliesGoalMaxSteps(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.Agents = map[string]config.AgentProfile{"loc": {}} // local provider — uses cfg.LLM directly
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, _, _, err := a.resolveSpawn("loc", "")
+	if err != nil {
+		t.Fatalf("resolveSpawn = %v, want success", err)
+	}
+	if got, want := resolveStepBudget(plan.goalMaxSteps, plan.llmCfg), autoStepBudget(8192); got != want {
+		t.Errorf("no override anywhere: sub-agent budget = %d, want the auto-scaled %d", got, want)
+	}
+
+	a.cfg.GoalMaxSteps = 99
+	plan, _, _, err = a.resolveSpawn("loc", "")
+	if err != nil {
+		t.Fatalf("resolveSpawn = %v, want success", err)
+	}
+	if plan.goalMaxSteps != 99 {
+		t.Errorf("plan.goalMaxSteps = %d, want the top-level override 99", plan.goalMaxSteps)
+	}
+	if got := resolveStepBudget(plan.goalMaxSteps, plan.llmCfg); got != 99 {
+		t.Errorf("top-level GoalMaxSteps must win for a sub-agent too: budget = %d, want 99 (not the auto-scaled 80)", got)
+	}
+}
+
 // /clear is the user's explicit "start fresh" signal. Before this fix it only
 // reset a.history — a workspace-scoped learned fact (e.g. a stale build
 // command from an abandoned subdirectory) survived untouched and kept

@@ -566,7 +566,12 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 		return nil
 	}
 	done := false      // only set at a real "[DONE]" — see the check after the loop
-	usageSeen := false // did the server ever send a real usage chunk this call?
+	usageSeen := false // did the server ever send a real (nonzero) usage chunk this call?
+	// A real usage report is accumulated into these LOCAL variables as it
+	// arrives, not committed to c.promptTk/c.complTk/c.lastPromptTk until the
+	// stream is confirmed done (mirrors promptEstimate's own placement below) —
+	// see the commit block after the sc.Err()/!done checks for why.
+	var usagePromptTk, usageComplDelta, usageLastPromptTk int
 	for sc.Scan() {
 		// reqCompl counts stream deltas, not true tokens (there's no per-chunk token
 		// count mid-stream). LM Studio sends ~1 token/chunk so the cap is accurate
@@ -672,15 +677,21 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 				}
 			}
 		}
-		if ch.Usage != nil {
+		// A real usage report (PromptTokens > 0 — an empty/zero usage object,
+		// e.g. "usage":{}, is NOT one; match parseJSON's own convention) is
+		// staged into the local vars above, not applied to shared state yet:
+		// applying it here, inline, would let a stream that later fails (no
+		// "[DONE]", a dropped connection) leave c.complTk holding a
+		// reconciliation for an attempt the retry loop is about to discard —
+		// rollbackCompletionCount only undoes reqCompl's own per-delta bumps,
+		// not a real-usage commit. Treating a zero usage object as real would
+		// also subtract this attempt's own in-flight progress from c.complTk
+		// via (0 - *reqCompl).
+		if ch.Usage != nil && ch.Usage.PromptTokens > 0 {
 			usageSeen = true
-			c.mu.Lock()
-			c.promptTk += ch.Usage.PromptTokens
-			c.complTk += ch.Usage.CompletionTokens - *reqCompl
-			if ch.Usage.PromptTokens > 0 {
-				c.lastPromptTk = ch.Usage.PromptTokens
-			}
-			c.mu.Unlock()
+			usagePromptTk += ch.Usage.PromptTokens
+			usageComplDelta += ch.Usage.CompletionTokens - *reqCompl
+			usageLastPromptTk = ch.Usage.PromptTokens
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -698,7 +709,13 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 		// failure — same bucket as a connection reset.
 		return Message{}, fmt.Errorf("llm stream ended without completing (no [DONE])")
 	}
-	if !usageSeen {
+	// Only now — stream confirmed complete — commit to shared state.
+	c.mu.Lock()
+	if usageSeen {
+		c.promptTk += usagePromptTk
+		c.complTk += usageComplDelta
+		c.lastPromptTk = usageLastPromptTk
+	} else {
 		// A server that never reports usage at all (some local runtimes, e.g.
 		// MLX-based ones, omit it entirely despite stream_options.include_usage)
 		// would otherwise leave lastPromptTk at 0 forever — silently disabling
@@ -707,11 +724,10 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 		// per streamed delta); prompt tokens don't, so fall back to the
 		// request-size estimate here. A real report, when one does arrive,
 		// always overwrites this.
-		c.mu.Lock()
 		c.promptTk += promptEstimate
 		c.lastPromptTk = promptEstimate
-		c.mu.Unlock()
 	}
+	c.mu.Unlock()
 	msg := Message{Role: "assistant", Content: stripChannelTokens(content.String())}
 	for _, idx := range order {
 		c := *calls[idx]

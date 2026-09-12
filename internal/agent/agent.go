@@ -1354,6 +1354,32 @@ func parseArgs(raw string) (string, map[string]any) {
 	}
 	action, _ := m["action"].(string)
 
+	// A model can leak its own "<parameter=NAME>value</parameter>" tool-call
+	// convention into just the "action" field's own string value, rather than
+	// wrapping the whole arguments blob (which decodeObj's fallback above
+	// already recovers) — reported live, twice, real transcripts: action=
+	// "<parameter=action>\nlist\n</parameter>" (a bare action name) and action=
+	// "<parameter=params>\n{\"command\": \"ls -la\", \"cwd\": \"...\"}" (a whole
+	// params object, mislabeled but still landing in "action"). Before this
+	// fix the entire garbled string became the action value; for run (a
+	// single-action domain) garbledActionAsParam then ran the literal tag
+	// text as a shell command, producing a real "sh: syntax error" instead of
+	// a self-correction, and for file it surfaced as an unknown action.
+	if newAction, extra := recoverActionTag(action); extra != nil {
+		action = ""
+		if a, ok := extra["action"].(string); ok {
+			action = a
+			delete(extra, "action")
+		}
+		for k, v := range extra {
+			if _, exists := m[k]; !exists {
+				m[k] = v
+			}
+		}
+	} else {
+		action = newAction
+	}
+
 	// A singleton array wrapping one object ("params":[{...}]) has exactly one
 	// unambiguous reading — unwrap it before the switch below so it's handled
 	// the same as a plain object. Anything else (0 or 2+ elements, or a
@@ -1489,6 +1515,36 @@ func decodeObjStrict(s string) map[string]any {
 		return nil
 	}
 	return m
+}
+
+// paramTagRe matches a model's own "<parameter=NAME>value</parameter>" tool-
+// call convention (see recoverActionTag). The closing tag is optional — a
+// model sometimes truncates it — so the capture group runs to end-of-string
+// either way.
+var paramTagRe = regexp.MustCompile(`(?s)^<parameter=[^>]*>\s*(.*?)\s*(?:</parameter>\s*)?$`)
+
+// recoverActionTag unwraps a "<parameter=NAME>value</parameter>" tag found in
+// the "action" field's own value (as opposed to wrapping the whole arguments
+// blob, which decodeObj already handles). If the unwrapped value is itself a
+// JSON object, it was meant as params, not an action name — those keys are
+// returned in extra for the caller to fold in (its own "action" key, if any,
+// wins). Otherwise the trimmed inner text is the real action name, returned
+// as newAction with extra == nil. A string not shaped like this tag at all is
+// returned unchanged with extra == nil.
+func recoverActionTag(action string) (newAction string, extra map[string]any) {
+	trimmed := strings.TrimSpace(action)
+	if !strings.HasPrefix(trimmed, "<parameter=") {
+		return action, nil
+	}
+	m := paramTagRe.FindStringSubmatch(trimmed)
+	if m == nil {
+		return action, nil
+	}
+	inner := strings.TrimSpace(m[1])
+	if obj := decodeObj(inner); obj != nil {
+		return "", obj
+	}
+	return inner, nil
 }
 
 func lastAssistantContent(msgs []llm.Message) string {

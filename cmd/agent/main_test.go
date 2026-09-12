@@ -5913,6 +5913,36 @@ func TestStdinOwnerDoesNotReadUntilFirstRequest(t *testing.T) {
 	}
 }
 
+// TestStdinApproverApproveRespectsContextCancellation guards against the
+// plain-mode approval prompt swallowing Ctrl-C: stdinApprover.Approve used to
+// ignore its ctx entirely and block forever on a synchronous stdin read, so
+// cancelling ctx (as the SIGINT handler does) had no effect and the process
+// just sat at the "allow? [y/N]" prompt. Approve must now deny and return
+// promptly once ctx is cancelled, even though the underlying stdin read (fed
+// by a pipe that's never written to here) never completes.
+func TestStdinApproverApproveRespectsContextCancellation(t *testing.T) {
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	s := &stdinApprover{stdin: newStdinOwner(bufio.NewReader(pr))}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan bool, 1)
+	go func() { done <- s.Approve(ctx, "run", "some command") }()
+
+	time.Sleep(50 * time.Millisecond) // let Approve start and block on the read
+	cancel()
+
+	select {
+	case ok := <-done:
+		if ok {
+			t.Fatal("Approve() = true after ctx cancellation, want false (deny)")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Approve() did not return after ctx cancellation — cancellation ignored")
+	}
+}
+
 // push() used to rebuild the ENTIRE wrapped log on every single call
 // (renderContent re-wrapped all of m.history from scratch) — so pushing one
 // more line into an already-large scrollback cost roughly as much as the

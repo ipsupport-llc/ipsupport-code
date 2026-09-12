@@ -833,6 +833,41 @@ func TestStuckNudgeRecovers(t *testing.T) {
 	}
 }
 
+// A model failing three DIFFERENT ways in a row (never repeating the same
+// call) still trips the stuck counter (nErr == len(calls) each turn, with no
+// repetition requirement) — but the nudge must not falsely tell it "you're
+// repeating the same tool call" when it demonstrably isn't; that undermines
+// the rest of the nudge (reported live: a model calling a hallucinated tool
+// name, then a wrong action name, then the right call with empty params).
+func TestStuckNudgeFramingForDistinctFailures(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "calc", `{"action":"nope1","params":{}}`),
+		toolCallReply("c2", "calc", `{"action":"nope2","params":{}}`),
+		toolCallReply("c3", "calc", `{"action":"nope3","params":{}}`),
+		{Role: "assistant", Content: "I can't do that with calc — here's the answer in words."},
+	}}
+	rt := &recTracer{}
+	a := New(fake, reg, nil, rt, "", 12)
+
+	a.Run(context.Background(), "do x")
+	if !rt.has("nudge") {
+		t.Fatal("expected a nudge")
+	}
+	var nudgeText string
+	for _, m := range fake.lastMsgs {
+		if m.Role == "user" && strings.Contains(m.Content, "tool call") {
+			nudgeText = m.Content
+		}
+	}
+	if strings.Contains(nudgeText, "repeating") {
+		t.Errorf("nudge falsely claims repetition for three distinct failing calls: %q", nudgeText)
+	}
+	if !strings.Contains(nudgeText, "different tool calls") {
+		t.Errorf("nudge doesn't name what actually happened: %q", nudgeText)
+	}
+}
+
 type cancelLLM struct {
 	calls  int
 	cancel context.CancelFunc

@@ -138,6 +138,21 @@ func TestDispatchRecoversGarbledActionAsSoleParamCalc(t *testing.T) {
 	}
 }
 
+// A domain with exactly one action is unambiguous even with "action" missing
+// entirely — reported live: a model's own "<parameter=params>...</parameter>"
+// tag convention leaked into the "action" field's value, and parseArgs (see
+// agent.go's recoverActionTag) correctly recovers the embedded params but,
+// having no "action" key to recover from inside them, leaves action="".
+// Dispatch must still resolve that to run's sole action ("shell") rather than
+// erroring, since there's nowhere else it could have meant to go.
+func TestDispatchResolvesEmptyActionForSingleActionDomain(t *testing.T) {
+	rt := runToolFor(t, t.TempDir(), "allow", yes(), nil)
+	r := NewRegistry(rt).Dispatch(context.Background(), "run", "", map[string]any{"command": "echo hi"})
+	if r.IsError || !strings.Contains(r.Content, "hi") {
+		t.Errorf("res = %+v, want a successful shell run resolved from the sole action", r)
+	}
+}
+
 // A multi-action tool (git has 9 actions) is genuinely ambiguous about which
 // action a garbled string was meant for — the recovery must NOT fire, and the
 // normal "unknown action" error must still surface unchanged.
@@ -146,6 +161,17 @@ func TestDispatchDoesNotRecoverGarbledActionForMultiActionTool(t *testing.T) {
 	r := NewRegistry(gt).Dispatch(context.Background(), "git", "do the thing", map[string]any{})
 	if !r.IsError || !strings.Contains(r.Content, `unknown action "do the thing"`) {
 		t.Errorf("res = %+v, want the unchanged unknown-action error", r)
+	}
+}
+
+// Same guard as above, but for an entirely empty action: a multi-action tool
+// (git has 9) must NOT guess which one was meant — still the normal
+// "no action given" error listing every valid action.
+func TestDispatchDoesNotResolveEmptyActionForMultiActionTool(t *testing.T) {
+	gt := gitToolFor(t, t.TempDir(), yes())
+	r := NewRegistry(gt).Dispatch(context.Background(), "git", "", map[string]any{})
+	if !r.IsError || !strings.Contains(r.Content, "no action given") {
+		t.Errorf("res = %+v, want the unchanged no-action-given error", r)
 	}
 }
 

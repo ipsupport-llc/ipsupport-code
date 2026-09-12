@@ -61,6 +61,13 @@ func (r *Registry) OpenAITools() []map[string]any {
 func (r *Registry) Dispatch(ctx context.Context, name, action string, params map[string]any) Result {
 	t, ok := r.tools[name]
 	if !ok {
+		// A model sometimes calls an action as if it were its own tool (e.g. "fetch"
+		// instead of "web" with action="fetch") — actionToTool already indexes every
+		// action's real owner(s) for the sibling hint below, so reuse it here too.
+		if owners := r.actionToTool[name]; len(owners) > 0 {
+			return Err(fmt.Sprintf("no tool named %q — %q is an action of %q, not its own tool; call %q with action=%q instead",
+				name, name, strings.Join(owners, "/"), owners[0], name))
+		}
 		return Err(fmt.Sprintf("unknown tool %q; available tools: %s", name, strings.Join(r.order, ", ")))
 	}
 	// Empty action is a common small-model slip — it often means the model didn't
@@ -74,12 +81,8 @@ func (r *Registry) Dispatch(ctx context.Context, name, action string, params map
 		// Some models violate the required+enum schema and omit "action". If the
 		// params clearly imply a READ-ONLY action, run it — a wrong guess can't
 		// mutate and self-corrects. Otherwise show the shape and the action list.
-		if inf, ok := t.(interface {
-			InferAction(map[string]any) string
-		}); ok {
-			if a := inf.InferAction(params); a != "" && contains(acts, a) {
-				return t.Call(ctx, a, params)
-			}
+		if a := inferAction(t, acts, params); a != "" {
+			return t.Call(ctx, a, params)
 		}
 		// Lead with the full action list (so a model that meant "edit" isn't nudged
 		// toward the first action), then a shape example.
@@ -91,9 +94,28 @@ func (r *Registry) Dispatch(ctx context.Context, name, action string, params map
 			return Err(fmt.Sprintf("action %q belongs to tool %q, not %q; call %q with that action instead",
 				action, strings.Join(owners, "/"), name, owners[0]))
 		}
+		// The action string itself may be garbled rather than just missing (e.g.
+		// a model's own tool-call convention leaking through instead of ours) —
+		// params can still clearly imply a real action; same inference as above.
+		if a := inferAction(t, t.Actions(), params); a != "" {
+			return t.Call(ctx, a, params)
+		}
 		return Err(fmt.Sprintf("%s: unknown action %q; valid actions: %s", name, action, strings.Join(t.Actions(), ", ")))
 	}
 	return t.Call(ctx, action, params)
+}
+
+// inferAction asks t (if it supports inference) to guess a read-only action
+// from params, returning "" if it can't or doesn't support it.
+func inferAction(t Tool, acts []string, params map[string]any) string {
+	inf, ok := t.(interface{ InferAction(map[string]any) string })
+	if !ok {
+		return ""
+	}
+	if a := inf.InferAction(params); a != "" && contains(acts, a) {
+		return a
+	}
+	return ""
 }
 
 // otherOwners returns the action's owner tools excluding self.

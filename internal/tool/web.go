@@ -61,14 +61,35 @@ func NewWeb(hc *http.Client, offline bool) Tool {
 	return NewDomain(DomainSpec{
 		Name:    "web",
 		Summary: "Reach the live web: search, read a page as Markdown, or query StackExchange Q&A.",
-		Details: "Use search to find pages, fetch to read one, stackexchange for programming Q&A.",
+		Details: "search/fetch/stackexchange are action values, not tools.",
 		NotHere: "NOT here — local files → file; shell → run; arithmetic → calc.",
 		Actions: []Action{
 			{Name: "search", Params: []Param{Req("query", "str"), Opt("limit", "int", "8")}, Run: w.search},
 			{Name: "fetch", Params: []Param{Req("url", "str")}, Run: w.fetch},
 			{Name: "stackexchange", Params: []Param{Req("query", "str"), Opt("site", "str", "stackoverflow"), Opt("tag", "str", ""), Opt("limit", "int", "5")}, Run: w.stackexchange},
 		},
+		Infer: inferWebAction,
 	})
+}
+
+// inferWebAction recovers search/fetch from garbled params (e.g. a model that
+// wraps a URL in its own tool-call convention instead of ours, so "action" and
+// "params" never come through as the declared shape) — a URL-looking value
+// anywhere in the params means fetch, any other non-empty text means search;
+// nothing usable means give up (search/fetch/stackexchange are all read-only,
+// so a wrong guess here is harmless per Infer's contract).
+func inferWebAction(params map[string]any) string {
+	for _, v := range params {
+		if s, ok := v.(string); ok && (strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://")) {
+			return "fetch"
+		}
+	}
+	for _, v := range params {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			return "search"
+		}
+	}
+	return ""
 }
 
 // offlineBlocked reports an offline refusal for a web action; ok=true means stop.

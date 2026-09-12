@@ -11,6 +11,7 @@ type fakeTool struct {
 	actions []string
 	mutates []string
 	last    string
+	infer   func(map[string]any) string
 }
 
 func (f *fakeTool) Name() string          { return f.name }
@@ -20,6 +21,12 @@ func (f *fakeTool) Mutates(a string) bool { return contains(f.mutates, a) }
 func (f *fakeTool) Call(_ context.Context, action string, _ map[string]any) Result {
 	f.last = action
 	return Ok("did " + action)
+}
+func (f *fakeTool) InferAction(params map[string]any) string {
+	if f.infer == nil {
+		return ""
+	}
+	return f.infer(params)
 }
 
 func TestDispatchRoutes(t *testing.T) {
@@ -44,6 +51,49 @@ func TestDispatchWrongToolHint(t *testing.T) {
 	}
 	if !strings.Contains(res.Content, `belongs to tool "web"`) {
 		t.Errorf("missing belongs-to hint: %q", res.Content)
+	}
+}
+
+// A model sometimes calls an action name directly as if it were its own tool
+// (reported live: "fetch" called as a top-level tool instead of "web" with
+// action="fetch" — a common confusion for models trained on frameworks where
+// each of these IS its own standalone tool). Dispatch already has the data to
+// recognize this (actionToTool, built for the sibling "wrong tool" hint) —
+// reuse it instead of just saying "unknown tool".
+func TestDispatchActionCalledAsTopLevelToolHint(t *testing.T) {
+	web := &fakeTool{name: "web", actions: []string{"search", "fetch"}}
+	r := NewRegistry(web)
+	res := r.Dispatch(context.Background(), "fetch", "", nil)
+	if !res.IsError {
+		t.Fatal("expected an error result")
+	}
+	if !strings.Contains(res.Content, `action of "web"`) || !strings.Contains(res.Content, `action="fetch"`) {
+		t.Errorf("missing action-called-as-tool hint: %q", res.Content)
+	}
+}
+
+// An unknown (not just empty) action string is a model's own tool-call
+// convention leaking through instead of ours — the params can still clearly
+// imply a real, read-only action, so Dispatch should run the inferred one
+// instead of just erroring on the garbled action string.
+func TestDispatchInfersActionFromGarbledAction(t *testing.T) {
+	web := &fakeTool{
+		name:    "web",
+		actions: []string{"search", "fetch"},
+		infer: func(params map[string]any) string {
+			if _, ok := params["url"]; ok {
+				return "fetch"
+			}
+			return ""
+		},
+	}
+	r := NewRegistry(web)
+	res := r.Dispatch(context.Background(), "web", "<parameter=params>", map[string]any{"url": "http://example.com"})
+	if res.IsError || res.Content != "did fetch" {
+		t.Errorf("res = %+v, want a successful inferred fetch", res)
+	}
+	if web.last != "fetch" {
+		t.Errorf("tool was called with %q, want fetch", web.last)
 	}
 }
 

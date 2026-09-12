@@ -404,6 +404,30 @@ func TestActionsDigestDoesNotTruncateTheDistinguishingPartOfACommand(t *testing.
 	}
 }
 
+// Live case: "go test ./..." fails on a compile error, the agent fixes the
+// code, then runs the identical command again later in the SAME task and it
+// passes. The dedup must keep the LATEST outcome, not freeze on the first
+// (now-stale) failure — otherwise Compact strengthens that stale record into
+// "never repeat this command", which is actively wrong once it's fixed.
+func TestActionsDigestKeepsLatestOutcomeOnRetry(t *testing.T) {
+	msgs := []llm.Message{
+		toolCallReply("c1", "run", `{"action":"shell","params":{"command":"go test ./..."}}`),
+		llm.ToolResult("c1", "run", "exit 1\n# foo\n./foo.go:1:1: syntax error"),
+		toolCallReply("c2", "run", `{"action":"shell","params":{"command":"go test ./..."}}`),
+		llm.ToolResult("c2", "run", "exit 0\nok  \tfoo\t0.002s"),
+	}
+	got := actionsDigest(msgs)
+	if strings.Contains(got, "FAILED") {
+		t.Errorf("digest still shows the stale FAILED outcome after a later success: %q", got)
+	}
+	if !strings.Contains(got, "go test ./...") {
+		t.Errorf("digest missing the retried command entirely: %q", got)
+	}
+	if strings.Count(got, "go test ./...") != 1 {
+		t.Errorf("digest should list the retried command exactly once (latest outcome only): %q", got)
+	}
+}
+
 // The whole point of the digest: cross-run memory must know which files were
 // actually created, not just whatever the model chose to say in its one-line
 // final answer.
@@ -581,6 +605,45 @@ func TestCompactPreservesActionDigestsVerbatim(t *testing.T) {
 	}
 	if !strings.Contains(got, "a summary that mentions nothing about go.mod") {
 		t.Errorf("compacted history should still include the LLM's own summary: %q", got)
+	}
+}
+
+// Compact's OWN digest block (embedded in a "user"-role summary message) must
+// survive a SECOND Compact call too, not just the first — otherwise it only
+// ever survives one compaction, and a task two compactions later loses the
+// exact command record entirely once the LLM's own prose drops it. The second
+// compaction's scripted summarizer here deliberately omits the specific
+// command detail, so the ONLY way it can survive is via the re-harvested
+// digest block, not the summary text.
+func TestCompactDigestSurvivesSecondCompaction(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "run", `{"action":"shell","params":{"command":"rm -rf build"}}`),
+		{Role: "assistant", Content: "cleaned the build directory"},                            // run 1 final
+		{Role: "assistant", Content: "first summary — mentions the cleanup"},                   // 1st Compact's summary
+		{Role: "assistant", Content: "second summary — says nothing about any command at all"}, // 2nd Compact's (lossy) summary
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	if _, err := a.Run(context.Background(), "clean up the build dir"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := a.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Compact(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var got string
+	for _, m := range a.history {
+		got += m.Content
+	}
+	if !strings.Contains(got, "rm -rf build") {
+		t.Errorf("exact command record lost after a second compaction: %q", got)
+	}
+	if !strings.Contains(got, "second summary — says nothing about any command at all") {
+		t.Errorf("compacted history should still include the 2nd Compact's own summary: %q", got)
 	}
 }
 

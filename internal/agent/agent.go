@@ -333,11 +333,17 @@ const trimMinResultSize = 500
 // estimateMsgTokens is a rough, deterministic token-count proxy: the same
 // ~4-bytes-per-token convention used elsewhere in this codebase (see
 // internal/llm's promptEstimate, TestCatalogTokenBudget) — good enough to
-// decide "getting close", not meant to be exact.
+// decide "getting close", not meant to be exact. Counts ToolCalls[].Arguments
+// too, not just Content — client.go's toWire() resends a tool call's Arguments
+// verbatim on every subsequent request, so a large write/edit/run argument
+// payload is just as much a real, resent cost as message Content is.
 func estimateMsgTokens(msgs []llm.Message) int {
 	n := 0
 	for _, m := range msgs {
 		n += len(m.Content)
+		for _, tc := range m.ToolCalls {
+			n += len(tc.Arguments)
+		}
 	}
 	return n / 4
 }
@@ -357,28 +363,69 @@ func estimateMsgTokens(msgs []llm.Message) int {
 // threshold. This is safe specifically because tools are idempotent: if the
 // model still needs that detail, it can just re-run the call — unlike an
 // LLM-written recap, there's no risk of silently dropping or misremembering a
-// fact the model is still relying on. Mutates msgs in place; returns bytes
-// freed (0 if nothing was trimmed).
+// fact the model is still relying on.
+//
+// If that first pass still isn't enough — the protected trimKeepRecent
+// messages alone are bigger than the whole budget (e.g. one huge tool result
+// among them) — a second, overflow-fallback pass trims further into the
+// protected zone too, sparing only the single most recent message. Nothing
+// short of that is left untouchable when the alternative is silently blowing
+// through the entire context window.
+//
+// Mutates msgs in place; returns bytes freed (0 if nothing was trimmed).
 func trimIfNearWindow(msgs []llm.Message, contextWindow int) int {
 	limit := int(float64(contextWindow) * inTaskTrimRatio)
 	if estimateMsgTokens(msgs) < limit {
 		return 0
 	}
-	protectFrom := len(msgs) - trimKeepRecent
+	freed := trimOldToolResults(msgs, limit, len(msgs)-trimKeepRecent)
+	if estimateMsgTokens(msgs) >= limit {
+		freed += trimOldToolResults(msgs, limit, len(msgs)-1)
+	}
+	return freed
+}
+
+// trimOldToolResults walks msgs[0:protectFrom] oldest-first, shrinking large
+// tool RESULT contents to a short placeholder (via trimPlaceholder) until the
+// estimate drops under limit or the range is exhausted. Returns bytes freed.
+func trimOldToolResults(msgs []llm.Message, limit, protectFrom int) int {
 	freed := 0
 	for i := 0; i < protectFrom; i++ {
 		m := &msgs[i]
 		if m.Role != "tool" || len(m.Content) < trimMinResultSize {
 			continue
 		}
-		freed += len(m.Content)
-		m.Content = fmt.Sprintf("[%d bytes of this tool result trimmed to stay within the context window — re-run the call if you still need the detail]", len(m.Content))
-		freed -= len(m.Content)
+		before := len(m.Content)
+		m.Content = trimPlaceholder(m.Content)
+		freed += before - len(m.Content)
 		if estimateMsgTokens(msgs) < limit {
 			break
 		}
 	}
 	return freed
+}
+
+// trimPlaceholder replaces a tool result's content with a short placeholder,
+// while preserving just enough of the content ahead of it that runFailureReason
+// (and therefore actionsDigest's "— FAILED: ..." tag) still extracts the SAME
+// failure signal it would have from the untrimmed content. trimIfNearWindow
+// runs mid-task, before remember() ever sees the result, so whatever isn't
+// carried forward here is gone for good by the time the digest is built: the
+// run tool's content is "exit N\n<output>" (see internal/tool/run.go), so the
+// first line carries the exit-status check runFailureReason keys off of
+// (HasPrefix "exit 0") and the next line carries the reason text it extracts.
+func trimPlaceholder(content string) string {
+	placeholder := fmt.Sprintf("[%d bytes of this tool result trimmed to stay within the context window — re-run the call if you still need the detail]", len(content))
+	firstLine, rest, ok := strings.Cut(content, "\n")
+	if !ok {
+		return placeholder
+	}
+	firstLine = clip(firstLine, 80)
+	reasonLine, _, _ := strings.Cut(rest, "\n")
+	if reasonLine = strings.TrimSpace(reasonLine); reasonLine == "" {
+		return firstLine + "\n" + placeholder
+	}
+	return firstLine + "\n" + clip(reasonLine, 80) + "\n" + placeholder
 }
 
 // stopNote describes a run that stopped before a clean answer, so the next turn

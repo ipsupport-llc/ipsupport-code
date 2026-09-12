@@ -331,6 +331,73 @@ func TestContextFallsBackToEstimateWhenServerReportsNoUsage(t *testing.T) {
 	}
 }
 
+// A backend that sends "usage":{} (present, all fields zero) as its final
+// chunk before [DONE] must be treated the same as never sending usage at all:
+// the promptEstimate fallback must still fire (lastPromptTk/Context() must
+// not be disabled), and the zero completion count must not be subtracted from
+// the running completion tally (which already holds this call's own 2 real
+// per-delta bumps).
+func TestChatZeroUsageChunkFallsBackAndDoesNotCorruptCompletionCount(t *testing.T) {
+	url := sseServer(t,
+		`{"choices":[{"delta":{"content":"Hello"}}]}`,
+		`{"choices":[{"delta":{"content":" world"}}]}`,
+		`{"choices":[{"delta":{}}],"usage":{"prompt_tokens":0,"completion_tokens":0}}`,
+	)
+	cl := NewOpenAIClient(config.LLM{BaseURL: url, Model: "fake"})
+	longPrompt := strings.Repeat("this is a fairly long user message ", 50)
+	if _, err := cl.Chat(context.Background(), []Message{User(longPrompt)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if cl.Context() <= 0 {
+		t.Errorf("Context() = %d, want a positive fallback estimate — an empty/zero usage object must not disable the promptEstimate fallback", cl.Context())
+	}
+	if _, compl := cl.Usage(); compl != 2 {
+		t.Errorf("completion tokens = %d, want 2 (this call's 2 real per-delta bumps) — a zero-usage chunk must not subtract from the completion count", compl)
+	}
+}
+
+// Usage reconciliation must not be committed to shared state until the
+// stream is confirmed fully complete. Exact repro: attempt 1 streams 2
+// content deltas then a usage chunk reporting completion=10, but the
+// connection is cut before "[DONE]" ever arrives (a truncated, retriable
+// stream, same shape as TestChatRetriesOnPrematureCleanEOF) — that usage
+// report must never reach c.complTk. The retry then streams its own 2 deltas
+// and its own usage=10, completing normally. The only correct final total is
+// the accepted retry's own 10, not some combination of both attempts.
+func TestChatUsageChunkNotCommittedUntilStreamConfirmedDone(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "text/event-stream")
+		fl := w.(http.Flusher)
+		if n < 2 {
+			// First attempt: 2 content deltas + a usage chunk reporting
+			// completion=10, then a clean EOF with no "[DONE]" — a truncated
+			// stream whose usage numbers must never reach shared state.
+			io.WriteString(w, `data: {"choices":[{"delta":{"content":"a"}}]}`+"\n\n")
+			io.WriteString(w, `data: {"choices":[{"delta":{"content":"b"}}]}`+"\n\n")
+			io.WriteString(w, `data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":10}}`+"\n\n")
+			fl.Flush()
+			return // clean EOF, no [DONE] — retriable per TestChatRetriesOnPrematureCleanEOF
+		}
+		// Retry: completes normally with its own usage=10.
+		io.WriteString(w, `data: {"choices":[{"delta":{"content":"c"}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{"content":"d"}}]}`+"\n\n")
+		io.WriteString(w, `data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":10}}`+"\n\n")
+		io.WriteString(w, "data: [DONE]\n\n")
+		fl.Flush()
+	}))
+	defer srv.Close()
+
+	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+	if _, err := cl.Chat(context.Background(), []Message{User("hi")}, nil); err != nil {
+		t.Fatalf("Chat should retry past the truncated stream: %v", err)
+	}
+	if _, compl := cl.Usage(); compl != 10 {
+		t.Errorf("completion tokens = %d, want 10 (only the accepted retry's usage — the discarded attempt's usage chunk must not have been committed)", compl)
+	}
+}
+
 func TestChatStreamingToolCall(t *testing.T) {
 	url := sseServer(t,
 		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"calc","arguments":""}}]}}]}`,

@@ -30,9 +30,13 @@ type LLM struct {
 	Temperature float64 `json:"temperature"`
 	// TopP is nucleus-sampling top_p (0 = unset — the server's own default; the
 	// client omits the field below that, same convention as Temperature).
-	TopP     float64 `json:"top_p,omitempty"`
-	MaxSteps int     `json:"max_steps"`
-	APIKey   string  `json:"api_key,omitempty"`
+	TopP float64 `json:"top_p,omitempty"`
+	// MaxSteps caps tool-call rounds per goal pursuit for THIS connection. 0
+	// (the default) auto-scales from ContextWindow — see cmd/agent's
+	// stepBudget/autoStepBudget — a flat number here would be oblivious to how
+	// much room a much bigger (or smaller) window actually affords.
+	MaxSteps int    `json:"max_steps"`
+	APIKey   string `json:"api_key,omitempty"`
 	// Type selects extra capabilities: "lmstudio" uses LM Studio's native API
 	// (rich model list, context detection); anything else is plain OpenAI-compat.
 	Type string `json:"type,omitempty"`
@@ -135,8 +139,17 @@ type Config struct {
 	// goal isn't done (a plan still has open items), it's re-fed the goal and tries
 	// again, up to this many returns. 0 disables (one run). Default 6.
 	GoalMaxReturns int `json:"goal_max_returns,omitempty"`
-	// GoalMaxSteps is the hard step backstop for one goal pursuit. Default 80.
+	// GoalMaxSteps is the hard tool-call-round backstop for one goal pursuit. 0
+	// (the default) auto-scales from the active connection's context window —
+	// see cmd/agent's autoStepBudget — instead of a flat number oblivious to
+	// how much room a big window actually affords a complex task.
 	GoalMaxSteps int `json:"goal_max_steps,omitempty"`
+	// MaxHistory caps how many cross-task session-memory messages
+	// Agent.remember keeps before silently dropping the oldest (no summary —
+	// Compact, not this, is the summarizing backstop). 0 (the default)
+	// auto-scales from the active context window — see cmd/agent's
+	// autoMaxHistory.
+	MaxHistory int `json:"max_history,omitempty"`
 	// GoalNudge, when true (default), gives the model ONE push if it re-reads the
 	// goal after a re-feed but then finishes without doing any work — instead of
 	// silently giving up. Set false to accept a no-progress finish immediately.
@@ -262,12 +275,10 @@ func ResolveProvider(cfg Config, name string) (LLM, bool) {
 			p.APIKey = os.Getenv(env)
 		}
 	}
-	// Leave Temperature at 0 unless the user set one: the client omits a zero
-	// temperature so hosted models that only accept their default (OpenAI gpt-5.x,
-	// chat-latest) keep working. Only MaxSteps falls back to the baseline.
-	if p.MaxSteps == 0 {
-		p.MaxSteps = Default().LLM.MaxSteps
-	}
+	// Leave Temperature and MaxSteps at 0 unless the user set one: the client
+	// omits a zero temperature so hosted models that only accept their default
+	// (OpenAI gpt-5.x, chat-latest) keep working, and 0 MaxSteps means "auto-scale
+	// from this connection's own context window" (cmd/agent's stepBudget).
 	return p, true
 }
 
@@ -287,7 +298,6 @@ func Default() Config {
 			BaseURL:       "http://localhost:1234/v1",
 			Model:         "qwen2.5-7b-instruct",
 			Temperature:   0.2,
-			MaxSteps:      12,
 			Type:          "lmstudio",
 			ContextWindow: 8192,
 		},
@@ -305,7 +315,6 @@ func Default() Config {
 		Spawn:          SpawnPolicy{Default: "ask", Exec: false},
 		UpdateCheck:    true,
 		GoalMaxReturns: 6,
-		GoalMaxSteps:   80,
 		GoalNudge:      true,
 	}
 }
@@ -484,6 +493,18 @@ func SaveKnowledgeRetention(days int) error {
 // SaveGoalMaxReturns persists the goal-pursuit return TTL globally.
 func SaveGoalMaxReturns(n int) error {
 	return mergeGlobalKeys(map[string]any{"goal_max_returns": n})
+}
+
+// SaveGoalMaxSteps persists the per-goal tool-call-round cap globally. 0
+// clears the override, letting it auto-scale from the context window again.
+func SaveGoalMaxSteps(n int) error {
+	return mergeGlobalKeys(map[string]any{"goal_max_steps": n})
+}
+
+// SaveMaxHistory persists the cross-task session-memory message cap globally.
+// 0 clears the override, letting it auto-scale from the context window again.
+func SaveMaxHistory(n int) error {
+	return mergeGlobalKeys(map[string]any{"max_history": n})
 }
 
 // SaveSessionBudget persists the per-session spend cap (USD) globally.

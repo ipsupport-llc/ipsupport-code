@@ -148,8 +148,8 @@ func TestLoadNoFileReturnsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.LLM.MaxSteps != 12 {
-		t.Errorf("MaxSteps = %d, want 12", cfg.LLM.MaxSteps)
+	if cfg.LLM.MaxSteps != 0 {
+		t.Errorf("MaxSteps = %d, want 0 (auto-scale from context window)", cfg.LLM.MaxSteps)
 	}
 	if cfg.LLM.BaseURL != "http://localhost:1234/v1" {
 		t.Errorf("BaseURL = %q", cfg.LLM.BaseURL)
@@ -177,8 +177,8 @@ func TestLoadMergesPartial(t *testing.T) {
 	if len(cfg.Run.Allow) != 2 || cfg.Run.Allow[0] != "ls*" {
 		t.Errorf("Run.Allow = %v, want [ls* git status]", cfg.Run.Allow)
 	}
-	if cfg.LLM.MaxSteps != 12 {
-		t.Errorf("MaxSteps = %d, want 12 (default preserved)", cfg.LLM.MaxSteps)
+	if cfg.LLM.MaxSteps != 0 {
+		t.Errorf("MaxSteps = %d, want 0 (default preserved — auto-scale)", cfg.LLM.MaxSteps)
 	}
 	if cfg.Run.Default != "ask" {
 		t.Errorf("Run.Default = %q, want ask (default preserved)", cfg.Run.Default)
@@ -256,8 +256,8 @@ func TestResolveProvider(t *testing.T) {
 	if !ok || l.BaseURL != "https://api.openai.com/v1" || l.Model != "gpt-4o-mini" || l.APIKey != "sk-env" {
 		t.Fatalf("openai template = %+v ok=%v", l, ok)
 	}
-	if l.MaxSteps == 0 {
-		t.Error("MaxSteps default should be filled")
+	if l.MaxSteps != 0 {
+		t.Errorf("MaxSteps = %d, want 0 (auto-scale from context window, not a filled-in baseline)", l.MaxSteps)
 	}
 	if l.Temperature != 0 {
 		t.Errorf("Temperature = %v, want 0 left unset (client omits it so hosted models accept their default)", l.Temperature)

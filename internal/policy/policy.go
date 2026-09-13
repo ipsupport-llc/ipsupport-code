@@ -294,7 +294,11 @@ func (e *Engine) Resolve(path string) (string, error) {
 	// error every jail-violating call already goes through (file paths, run's
 	// cwd, git refs — anything via Resolve), means it doesn't depend on the
 	// system prompt being remembered mid-task.
-	return abs, fmt.Errorf("path %q is outside the workspace jail %q — this is a hard boundary, not a one-off failure: no path or working directory outside it is reachable by ANY tool. Stick to relative paths inside the workspace, or tell the user this task needs a different directory (they can /cd there, or relaunch pointed at it)", path, e.jailRoot)
+	// Deliberately doesn't mention /cd or any other escape mechanism: the
+	// model can't invoke those itself (they're human-typed TUI commands), so
+	// naming them here is noise, not guidance — all it needs is the plain
+	// fact that retrying with a different path is pointless.
+	return abs, fmt.Errorf("path %q is outside the workspace jail %q — this is a hard boundary, not a one-off failure: no path or working directory outside it is reachable by ANY tool, and retrying with a different one won't help. Say so instead of trying more variants", path, e.jailRoot)
 }
 
 // expandTilde turns a leading ~ or ~/ into the user's home directory, matching

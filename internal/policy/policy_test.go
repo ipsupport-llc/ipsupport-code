@@ -15,7 +15,10 @@ import (
 // absolute dir) — because the bare "escapes the workspace jail" message
 // looked like a one-off routing failure to retry around, not a categorical
 // boundary. The message must say this is a hard boundary (not worth
-// retrying with a different path) and suggest what to actually do instead.
+// retrying with a different path) — but must NOT name /cd or any other
+// escape mechanism: the model can't invoke those itself (they're human-typed
+// TUI commands), so naming them is noise the model can't act on, not
+// guidance.
 func TestResolveJailEscapeErrorExplainsItsAHardBoundary(t *testing.T) {
 	ws := t.TempDir()
 	c := config.Default()
@@ -31,8 +34,8 @@ func TestResolveJailEscapeErrorExplainsItsAHardBoundary(t *testing.T) {
 	if !strings.Contains(msg, "hard boundary") {
 		t.Errorf("error = %q, want it to say this is a hard boundary (not a one-off failure worth retrying)", msg)
 	}
-	if !strings.Contains(msg, "/cd") {
-		t.Errorf("error = %q, want it to suggest /cd (or an equivalent concrete next step)", msg)
+	if strings.Contains(msg, "/cd") {
+		t.Errorf("error = %q, must NOT mention /cd — the model can't invoke it, so naming it is noise", msg)
 	}
 }
 

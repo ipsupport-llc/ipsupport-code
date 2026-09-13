@@ -165,7 +165,7 @@ func (a *Agent) SetMaxStuckTurns(n int) {
 // SetPriorGoalProgress records whether an earlier attempt at the goal this Run
 // call is about to pursue ever had a productive turn (hadProductiveTurn resets
 // to false on every Run call, even though the session it resumes into is the
-// same one) — the caller (goalTTLFor's sibling on the cmd/agent side) should
+// same one) — the caller (cmd/agent's goalLoopBudget/finishGoal) should
 // pass the standing goal's persisted Progressed flag right before Run, so a
 // give-up that stumbles again immediately on a resume still lets the judge
 // assess the real progress made in an earlier attempt instead of skipping it
@@ -742,7 +742,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	msgs = append(msgs, hist...) // session memory
 	msgs = append(msgs, llm.User(goal))
 	tools := a.reg.OpenAITools()
-	slog.Debug("run start", "goal", clip(goal, 120), "tools", toolNames(tools), "plan_mode", a.planMode)
+	slog.Debug("run start", a.debugArgs("goal", clip(goal, 120), "tools", toolNames(tools), "plan_mode", a.planMode)...)
 	// Reported live: no single log line said how/why a run ended — reading it
 	// off "model turn"/"stuck check" lines meant inferring it indirectly (e.g.
 	// a tool_calls=[] turn with no following "stuck check" line MIGHT be a
@@ -752,8 +752,8 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	// finalize, the stuck-stop, and step-exhaustion) without having to
 	// remember to add a log call at each one individually.
 	defer func() {
-		slog.Debug("run end", "steps", tr.Steps, "stopped", tr.Stopped, "cancelled", tr.Cancelled,
-			"goal_met", tr.GoalMet, "returns", tr.Returns, "productive", tr.Productive, "err", err, "final", clip(tr.Final, 200))
+		slog.Debug("run end", a.debugArgs("steps", tr.Steps, "stopped", tr.Stopped, "cancelled", tr.Cancelled,
+			"goal_met", tr.GoalMet, "returns", tr.Returns, "productive", tr.Productive, "err", err, "final", clip(tr.Final, 200))...)
 	}()
 
 	stuck, nudged := 0, false
@@ -874,7 +874,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// unparseable-reply cases were logged, so a "more"/"done" judge
 					// call left no trace of ever having happened, making a
 					// tool_calls=[] turn's true fate unreadable from the log alone.
-					slog.Debug("goal judge", "verdict", verdict, "missing", missing, "return", returns, "of", a.maxReturns, "reason", "normal")
+					slog.Debug("goal judge", a.debugArgs("verdict", verdict, "missing", missing, "return", returns, "of", a.maxReturns, "reason", "normal")...)
 					switch verdict {
 					case judgeMore:
 						returns++
@@ -959,7 +959,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		// on a stuck/nudge/stop decision) so the counter's whole history is
 		// reconstructable, not just its final value.
 		allFailed := nErr == len(assistant.ToolCalls)
-		slog.Debug("stuck check", "step", step+1, "all_failed", allFailed, "repeating", repeating, "stuck_before", stuck, "nudged", nudged)
+		slog.Debug("stuck check", a.debugArgs("step", step+1, "all_failed", allFailed, "repeating", repeating, "stuck_before", stuck, "nudged", nudged)...)
 		if allFailed || repeating {
 			if stuck++; stuck >= a.maxStuckTurns {
 				if !nudged {
@@ -1242,7 +1242,7 @@ func (a *Agent) judgeOnGiveUp(ctx context.Context, goal string, returns int, had
 		return false, ""
 	}
 	verdict, missing := a.judgeGoal(ctx, goal, result)
-	slog.Debug("goal judge", "verdict", verdict, "missing", missing, "return", returns, "of", a.maxReturns, "reason", reason)
+	slog.Debug("goal judge", a.debugArgs("verdict", verdict, "missing", missing, "return", returns, "of", a.maxReturns, "reason", reason)...)
 	met = verdict == judgeDone
 	// judgeUnclear carries no real signal (met=false, missing="") — stay silent on
 	// it, same as the normal finalize path above, which only ever emits "judge" on
@@ -1278,16 +1278,40 @@ func goalNotConfirmedNote(maxReturns int, met bool, missing string) string {
 // treat "can't tell" differently from "confirmed done": on a transport error or an
 // unparseable reply it returns judgeUnclear — accept the final to avoid trapping
 // the loop, but do NOT record the goal as verifiably met.
+//
+// One retry on judgeUnclear: reported live, a weak local judge model
+// occasionally returns a totally empty reply ("goal judge unparseable
+// reply=\"\""), which otherwise permanently stalls the goal as "incomplete" on
+// pure noise — a single cheap, tools-free retry costs little and can turn a
+// wrongly-unclear verdict into a real one.
 func (a *Agent) judgeGoal(ctx context.Context, goal, result string) (judgeVerdict, string) {
+	verdict, missing := a.judgeGoalOnce(ctx, goal, result)
+	if verdict == judgeUnclear {
+		verdict, missing = a.judgeGoalOnce(ctx, goal, result)
+	}
+	return verdict, missing
+}
+
+func (a *Agent) judgeGoalOnce(ctx context.Context, goal, result string) (judgeVerdict, string) {
 	reply, err := a.llm.Chat(ctx, []llm.Message{
 		llm.System(judgeSystem),
 		llm.User("GOAL:\n" + goal + "\n\nWHAT THE AGENT DID / ITS FINAL ANSWER:\n" + clip(result, 2000)),
 	}, nil)
 	if err != nil {
-		slog.Debug("goal judge failed", "err", err)
+		slog.Debug("goal judge failed", a.debugArgs("err", err)...)
 		return judgeUnclear, ""
 	}
-	return parseVerdict(reply.Content)
+	verdict, missing := parseVerdict(reply.Content)
+	if verdict == judgeUnclear {
+		// Reasoning logged alongside Content: a reasoning-capable local model
+		// can stream its whole verdict into Reasoning and leave Content empty
+		// — without this, a future occurrence still couldn't tell "genuinely
+		// empty" from "reasoned it out but never committed it to Content".
+		slog.Debug("goal judge unparseable", a.debugArgs(
+			"reply", clip(strings.TrimSpace(reply.Content), 120),
+			"reasoning", clip(strings.TrimSpace(reply.Reasoning), 200))...)
+	}
+	return verdict, missing
 }
 
 var (
@@ -1311,7 +1335,8 @@ func parseVerdict(s string) (judgeVerdict, string) {
 	if doneToken.MatchString(s) {
 		return judgeDone, ""
 	}
-	slog.Debug("goal judge unparseable", "reply", clip(strings.TrimSpace(s), 120))
+	// Logging moved to the caller (judgeGoalOnce), which also has the reply's
+	// Reasoning field and the agent's sub-agent label to tag it with.
 	return judgeUnclear, ""
 }
 
@@ -1538,6 +1563,21 @@ func (a *Agent) emit(kind string, fields map[string]any) {
 		fields["agent"] = a.label
 	}
 	a.tr.Emit(kind, fields)
+}
+
+// debugArgs prepends an "agent" tag to a slog.Debug call's key/value pairs
+// when this is a sub-agent (a.label != ""), mirroring the tag emit already
+// puts on every UI event. Without this, "run start"/"run end"/"stuck
+// check"/"goal judge" were textually indistinguishable in IPS_LOG=debug output
+// between the top-level run and any spawned sub-agent — reported live: a real
+// debug log's "run end" line couldn't be attributed with certainty to either
+// one, because its own "run start" (which would have carried the goal text)
+// had scrolled out of view.
+func (a *Agent) debugArgs(args ...any) []any {
+	if a.label == "" {
+		return args
+	}
+	return append([]any{"agent", a.label}, args...)
 }
 
 // parseArgs decodes a tool-call argument string into (action, params), tolerating

@@ -1387,22 +1387,34 @@ func TestGoalSetPersistAndLoad(t *testing.T) {
 	}
 }
 
-func TestGoalTTLForOnlyAppliesToActiveGoal(t *testing.T) {
+// goalLoopBudget gates purely on whether a standing goal is in force (any
+// non-empty Status), NOT on whether this particular run's text matches the
+// goal's stored text. That text-match gate was tried and explicitly rejected:
+// reported live, a run resubmitting the goal's own exact text (after an
+// earlier give-up left it "incomplete") still showed zero judge involvement,
+// because only /goal's own command path ever flipped Status back to "active".
+// The real requirement: an outstanding goal stays in force — and every
+// subsequent run counts toward it, whatever its text — until the judge
+// confirms it met or the user explicitly turns it off/clears it.
+func TestGoalLoopBudgetIgnoresTextAndGatesOnlyOnStatus(t *testing.T) {
 	a := &app{workspace: t.TempDir(), cfg: config.Default()} // GoalMaxReturns=6
-	// No goal set → a plain task gets no judge loop.
-	if got := a.goalTTLFor("anything"); got != 0 {
-		t.Errorf("plain task TTL = %d, want 0", got)
+	// No goal at all → a plain task gets no judge loop.
+	if got := a.goalLoopBudget(); got != 0 {
+		t.Errorf("no goal: budget = %d, want 0", got)
 	}
 	a.goal = goalState{Text: "the goal", Status: "active"}
-	if got := a.goalTTLFor("the goal"); got != 6 {
-		t.Errorf("active goal TTL = %d, want 6", got)
+	if got := a.goalLoopBudget(); got != 6 {
+		t.Errorf("active goal: budget = %d, want 6", got)
 	}
-	if got := a.goalTTLFor("a different task"); got != 0 {
-		t.Errorf("off-goal task TTL = %d, want 0", got)
+	// The exact scenario reported live: the goal gave up once and sits
+	// "incomplete" — a later run (ANY text) must still be tracked.
+	a.goal.Status = "incomplete"
+	if got := a.goalLoopBudget(); got != 6 {
+		t.Errorf("incomplete goal: budget = %d, want 6 (must still be in force)", got)
 	}
-	a.goal.Status = "done"
-	if got := a.goalTTLFor("the goal"); got != 0 {
-		t.Errorf("finished goal TTL = %d, want 0", got)
+	a.goal = goalState{} // done/cleared
+	if got := a.goalLoopBudget(); got != 0 {
+		t.Errorf("cleared goal: budget = %d, want 0", got)
 	}
 }
 
@@ -1431,7 +1443,7 @@ func TestFinishGoalStatusFromTranscript(t *testing.T) {
 	a := &app{workspace: ws, cfg: config.Default()}
 
 	a.setGoal("do it")
-	a.finishGoal("do it", agent.Transcript{GoalMet: true})
+	a.finishGoal(agent.Transcript{GoalMet: true})
 	if a.goal.Text != "" || a.goal.Status != "" { // a met goal is cleared, not kept as "done"
 		t.Errorf("met goal = %+v, want cleared", a.goal)
 	}
@@ -1440,16 +1452,9 @@ func TestFinishGoalStatusFromTranscript(t *testing.T) {
 	}
 
 	a.setGoal("do it")
-	a.finishGoal("do it", agent.Transcript{GoalMet: false})
+	a.finishGoal(agent.Transcript{GoalMet: false})
 	if a.goal.Status != "incomplete" || a.goal.Offered {
 		t.Errorf("unmet goal = %+v, want incomplete & not offered", a.goal)
-	}
-
-	// A run that isn't the standing goal must not touch its status.
-	a.setGoal("do it")
-	a.finishGoal("some other task", agent.Transcript{GoalMet: true})
-	if a.goal.Status != "active" {
-		t.Errorf("off-goal run changed status to %q, want active", a.goal.Status)
 	}
 }
 
@@ -1462,7 +1467,7 @@ func TestFinishGoalStatusFromTranscript(t *testing.T) {
 func TestFinishGoalMarksDoneEvenWhenStoppedIfJudgeConfirmed(t *testing.T) {
 	a := &app{workspace: t.TempDir(), cfg: config.Default()}
 	a.setGoal("do it")
-	a.finishGoal("do it", agent.Transcript{GoalMet: true, Stopped: true})
+	a.finishGoal(agent.Transcript{GoalMet: true, Stopped: true})
 	if a.goal.Text != "" || a.goal.Status != "" {
 		t.Errorf("goal = %+v, want cleared (judge confirmed met despite Stopped)", a.goal)
 	}
@@ -1474,7 +1479,7 @@ func TestFinishGoalMarksDoneEvenWhenStoppedIfJudgeConfirmed(t *testing.T) {
 func TestFinishGoalNeverMarksDoneWhenCancelled(t *testing.T) {
 	a := &app{workspace: t.TempDir(), cfg: config.Default()}
 	a.setGoal("do it")
-	a.finishGoal("do it", agent.Transcript{GoalMet: true, Cancelled: true})
+	a.finishGoal(agent.Transcript{GoalMet: true, Cancelled: true})
 	if a.goal.Status != "incomplete" {
 		t.Errorf("status = %q, want incomplete (Cancelled must override GoalMet)", a.goal.Status)
 	}
@@ -1486,7 +1491,7 @@ func TestFinishGoalNeverMarksDoneWhenCancelled(t *testing.T) {
 func TestFinishGoalPersistsMissingHint(t *testing.T) {
 	a := &app{workspace: t.TempDir(), cfg: config.Default()}
 	a.setGoal("do it")
-	a.finishGoal("do it", agent.Transcript{GoalMet: false, Stopped: true, Missing: "needs step two"})
+	a.finishGoal(agent.Transcript{GoalMet: false, Stopped: true, Missing: "needs step two"})
 	if a.goal.Status != "incomplete" || a.goal.Missing != "needs step two" {
 		t.Errorf("goal = %+v, want incomplete with Missing=%q", a.goal, "needs step two")
 	}
@@ -1501,7 +1506,7 @@ func TestFinishGoalPersistsMissingHint(t *testing.T) {
 func TestSetGoalPreservesProgressedAndMissingOnResume(t *testing.T) {
 	a := &app{workspace: t.TempDir(), cfg: config.Default()}
 	a.setGoal("do it")
-	a.finishGoal("do it", agent.Transcript{Stopped: true, Missing: "needs step two", Productive: true})
+	a.finishGoal(agent.Transcript{Stopped: true, Missing: "needs step two", Productive: true})
 	if !a.goal.Progressed || a.goal.Missing != "needs step two" {
 		t.Fatalf("goal = %+v, want Progressed=true and Missing set after the give-up", a.goal)
 	}
@@ -1520,17 +1525,19 @@ func TestSetGoalPreservesProgressedAndMissingOnResume(t *testing.T) {
 	}
 }
 
-// Reported live via a real debug log: a run whose goal text matched the
-// standing goal exactly finalized with the goal's own deliverable ("Created
-// LAB_REPORT.md...") yet showed zero "goal judge" line and returns=0 — because
-// the goal was left "incomplete" from an earlier give-up, and only /goal's own
-// command handler ever flips Status back to "active" (see goalTTLFor). A task
-// resubmitted with the identical text by ANY other means (history recall,
-// retyping, a pasted line) bypassed all goal tracking, silently, forever.
-// runOne's resumeGoalIfMatching must close that gap: the same text on an
-// "incomplete" goal auto-reactivates it before the run, so the judge actually
-// runs and finishGoal actually updates the goal afterward.
-func TestPlainTaskMatchingIncompleteGoalAutoResumes(t *testing.T) {
+// Reported live via a real debug log: a run finalizing with the goal's own
+// deliverable ("Created LAB_REPORT.md...") showed zero "goal judge" line and
+// returns=0 — the goal was left "incomplete" from an earlier give-up, and only
+// /goal's own command handler ever flipped Status back to "active". A task run
+// by ANY other means (history recall, retyping, a pasted line, a follow-up
+// nudge like "а документация?") bypassed all goal tracking, silently, forever.
+// Fixed at the source: goalLoopBudget/finishGoal now gate purely on whether a
+// standing goal is in force (Status != "") — not on whether this run's text
+// matches it — so an "incomplete" goal stays tracked through ANY subsequent
+// run, whatever its text, until the judge confirms it or the user turns it
+// off/clears it. This test uses the SAME exact text as the stored goal (the
+// narrowest case); the next one below uses a DIFFERENT text (the nudge case).
+func TestPlainTaskOnIncompleteGoalStaysTracked(t *testing.T) {
 	url := tuiFakeServer(t,
 		tuiToolCall("file", `{"action":"write","params":{"path":"x.txt","content":"hi"}}`),
 		tuiContent("all done"), // the model's own finalize
@@ -1546,7 +1553,30 @@ func TestPlainTaskMatchingIncompleteGoalAutoResumes(t *testing.T) {
 	a.runOne(context.Background(), "do the thing")
 
 	if a.goal.Text != "" || a.goal.Status != "" {
-		t.Errorf("goal = %+v, want cleared (auto-resumed, then the judge confirmed DONE)", a.goal)
+		t.Errorf("goal = %+v, want cleared (tracked and the judge confirmed DONE)", a.goal)
+	}
+}
+
+// The nudge case: a DIFFERENT plain follow-up ("а документация?" in the real
+// report) while a goal sits "incomplete" — must still be tracked and judged,
+// not silently ignored just because the text doesn't match the stored goal.
+func TestDifferentPlainTaskOnIncompleteGoalStillTracked(t *testing.T) {
+	url := tuiFakeServer(t,
+		tuiToolCall("file", `{"action":"write","params":{"path":"docs.md","content":"hi"}}`),
+		tuiContent("added docs"), // the model's own finalize
+		tuiContent("DONE"),       // the judge's separate side call
+	)
+	a := tuiTestApp(t, url)
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.cfg.GoalMaxReturns = 3
+	a.goal = goalState{Text: "do the thing", Status: "incomplete"}
+
+	a.runOne(context.Background(), "а документация?") // different text on purpose
+
+	if a.goal.Text != "" || a.goal.Status != "" {
+		t.Errorf("goal = %+v, want cleared (a different-text nudge must still be tracked and judged)", a.goal)
 	}
 }
 
@@ -1565,7 +1595,7 @@ func TestGoalOfferOnce(t *testing.T) {
 		t.Errorf("offered flag not persisted: %+v", b.goal)
 	}
 	// Engaging it again (a run that leaves it unfinished) re-arms one more offer.
-	b.finishGoal("ship it", agent.Transcript{GoalMet: false})
+	b.finishGoal(agent.Transcript{GoalMet: false})
 	if b.goal.Offered {
 		t.Error("an unfinished run should re-arm the resume offer")
 	}
@@ -3000,12 +3030,12 @@ func TestGoalDoneWithJudgeOff(t *testing.T) {
 	a := &app{cfg: config.Default(), workspace: t.TempDir()}
 	a.cfg.GoalMaxReturns = 0 // judge loop off
 	a.goal = goalState{Text: "ship it", Status: "active"}
-	a.finishGoal("ship it", agent.Transcript{}) // clean finish, GoalMet never set → counts as done
+	a.finishGoal(agent.Transcript{}) // clean finish, GoalMet never set → counts as done
 	if a.goal.Text != "" || a.goal.Status != "" {
 		t.Errorf("clean TTL-off finish should clear the goal, got %+v", a.goal)
 	}
 	a.goal = goalState{Text: "ship it", Status: "active"}
-	a.finishGoal("ship it", agent.Transcript{Cancelled: true})
+	a.finishGoal(agent.Transcript{Cancelled: true})
 	if a.goal.Status != "incomplete" {
 		t.Errorf("cancelled run → %q, want incomplete", a.goal.Status)
 	}

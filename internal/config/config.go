@@ -627,6 +627,24 @@ func ApplyOverride(cfg *Config, dotted, raw string) error {
 	if err := json.Unmarshal(data, &next); err != nil {
 		return err
 	}
+	// Workspace and every LLM's Extra (top-level and per-provider) are all
+	// tagged json:"-" — toObject's marshal never emits them, so the round
+	// trip above silently drops them and *cfg = next would wipe them to
+	// their zero values. Reported live: -skip-permissions (or any -override)
+	// combined with -C wiped the workspace back to "", breaking the file
+	// jail root, run's cwd default, and session file paths for the rest of
+	// the process. No dotted-path override could ever legitimately target
+	// these fields anyway (they're excluded from the JSON view a path
+	// walks), so restoring them from the pre-mutation cfg can never clobber
+	// a real override.
+	next.Workspace = cfg.Workspace
+	next.LLM.Extra = cfg.LLM.Extra
+	for name, p := range next.Providers {
+		if orig, ok := cfg.Providers[name]; ok {
+			p.Extra = orig.Extra
+			next.Providers[name] = p
+		}
+	}
 	*cfg = next
 	return nil
 }

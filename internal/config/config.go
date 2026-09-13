@@ -171,6 +171,17 @@ type Config struct {
 	// auto-scales from the active context window — see cmd/agent's
 	// autoMaxHistory.
 	MaxHistory int `json:"max_history,omitempty"`
+	// MaxStuckTurns is how many consecutive unproductive turns (every tool call
+	// failed, or the exact same call(s) repeated) earn ONE rethink nudge before
+	// the run gives up; a still-unproductive turn right after the nudge stops
+	// it. 0 (the default) uses internal/agent's own default. Reported live: a
+	// model that hit the workspace jail from several different angles (an
+	// absolute path, then a couple of cwd variants) got cut off before it had
+	// room to actually work through the problem — this raises the ceiling for
+	// anyone who wants their model to keep grinding longer before giving up
+	// (a genuinely looping model still stops, just later; the outer step
+	// budget is the real backstop against a truly runaway task).
+	MaxStuckTurns int `json:"max_stuck_turns,omitempty"`
 	// GoalNudge, when true (default), gives the model ONE push if it re-reads the
 	// goal after a re-feed but then finishes without doing any work — instead of
 	// silently giving up. Set false to accept a no-progress finish immediately.
@@ -526,6 +537,12 @@ func SaveGoalMaxSteps(n int) error {
 // 0 clears the override, letting it auto-scale from the context window again.
 func SaveMaxHistory(n int) error {
 	return mergeGlobalKeys(map[string]any{"max_history": n})
+}
+
+// SaveMaxStuckTurns persists the stuck/repeat-turn tolerance globally. 0
+// clears the override, falling back to internal/agent's own default.
+func SaveMaxStuckTurns(n int) error {
+	return mergeGlobalKeys(map[string]any{"max_stuck_turns": n})
 }
 
 // SaveSessionBudget persists the per-session spend cap (USD) globally.

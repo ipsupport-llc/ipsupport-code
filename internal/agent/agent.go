@@ -53,6 +53,10 @@ type Agent struct {
 	detached atomic.Bool
 	system   string
 	maxSteps int
+	// maxStuckTurns is how many consecutive unproductive turns earn a rethink
+	// nudge before the run gives up — see SetMaxStuckTurns and
+	// DefaultMaxStuckTurns.
+	maxStuckTurns int
 	// contextWindow is the active connection's real context size (0 = unknown),
 	// used ONLY to keep a single long task's own growing tool-call trail inside
 	// it (see trimIfNearWindow) — auto-compact (Compact) is the analogous
@@ -129,7 +133,17 @@ func New(l llm.Chatter, reg *tool.Registry, kb *knowledge.KB, tr trace.Tracer, s
 	if strings.TrimSpace(system) == "" {
 		system = DefaultSystemPrompt()
 	}
-	return &Agent{llm: l, reg: reg, kb: kb, tr: tr, system: system, maxSteps: maxSteps, maxHistory: 16}
+	return &Agent{llm: l, reg: reg, kb: kb, tr: tr, system: system, maxSteps: maxSteps, maxHistory: 16, maxStuckTurns: DefaultMaxStuckTurns}
+}
+
+// SetMaxStuckTurns overrides how many consecutive unproductive turns are
+// tolerated before a rethink nudge (see DefaultMaxStuckTurns). n <= 0 resets
+// to the default — same "0 = auto/default" convention as SetContextWindow.
+func (a *Agent) SetMaxStuckTurns(n int) {
+	if n <= 0 {
+		n = DefaultMaxStuckTurns
+	}
+	a.maxStuckTurns = n
 }
 
 // Reset clears the session conversation memory.
@@ -891,7 +905,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 		allFailed := nErr == len(assistant.ToolCalls)
 		slog.Debug("stuck check", "step", step+1, "all_failed", allFailed, "repeating", repeating, "stuck_before", stuck, "nudged", nudged)
 		if allFailed || repeating {
-			if stuck++; stuck >= maxStuckTurns {
+			if stuck++; stuck >= a.maxStuckTurns {
 				if !nudged {
 					msgs = append(msgs, llm.User(stuckNudgeFor(repeating)))
 					a.emit("nudge", map[string]any{})
@@ -1040,9 +1054,16 @@ func splitSuggestion(text string) (clean, suggestion string) {
 	return strings.TrimRight(trimmed[:nl], " \n"), suggestion
 }
 
-// maxStuckTurns is how many consecutive all-error tool turns trigger the rethink
-// nudge (and, if it doesn't help, the stop).
-const maxStuckTurns = 3
+// DefaultMaxStuckTurns is how many consecutive unproductive turns (every call
+// failed, or the exact same call(s) repeated) trigger the rethink nudge (and,
+// if it doesn't help, the stop) when SetMaxStuckTurns hasn't set an explicit
+// value. Raised from an earlier, more aggressive 3: reported live, a model
+// working through the workspace jail from a few different angles (an
+// absolute path, then a couple of cwd variants) got cut off before it had
+// room to actually work through the problem — a real backstop against a
+// truly looping model still exists (the outer step budget), so a more
+// patient default here costs little.
+const DefaultMaxStuckTurns = 8
 
 // stuckNudgeRepeat is injected when the model sent the exact same tool
 // call(s) as last turn — a literal repeat, whether it keeps failing or

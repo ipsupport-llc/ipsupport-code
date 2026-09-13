@@ -14,7 +14,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834
 	github.com/charmbracelet/x/exp/teatest v0.0.0-20260622092256-25656177ba8e
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
-	github.com/landlock-lsm/go-landlock v0.9.0
+	github.com/landlock-lsm/go-landlock v0.10.0
 	golang.org/x/sys v0.46.0
 	golang.org/x/term v0.44.0
 )

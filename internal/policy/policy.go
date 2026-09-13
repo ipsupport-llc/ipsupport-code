@@ -298,7 +298,13 @@ func (e *Engine) Resolve(path string) (string, error) {
 	// model can't invoke those itself (they're human-typed TUI commands), so
 	// naming them here is noise, not guidance — all it needs is the plain
 	// fact that retrying with a different path is pointless.
-	return abs, fmt.Errorf("path %q is outside the workspace jail %q — this is a hard boundary, not a one-off failure: no path or working directory outside it is reachable by ANY tool, and retrying with a different one won't help. Say so instead of trying more variants", path, e.jailRoot)
+	// Resolve is shared by both a model's tool calls AND a human's own /cd —
+	// reported live, a person running /cd themselves got told "Say so instead
+	// of trying more variants", an instruction written for an agent that
+	// makes no sense addressed to the human who just typed the command once.
+	// Kept to a plain statement of fact instead: true and useful either way,
+	// with no audience baked in.
+	return abs, fmt.Errorf("path %q is outside the workspace jail %q — this is a hard boundary, not a one-off failure: no path or working directory outside it is reachable by ANY tool, and retrying with a different one won't help", path, e.jailRoot)
 }
 
 // expandTilde turns a leading ~ or ~/ into the user's home directory, matching

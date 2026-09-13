@@ -4067,6 +4067,57 @@ func TestBannerShowsRestoredWorkdirNotWorkspaceRoot(t *testing.T) {
 	}
 }
 
+// Same underlying bug as TestBannerShowsRestoredWorkdirNotWorkspaceRoot, but
+// via the OTHER restore path: the in-TUI session CHOOSER (no -session flag,
+// saved sessions exist — the common interactive flow), which restores /cd
+// AFTER the banner was already built and pushed into history. Reported live:
+// after picking a session with its own /cd from the chooser, the banner's
+// cwd row stayed at the bare workspace root — PR #272 only fixed the
+// -session-flag path (sessionRestored=true before newTUIModel runs).
+func TestChooserRestoreAnnouncesTheNewWorkdir(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, "backend"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Workspace = ws
+
+	mk := func() *app {
+		kb, _ := knowledge.Open("")
+		c := cfg
+		a := &app{cfg: c, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+		if err := a.wire(); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+
+	first := mk()
+	if lines := first.cdCommand("backend"); strings.Contains(lines[0], "cd:") {
+		t.Fatalf("cd failed: %v", lines)
+	}
+	first.ag.SetHistory([]llm.Message{llm.User("g0"), {Role: "assistant", Content: "a0"}})
+	first.saveSession()
+
+	// Second process: no -session flag, no pre-set sessionRestored — this
+	// goes through the in-TUI chooser, not the -session-flag auto-restore.
+	second := mk()
+	m, err := second.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.state != stChooseSession {
+		t.Fatalf("want the chooser to show (a saved session exists), got state=%v", m.state)
+	}
+
+	m.chooseActivate() // pick the only row: the session that /cd'd into backend
+
+	joined := stripAnsi(strings.Join(m.history, "\n"))
+	if !strings.Contains(joined, "working directory") || !strings.Contains(joined, "backend") {
+		t.Errorf("no announcement of the restored working directory after picking the session from the chooser:\n%s", joined)
+	}
+}
+
 func TestNewSessionPreservesOld(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // newNamedSession(persist) writes the global config
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())

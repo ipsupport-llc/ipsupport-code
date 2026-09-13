@@ -1197,7 +1197,16 @@ func (a *Agent) judgeOnGiveUp(ctx context.Context, goal string, returns int, had
 	}
 	verdict, missing := a.judgeGoal(ctx, goal, result)
 	slog.Debug("goal judge", "verdict", verdict, "missing", missing, "return", returns, "of", a.maxReturns, "reason", reason)
-	return verdict == judgeDone, missing
+	met = verdict == judgeDone
+	// judgeUnclear carries no real signal (met=false, missing="") — stay silent on
+	// it, same as the normal finalize path above, which only ever emits "judge" on
+	// a definite DONE. Without this, a give-up run's judge call was invisible on
+	// screen: the caller only ever learned the verdict later, via goalState.Missing
+	// surfaced through an explicit /goal or /status.
+	if met || missing != "" {
+		a.emit("judge", map[string]any{"done": met, "missing": missing})
+	}
+	return met, missing
 }
 
 // judgeGoal asks the model, in a fresh side call (no tools), whether the goal is

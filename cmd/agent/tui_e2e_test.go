@@ -166,6 +166,29 @@ func TestTUI_E2E_HelpCommand(t *testing.T) {
 	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
 }
 
+// /goal must confirm it actually registered — before this fix its output was
+// visually identical to a plain task submission (just the echoed task line),
+// so there was no way to tell a standing goal had been set. Reported live:
+// "у нас же вроде было goal set или что-то такое ... а теперь не вижу".
+func TestTUI_E2E_GoalCommandConfirmsItWasSet(t *testing.T) {
+	a := tuiTestApp(t, tuiFakeServer(t, tuiContent("done")))
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(120, 40))
+	tm.Type("/goal do the thing")
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+
+	teatest.WaitFor(t, tm.Output(), func(b []byte) bool {
+		return strings.Contains(string(b), "goal set")
+	}, teatest.WithDuration(5*time.Second))
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
+	tm.WaitFinished(t, teatest.WithFinalTimeout(3*time.Second))
+}
+
 // A second Ctrl+R while already reverse-searching must step to an OLDER match,
 // not re-find the same one — the standard reverse-incremental-search
 // convention (bash/readline). Regression test: the top-level switch's

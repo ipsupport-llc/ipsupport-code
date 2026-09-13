@@ -332,11 +332,21 @@ func (m *tuiModel) chooseActivate() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	name := m.chooseRows[m.chooseCursor].name
+	before := m.app.effectiveDir() // the banner's own cwd, built before any session was picked
 	if name == slugName(m.app.cfg.Name) {
 		m.app.loadSession() // the current name — restore, keep its display name
 	} else if err := m.app.switchSession(name); err != nil {
 		m.push(cErr.Render("couldn't open session: " + err.Error()))
 		return m, nil
+	}
+	// Reported live: picking a saved session with its OWN /cd here left the
+	// startup banner's "cwd" row stale — it was rendered once at newTUIModel
+	// construction, before any session was chosen, and restoring a DIFFERENT
+	// workdir doesn't retroactively rewrite already-pushed history. Announcing
+	// the change the same way a manual /cd already does (see cdCommand) is
+	// simpler than splicing the static banner lines.
+	if after := m.app.effectiveDir(); after != before {
+		m.push(cDim.Render("  working directory → " + after))
 	}
 	m.push(m.sessionRecap()...)
 	m.offerGoalResume()

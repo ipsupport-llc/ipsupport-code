@@ -4118,6 +4118,72 @@ func TestChooserRestoreAnnouncesTheNewWorkdir(t *testing.T) {
 	}
 }
 
+// Requested: -it <task> should open the interactive TUI and auto-submit the
+// task instead of one-shot mode, through the exact same dispatch a typed
+// Enter goes through (submit) — and, since main() forces startNew whenever a
+// startup task is set (skip the ambiguous "resume a session?" chooser, same
+// as -new), it must do that even with a saved session sitting there.
+func TestStartupTaskSkipsChooserAndAutoSubmits(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+
+	// A saved session exists, so without the -it/startupTask override the
+	// chooser would normally show (see TestChooserRestoreAnnouncesTheNewWorkdir).
+	first := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := first.wire(); err != nil {
+		t.Fatal(err)
+	}
+	first.ag.SetHistory([]llm.Message{llm.User("g0"), {Role: "assistant", Content: "a0"}})
+	first.saveSession()
+
+	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.startupTask = "2+2"
+	a.startNew = true // what main() sets whenever startupTask != ""
+
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.state == stChooseSession {
+		t.Fatal("the chooser must not show when a startup task is set, even with a saved session present")
+	}
+
+	m.Init()
+	if m.state != stRunning {
+		t.Errorf("state = %v, want stRunning — Init() should auto-submit the startup task", m.state)
+	}
+}
+
+// A startup task must also skip the "resume standing goal?" interactive
+// offer — showing it would fight the auto-submitted task for the screen
+// (two competing things wanting stRunning/stGoalResume at once).
+func TestStartupTaskSkipsGoalResumeOffer(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.goal = goalState{Text: "ship it", Status: "incomplete"}
+	a.startupTask = "2+2"
+	a.startNew = true
+
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.state == stGoalResume {
+		t.Error("the goal-resume offer must not show when a startup task is set")
+	}
+}
+
 func TestNewSessionPreservesOld(t *testing.T) {
 	t.Setenv("HOME", t.TempDir()) // newNamedSession(persist) writes the global config
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -6832,6 +6898,64 @@ func TestClearCommandDropsStaleProjectFacts(t *testing.T) {
 	}
 	if _, err := os.Stat(a.factsPath()); !os.IsNotExist(err) {
 		t.Errorf("/clear did not remove the on-disk facts file: err=%v", err)
+	}
+}
+
+// Requested: a -clear CLI flag equivalent to /clear at launch. clearSession
+// is the shared app-level logic both now call — this exercises it directly,
+// covering the conversation-history wipe /clear's own TUI-only test above
+// doesn't check (that one only asserts on facts).
+func TestClearSessionWipesHistoryAndPersistsEmpty(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag.SetHistory([]llm.Message{llm.User("g0"), {Role: "assistant", Content: "a0"}})
+	a.facts = []string{"some learned fact"}
+
+	a.clearSession()
+
+	if a.ag.SessionLen() != 0 {
+		t.Errorf("SessionLen() = %d after clearSession, want 0", a.ag.SessionLen())
+	}
+	if len(a.facts) != 0 {
+		t.Errorf("facts = %v after clearSession, want none", a.facts)
+	}
+	// Persisted immediately, not just wiped in memory — a restart right after
+	// -clear must not resurrect the old thread.
+	reloaded := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := reloaded.wire(); err != nil {
+		t.Fatal(err)
+	}
+	reloaded.loadSession()
+	if reloaded.ag.SessionLen() != 0 {
+		t.Errorf("reloaded SessionLen() = %d, want 0 (clearSession must persist the empty session)", reloaded.ag.SessionLen())
+	}
+}
+
+// Requested: a -show-thinking CLI flag to start with the live reasoning view
+// already on, instead of needing ctrl+t once a task is running.
+func TestStartupShowThinkingSeedsTheFlag(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	a.startupShowThinking = true
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.showThinking {
+		t.Error("showThinking = false, want true (seeded from -show-thinking)")
 	}
 }
 

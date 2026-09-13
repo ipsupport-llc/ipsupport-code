@@ -220,7 +220,7 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 			}
 		}
 	}
-	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: accent, accentIdx: accentIdx, inputLines: 1}
+	m := &tuiModel{app: a, ctx: ctx, bridge: b, input: in, spin: sp, state: stIdle, accent: accent, accentIdx: accentIdx, inputLines: 1, showThinking: a.startupShowThinking}
 	m.histIdx = len(a.promptHist) // start "not browsing": first ↑ recalls the most recent prompt
 	act := a.activeLLM()
 	m.history = bannerLines(name, version, a.providerName(), act.Model, a.effectiveDir(), act.ContextWindow, m.accent)
@@ -244,7 +244,7 @@ func (a *app) newTUIModel(ctx context.Context) (*tuiModel, error) {
 			m.state = stChooseSession
 		}
 	}
-	if m.state == stIdle {
+	if m.state == stIdle && a.startupTask == "" {
 		m.offerGoalResume() // no chooser is intervening — offer right away (once)
 	}
 	return m, nil
@@ -463,7 +463,18 @@ func tuiDebugHeartbeat(ctx context.Context) {
 }
 
 func (m *tuiModel) Init() tea.Cmd {
-	return tea.Batch(m.spin.Tick, textarea.Blink, m.waitEvent(), m.waitApproval(), m.checkUpdate())
+	cmds := []tea.Cmd{m.spin.Tick, textarea.Blink, m.waitEvent(), m.waitApproval(), m.checkUpdate()}
+	if t := m.app.startupTask; t != "" {
+		// -it redirected a [task] argument here instead of one-shot mode.
+		// submit() is the exact same dispatch a typed Enter goes through, so
+		// a /command or !shell line works here too, not just a plain task —
+		// newTUIModel already forced startNew (skip the chooser) and skipped
+		// the goal-resume offer whenever this is set, so there's nothing else
+		// competing for the screen right now.
+		_, cmd := m.submit(t)
+		cmds = append(cmds, cmd)
+	}
+	return tea.Batch(cmds...)
 }
 
 // detectWindowCmd re-detects the context window off the UI thread once the model
@@ -1411,11 +1422,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.push(cDim.Render(msg))
 		return m, m.detectWindowCmd()
 	case "/clear", "/reset": // wipe THIS thread + the screen
-		m.app.ag.Reset()
-		m.app.resetSessionAllow()
-		m.app.clearFacts()
-		m.app.ag.SetSystem(m.app.systemPrompt())
-		m.app.saveSession()
+		m.app.clearSession()
 		m.history = m.history[:0]
 		m.wrappedLog.Reset()
 		if m.ready {

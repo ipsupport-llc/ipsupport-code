@@ -75,6 +75,9 @@ func main() {
 		sessionName     string
 		skipPermissions bool
 		overrides       overrideFlags
+		clearOnStart    bool
+		interactive     bool
+		showThinking    bool
 	)
 	flag.StringVar(&workspace, "C", ".", "workspace directory")
 	flag.BoolVar(&doInit, "init", false, "re-run first-time setup (server URL, API key, model)")
@@ -84,6 +87,9 @@ func main() {
 	flag.StringVar(&sessionName, "session", "", "use a named session (a separate saved thread)")
 	flag.BoolVar(&skipPermissions, "skip-permissions", false, "don't ask before file writes or shell commands this run (equivalent to -override run.default=allow -override file.default=allow); not persisted")
 	flag.Var(&overrides, "override", "override a config key for this run only, key=value (repeatable, e.g. -override llm.temperature=0.7); same dotted keys as `config set`, never persisted")
+	flag.BoolVar(&clearOnStart, "clear", false, "wipe this thread's history, learned facts, and session permissions before starting (like /clear, but at launch)")
+	flag.BoolVar(&interactive, "it", false, "with a [task] argument, open the interactive TUI and auto-submit it instead of one-shot mode (same dispatch as typing it in — a /command or !shell line works too)")
+	flag.BoolVar(&showThinking, "show-thinking", false, "start with the live reasoning view on (same as pressing ctrl+t once a task is running)")
 	flag.Usage = printUsage
 	flag.Parse()
 	if showVersion {
@@ -141,15 +147,26 @@ func main() {
 	}
 	defer cleanup()
 
+	// -clear wipes the thread before anything below has a chance to load or
+	// use it — same as -new (no branch below should restore the old one
+	// only to immediately discard it), plus the broader /clear semantics
+	// (facts, session permissions) -new alone doesn't touch.
+	if clearOnStart {
+		newSession = true
+		app.clearSession()
+	}
+	app.startupShowThinking = showThinking
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
+	taskText := strings.TrimSpace(strings.Join(flag.Args(), " "))
 	switch {
-	case strings.TrimSpace(strings.Join(flag.Args(), " ")) != "":
+	case taskText != "" && !(interactive && isTTY()):
 		if !newSession {
 			app.loadSession() // one-shot: silently continue the saved session
 		}
-		if err := app.runOne(ctx, strings.TrimSpace(strings.Join(flag.Args(), " "))); err != nil {
+		if err := app.runOne(ctx, taskText); err != nil {
 			// The task never ran at all — exit nonzero so scripts/CI checking $?
 			// see the failure instead of falling through to the implicit exit-0
 			// below. os.Exit skips every registered defer, so run them by hand.
@@ -163,11 +180,19 @@ func main() {
 		if closeLog := redirectLogToFile(); closeLog != nil {
 			defer closeLog()
 		}
-		app.startNew = newSession             // the TUI shows an in-screen session chooser (unless -new)
+		// -it with a task: skip the chooser too (same as -new would), so an
+		// explicit "run this now" launch isn't gated behind a "resume a
+		// session?" prompt — an EXPLICIT -session restore below still wins,
+		// this only affects the ambiguous chooser case.
+		app.startNew = newSession || taskText != ""
 		if sessionName != "" && !newSession { // -session: go straight to that named thread
 			app.loadSession()
 			app.sessionRestored = app.ag.SessionLen() > 0
 		}
+		// -it redirected a [task] argument here instead of one-shot mode —
+		// newTUIModel auto-submits it through the exact same dispatch a typed
+		// line gets (submit), so a /command or !shell line works too.
+		app.startupTask = taskText
 		if err := app.runTUI(ctx); err != nil {
 			fmt.Fprintln(os.Stderr, "tui:", err)
 		}
@@ -334,6 +359,14 @@ type app struct {
 	historyToolOn   bool                       // history tool is in the current tool list (see hasArchivedHistory, maybeRewireHistoryTool)
 	tui             bool                       // running the TUI (detect the context window off-thread, not inline)
 	startNew        bool                       // -new: skip the startup chooser, begin a fresh session
+	// startupTask is set from a positional [task] argument when -it redirected
+	// it here instead of one-shot mode — newTUIModel auto-submits it via the
+	// same dispatch path as anything typed in (submit), so a /command or
+	// !shell line works too, not just a plain task.
+	startupTask string
+	// startupShowThinking is set from -show-thinking — newTUIModel seeds the
+	// live reasoning view on instead of the normal off-by-default/ctrl+t-toggled start.
+	startupShowThinking bool
 
 	// statusMu guards tasks/steps/toolCalls below plus facts (above) and goal
 	// (above): recordRun/finishGoal/reflection's addFacts write them from the
@@ -2833,6 +2866,19 @@ func (a *app) factsSnapshot() []string {
 	return append([]string(nil), a.facts...)
 }
 
+// clearSession wipes the current thread's conversation history, learned
+// facts, and session-scoped permission-allow state, then persists the now-
+// empty session — the app-level half of what /clear does (the TUI case adds
+// its own screen-rendering reset on top). Shared so a fresh launch's
+// -clear flag doesn't have to duplicate this logic.
+func (a *app) clearSession() {
+	a.ag.Reset()
+	a.resetSessionAllow()
+	a.clearFacts()
+	a.ag.SetSystem(a.systemPrompt())
+	a.saveSession()
+}
+
 // clearFacts drops every learned project fact for this workspace. Facts are
 // meant to be durable across sessions, but /clear is the user's explicit
 // "start fresh" signal — without this, a fact learned about an abandoned
@@ -3358,11 +3404,7 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 			fmt.Printf("started a new session %q\n", a.cfg.Name)
 		}
 	case "/reset", "/clear": // wipe THIS thread
-		a.ag.Reset()
-		a.resetSessionAllow()
-		a.clearFacts()
-		a.ag.SetSystem(a.systemPrompt())
-		a.saveSession()
+		a.clearSession()
 		fmt.Println("session cleared.")
 	case "/compact":
 		n, err := a.ag.Compact(ctx)

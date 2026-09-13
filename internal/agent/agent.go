@@ -43,6 +43,12 @@ type Transcript struct {
 	// need to know how full the context actually is (e.g. auto-compact) should
 	// read this instead of asking the client directly.
 	PromptTokens int
+	// Productive is this run's own final hadProductiveTurn value — whether at
+	// least one tool call succeeded and wasn't a verbatim repeat. The caller
+	// (finishGoal) ORs this into the standing goal's persisted Progressed flag,
+	// so a LATER resume of the same goal (/goal go) that stumbles again
+	// immediately still lets the give-up judge run — see SetPriorGoalProgress.
+	Productive bool
 }
 
 // Agent holds the wiring for a run. The knowledge base and tracer may be nil.
@@ -93,6 +99,9 @@ type Agent struct {
 	// nudgeIdle: after a re-feed, if the model finishes without doing any work,
 	// push it once (instead of silently giving up) before accepting the finish.
 	nudgeIdle bool
+	// priorGoalProgress carries forward whether an EARLIER attempt at the same
+	// standing goal ever had a productive turn — see SetPriorGoalProgress.
+	priorGoalProgress bool
 	// asides, if set, is drained between steps of a running task; each returned
 	// question gets a one-turn, no-tools answer (the /btw side-channel) without
 	// derailing the task.
@@ -152,6 +161,17 @@ func (a *Agent) SetMaxStuckTurns(n int) {
 	}
 	a.maxStuckTurns = n
 }
+
+// SetPriorGoalProgress records whether an earlier attempt at the goal this Run
+// call is about to pursue ever had a productive turn (hadProductiveTurn resets
+// to false on every Run call, even though the session it resumes into is the
+// same one) — the caller (goalTTLFor's sibling on the cmd/agent side) should
+// pass the standing goal's persisted Progressed flag right before Run, so a
+// give-up that stumbles again immediately on a resume still lets the judge
+// assess the real progress made in an earlier attempt instead of skipping it
+// every single time. Reported live: "неправильный вызов тула - разорвал гоал" —
+// /goal go after a stuck-stop could stumble again and never once reach a judge.
+func (a *Agent) SetPriorGoalProgress(b bool) { a.priorGoalProgress = b }
 
 // Reset clears the session conversation memory.
 func (a *Agent) Reset() {
@@ -733,7 +753,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	// remember to add a log call at each one individually.
 	defer func() {
 		slog.Debug("run end", "steps", tr.Steps, "stopped", tr.Stopped, "cancelled", tr.Cancelled,
-			"goal_met", tr.GoalMet, "returns", tr.Returns, "err", err, "final", clip(tr.Final, 200))
+			"goal_met", tr.GoalMet, "returns", tr.Returns, "productive", tr.Productive, "err", err, "final", clip(tr.Final, 200))
 	}()
 
 	stuck, nudged := 0, false
@@ -746,6 +766,11 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	// counts as "acted"), which isn't a real signal that a judge call on a
 	// stuck-stop would be worth its cost; a genuinely productive turn is.
 	hadProductiveTurn := false
+	// This run's own hadProductiveTurn resets to false regardless of what an
+	// earlier attempt at the same goal did — recorded into tr.Productive here
+	// (LIFO: runs before the "run end" log defer above, which reads it) so
+	// finishGoal can OR it into the standing goal's persisted Progressed flag.
+	defer func() { tr.Productive = hadProductiveTurn }()
 	returns := 0           // goal re-feeds so far (TTL = a.maxReturns)
 	goalMet := false       // the judge confirmed the goal was met
 	refusalNudged := false // already pushed back on a "can't edit / here are the files" dodge?
@@ -948,8 +973,13 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// the judge only ever ran from the CLEAN finalize path below, so
 					// real partial progress before the stall left no trace beyond
 					// the bare "incomplete" status. See judgeOnGiveUp.
+					// judgeGoal is an ISOLATED side call with no access to msgs — it never
+					// saw "above" despite this text once claiming it should assess it.
+					// actionsDigest gives it something real to go on instead: the actual
+					// files touched / commands run (and why they failed), the same record
+					// remember() below stores as cross-task memory.
 					met, missing := a.judgeOnGiveUp(ctx, goal, returns, hadProductiveTurn, "stuck_stop",
-						"(the agent got stuck repeating or failing tool calls before producing a coherent final answer — assess whatever real progress is visible above)")
+						"(the agent got stuck repeating or failing tool calls before producing a coherent final answer.)"+actionsDigest(msgs))
 					// Reported live: a single bad tool call, repeated until this stop,
 					// read as having killed the whole standing goal ("неправильный вызов
 					// тула - разорвал гоал") — nothing on screen said the goal itself was
@@ -994,12 +1024,15 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		// empty — so a real, common ending mode was completely invisible
 		// there. Setting it here, at the source, means every caller gets it.
 		clean = fmt.Sprintf("(no final answer — step budget exhausted after %d steps)", a.maxSteps)
-		judgeResult = "(the agent ran out of its step budget without ever writing a final answer — assess whatever real progress is visible above)"
+		judgeResult = "(the agent ran out of its step budget without ever writing a final answer.)"
 	}
 	// Same reasoning as the stuck-stop path (see judgeOnGiveUp): running out
 	// of steps is just as much a "give up" as getting stuck repeating calls,
-	// and was marked "incomplete" with zero assessment just the same.
-	met, missing := a.judgeOnGiveUp(ctx, goal, returns, hadProductiveTurn, "step_exhaustion", judgeResult)
+	// and was marked "incomplete" with zero assessment just the same. judgeGoal
+	// is an isolated call with no access to msgs, so actionsDigest gives it
+	// something real to go on (files touched / commands run) instead of just
+	// the model's own possibly-empty final text.
+	met, missing := a.judgeOnGiveUp(ctx, goal, returns, hadProductiveTurn, "step_exhaustion", judgeResult+actionsDigest(msgs))
 	tr.GoalMet = met
 	tr.Missing = missing
 	clean += goalNotConfirmedNote(a.maxReturns, met, missing)
@@ -1195,12 +1228,17 @@ func (v judgeVerdict) String() string {
 // normal "model produced a chat-only reply" finalize path.
 //
 // Gated exactly like that normal path (goal loop on, returns left) PLUS
-// hadProductiveTurn: a give-up where NOTHING ever actually succeeded isn't
-// worth an extra judge call for — the answer is obviously "not done", and
-// a judge fed nothing but failures/loops can't add real signal. reason tags
-// the "goal judge" debug log so it's clear which give-up path triggered it.
+// (hadProductiveTurn OR priorGoalProgress): a give-up where NOTHING ever
+// actually succeeded — in THIS run or an earlier attempt at the same standing
+// goal — isn't worth an extra judge call for; the answer is obviously "not
+// done". priorGoalProgress matters because hadProductiveTurn resets to false
+// on every Run call: without it, resuming via /goal go after a stuck-stop and
+// immediately stumbling again (the same bad tool call, say) would never once
+// reach a judge, even though real work happened in an earlier attempt at this
+// same goal. reason tags the "goal judge" debug log so it's clear which
+// give-up path triggered it.
 func (a *Agent) judgeOnGiveUp(ctx context.Context, goal string, returns int, hadProductiveTurn bool, reason, result string) (met bool, missing string) {
-	if a.planMode || a.maxReturns == 0 || returns >= a.maxReturns || !hadProductiveTurn {
+	if a.planMode || a.maxReturns == 0 || returns >= a.maxReturns || !(hadProductiveTurn || a.priorGoalProgress) {
 		return false, ""
 	}
 	verdict, missing := a.judgeGoal(ctx, goal, result)

@@ -1240,6 +1240,15 @@ type goalState struct {
 	// to judge normally — so "incomplete" on /goal status shows a real hint
 	// instead of nothing. Cleared once the goal is done or replaced.
 	Missing string `json:"missing,omitempty"`
+	// Progressed records whether ANY attempt at this standing goal (across
+	// every /goal go resume) ever had a productive turn (see
+	// agent.Transcript.Productive). A give-up run's own hadProductiveTurn
+	// resets to false on every single Run call, so without carrying this
+	// forward, a resume that stumbles again immediately would never once let
+	// the give-up judge run — see setGoal (preserved across a same-text
+	// resume) and Agent.SetPriorGoalProgress. Cleared only when the goal is
+	// done or replaced with different text.
+	Progressed bool `json:"progressed,omitempty"`
 }
 
 func (a *app) goalPath() string { return filepath.Join(a.workspace, ".agent", "goal.json") }
@@ -1299,10 +1308,18 @@ func (a *app) clearGoal() {
 	os.Remove(a.goalPath())
 }
 
-// setGoal records a new standing goal (active) and persists it.
+// setGoal records a new standing goal (active) and persists it. Resuming the
+// SAME text (/goal go or the resume prompt) reactivates in place instead of
+// wiping accumulated state — Progressed in particular must survive a resume, or
+// a give-up's judge could never credit progress made in an earlier attempt.
 func (a *app) setGoal(text string) {
+	text = strings.TrimSpace(text)
 	a.statusMu.Lock()
-	a.goal = goalState{Text: strings.TrimSpace(text), Status: "active"}
+	if a.goal.Text == text {
+		a.goal.Status = "active"
+	} else {
+		a.goal = goalState{Text: text, Status: "active"}
+	}
 	a.statusMu.Unlock()
 	if err := a.saveGoal(); err != nil {
 		slog.Warn("goal not persisted", "err", err)
@@ -1336,6 +1353,10 @@ func (a *app) finishGoal(goal string, tr agent.Transcript) {
 		// instead of a bare "incomplete".
 		a.goal.Status, a.goal.Offered = "incomplete", false
 		a.goal.Missing = tr.Missing
+		// OR, not overwrite: once ANY attempt at this goal ever had a productive
+		// turn, that stays true across every later resume, even one that stumbles
+		// again immediately — see goalState.Progressed and SetPriorGoalProgress.
+		a.goal.Progressed = a.goal.Progressed || tr.Productive
 	}
 	a.statusMu.Unlock()
 	if done {
@@ -3255,7 +3276,8 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	a.maybeRewireHistoryTool() // the archive may have gained its first entry since wire()
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
-	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
+	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge)  // judge-loop only when pursuing an explicit goal
+	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again
 	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()
 	tr, err := a.ag.Run(ctx, goal)
@@ -3318,7 +3340,8 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	a.injectJobResults() // finished background jobs land before the model thinks
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
-	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge) // judge-loop only when pursuing an explicit goal
+	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge)  // judge-loop only when pursuing an explicit goal
+	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again
 	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()
 	tr, err := a.ag.Run(ctx, goal)

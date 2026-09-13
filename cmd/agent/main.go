@@ -1414,11 +1414,26 @@ func (a *app) goalTTL(verb string, fields []string) []string {
 	return []string{fmt.Sprintf("goal loop → up to %d re-feed(s) before giving up", n)}
 }
 
-func (a *app) goalStatus() []string {
-	ttl := fmt.Sprintf("TTL %d re-feed(s)", a.cfg.GoalMaxReturns)
+// goalTTLLabel describes the current judge re-feed budget, shared by goalStatus
+// and goalSetLine so the two can't drift apart in wording.
+func (a *app) goalTTLLabel() string {
 	if a.cfg.GoalMaxReturns == 0 {
-		ttl = "loop off"
+		return "loop off"
 	}
+	return fmt.Sprintf("TTL %d re-feed(s)", a.cfg.GoalMaxReturns)
+}
+
+// goalSetLine confirms a /goal launch actually registered. Without it, /goal's
+// output was visually identical to a plain task submission — nothing on screen
+// distinguished "the model will keep going until a judge signs off" from
+// "answer once and stop" (reported live: "а вот скажи мне у нас же вроде было
+// goal set или что-то такое ... а теперь не вижу").
+func (a *app) goalSetLine() string {
+	return "🎯 goal set — a judge re-feeds it until done · " + a.goalTTLLabel()
+}
+
+func (a *app) goalStatus() []string {
+	ttl := a.goalTTLLabel()
 	g := a.goalSnapshot()
 	if g.Text == "" {
 		return []string{
@@ -3455,6 +3470,7 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	case "/goal":
 		if text, ok := a.launchGoalText(rest); ok {
 			a.setGoal(text)
+			fmt.Println(a.goalSetLine())
 			a.runOne(ctx, text)
 		} else {
 			printLines(a.goalCommand(rest))

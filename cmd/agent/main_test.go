@@ -144,6 +144,20 @@ func TestJobsShowsLiveProgress(t *testing.T) {
 	}
 }
 
+// The give-up paths (stuck-stop, step-exhaustion) emit "judge" with done=false
+// and a missing gap when the judge found real work still outstanding — before
+// this, the "judge" case only ever rendered a confirmed done=true, so a give-up
+// run's verdict was invisible on screen.
+func TestJudgeRenderShowsNotDoneWithMissingGap(t *testing.T) {
+	m := &tuiModel{width: 60}
+	lines := m.renderEvent(uiEvent{kind: "judge", fields: map[string]any{
+		"done": false, "missing": "needs step two"}})
+	joined := stripAnsi(strings.Join(lines, " "))
+	if !strings.Contains(joined, "needs step two") {
+		t.Errorf("missing gap not rendered:\n%v", lines)
+	}
+}
+
 func TestSubagentRenderShowsFullTask(t *testing.T) {
 	m := &tuiModel{width: 60}
 	task := "Fix ALL issues identified in the code review of the notecli repository and then open a pull request"

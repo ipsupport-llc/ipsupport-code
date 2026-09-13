@@ -29,6 +29,13 @@ type Transcript struct {
 	Stopped   bool // ended before a clean answer (cancel / runaway / stuck / maxSteps / mid-run error) → no reflection
 	Returns   int  // goal re-feeds the judge triggered this run
 	GoalMet   bool // a goal-loop ran and the judge confirmed the goal was met
+	// Missing carries the judge's own "what's left" assessment (judgeMore's
+	// gap text) out to the caller when a goal-loop run ends WITHOUT a clean
+	// finalize to judge in the usual way — currently only set by the
+	// stuck-stop path (see Run), so a persisted "incomplete" goal carries a
+	// real hint instead of nothing at all. Empty when no such judge call ran,
+	// or when it said done/unclear.
+	Missing string
 	// PromptTokens is the real conversation's prompt size, snapshotted right
 	// after the last successful MAIN-turn llm.Chat call (before judgeGoal, which
 	// shares the same client absent a dedicated judge/reflect model, gets a
@@ -733,11 +740,17 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	lastSig := ""             // signature of the previous turn's tool calls (loop detection)
 	acted := false            // did the model call any tool this run?
 	actedSinceReturn := false // acted since the last goal re-feed (don't burn a return on no progress)
-	returns := 0              // goal re-feeds so far (TTL = a.maxReturns)
-	goalMet := false          // the judge confirmed the goal was met
-	refusalNudged := false    // already pushed back on a "can't edit / here are the files" dodge?
-	idleNudged := false       // already pushed a no-progress model once since the last re-feed?
-	promptTokens := 0         // last known real prompt size from a MAIN-turn Chat call — see Transcript.PromptTokens
+	// hadProductiveTurn distinguishes "attempted some tool call" (acted) from
+	// "at least one turn actually succeeded, wasn't a repeat" — a stuck-stop
+	// where EVERY turn failed/repeated has acted=true too (a failed call still
+	// counts as "acted"), which isn't a real signal that a judge call on a
+	// stuck-stop would be worth its cost; a genuinely productive turn is.
+	hadProductiveTurn := false
+	returns := 0           // goal re-feeds so far (TTL = a.maxReturns)
+	goalMet := false       // the judge confirmed the goal was met
+	refusalNudged := false // already pushed back on a "can't edit / here are the files" dodge?
+	idleNudged := false    // already pushed a no-progress model once since the last re-feed?
+	promptTokens := 0      // last known real prompt size from a MAIN-turn Chat call — see Transcript.PromptTokens
 	for step := 0; step < a.maxSteps; step++ {
 		tr.Steps = step + 1
 
@@ -836,7 +849,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// unparseable-reply cases were logged, so a "more"/"done" judge
 					// call left no trace of ever having happened, making a
 					// tool_calls=[] turn's true fate unreadable from the log alone.
-					slog.Debug("goal judge", "verdict", verdict, "missing", missing, "return", returns, "of", a.maxReturns)
+					slog.Debug("goal judge", "verdict", verdict, "missing", missing, "return", returns, "of", a.maxReturns, "reason", "normal")
 					switch verdict {
 					case judgeMore:
 						returns++
@@ -930,8 +943,17 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					nudged = true // keep stuck high: one more dud turn now stops it
 				} else {
 					const msg = "Stopped — it kept repeating the same tool calls without progress (or they kept failing) even after a nudge to rethink. Steer it (a different approach), or use a stronger model."
+					// Reported live: a goal-pursuing task that got stuck here was
+					// unconditionally marked "incomplete" with no assessment at all —
+					// the judge only ever ran from the CLEAN finalize path below, so
+					// real partial progress before the stall left no trace beyond
+					// the bare "incomplete" status. See judgeOnGiveUp.
+					met, missing := a.judgeOnGiveUp(ctx, goal, returns, hadProductiveTurn, "stuck_stop",
+						"(the agent got stuck repeating or failing tool calls before producing a coherent final answer — assess whatever real progress is visible above)")
 					tr.Final, tr.Stopped = msg, true
 					tr.Returns = returns
+					tr.GoalMet = met
+					tr.Missing = missing
 					tr.Messages = msgs
 					tr.PromptTokens = promptTokens
 					a.emit("final", map[string]any{"text": msg, "suggest": stuckSuggest, "exhausted": true})
@@ -945,6 +967,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// earns a fresh nudge budget, so a couple of early errors followed by good
 			// work don't insta-stop the next time the model briefly stumbles.
 			stuck, nudged = 0, false
+			hadProductiveTurn = true
 		}
 	}
 
@@ -952,6 +975,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	tr.Stopped = true // ran out of steps before a clean answer
 	tr.Returns = returns
 	clean, suggest := splitSuggestion(lastAssistantContent(msgs))
+	judgeResult := clean
 	if strings.TrimSpace(clean) == "" {
 		// Reported live: a task that burns its whole step budget on turns that
 		// never produce non-empty content (all reasoning/tool-calls — e.g. a
@@ -963,7 +987,14 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		// empty — so a real, common ending mode was completely invisible
 		// there. Setting it here, at the source, means every caller gets it.
 		clean = fmt.Sprintf("(no final answer — step budget exhausted after %d steps)", a.maxSteps)
+		judgeResult = "(the agent ran out of its step budget without ever writing a final answer — assess whatever real progress is visible above)"
 	}
+	// Same reasoning as the stuck-stop path (see judgeOnGiveUp): running out
+	// of steps is just as much a "give up" as getting stuck repeating calls,
+	// and was marked "incomplete" with zero assessment just the same.
+	met, missing := a.judgeOnGiveUp(ctx, goal, returns, hadProductiveTurn, "step_exhaustion", judgeResult)
+	tr.GoalMet = met
+	tr.Missing = missing
 	tr.Final = clean
 	tr.PromptTokens = promptTokens
 	a.emit("final", map[string]any{"text": clean, "suggest": suggest, "exhausted": true})
@@ -1146,6 +1177,27 @@ func (v judgeVerdict) String() string {
 	default:
 		return "unclear"
 	}
+}
+
+// judgeOnGiveUp runs one extra judge call when a goal-pursuing run gives up
+// WITHOUT a clean finalize to judge in the usual way (the stuck-stop and
+// step-exhaustion paths both call this). Reported live: both endings used to
+// mark the goal "incomplete" unconditionally, with zero assessment, even
+// when real progress happened first — the judge only ever ran from the
+// normal "model produced a chat-only reply" finalize path.
+//
+// Gated exactly like that normal path (goal loop on, returns left) PLUS
+// hadProductiveTurn: a give-up where NOTHING ever actually succeeded isn't
+// worth an extra judge call for — the answer is obviously "not done", and
+// a judge fed nothing but failures/loops can't add real signal. reason tags
+// the "goal judge" debug log so it's clear which give-up path triggered it.
+func (a *Agent) judgeOnGiveUp(ctx context.Context, goal string, returns int, hadProductiveTurn bool, reason, result string) (met bool, missing string) {
+	if a.planMode || a.maxReturns == 0 || returns >= a.maxReturns || !hadProductiveTurn {
+		return false, ""
+	}
+	verdict, missing := a.judgeGoal(ctx, goal, result)
+	slog.Debug("goal judge", "verdict", verdict, "missing", missing, "return", returns, "of", a.maxReturns, "reason", reason)
+	return verdict == judgeDone, missing
 }
 
 // judgeGoal asks the model, in a fresh side call (no tools), whether the goal is

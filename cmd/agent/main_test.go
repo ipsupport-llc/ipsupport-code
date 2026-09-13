@@ -1439,6 +1439,45 @@ func TestFinishGoalStatusFromTranscript(t *testing.T) {
 	}
 }
 
+// Requested: "the whole point of goal mode is a judge checks whether it
+// actually finished or gave up" — the agent's stuck-stop/step-exhaustion
+// paths can now run that judge and confirm GoalMet even though the run also
+// set Stopped=true (see internal/agent's judgeOnGiveUp). finishGoal must
+// still mark the goal done in that case, not stuck on the old "Stopped
+// always means incomplete" assumption.
+func TestFinishGoalMarksDoneEvenWhenStoppedIfJudgeConfirmed(t *testing.T) {
+	a := &app{workspace: t.TempDir(), cfg: config.Default()}
+	a.setGoal("do it")
+	a.finishGoal("do it", agent.Transcript{GoalMet: true, Stopped: true})
+	if a.goal.Text != "" || a.goal.Status != "" {
+		t.Errorf("goal = %+v, want cleared (judge confirmed met despite Stopped)", a.goal)
+	}
+}
+
+// Cancelled (the user pressed esc) must stay an unconditional block on
+// marking a goal done, even if GoalMet somehow came back true — a human
+// interrupting the run is a deliberate stop, not something to second-guess.
+func TestFinishGoalNeverMarksDoneWhenCancelled(t *testing.T) {
+	a := &app{workspace: t.TempDir(), cfg: config.Default()}
+	a.setGoal("do it")
+	a.finishGoal("do it", agent.Transcript{GoalMet: true, Cancelled: true})
+	if a.goal.Status != "incomplete" {
+		t.Errorf("status = %q, want incomplete (Cancelled must override GoalMet)", a.goal.Status)
+	}
+}
+
+// The judge's own "missing: ..." assessment (from a stuck-stop or
+// step-exhaustion give-up) must persist onto the standing goal, so /goal
+// status shows something real instead of a bare "incomplete".
+func TestFinishGoalPersistsMissingHint(t *testing.T) {
+	a := &app{workspace: t.TempDir(), cfg: config.Default()}
+	a.setGoal("do it")
+	a.finishGoal("do it", agent.Transcript{GoalMet: false, Stopped: true, Missing: "needs step two"})
+	if a.goal.Status != "incomplete" || a.goal.Missing != "needs step two" {
+		t.Errorf("goal = %+v, want incomplete with Missing=%q", a.goal, "needs step two")
+	}
+}
+
 func TestGoalOfferOnce(t *testing.T) {
 	a := &app{workspace: t.TempDir(), cfg: config.Default()}
 

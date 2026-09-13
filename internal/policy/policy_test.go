@@ -37,6 +37,12 @@ func TestResolveJailEscapeErrorExplainsItsAHardBoundary(t *testing.T) {
 	if strings.Contains(msg, "/cd") {
 		t.Errorf("error = %q, must NOT mention /cd — the model can't invoke it, so naming it is noise", msg)
 	}
+	// Resolve is shared by a model's tool calls AND a human's own /cd — an
+	// instruction written for an agent ("say so", "don't retry") makes no
+	// sense addressed to a human who just typed the command once.
+	if strings.Contains(msg, "Say so") {
+		t.Errorf("error = %q, must NOT contain an agent-directed instruction — a human runs /cd through this same path", msg)
+	}
 }
 
 func TestResolveExpandsTilde(t *testing.T) {

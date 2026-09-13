@@ -1520,6 +1520,36 @@ func TestSetGoalPreservesProgressedAndMissingOnResume(t *testing.T) {
 	}
 }
 
+// Reported live via a real debug log: a run whose goal text matched the
+// standing goal exactly finalized with the goal's own deliverable ("Created
+// LAB_REPORT.md...") yet showed zero "goal judge" line and returns=0 — because
+// the goal was left "incomplete" from an earlier give-up, and only /goal's own
+// command handler ever flips Status back to "active" (see goalTTLFor). A task
+// resubmitted with the identical text by ANY other means (history recall,
+// retyping, a pasted line) bypassed all goal tracking, silently, forever.
+// runOne's resumeGoalIfMatching must close that gap: the same text on an
+// "incomplete" goal auto-reactivates it before the run, so the judge actually
+// runs and finishGoal actually updates the goal afterward.
+func TestPlainTaskMatchingIncompleteGoalAutoResumes(t *testing.T) {
+	url := tuiFakeServer(t,
+		tuiToolCall("file", `{"action":"write","params":{"path":"x.txt","content":"hi"}}`),
+		tuiContent("all done"), // the model's own finalize
+		tuiContent("DONE"),     // the judge's separate side call
+	)
+	a := tuiTestApp(t, url)
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.cfg.GoalMaxReturns = 3
+	a.goal = goalState{Text: "do the thing", Status: "incomplete"}
+
+	a.runOne(context.Background(), "do the thing")
+
+	if a.goal.Text != "" || a.goal.Status != "" {
+		t.Errorf("goal = %+v, want cleared (auto-resumed, then the judge confirmed DONE)", a.goal)
+	}
+}
+
 func TestGoalOfferOnce(t *testing.T) {
 	a := &app{workspace: t.TempDir(), cfg: config.Default()}
 

@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 )
 
@@ -47,6 +48,7 @@ var configRows = []cfgRow{
 	{key: "compact_threshold"},
 	{key: "max_steps"},
 	{key: "max_history"},
+	{key: "max_stuck_turns"},
 	{header: "Sub-agents"},
 	{key: "agents"},
 	{key: "spawn"},
@@ -329,6 +331,12 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 			v = fmt.Sprintf("%d", m.app.cfg.MaxHistory)
 		}
 		return "max history", v, "enter: cycle (0 = auto-scale from context window)"
+	case "max_stuck_turns":
+		v := fmt.Sprintf("default (%d)", agent.DefaultMaxStuckTurns)
+		if m.app.cfg.MaxStuckTurns > 0 {
+			v = fmt.Sprintf("%d", m.app.cfg.MaxStuckTurns)
+		}
+		return "stuck tolerance", v, "enter: cycle (consecutive unproductive turns before giving up)"
 	case "agents":
 		return "profiles", fmt.Sprintf("%d configured", len(m.app.cfg.Agents)), "enter: add (provider → model)"
 	case "spawn":
@@ -407,6 +415,8 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		m.cycleMaxSteps()
 	case "max_history":
 		m.cycleMaxHistory()
+	case "max_stuck_turns":
+		m.cycleMaxStuckTurns()
 	case "reasoning": // cycle the active model's reasoning effort off→high
 		provider, model := m.app.providerName(), m.app.activeLLM().Model
 		next := nextReasoning(provider, m.app.reasoningLevel(provider, model))
@@ -553,6 +563,22 @@ var maxHistoryCycle = []int{0, 16, 32, 64, 128, 256, rawMemoryMaxHistory}
 func (m *tuiModel) cycleMaxHistory() {
 	m.app.cfg.MaxHistory = nextInt(m.app.cfg.MaxHistory, maxHistoryCycle)
 	if err := config.SaveMaxHistory(m.app.cfg.MaxHistory); err != nil {
+		m.push(cErr.Render("  could not persist: " + err.Error()))
+		return
+	}
+	_ = m.app.wire()
+}
+
+// maxStuckTurnsCycle presets for the /config "max_stuck_turns" row. 0 clears
+// the override, falling back to internal/agent's own DefaultMaxStuckTurns.
+var maxStuckTurnsCycle = []int{0, 3, 5, 8, 15, 25}
+
+// cycleMaxStuckTurns advances the manual Config.MaxStuckTurns override
+// through presets, persists it, and re-wires so the rebuilt Agent picks up
+// the new tolerance.
+func (m *tuiModel) cycleMaxStuckTurns() {
+	m.app.cfg.MaxStuckTurns = nextInt(m.app.cfg.MaxStuckTurns, maxStuckTurnsCycle)
+	if err := config.SaveMaxStuckTurns(m.app.cfg.MaxStuckTurns); err != nil {
 		m.push(cErr.Render("  could not persist: " + err.Error()))
 		return
 	}

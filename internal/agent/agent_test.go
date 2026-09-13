@@ -1250,12 +1250,16 @@ func TestPlanModeAllowsReadOnly(t *testing.T) {
 func TestRunNudgesThenStops(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
 	bad := toolCallReply("c", "calc", `{"action":"","params":{}}`) // empty action → always errors
-	fake := &scriptLLM{replies: []llm.Message{bad, bad, bad, bad, bad, bad, bad, bad}}
+	replies := make([]llm.Message, DefaultMaxStuckTurns+2)
+	for i := range replies {
+		replies[i] = bad
+	}
+	fake := &scriptLLM{replies: replies}
 	rt := &recTracer{}
-	a := New(fake, reg, nil, rt, "", 20)
+	a := New(fake, reg, nil, rt, "", DefaultMaxStuckTurns*3)
 
 	tr, _ := a.Run(context.Background(), "do something")
-	if tr.Steps > 2*maxStuckTurns+1 {
+	if tr.Steps > 2*DefaultMaxStuckTurns+1 {
 		t.Errorf("ran %d steps, want it bounded (~2x stuck, after one nudge)", tr.Steps)
 	}
 	if !strings.Contains(tr.Final, "Stopped") {
@@ -1314,6 +1318,7 @@ func TestStuckNudgeRecovers(t *testing.T) {
 	}}
 	rt := &recTracer{}
 	a := New(fake, reg, nil, rt, "", 12)
+	a.SetMaxStuckTurns(3) // this test is about the mechanism, not the default's exact value
 
 	tr, _ := a.Run(context.Background(), "do x")
 	if strings.Contains(tr.Final, "Stopped") {
@@ -1349,6 +1354,7 @@ func TestStuckNudgeFramingForDistinctFailures(t *testing.T) {
 	}}
 	rt := &recTracer{}
 	a := New(fake, reg, nil, rt, "", 12)
+	a.SetMaxStuckTurns(3) // this test is about the mechanism, not the default's exact value
 
 	a.Run(context.Background(), "do x")
 	if !rt.has("nudge") {
@@ -1417,6 +1423,7 @@ func TestProgressResetsNudge(t *testing.T) {
 	}}
 	rt := &recTracer{}
 	a := New(fake, reg, nil, rt, "", 30)
+	a.SetMaxStuckTurns(3) // this test is about the mechanism, not the default's exact value
 
 	tr, _ := a.Run(context.Background(), "do x")
 	if strings.Contains(tr.Final, "Stopped") {
@@ -1695,6 +1702,37 @@ func TestParseVerdict(t *testing.T) {
 	}
 }
 
+// Raised live, from an earlier, more aggressive 3: reported live, a model
+// working through the workspace jail from a few different angles (an
+// absolute path, then a couple of cwd variants) got cut off before it had
+// room to work through the problem. New Agents must tolerate
+// DefaultMaxStuckTurns consecutive unproductive turns (not the old 3) before
+// even the FIRST nudge, when SetMaxStuckTurns is never called.
+func TestNewDefaultsToTheRaisedStuckTolerance(t *testing.T) {
+	if DefaultMaxStuckTurns != 8 {
+		t.Fatalf("DefaultMaxStuckTurns = %d, want 8", DefaultMaxStuckTurns)
+	}
+
+	reg := tool.NewRegistry(tool.NewCalc())
+	bad := toolCallReply("c", "calc", `{"action":"","params":{}}`)
+	// A LITERAL 6 here, not derived from DefaultMaxStuckTurns — otherwise a
+	// regression back to the old default would still pass (fewer replies than
+	// whatever the constant currently says is a tautology, not a real check).
+	// 6 is past the OLD aggressive default (3, would have nudged by turn 3)
+	// but short of the new one (8).
+	fake := &scriptLLM{replies: []llm.Message{
+		bad, bad, bad, bad, bad, bad,
+		toolCallReply("c", "calc", `{"action":"calculate","params":{"expression":"1+1"}}`),
+	}}
+	rt := &recTracer{}
+	a := New(fake, reg, nil, rt, "", 30) // no SetMaxStuckTurns call — real default in effect
+
+	a.Run(context.Background(), "do x")
+	if rt.has("nudge") {
+		t.Error("a nudge fired within 6 consecutive failures — the old, lower default (3) is still in effect")
+	}
+}
+
 // After the rethink nudge, a single further unproductive turn stops the run — the
 // counter isn't reset on the nudge, so a degenerate model (which may think for
 // minutes per turn) can't flail for another full budget before stopping.
@@ -1704,6 +1742,7 @@ func TestStuckStopsOneTurnAfterNudge(t *testing.T) {
 	fake := &scriptLLM{replies: []llm.Message{bad, bad, bad, bad, bad, bad}}
 	rt := &recTracer{}
 	a := New(fake, reg, nil, rt, "", 30)
+	a.SetMaxStuckTurns(3) // this test is about the mechanism, not the default's exact value
 
 	tr, _ := a.Run(context.Background(), "do x")
 	if !tr.Stopped || !strings.Contains(tr.Final, "Stopped") {

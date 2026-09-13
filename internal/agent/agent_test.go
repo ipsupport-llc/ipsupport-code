@@ -1866,6 +1866,29 @@ func TestStuckStopSkipsJudgeWithNoProductiveTurn(t *testing.T) {
 	}
 }
 
+// Reported live: a single bad tool call, repeated from the very first turn
+// until the stuck-stop, read as having killed the whole standing goal
+// ("неправильный вызов тула - разорвал гоал") — the judge is correctly skipped
+// here (no productive turn ever happened, see the test above), but the goal
+// itself is NOT abandoned: it stays "incomplete" and resumable. The final
+// message must say so, not just report the generic stuck-stop.
+func TestStuckStopWithoutProductiveTurnStillPointsAtGoalResume(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	bad := toolCallReply("c", "calc", `{"action":"","params":{}}`)
+	fake := &scriptLLM{replies: []llm.Message{bad, bad, bad, bad}}
+	a := New(fake, reg, nil, nil, "", 30)
+	a.SetMaxStuckTurns(3)
+	a.SetGoalLoop(3, false)
+
+	tr, _ := a.Run(context.Background(), "do x")
+	if !tr.Stopped || tr.GoalMet {
+		t.Fatalf("stopped=%v goalMet=%v, want stopped=true goalMet=false", tr.Stopped, tr.GoalMet)
+	}
+	if !strings.Contains(tr.Final, "/goal go") {
+		t.Errorf("stuck-stop with an active goal loop must still point at /goal go, got:\n%s", tr.Final)
+	}
+}
+
 // Same reasoning as the stuck-stop case, for the OTHER give-up path: running
 // out of the step budget is just as much a give-up, and real progress before
 // that must still get a judge chance — here the judge says MORE, which must
@@ -1889,6 +1912,9 @@ func TestStepExhaustionJudgesRealProgressAndRecordsMissing(t *testing.T) {
 	}
 	if tr.Missing != "needs step two" {
 		t.Errorf("Missing = %q, want %q", tr.Missing, "needs step two")
+	}
+	if !strings.Contains(tr.Final, "/goal go") || !strings.Contains(tr.Final, "needs step two") {
+		t.Errorf("Final must point at /goal go and repeat the missing gap, got:\n%s", tr.Final)
 	}
 }
 

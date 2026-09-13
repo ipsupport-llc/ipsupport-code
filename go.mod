@@ -15,7 +15,7 @@ require (
 	github.com/charmbracelet/x/exp/teatest v0.0.0-20260622092256-25656177ba8e
 	github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0
 	github.com/landlock-lsm/go-landlock v0.10.0
-	golang.org/x/sys v0.47.0
+	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.45.0
 )
 

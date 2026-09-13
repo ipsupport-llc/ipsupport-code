@@ -1804,6 +1804,86 @@ func TestStuckStopsOneTurnAfterNudge(t *testing.T) {
 	}
 }
 
+// Requested: "the whole point of goal mode is a judge checks whether it
+// actually finished or gave up, and if it gave up, on what" — a stuck-stop
+// is a give-up just as much as a clean finalize is, so if real progress
+// happened first (hadProductiveTurn), the judge must still get a chance to
+// confirm the goal was ACTUALLY met despite the run technically stopping —
+// GoalMet must be true even though Stopped is also true.
+func TestStuckStopJudgesRealProgressAndCanConfirmGoalMet(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	good := toolCallReply("c", "calc", `{"action":"calculate","params":{"expression":"1+1"}}`)
+	bad := toolCallReply("c", "calc", `{"action":"","params":{}}`)
+	fake := &scriptLLM{replies: []llm.Message{
+		good,               // step1: real progress → hadProductiveTurn=true
+		bad, bad, bad, bad, // steps 2-5: stuck (nudge at 4, stop at 5)
+		{Role: "assistant", Content: "DONE"}, // the judge call the stuck-stop now triggers
+	}}
+	a := New(fake, reg, nil, nil, "", 30)
+	a.SetMaxStuckTurns(3)
+	a.SetGoalLoop(3, false)
+
+	tr, _ := a.Run(context.Background(), "do x")
+	if !tr.Stopped {
+		t.Fatal("want a stuck-stop (Stopped=true)")
+	}
+	if !tr.GoalMet {
+		t.Error("want GoalMet=true — the judge, triggered by real progress before the stall, said DONE")
+	}
+}
+
+// The stuck-stop judge call must NOT fire when nothing ever actually
+// succeeded — a run where every turn failed or repeated from the very start
+// has an obvious answer ("not done"); spending an extra judge call on it adds
+// nothing.
+func TestStuckStopSkipsJudgeWithNoProductiveTurn(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	reg := tool.NewRegistry(tool.NewCalc())
+	bad := toolCallReply("c", "calc", `{"action":"","params":{}}`)
+	fake := &scriptLLM{replies: []llm.Message{bad, bad, bad, bad}}
+	a := New(fake, reg, nil, nil, "", 30)
+	a.SetMaxStuckTurns(3)
+	a.SetGoalLoop(3, false)
+
+	tr, _ := a.Run(context.Background(), "do x")
+	if !tr.Stopped || tr.GoalMet {
+		t.Errorf("stopped=%v goalMet=%v, want stopped=true goalMet=false", tr.Stopped, tr.GoalMet)
+	}
+	if strings.Contains(buf.String(), "goal judge") {
+		t.Errorf("judge ran despite no productive turn ever happening:\n%s", buf.String())
+	}
+}
+
+// Same reasoning as the stuck-stop case, for the OTHER give-up path: running
+// out of the step budget is just as much a give-up, and real progress before
+// that must still get a judge chance — here the judge says MORE, which must
+// surface as tr.Missing for the caller to persist.
+func TestStepExhaustionJudgesRealProgressAndRecordsMissing(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	good := toolCallReply("c", "calc", `{"action":"calculate","params":{"expression":"1+1"}}`)
+	fake := &scriptLLM{replies: []llm.Message{
+		good, good, good, // 3 tool-call turns exactly fill maxSteps=3 — never reaches a clean finalize
+		{Role: "assistant", Content: "MORE: needs step two"}, // the judge call step-exhaustion now triggers
+	}}
+	a := New(fake, reg, nil, nil, "", 3) // maxSteps=3: exhausted right after the 3rd tool-call turn
+	a.SetGoalLoop(3, false)
+
+	tr, _ := a.Run(context.Background(), "do x")
+	if !tr.Stopped {
+		t.Fatal("want Stopped=true — ran out of steps")
+	}
+	if tr.GoalMet {
+		t.Error("want GoalMet=false — the judge said MORE, not DONE")
+	}
+	if tr.Missing != "needs step two" {
+		t.Errorf("Missing = %q, want %q", tr.Missing, "needs step two")
+	}
+}
+
 // An empty-action error must stay a single clean line — no full schema dump, no
 // learned hints piled on (that buries the example for a weak model).
 func TestEmptyActionErrorStaysTerse(t *testing.T) {

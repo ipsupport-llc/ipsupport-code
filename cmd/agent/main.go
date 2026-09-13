@@ -1202,6 +1202,11 @@ type goalState struct {
 	Text    string `json:"text"`
 	Status  string `json:"status"`            // active | done | incomplete
 	Offered bool   `json:"offered,omitempty"` // already surfaced once after a restart — don't auto-nag again
+	// Missing carries the judge's own last "what's left" assessment (see
+	// agent.Transcript.Missing) when a run stopped without a clean finalize
+	// to judge normally — so "incomplete" on /goal status shows a real hint
+	// instead of nothing. Cleared once the goal is done or replaced.
+	Missing string `json:"missing,omitempty"`
 }
 
 func (a *app) goalPath() string { return filepath.Join(a.workspace, ".agent", "goal.json") }
@@ -1282,14 +1287,22 @@ func (a *app) finishGoal(goal string, tr agent.Transcript) {
 	// With the judge loop off (/goal off · ttl 0) GoalMet is never set — the model
 	// decides when it's done, so a clean uninterrupted finish counts as done
 	// (otherwise the goal stays "incomplete" and the resume prompt nags forever).
-	done := (tr.GoalMet || a.cfg.GoalMaxReturns == 0) && !tr.Stopped && !tr.Cancelled
+	// tr.GoalMet on its own (regardless of tr.Stopped) also counts as done now:
+	// the agent's stuck-stop path can run its own judge call on real partial
+	// progress and confirm the goal WAS actually met even though the run
+	// technically stopped early (see internal/agent's Run) — only Cancelled
+	// (the user pressed esc) is an unconditional block.
+	done := !tr.Cancelled && (tr.GoalMet || (a.cfg.GoalMaxReturns == 0 && !tr.Stopped))
 	if done {
 		// Done: clear it entirely so it never resurfaces after a restart.
 		a.goal = goalState{}
 	} else {
 		// Still unfinished: re-arm one resume offer for the next restart (you
-		// just engaged it).
+		// just engaged it), and carry forward whatever the judge said was
+		// missing (if it ran at all) so /goal status shows something real
+		// instead of a bare "incomplete".
 		a.goal.Status, a.goal.Offered = "incomplete", false
+		a.goal.Missing = tr.Missing
 	}
 	a.statusMu.Unlock()
 	if done {
@@ -1383,6 +1396,9 @@ func (a *app) goalStatus() []string {
 	out := []string{
 		fmt.Sprintf("goal [%s]: %s", g.Status, g.Text),
 		"  " + ttl + " · /goal go to resume · /goal clear to drop · /goal ttl <n>",
+	}
+	if g.Missing != "" {
+		out = append(out, "  missing: "+g.Missing)
 	}
 	return out
 }

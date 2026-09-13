@@ -704,7 +704,7 @@ const planDirective = `PLAN MODE is ON. Do NOT change anything. You may investig
 
 // Run executes the loop until the model produces a final answer (a reply with no
 // tool calls), maxSteps is reached, or the context is cancelled.
-func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
+func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error) {
 	a.emit("goal", map[string]any{"text": goal})
 	hist := a.History() // guarded snapshot — see historyMu
 	msgs := make([]llm.Message, 0, len(hist)+3)
@@ -716,8 +716,19 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 	msgs = append(msgs, llm.User(goal))
 	tools := a.reg.OpenAITools()
 	slog.Debug("run start", "goal", clip(goal, 120), "tools", toolNames(tools), "plan_mode", a.planMode)
+	// Reported live: no single log line said how/why a run ended — reading it
+	// off "model turn"/"stuck check" lines meant inferring it indirectly (e.g.
+	// a tool_calls=[] turn with no following "stuck check" line MIGHT be a
+	// clean finish, or might be about to hit an invisible goal-loop judge
+	// call — see the "goal judge" log added below). A named return + defer
+	// covers every return path (cancellation, a mid-run Chat error, a clean
+	// finalize, the stuck-stop, and step-exhaustion) without having to
+	// remember to add a log call at each one individually.
+	defer func() {
+		slog.Debug("run end", "steps", tr.Steps, "stopped", tr.Stopped, "cancelled", tr.Cancelled,
+			"goal_met", tr.GoalMet, "returns", tr.Returns, "err", err, "final", clip(tr.Final, 200))
+	}()
 
-	var tr Transcript
 	stuck, nudged := 0, false
 	lastSig := ""             // signature of the previous turn's tool calls (loop detection)
 	acted := false            // did the model call any tool this run?
@@ -819,6 +830,13 @@ func (a *Agent) Run(ctx context.Context, goal string) (Transcript, error) {
 				switch {
 				case actedSinceReturn && acted:
 					verdict, missing := a.judgeGoal(ctx, goal, clean)
+					// Reported live: the judge's own decision (a separate LLM call)
+					// was entirely invisible in the debug log for its two NORMAL
+					// verdicts — only its failure ("goal judge failed") and
+					// unparseable-reply cases were logged, so a "more"/"done" judge
+					// call left no trace of ever having happened, making a
+					// tool_calls=[] turn's true fate unreadable from the log alone.
+					slog.Debug("goal judge", "verdict", verdict, "missing", missing, "return", returns, "of", a.maxReturns)
 					switch verdict {
 					case judgeMore:
 						returns++
@@ -1118,6 +1136,17 @@ const (
 	judgeDone                        // explicitly met
 	judgeMore                        // explicitly incomplete
 )
+
+func (v judgeVerdict) String() string {
+	switch v {
+	case judgeDone:
+		return "done"
+	case judgeMore:
+		return "more"
+	default:
+		return "unclear"
+	}
+}
 
 // judgeGoal asks the model, in a fresh side call (no tools), whether the goal is
 // actually met given the work just finished. Returns a tri-state so the caller can

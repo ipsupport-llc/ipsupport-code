@@ -1496,6 +1496,48 @@ func TestRunPromptTokensSnapshotBeforeJudgeClobbersContext(t *testing.T) {
 	}
 }
 
+// Reported live: neither the judge's own decision (a separate LLM call, only
+// its FAILURE was logged before this) nor a run's overall ending (stopped,
+// goal_met, steps, final text) had any debug log trace — a tool_calls=[]
+// turn's true fate was unreadable from the log alone. Both must be logged
+// for every real verdict/every return path, not just the error cases.
+func TestGoalJudgeAndRunEndDebugLogsShowTheDecisions(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "did part 1"},
+		{Role: "assistant", Content: "MORE: still need pt2"}, // judge #1: more
+		calcCall(),
+		{Role: "assistant", Content: "all done"},
+		{Role: "assistant", Content: "DONE"}, // judge #2: done
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+
+	tr, err := a.Run(context.Background(), "do part 1 and part 2")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	logged := buf.String()
+	if !strings.Contains(logged, `msg="goal judge" verdict=more missing="still need pt2" return=0 of=3`) {
+		t.Errorf("debug log missing the first (more) judge verdict, got:\n%s", logged)
+	}
+	if !strings.Contains(logged, `msg="goal judge" verdict=done missing="" return=1 of=3`) {
+		t.Errorf("debug log missing the second (done) judge verdict, got:\n%s", logged)
+	}
+	want := fmt.Sprintf(`msg="run end" steps=%d stopped=%v cancelled=%v goal_met=%v returns=%d err=<nil> final="all done"`,
+		tr.Steps, tr.Stopped, tr.Cancelled, tr.GoalMet, tr.Returns)
+	if !strings.Contains(logged, want) {
+		t.Errorf("debug log missing the run-end summary %q, got:\n%s", want, logged)
+	}
+}
+
 // The goal loop re-feeds the goal when the judge says it isn't met, then accepts it
 // once the judge says DONE. Returns counts the re-feeds; GoalMet records the verdict.
 func TestRunGoalLoopRefeedsUntilJudgeSaysDone(t *testing.T) {

@@ -357,6 +357,44 @@ func TestSetFileValueOnNullRootDoesNotPanic(t *testing.T) {
 	}
 }
 
+// Reported live: -skip-permissions (or any -override) combined with -C wiped
+// the workspace back to "" — silently breaking the file jail root, run's
+// cwd default, and session file paths for the rest of the process.
+// Workspace and LLM.Extra (also per-provider) are all tagged json:"-" — they
+// round-trip through ApplyOverride's marshal→map→mutate→marshal→unmarshal
+// path by being dropped entirely, then a fresh zero-value Config silently
+// replaces cfg wholesale. No dotted-path override could ever legitimately
+// target these fields anyway (they're excluded from the JSON view a path
+// walks), so restoring them after the round trip can never clobber a real
+// override.
+func TestApplyOverridePreservesWorkspaceAndExtra(t *testing.T) {
+	isolate(t)
+	cfg := Default()
+	cfg.Workspace = "/some/real/workspace"
+	cfg.LLM.Extra = map[string]any{"reasoning_effort": "high"}
+	cfg.Providers = map[string]LLM{
+		"mylab": {BaseURL: "http://x", Extra: map[string]any{"foo": "bar"}},
+	}
+
+	if err := ApplyOverride(&cfg, "run.default", "allow"); err != nil {
+		t.Fatalf("ApplyOverride: %v", err)
+	}
+
+	if cfg.Workspace != "/some/real/workspace" {
+		t.Errorf("Workspace = %q, want it preserved across the override", cfg.Workspace)
+	}
+	if cfg.LLM.Extra["reasoning_effort"] != "high" {
+		t.Errorf("LLM.Extra = %v, want it preserved across the override", cfg.LLM.Extra)
+	}
+	if cfg.Providers["mylab"].Extra["foo"] != "bar" {
+		t.Errorf("Providers[mylab].Extra = %v, want it preserved across the override", cfg.Providers["mylab"].Extra)
+	}
+	// The actual override must still have applied.
+	if cfg.Run.Default != "allow" {
+		t.Errorf("Run.Default = %q, want allow (the override itself)", cfg.Run.Default)
+	}
+}
+
 // ApplyOverride backs the CLI's -override/-skip-permissions flags: a per-run
 // change that must be invisible to anything reading the config FILE — a
 // later plain launch, with no override flags, must see exactly what was

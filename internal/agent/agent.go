@@ -942,7 +942,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					a.emit("nudge", map[string]any{})
 					nudged = true // keep stuck high: one more dud turn now stops it
 				} else {
-					const msg = "Stopped — it kept repeating the same tool calls without progress (or they kept failing) even after a nudge to rethink. Steer it (a different approach), or use a stronger model."
+					msg := "Stopped — it kept repeating the same tool calls without progress (or they kept failing) even after a nudge to rethink. Steer it (a different approach), or use a stronger model."
 					// Reported live: a goal-pursuing task that got stuck here was
 					// unconditionally marked "incomplete" with no assessment at all —
 					// the judge only ever ran from the CLEAN finalize path below, so
@@ -950,6 +950,13 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// the bare "incomplete" status. See judgeOnGiveUp.
 					met, missing := a.judgeOnGiveUp(ctx, goal, returns, hadProductiveTurn, "stuck_stop",
 						"(the agent got stuck repeating or failing tool calls before producing a coherent final answer — assess whatever real progress is visible above)")
+					// Reported live: a single bad tool call, repeated until this stop,
+					// read as having killed the whole standing goal ("неправильный вызов
+					// тула - разорвал гоал") — nothing on screen said the goal itself was
+					// still alive and resumable. This fires even with no productive turn
+					// at all (hadProductiveTurn=false skips the judge above, but the goal
+					// wasn't abandoned — see goalNotConfirmedNote).
+					msg += goalNotConfirmedNote(a.maxReturns, met, missing)
 					tr.Final, tr.Stopped = msg, true
 					tr.Returns = returns
 					tr.GoalMet = met
@@ -995,6 +1002,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	met, missing := a.judgeOnGiveUp(ctx, goal, returns, hadProductiveTurn, "step_exhaustion", judgeResult)
 	tr.GoalMet = met
 	tr.Missing = missing
+	clean += goalNotConfirmedNote(a.maxReturns, met, missing)
 	tr.Final = clean
 	tr.PromptTokens = promptTokens
 	a.emit("final", map[string]any{"text": clean, "suggest": suggest, "exhausted": true})
@@ -1207,6 +1215,24 @@ func (a *Agent) judgeOnGiveUp(ctx context.Context, goal string, returns int, had
 		a.emit("judge", map[string]any{"done": met, "missing": missing})
 	}
 	return met, missing
+}
+
+// goalNotConfirmedNote points a give-up ending (stuck-stop or step-exhaustion)
+// back at `/goal go` whenever it happened while pursuing an active goal loop
+// (maxReturns > 0) and the judge didn't confirm it met — including when the
+// judge never even ran (hadProductiveTurn=false skips judgeOnGiveUp entirely,
+// but the goal itself wasn't abandoned). Mirrors the wording the normal
+// finalize path already uses for its own "goalStalled" case, so a give-up
+// doesn't read as the standing goal having silently died — only as unconfirmed
+// and resumable.
+func goalNotConfirmedNote(maxReturns int, met bool, missing string) string {
+	if maxReturns == 0 || met {
+		return ""
+	}
+	if missing != "" {
+		return fmt.Sprintf("\n\n(note: the goal was not confirmed complete — missing: %s. `/goal go` to keep pushing.)", missing)
+	}
+	return "\n\n(note: the goal was not confirmed complete — `/goal go` to keep pushing.)"
 }
 
 // judgeGoal asks the model, in a fresh side call (no tools), whether the goal is

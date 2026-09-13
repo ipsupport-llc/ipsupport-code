@@ -1492,6 +1492,34 @@ func TestFinishGoalPersistsMissingHint(t *testing.T) {
 	}
 }
 
+// finishGoal marks a goal "incomplete" with Progressed=true when the run had a
+// productive turn (tr.Productive). setGoal, resuming the SAME text (/goal go),
+// must preserve that instead of wiping it wholesale — otherwise the next run's
+// SetPriorGoalProgress would see false even though real work happened last
+// time, and a give-up that stumbles again immediately would never once reach
+// a judge. A genuinely NEW goal (different text) must still reset wholesale.
+func TestSetGoalPreservesProgressedAndMissingOnResume(t *testing.T) {
+	a := &app{workspace: t.TempDir(), cfg: config.Default()}
+	a.setGoal("do it")
+	a.finishGoal("do it", agent.Transcript{Stopped: true, Missing: "needs step two", Productive: true})
+	if !a.goal.Progressed || a.goal.Missing != "needs step two" {
+		t.Fatalf("goal = %+v, want Progressed=true and Missing set after the give-up", a.goal)
+	}
+
+	a.setGoal("do it") // resume the SAME goal
+	if !a.goal.Progressed {
+		t.Errorf("goal = %+v, want Progressed to survive a same-text resume", a.goal)
+	}
+	if a.goal.Status != "active" {
+		t.Errorf("status = %q, want active after resuming", a.goal.Status)
+	}
+
+	a.setGoal("do something else") // a genuinely different goal
+	if a.goal.Progressed || a.goal.Missing != "" {
+		t.Errorf("goal = %+v, want a fresh reset for a different goal text", a.goal)
+	}
+}
+
 func TestGoalOfferOnce(t *testing.T) {
 	a := &app{workspace: t.TempDir(), cfg: config.Default()}
 

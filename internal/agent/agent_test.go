@@ -1539,8 +1539,8 @@ func TestGoalJudgeAndRunEndDebugLogsShowTheDecisions(t *testing.T) {
 	if !strings.Contains(logged, `msg="goal judge" verdict=done missing="" return=1 of=3`) {
 		t.Errorf("debug log missing the second (done) judge verdict, got:\n%s", logged)
 	}
-	want := fmt.Sprintf(`msg="run end" steps=%d stopped=%v cancelled=%v goal_met=%v returns=%d err=<nil> final="all done"`,
-		tr.Steps, tr.Stopped, tr.Cancelled, tr.GoalMet, tr.Returns)
+	want := fmt.Sprintf(`msg="run end" steps=%d stopped=%v cancelled=%v goal_met=%v returns=%d productive=%v err=<nil> final="all done"`,
+		tr.Steps, tr.Stopped, tr.Cancelled, tr.GoalMet, tr.Returns, tr.Productive)
 	if !strings.Contains(logged, want) {
 		t.Errorf("debug log missing the run-end summary %q, got:\n%s", want, logged)
 	}
@@ -1840,6 +1840,39 @@ func TestStuckStopJudgesRealProgressAndCanConfirmGoalMet(t *testing.T) {
 	}
 }
 
+// judgeGoal is an ISOLATED side call — it never sees msgs, only the "result"
+// text it's handed. The stuck-stop path used to hand it a canned sentence
+// ("assess whatever real progress is visible above") describing content the
+// judge could never actually see. It must instead get something real:
+// actionsDigest's own record of files touched / commands run.
+func TestStuckStopJudgeSeesRealActionsDigestNotACannedSentence(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	good := toolCallReply("c", "calc", `{"action":"calculate","params":{"expression":"1+1"}}`)
+	badRun := toolCallReply("c", "run", `{"action":"shell","params":{"command":"go test ./..."}}`)
+	fake := &scriptLLM{replies: []llm.Message{
+		good,                           // step1: real progress → hadProductiveTurn=true
+		badRun, badRun, badRun, badRun, // steps 2-5: stuck — "run" isn't registered, every call fails
+		{Role: "assistant", Content: "DONE"}, // the judge call the stuck-stop triggers
+	}}
+	a := New(fake, reg, nil, nil, "", 30)
+	a.SetMaxStuckTurns(3)
+	a.SetGoalLoop(3, false)
+
+	if _, err := a.Run(context.Background(), "do x"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.lastMsgs) == 0 {
+		t.Fatal("judge never ran")
+	}
+	prompt := fake.lastMsgs[len(fake.lastMsgs)-1].Content
+	if strings.Contains(prompt, "assess whatever real progress is visible above") {
+		t.Errorf("judge prompt still claims it can see \"above\" — it's an isolated call, it never could:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "commands run") || !strings.Contains(prompt, "go test ./...") {
+		t.Errorf("judge prompt missing the real actions digest, got:\n%s", prompt)
+	}
+}
+
 // The stuck-stop judge call must NOT fire when nothing ever actually
 // succeeded — a run where every turn failed or repeated from the very start
 // has an obvious answer ("not done"); spending an extra judge call on it adds
@@ -1886,6 +1919,36 @@ func TestStuckStopWithoutProductiveTurnStillPointsAtGoalResume(t *testing.T) {
 	}
 	if !strings.Contains(tr.Final, "/goal go") {
 		t.Errorf("stuck-stop with an active goal loop must still point at /goal go, got:\n%s", tr.Final)
+	}
+}
+
+// A resume (/goal go) that stumbles again immediately — same bad tool call
+// from turn 1, zero productive turns THIS run — must still let the judge run
+// when an EARLIER attempt at the same standing goal made real progress
+// (SetPriorGoalProgress(true), what cmd/agent's finishGoal/setGoal persist and
+// replay). Without this, hadProductiveTurn resetting to false on every single
+// Run call meant a resume could stumble forever and never once reach a judge,
+// even though real work happened before. Contrast with
+// TestStuckStopSkipsJudgeWithNoProductiveTurn, which has no prior progress at
+// all and correctly skips the judge.
+func TestStuckStopCreditsPriorGoalProgressOnResume(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	bad := toolCallReply("c", "calc", `{"action":"","params":{}}`)
+	fake := &scriptLLM{replies: []llm.Message{
+		bad, bad, bad, bad,
+		{Role: "assistant", Content: "DONE"}, // the judge call this resume now triggers
+	}}
+	a := New(fake, reg, nil, nil, "", 30)
+	a.SetMaxStuckTurns(3)
+	a.SetGoalLoop(3, false)
+	a.SetPriorGoalProgress(true)
+
+	tr, _ := a.Run(context.Background(), "do x")
+	if !tr.Stopped {
+		t.Fatal("want a stuck-stop (Stopped=true)")
+	}
+	if !tr.GoalMet {
+		t.Error("want GoalMet=true — prior progress must let the judge run even with zero productive turns this run")
 	}
 }
 

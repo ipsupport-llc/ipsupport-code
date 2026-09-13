@@ -1326,11 +1326,15 @@ func (a *app) setGoal(text string) {
 	}
 }
 
-// finishGoal updates the standing goal's status from a finished run, but only when
-// that run was actually pursuing it (same text, still active).
-func (a *app) finishGoal(goal string, tr agent.Transcript) {
+// finishGoal updates the standing goal's status from a finished run. Gated
+// ONLY on there being a standing goal at all (Status != ""), not on whether
+// this particular run's text matched it: an outstanding goal stays in force —
+// and every subsequent run counts toward it — until the judge confirms it met,
+// or the user explicitly turns it off (/goal off) or clears it (/goal clear).
+// No other condition (text match, /btw, a clarifying follow-up) knocks it out.
+func (a *app) finishGoal(tr agent.Transcript) {
 	a.statusMu.Lock()
-	if a.goal.Status != "active" || strings.TrimSpace(goal) != a.goal.Text {
+	if a.goal.Status == "" {
 		a.statusMu.Unlock()
 		return
 	}
@@ -1425,7 +1429,7 @@ func (a *app) goalTTL(verb string, fields []string) []string {
 		}
 		n = v
 	}
-	a.cfg.GoalMaxReturns = n // applied per goal run via goalTTLFor
+	a.cfg.GoalMaxReturns = n // applied per goal run via goalLoopBudget
 	if err := config.SaveGoalMaxReturns(n); err != nil {
 		return []string{"warning: not persisted: " + err.Error()}
 	}
@@ -1472,12 +1476,23 @@ func (a *app) goalStatus() []string {
 	return out
 }
 
-// goalTTLFor returns the judge re-feed budget for a run: the configured TTL only
-// when the run is pursuing the active standing goal, else 0 (a plain task is one
-// run, no judge overhead).
-func (a *app) goalTTLFor(goal string) int {
-	g := a.goalSnapshot()
-	if g.Status == "active" && strings.TrimSpace(goal) == g.Text {
+// goalTTL returns the judge re-feed budget for a run: the configured TTL
+// whenever there's a standing goal in force (Status != "" — "active" or
+// "incomplete" both count), regardless of what text this particular run
+// happens to pursue.
+//
+// Deliberately NOT gated on the run's text matching the goal's stored text —
+// that was tried and explicitly rejected: reported live, a run resubmitting
+// the goal's own exact text (after an earlier give-up left it "incomplete")
+// still showed zero judge involvement, because only /goal's own command path
+// ever flipped Status back to "active". The real requirement, stated
+// directly: an outstanding goal must not be knocked off track by anything
+// short of the judge confirming it met or the user explicitly turning it off
+// (/goal off) or clearing it (/goal clear) — not a text-match heuristic, not
+// /btw, not a "clarifying input" special case. So: no text argument, no
+// per-request condition at all — only whether a goal is currently in force.
+func (a *app) goalLoopBudget() int {
+	if a.goalSnapshot().Status != "" {
 		return a.cfg.GoalMaxReturns
 	}
 	return 0
@@ -3276,7 +3291,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	a.maybeRewireHistoryTool() // the archive may have gained its first entry since wire()
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
-	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge)  // judge-loop only when pursuing an explicit goal
+	a.ag.SetGoalLoop(a.goalLoopBudget(), a.cfg.GoalNudge)  // in force whenever a standing goal exists (any status) — see goalLoopBudget
 	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again
 	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()
@@ -3290,7 +3305,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	}
 	a.lastRealContext = tr.PromptTokens // snapshot the real fullness before reflectAndStore (below) can clobber the shared client's own Context()
 	a.recordRun(tr)
-	a.finishGoal(goal, tr)
+	a.finishGoal(tr)
 	a.recordUsage(dur)
 	a.saveSession() // the conversation is decided now — save it before the slower,
 	// best-effort reflection pass below, which the process could be interrupted
@@ -3340,7 +3355,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	a.injectJobResults() // finished background jobs land before the model thinks
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
-	a.ag.SetGoalLoop(a.goalTTLFor(goal), a.cfg.GoalNudge)  // judge-loop only when pursuing an explicit goal
+	a.ag.SetGoalLoop(a.goalLoopBudget(), a.cfg.GoalNudge)  // in force whenever a standing goal exists (any status) — see goalLoopBudget
 	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again
 	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()
@@ -3356,7 +3371,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	}
 	a.lastRealContext = tr.PromptTokens // snapshot the real fullness before reflectAndStore (below) can clobber the shared client's own Context()
 	a.recordRun(tr)
-	a.finishGoal(goal, tr)
+	a.finishGoal(tr)
 	a.recordUsage(dur)
 	a.saveSession() // the conversation is decided now — save it before the slower,
 	// best-effort reflection below. That matters because /exit quits immediately even

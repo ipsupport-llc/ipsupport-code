@@ -1067,6 +1067,43 @@ func TestConfigPanelMaxStepsAndMaxHistoryCycle(t *testing.T) {
 	}
 }
 
+// The stuck/repeat-turn tolerance must be settable from /config — same
+// top-level, no-local-vs-provider-split convention as max_steps/max_history —
+// and persist and survive a reload.
+func TestConfigPanelMaxStuckTurnsCycle(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	cursorFor := func(key string) int {
+		for i, k := range cfgKeys() {
+			if k == key {
+				return i
+			}
+		}
+		t.Fatalf("no %q row in the config panel", key)
+		return -1
+	}
+
+	m.cfgCursor = cursorFor("max_stuck_turns")
+	if m.app.cfg.MaxStuckTurns != 0 {
+		t.Fatalf("default MaxStuckTurns = %v, want 0 (internal/agent's own default)", m.app.cfg.MaxStuckTurns)
+	}
+	for i := 0; i < 3; i++ {
+		m.configActivate() // 0 → 3 → 5 → 8
+	}
+	if m.app.cfg.MaxStuckTurns != 8 {
+		t.Errorf("after three cycles, MaxStuckTurns = %v, want 8", m.app.cfg.MaxStuckTurns)
+	}
+
+	loaded, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.MaxStuckTurns != 8 {
+		t.Errorf("MaxStuckTurns not persisted: %v", loaded.MaxStuckTurns)
+	}
+}
+
 func TestResolveModelArg(t *testing.T) {
 	ids := []string{"openai/gpt-4o", "openai/gpt-4o-mini", "anthropic/claude-3.5-sonnet", "x-ai/grok-4.3"}
 	// exact id → switch

@@ -2365,6 +2365,7 @@ func (a *app) wire() error {
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
 	a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
 	a.ag.SetContextWindow(a.activeLLM().ContextWindow) // so a single long task can watch its OWN growing trail mid-run
+	a.ag.SetMaxStuckTurns(a.cfg.MaxStuckTurns)         // 0 = internal/agent's own default
 	// A local server's KV-cache only helps while the prompt PREFIX stays
 	// identical between requests; remember()'s trim cuts from the front, which
 	// breaks that just like a summary compact would — so the cap is meant as a

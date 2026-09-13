@@ -6084,6 +6084,26 @@ func TestSystemPromptExplainsTheWorkspaceJail(t *testing.T) {
 	}
 }
 
+// Requested: a local model has no live sense of the current date without
+// being told — it can only infer from its own training cutoff, which is
+// wrong for anything happening now. Both prompt flavors (interactive and
+// sub-agent) need it.
+func TestSystemPromptIncludesTodaysDate(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+
+	want := "Today is " + time.Now().Format("2006-01-02")
+	if p := a.systemPrompt(); !strings.Contains(p, want) {
+		t.Errorf("system prompt missing %q:\n%s", want, p)
+	}
+	if p := a.subAgentPrompt(ws, ""); !strings.Contains(p, want) {
+		t.Errorf("sub-agent prompt missing %q:\n%s", want, p)
+	}
+}
+
 // A /skills or /permissions toggle re-wires the stack (new client); the running
 // token total must carry over, not reset to zero.
 func TestTokenTotalSurvivesRewire(t *testing.T) {

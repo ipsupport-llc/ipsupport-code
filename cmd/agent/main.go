@@ -2924,7 +2924,7 @@ func (a *app) systemPrompt() string {
 	}
 	a.promptSrc = psrc
 	out := base + fmt.Sprintf(
-		"\n\nEnvironment: you are running on %s; your working directory is %s. Relative paths resolve there. Use commands that exist on this OS — on darwin prefer vm_stat/top/sw_vers over Linux-only tools like free.",
+		"\n\nEnvironment: you are running on %s; your working directory is %s. Relative paths resolve there — and by default this is a HARD JAIL: no tool (file, run's cwd, git) can reach a path outside it, an absolute path elsewhere is rejected, not silently redirected. If a task genuinely needs a different directory, say so — don't keep retrying different absolute paths or cwd values, they'll all fail the same way. Use commands that exist on this OS — on darwin prefer vm_stat/top/sw_vers over Linux-only tools like free.",
 		runtime.GOOS, a.effectiveDir())
 	if text != "" {
 		out += "\n\n## Project instructions (from " + src + ") — follow these:\n" + text

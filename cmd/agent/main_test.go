@@ -5964,6 +5964,28 @@ func TestSystemPromptOverride(t *testing.T) {
 	}
 }
 
+// Reported live: a model repeatedly tried different ways to reach a path
+// outside the workspace jail (an absolute file path, a run cwd="/", another
+// absolute dir) before the stuck-detector gave up on it — because nothing in
+// its own system prompt had ever told it a jail existed, each rejection
+// looked like an isolated failure to route around rather than a categorical
+// boundary. The prompt's own environment line must say so upfront.
+func TestSystemPromptExplainsTheWorkspaceJail(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+
+	p := a.systemPrompt()
+	if !strings.Contains(p, "HARD JAIL") {
+		t.Errorf("system prompt doesn't mention the jail is a hard boundary:\n%s", p)
+	}
+	if !strings.Contains(p, ws) {
+		t.Errorf("system prompt doesn't name the actual working directory:\n%s", p)
+	}
+}
+
 // A /skills or /permissions toggle re-wires the stack (new client); the running
 // token total must carry over, not reset to zero.
 func TestTokenTotalSurvivesRewire(t *testing.T) {

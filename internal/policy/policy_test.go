@@ -10,6 +10,32 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 )
 
+// Reported live: a model repeatedly tried different ways to reach a path
+// outside the jail (an absolute file path, a run cwd="/", then another
+// absolute dir) — because the bare "escapes the workspace jail" message
+// looked like a one-off routing failure to retry around, not a categorical
+// boundary. The message must say this is a hard boundary (not worth
+// retrying with a different path) and suggest what to actually do instead.
+func TestResolveJailEscapeErrorExplainsItsAHardBoundary(t *testing.T) {
+	ws := t.TempDir()
+	c := config.Default()
+	c.Workspace = ws
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	e := eng(t, c)
+
+	_, err := e.Resolve("/etc/passwd")
+	if err == nil {
+		t.Fatal("want an error resolving a path outside the jail, got nil")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "hard boundary") {
+		t.Errorf("error = %q, want it to say this is a hard boundary (not a one-off failure worth retrying)", msg)
+	}
+	if !strings.Contains(msg, "/cd") {
+		t.Errorf("error = %q, want it to suggest /cd (or an equivalent concrete next step)", msg)
+	}
+}
+
 func TestResolveExpandsTilde(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

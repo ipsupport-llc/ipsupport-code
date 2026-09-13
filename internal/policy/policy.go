@@ -286,7 +286,15 @@ func (e *Engine) Resolve(path string) (string, error) {
 	if abs == e.jailRoot || strings.HasPrefix(abs, e.jailRoot+string(filepath.Separator)) {
 		return abs, nil
 	}
-	return abs, fmt.Errorf("path %q escapes the workspace jail %q", path, e.jailRoot)
+	// Reported live: a model repeatedly tried different ways to reach a path
+	// outside the jail (an absolute file path, then a run `cwd` set to "/",
+	// then to another absolute dir) — because nothing had ever told it a jail
+	// existed, each rejection just looked like a one-off failure to route
+	// around, not a categorical boundary. Spelling that out here, in the one
+	// error every jail-violating call already goes through (file paths, run's
+	// cwd, git refs — anything via Resolve), means it doesn't depend on the
+	// system prompt being remembered mid-task.
+	return abs, fmt.Errorf("path %q is outside the workspace jail %q — this is a hard boundary, not a one-off failure: no path or working directory outside it is reachable by ANY tool. Stick to relative paths inside the workspace, or tell the user this task needs a different directory (they can /cd there, or relaunch pointed at it)", path, e.jailRoot)
 }
 
 // expandTilde turns a leading ~ or ~/ into the user's home directory, matching

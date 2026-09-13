@@ -671,12 +671,20 @@ func TestArchiverReceivesEveryRememberedTurn(t *testing.T) {
 type recTracer struct {
 	kinds        []string
 	finalSuggest string
+	sawJudge     bool
+	judgeDone    bool
+	judgeMissing string
 }
 
 func (r *recTracer) Emit(kind string, f map[string]any) {
 	r.kinds = append(r.kinds, kind)
 	if kind == "final" {
 		r.finalSuggest, _ = f["suggest"].(string)
+	}
+	if kind == "judge" {
+		r.sawJudge = true
+		r.judgeDone, _ = f["done"].(bool)
+		r.judgeMissing, _ = f["missing"].(string)
 	}
 }
 
@@ -1881,6 +1889,58 @@ func TestStepExhaustionJudgesRealProgressAndRecordsMissing(t *testing.T) {
 	}
 	if tr.Missing != "needs step two" {
 		t.Errorf("Missing = %q, want %q", tr.Missing, "needs step two")
+	}
+}
+
+// judgeOnGiveUp must not just decide tr.GoalMet silently — it emits a "judge"
+// trace event too, the same on-screen signal the normal re-feed path already
+// gives on a confirmed DONE. Reported live: /goal gave no visible indication of
+// what the judge decided when a run gave up early (stuck-stop or step-exhaustion)
+// — the verdict only ever reached goalState.Missing, surfaced later via /goal or
+// /status.
+func TestJudgeOnGiveUpEmitsATraceEvent(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	good := toolCallReply("c", "calc", `{"action":"calculate","params":{"expression":"1+1"}}`)
+	bad := toolCallReply("c", "calc", `{"action":"","params":{}}`)
+	rt := &recTracer{}
+	fake := &scriptLLM{replies: []llm.Message{
+		good,
+		bad, bad, bad, bad,
+		{Role: "assistant", Content: "DONE"},
+	}}
+	a := New(fake, reg, nil, rt, "", 30)
+	a.SetMaxStuckTurns(3)
+	a.SetGoalLoop(3, false)
+
+	tr, _ := a.Run(context.Background(), "do x")
+	if !tr.GoalMet {
+		t.Fatal("want GoalMet=true")
+	}
+	if !rt.sawJudge || !rt.judgeDone {
+		t.Errorf("want a \"judge\" event with done=true, got sawJudge=%v done=%v kinds=%v", rt.sawJudge, rt.judgeDone, rt.kinds)
+	}
+}
+
+// Same as above for the step-exhaustion give-up path, and for a MORE verdict:
+// the emitted event must carry the missing gap, not just a bare done=false.
+func TestJudgeOnGiveUpEmitsMissingGapOnMoreVerdict(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	good := toolCallReply("c", "calc", `{"action":"calculate","params":{"expression":"1+1"}}`)
+	rt := &recTracer{}
+	fake := &scriptLLM{replies: []llm.Message{
+		good, good, good, // fills maxSteps=3 — never reaches a clean finalize
+		{Role: "assistant", Content: "MORE: needs step two"},
+	}}
+	a := New(fake, reg, nil, rt, "", 3)
+	a.SetGoalLoop(3, false)
+
+	tr, _ := a.Run(context.Background(), "do x")
+	if tr.GoalMet {
+		t.Fatal("want GoalMet=false")
+	}
+	if !rt.sawJudge || rt.judgeDone || rt.judgeMissing != "needs step two" {
+		t.Errorf("want a \"judge\" event with done=false missing=%q, got sawJudge=%v done=%v missing=%q",
+			"needs step two", rt.sawJudge, rt.judgeDone, rt.judgeMissing)
 	}
 }
 

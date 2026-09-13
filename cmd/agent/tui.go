@@ -965,6 +965,7 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter", "y": // resume the standing goal
 			text := m.app.goalSnapshot().Text
 			m.app.setGoal(text) // re-activate + persist
+			m.push(cDim.Render("  " + m.app.goalSetLine()))
 			m.push(cYou.Render("❯ ") + text)
 			return m, m.runTask(text)
 		case "esc", "n": // not now — drop to the prompt (goal stays; /goal go later)
@@ -1480,6 +1481,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/goal":
 		if text, ok := m.app.launchGoalText(rest); ok {
 			m.app.setGoal(text)
+			m.push(cDim.Render("  " + m.app.goalSetLine()))
 			m.push(cYou.Render("❯ ") + text)
 			return m, m.runTask(text)
 		}
@@ -2818,6 +2820,13 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 	case "judge":
 		if done, _ := e.fields["done"].(bool); done {
 			return []string{cOk.Render("  ✓ judge: goal met")}
+		}
+		// The give-up paths (stuck-stop, step-exhaustion) emit this with done=false
+		// when the judge found a real gap — the normal re-feed path already shows
+		// its own "continue" line, so this only ever fires for a run that's ending
+		// anyway, not one that's about to loop again.
+		if miss, _ := e.fields["missing"].(string); strings.TrimSpace(miss) != "" {
+			return []string{cToolCall.Render("  ↻ judge: not done yet — " + oneLine(miss, 60))}
 		}
 	case "lesson":
 		d, _ := e.fields["domain"].(string)

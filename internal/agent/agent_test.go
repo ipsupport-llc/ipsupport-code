@@ -1620,13 +1620,16 @@ func TestRunGoalLoopStopsAtTTL(t *testing.T) {
 }
 
 // The judge must NOT rubber-stamp an unparseable reply as a met goal: it accepts
-// the final (so it doesn't trap the loop) but leaves GoalMet false.
+// the final (so it doesn't trap the loop) but leaves GoalMet false. judgeGoal
+// retries once on an unclear verdict (see judgeGoalOnce) — both scripted judge
+// replies here are unclear, so the retry fires too and still lands unclear.
 func TestRunGoalLoopUnclearJudgeDoesNotMarkMet(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
 	fake := &scriptLLM{replies: []llm.Message{
 		calcCall(),
 		{Role: "assistant", Content: "I think that's everything"}, // finalize
-		{Role: "assistant", Content: "hmm, hard to say really"},   // judge: no DONE/MORE token
+		{Role: "assistant", Content: "hmm, hard to say really"},   // judge attempt 1: no DONE/MORE token
+		{Role: "assistant", Content: "still can't tell honestly"}, // judge attempt 2 (the retry): also unclear
 	}}
 	a := New(fake, reg, nil, nil, "", 20)
 	a.SetGoalLoop(3, false)
@@ -1640,6 +1643,59 @@ func TestRunGoalLoopUnclearJudgeDoesNotMarkMet(t *testing.T) {
 	}
 	if tr.Final != "I think that's everything" {
 		t.Errorf("final = %q", tr.Final)
+	}
+}
+
+// Reported live: "goal judge unparseable reply=\"\"" — a weak local judge model
+// occasionally returns a totally empty/unparseable reply, permanently stalling
+// the goal as "incomplete" on pure noise. judgeGoal must retry once: if the
+// FIRST attempt is unclear but the SECOND says DONE, the goal must end up met.
+func TestJudgeGoalRetriesOnceAndCanRecoverFromAnUnclearFirstAttempt(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "all done"}, // finalize
+		{Role: "assistant", Content: ""},         // judge attempt 1: empty/unparseable
+		{Role: "assistant", Content: "DONE"},     // judge attempt 2 (the retry): confirms it
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+
+	tr, _ := a.Run(context.Background(), "do the thing")
+	if !tr.GoalMet {
+		t.Error("want GoalMet=true — the retry's DONE must be honored, not just the first empty reply")
+	}
+}
+
+// Reported live: a debug log's "run start"/"run end" pair couldn't be
+// attributed with certainty to the top-level run vs. a spawned sub-agent —
+// unlike a.emit's UI events (already tagged "agent": a.label for a sub-agent),
+// the raw slog.Debug calls carried no such tag. debugArgs must add one
+// whenever a.label is set, and add nothing when it isn't (the top-level run).
+func TestDebugArgsTagsSubAgentRunLogsButNotTopLevel(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+
+	var subBuf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&subBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	sub := New(&scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "done"}}}, reg, nil, nil, "", 5)
+	sub.SetLabel("sub1")
+	if _, err := sub.Run(context.Background(), "delegated task"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(subBuf.String(), `agent=sub1`) {
+		t.Errorf("sub-agent's run start/end not tagged with its label:\n%s", subBuf.String())
+	}
+
+	var topBuf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&topBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+	top := New(&scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "done"}}}, reg, nil, nil, "", 5)
+	if _, err := top.Run(context.Background(), "a task"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(topBuf.String(), "agent=") {
+		t.Errorf("top-level run must not be tagged, got:\n%s", topBuf.String())
 	}
 }
 

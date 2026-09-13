@@ -990,6 +990,16 @@ func TestBuildAppliesOverridesInMemoryNotToFile(t *testing.T) {
 	if a.cfg.LLM.Temperature != 0.7 {
 		t.Errorf("llm.temperature = %v, want 0.7 (from -override)", a.cfg.LLM.Temperature)
 	}
+	// Reported live: -skip-permissions/-override combined with -C wiped the
+	// workspace back to "" (Workspace is json:"-", so ApplyOverride's JSON
+	// round trip used to drop it) — breaking the file jail root, run's cwd
+	// default, and session file paths for the rest of the process.
+	if a.workspace != ws {
+		t.Errorf("a.workspace = %q, want %q (an -override must never touch it)", a.workspace, ws)
+	}
+	if a.cfg.Workspace != ws {
+		t.Errorf("a.cfg.Workspace = %q, want %q (an -override must never touch it)", a.cfg.Workspace, ws)
+	}
 
 	// A fresh build with NO overrides must see the untouched defaults — proving
 	// the overrides above never reached disk.

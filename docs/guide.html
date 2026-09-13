@@ -133,8 +133,13 @@
       <div class="row">
         <h4>Local — LM Studio (the default)</h4>
         <p>Open LM Studio, download a model, load it, and start its local server (the "Developer" tab
-           → <b>Start Server</b>). That's it — <code>ipsupport-code</code> talks to it out of the box,
-           nothing to configure.</p>
+           → <b>Start Server</b>). That's it — <code>ipsupport-code</code> talks to
+           <code>localhost:1234</code> out of the box, nothing to configure.</p>
+        <div class="term">
+          <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>pick which loaded model to use</span></div>
+          <pre><span class="p">❯</span> /model                 <span class="d"># lists what's loaded in LM Studio</span>
+<span class="p">❯</span> /model qwen2.5-coder   <span class="d"># switches to it (a substring is enough)</span></pre>
+        </div>
         <div class="reco">
           <span class="tag">recommended</span>
           <p>For the best tool-calling reliability, use a model fine-tuned specifically for this agent:
@@ -168,9 +173,13 @@
 <span class="p">❯</span> /ai openrouter
 <span class="p">❯</span> /model sonnet    <span class="d"># filters the catalog — great for OpenRouter's 300+</span></pre>
         </div>
-        <p style="margin:0" class="dim">Keys are written <code>chmod 600</code> to
+        <p style="margin:0 0 8px" class="dim">Keys are written <code>chmod 600</code> to
            <code>~/.config/ipsupport-code/config.json</code>, or fall back to the usual env var
            (<code>OPENAI_API_KEY</code>, <code>ANTHROPIC_API_KEY</code>, …).</p>
+        <p style="margin:0">Don't want to remember the exact syntax? <code>/config</code> is the same
+           thing as a menu — <b>↑↓</b> to a field, <b>Enter</b> to cycle or jump into it (provider,
+           model, key, permissions, color…), <b>esc</b> to close. It saves as you go, no JSON to
+           hand-edit.</p>
       </div>
     </div>
   </section>
@@ -247,6 +256,12 @@
         <p>One screen: provider, model, workspace, jail, permissions, session, and the standing goal
            if you have one.</p>
         <span class="ex"><code>/status</code></span>
+      </div>
+      <div class="card">
+        <h3><code>/config</code></h3>
+        <p>All of the above (provider, model, key, permissions, color…) as an arrow-key menu instead
+           of commands to memorize. Saves as you go.</p>
+        <span class="ex"><code>/config</code></span>
       </div>
     </div>
   </section>

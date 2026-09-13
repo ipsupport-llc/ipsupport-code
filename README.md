@@ -402,6 +402,11 @@ levers, in order:
   own (leaner) reasoning setting.
 - **`/skills on plan`** — for long multi-step work, the model keeps a checklist so
   it resumes instead of drifting.
+- **Fine-tune it on the tool schema.** If a specific local model keeps garbling
+  the `{"action":...,"params":...}` shape (the registry recovers several common
+  ones automatically, but not all), see [FINETUNING.md](FINETUNING.md) for a
+  from-scratch guide, including where to mine real training examples you
+  already have on disk.
 
 ## Rewind
 

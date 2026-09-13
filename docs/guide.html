@@ -137,8 +137,8 @@
            <code>localhost:1234</code> out of the box, nothing to configure.</p>
         <div class="term">
           <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>pick which loaded model to use</span></div>
-          <pre><span class="p">❯</span> /model                 <span class="d"># lists what's loaded in LM Studio</span>
-<span class="p">❯</span> /model qwen2.5-coder   <span class="d"># switches to it (a substring is enough)</span></pre>
+          <pre><span class="p">❯</span> /model              <span class="d"># lists what's loaded in LM Studio</span>
+<span class="p">❯</span> /model nemotron     <span class="d"># switches to it (a substring is enough)</span></pre>
         </div>
         <div class="reco">
           <span class="tag">recommended</span>
@@ -157,7 +157,7 @@
           <pre>{ "provider": "ollama",
   "providers": { "ollama": {
     "base_url": "http://localhost:11434/v1",
-    "model": "qwen2.5-coder:7b"
+    "model": "nemotron-3.5"
   } } }</pre>
         </div>
         <p style="margin:0">Then <code>/ai ollama</code> to switch to it (or <code>/config</code> to do
@@ -216,8 +216,27 @@
     </div>
   </section>
 
+  <section id="offline">
+    <h2><span class="h">✈</span> works with zero signal</h2>
+    <p class="lead">On a plane, out of coverage, on a train through a tunnel — none of that matters
+       when the model lives on your own machine. LM Studio, the model, and the agent are all local;
+       there's no cloud round-trip to lose.</p>
+    <div class="term">
+      <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>no wifi, no problem</span></div>
+      <pre><span class="p">❯</span> /offline on   <span class="d"># skip update checks, refuse the web tool cleanly</span>
+<span class="p">❯</span> fix the failing test in payments.go
+  <span class="c">⚙ file</span> read  payments.go
+  <span class="c">⚙ run</span>   go test ./...
+  <span class="d">→ exit 0</span>   <span class="ok">ok</span></pre>
+    </div>
+    <p style="margin:0" class="dim"><code>/offline</code> only stops the agent from reaching <em>out</em>
+       (the <code>web</code> tool, update checks) — it doesn't touch your model connection. Pair it
+       with a local LM Studio setup and the whole loop — read, edit, run, test — needs no
+       connectivity at all.</p>
+  </section>
+
   <section id="essentials">
-    <h2><span class="h">4</span> the essentials</h2>
+    <h2><span class="h">5</span> the essentials</h2>
     <p class="lead">A handful of commands cover most of what you'll actually reach for day to day.
        Type <code>/help</code> any time for the full list.</p>
     <div class="grid">
@@ -243,7 +262,7 @@
         <h3><code>/model</code></h3>
         <p>List or switch models on the current provider — filters as you type, handy on a big
            catalog like OpenRouter.</p>
-        <span class="ex"><code>/model qwen2.5-coder</code></span>
+        <span class="ex"><code>/model nemotron</code></span>
       </div>
       <div class="card">
         <h3><code>/plan</code> · <code>/auto</code></h3>

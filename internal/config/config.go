@@ -568,6 +568,11 @@ func SaveGoalMaxReturns(n int) error {
 	return mergeGlobalKeys(map[string]any{"goal_max_returns": n})
 }
 
+// SaveGoalNudge persists the idle-nudge flag globally.
+func SaveGoalNudge(on bool) error {
+	return mergeGlobalKeys(map[string]any{"goal_nudge": on})
+}
+
 // SaveGoalMaxSteps persists the per-goal tool-call-round cap globally. 0
 // clears the override, letting it auto-scale from the context window again.
 func SaveGoalMaxSteps(n int) error {

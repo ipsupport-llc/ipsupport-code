@@ -1145,9 +1145,32 @@ func TestRunDoneOnlyCallFinalizesLikeAPlainReply(t *testing.T) {
 	if tr.Final != "all done here" {
 		t.Errorf("final = %q, want the done-turn's own Content", tr.Final)
 	}
-	if len(toolObservation(tr.Messages)) != 0 {
-		t.Error("done must never actually be dispatched as a real tool call")
+	// done is answered but never DISPATCHED: no registry call, no side effect —
+	// the reply is synthesized here precisely because the call is intercepted.
+	if !everyToolCallAnswered(tr.Messages) {
+		t.Error("a tool call was left without a result — a strict backend rejects the next request")
 	}
+}
+
+// everyToolCallAnswered checks the protocol invariant: each assistant tool call
+// is followed by a tool message answering it.
+func everyToolCallAnswered(msgs []llm.Message) bool {
+	answered := map[string]bool{}
+	var want []string
+	for _, m := range msgs {
+		for _, tc := range m.ToolCalls {
+			want = append(want, tc.ID)
+		}
+		if m.Role == "tool" {
+			answered[m.ToolCallID] = true
+		}
+	}
+	for _, id := range want {
+		if !answered[id] {
+			return false
+		}
+	}
+	return true
 }
 
 // isDoneOnly keys ONLY on the call's Name — it never parses Arguments at all,
@@ -2779,109 +2802,6 @@ func TestCompactFocusCannotDropTheActionDigests(t *testing.T) {
 	}
 }
 
-// Reported live, six returns in a row on one goal: the model wrote the required
-// file, read it back to prove it, and ran a build that printed "Build OK" — and
-// the judge answered "more" every time, asking to "verify that it compiles and
-// that the report includes all required sections". It had no way to check: all
-// it ever received was the model's own final text plus a one-line digest naming
-// which files were touched. The judge must see what the run actually produced.
-func TestJudgeEvidenceCarriesTheRealToolOutput(t *testing.T) {
-	msgs := []llm.Message{
-		llm.User("write the report"),
-		toolCallReply("1", "file", `{"action":"write","params":{"path":"LAB_REPORT.md","content":"..."}}`),
-		{Role: "tool", Name: "file", Content: "wrote LAB_REPORT.md (12 lines)"},
-		toolCallReply("2", "run", `{"action":"shell","params":{"command":"go build ./..."}}`),
-		{Role: "tool", Name: "run", Content: "exit 0\nBuild OK"},
-	}
-	ev := judgeEvidence(msgs)
-	for _, want := range []string{"Build OK", "wrote LAB_REPORT.md", "file.write LAB_REPORT.md", "run.shell go build ./..."} {
-		if !strings.Contains(ev, want) {
-			t.Errorf("evidence missing %q:\n%s", want, ev)
-		}
-	}
-}
-
-// The same target read repeatedly must cost ONE entry, showing its latest
-// content — the live run read the report back three times, and three identical
-// copies would crowd out everything else in the budget.
-func TestJudgeEvidenceKeepsOnlyTheLatestPerTarget(t *testing.T) {
-	read := func(id string) llm.Message {
-		return toolCallReply(id, "file", `{"action":"read","params":{"path":"LAB_REPORT.md"}}`)
-	}
-	msgs := []llm.Message{
-		read("1"), {Role: "tool", Name: "file", Content: "stale draft"},
-		read("2"), {Role: "tool", Name: "file", Content: "stale draft"},
-		read("3"), {Role: "tool", Name: "file", Content: "final content"},
-	}
-	ev := judgeEvidence(msgs)
-	if strings.Contains(ev, "stale draft") {
-		t.Errorf("evidence kept an outdated read:\n%s", ev)
-	}
-	if !strings.Contains(ev, "final content") {
-		t.Errorf("evidence lost the latest read:\n%s", ev)
-	}
-	if n := strings.Count(ev, "file.read LAB_REPORT.md"); n != 1 {
-		t.Errorf("same target appears %d times, want 1", n)
-	}
-}
-
-// The judge usually shares the main model's connection — often a small local
-// one — so the evidence block must stay bounded no matter how long the run was.
-func TestJudgeEvidenceStaysWithinItsBudget(t *testing.T) {
-	var msgs []llm.Message
-	for i := 0; i < 50; i++ {
-		id := fmt.Sprintf("%d", i)
-		msgs = append(msgs,
-			toolCallReply(id, "file", fmt.Sprintf(`{"action":"read","params":{"path":"f%d.txt"}}`, i)),
-			llm.Message{Role: "tool", Name: "file", Content: strings.Repeat("x", 5000)})
-	}
-	ev := judgeEvidence(msgs)
-	if len(ev) > judgeEvidenceBudget*2 {
-		t.Errorf("evidence is %d chars, want it bounded near the %d budget", len(ev), judgeEvidenceBudget)
-	}
-	// Newest-first: the budget is spent on the END of the run, not its beginning.
-	if !strings.Contains(ev, "f49.txt") {
-		t.Errorf("evidence dropped the most recent call:\n%s", clip(ev, 300))
-	}
-}
-
-// A run with no tool results has nothing to show — the block must be absent
-// rather than an empty header the judge has to reason about.
-func TestJudgeEvidenceIsEmptyWithoutToolResults(t *testing.T) {
-	if ev := judgeEvidence([]llm.Message{llm.User("hi"), {Role: "assistant", Content: "hello"}}); ev != "" {
-		t.Errorf("evidence = %q, want empty", ev)
-	}
-}
-
-// End to end: the evidence must actually reach the judge's own prompt, or none
-// of the above matters.
-func TestJudgeCallReceivesTheEvidence(t *testing.T) {
-	reg := tool.NewRegistry(tool.NewCalc())
-	fake := &scriptLLM{replies: []llm.Message{
-		calcCall(),
-		{Role: "assistant", Content: "all set"}, // finalize
-		{Role: "assistant", Content: "DONE"},    // judge
-	}}
-	a := New(fake, reg, nil, nil, "", 20)
-	a.SetGoalLoop(3, false)
-
-	if _, err := a.Run(context.Background(), "add two numbers"); err != nil {
-		t.Fatal(err)
-	}
-	sent := ""
-	for _, m := range fake.lastMsgs { // lastMsgs is the judge's own call
-		if m.Role == "user" {
-			sent = m.Content
-		}
-	}
-	if !strings.Contains(sent, "EVIDENCE") {
-		t.Errorf("the judge's prompt carries no evidence block:\n%s", sent)
-	}
-	if !strings.Contains(sent, "calc.calculate") {
-		t.Errorf("the judge's prompt doesn't name what was actually run:\n%s", sent)
-	}
-}
-
 // The judge prompt must not send the checker after verification it cannot do —
 // that was the live failure: "verify that it compiles" repeated forever by a
 // checker with no tools.
@@ -3251,80 +3171,6 @@ func TestAcceptanceTargetFallsBackToTheRunsRequest(t *testing.T) {
 	}
 }
 
-// An emptied file read back gives an empty result. Skipping it used to leave its
-// key unclaimed, so the older populated read of the SAME file was then presented
-// as that file's current state.
-func TestJudgeEvidenceDoesNotResurrectStaleContentBehindAnEmptyResult(t *testing.T) {
-	read := func(id string) llm.Message {
-		return toolCallReply(id, "file", `{"action":"read","params":{"path":"report.md"}}`)
-	}
-	msgs := []llm.Message{
-		read("1"), {Role: "tool", Name: "file", Content: "# Report\nall the sections"},
-		read("2"), {Role: "tool", Name: "file", Content: "   "},
-	}
-	ev := judgeEvidence(msgs)
-	if strings.Contains(ev, "all the sections") {
-		t.Errorf("an emptied file still shows its old contents:\n%s", ev)
-	}
-	if !strings.Contains(ev, "(empty result)") {
-		t.Errorf("the empty current state isn't stated:\n%s", ev)
-	}
-}
-
-// read, write, edit and append of one file are four labels but ONE artifact.
-// Keeping them apart showed a stale pre-edit read beside an "edited (+1 -1)"
-// receipt, with the current contents nowhere — exactly what a live judge said it
-// could not see.
-func TestJudgeEvidenceKeepsOnlyTheLastTouchOfAFile(t *testing.T) {
-	msgs := []llm.Message{
-		toolCallReply("1", "file", `{"action":"read","params":{"path":"main.go"}}`),
-		{Role: "tool", Name: "file", Content: "package main // THE OLD BROKEN ONE"},
-		toolCallReply("2", "file", `{"action":"write","params":{"path":"main.go","content":"package main // the fixed one"}}`),
-		{Role: "tool", Name: "file", Content: "wrote main.go (2 lines)"},
-	}
-	ev := judgeEvidence(msgs)
-	if strings.Contains(ev, "THE OLD BROKEN ONE") {
-		t.Errorf("the pre-write content is still presented as current:\n%s", ev)
-	}
-	// And a write's receipt alone is not evidence — the content it wrote is in
-	// the ARGUMENTS, and the judge has to see it.
-	if !strings.Contains(ev, "the fixed one") {
-		t.Errorf("what was actually written never reaches the judge:\n%s", ev)
-	}
-}
-
-// Two commands sharing a prefix are different work; a 60-byte key merged them.
-func TestJudgeEvidenceKeepsCommandsThatOnlyDifferLate(t *testing.T) {
-	long := strings.Repeat("x", 70)
-	msgs := []llm.Message{
-		toolCallReply("1", "run", `{"action":"shell","params":{"command":"go test ./`+long+`a"}}`),
-		{Role: "tool", Name: "run", Content: "exit 0\nfirst command output"},
-		toolCallReply("2", "run", `{"action":"shell","params":{"command":"go test ./`+long+`b"}}`),
-		{Role: "tool", Name: "run", Content: "exit 1\nsecond command output"},
-	}
-	ev := judgeEvidence(msgs)
-	for _, want := range []string{"first command output", "second command output"} {
-		if !strings.Contains(ev, want) {
-			t.Errorf("evidence merged two distinct commands, missing %q:\n%s", want, ev)
-		}
-	}
-}
-
-// Evidence must never be silently partial: an unmarked excerpt makes a complete
-// report look like it is missing the sections that sat past the cut.
-func TestJudgeEvidenceMarksWhereItCut(t *testing.T) {
-	msgs := []llm.Message{
-		toolCallReply("1", "file", `{"action":"read","params":{"path":"report.md"}}`),
-		{Role: "tool", Name: "file", Content: strings.Repeat("section\n", 5000)},
-	}
-	if ev := judgeEvidence(msgs); !strings.Contains(ev, "cut here") {
-		t.Errorf("a truncated result is presented as whole:\n%s", clip(ev, 300))
-	}
-	if got := clipMarked("short", 100); got != "short" {
-		t.Errorf("clipMarked marked an untruncated string: %q", got)
-	}
-}
-
 // The calibration must divide the reading by the estimate of what was SENT. Using
 // the current, larger set produced a ratio below 1 and shrank the very number it
 // was meant to correct.
@@ -3424,39 +3270,6 @@ func TestJudgeCallCarriesTheCriteriaAndStillTheGoal(t *testing.T) {
 	}
 	if !strings.Contains(user, "ship the parser") {
 		t.Errorf("the goal is no longer the acceptance target:\n%s", clip(user, 200))
-	}
-}
-
-// A FAILED call's arguments still hold everything it MEANT to do. Pulling the
-// content out regardless turned "could not write the report" into evidence that
-// the report had been written — a straight path to accepting a goal on work that
-// never happened.
-func TestJudgeEvidenceLabelsAFailedCallAsAnAttempt(t *testing.T) {
-	msgs := []llm.Message{
-		toolCallReply("1", "file", `{"action":"write","params":{"path":"report.md","content":"# The whole report"}}`),
-		{Role: "tool", Name: "file", Content: "write denied by workspace policy", IsError: true},
-	}
-	ev := judgeEvidence(msgs)
-	if !strings.Contains(ev, "FAILED") {
-		t.Errorf("a failed write isn't marked as failed:\n%s", ev)
-	}
-	if strings.Contains(ev, "content written") {
-		t.Errorf("a failed write's payload is presented as accomplished work:\n%s", ev)
-	}
-}
-
-// An edit's result is a bare receipt and its content lives in find/replace, so a
-// newest-first edit claimed the file's key and suppressed the read that actually
-// showed the file — leaving the judge with strictly less than if the edit had
-// never happened.
-func TestJudgeEvidenceShowsWhatAnEditChanged(t *testing.T) {
-	msgs := []llm.Message{
-		toolCallReply("1", "file", `{"action":"edit","params":{"path":"main.go","find":"old url","replace":"https://new.example"}}`),
-		{Role: "tool", Name: "file", Content: "edited main.go (+1 -1)"},
-	}
-	ev := judgeEvidence(msgs)
-	if !strings.Contains(ev, "https://new.example") {
-		t.Errorf("an edit contributes only a receipt:\n%s", ev)
 	}
 }
 
@@ -3603,5 +3416,135 @@ func TestGiveUpJudgeStillRunsOnceTheTTLIsSpent(t *testing.T) {
 	tr, _ := a.Run(context.Background(), "write the report")
 	if !tr.GoalMet {
 		t.Error("the give-up judge never ran with the TTL spent — a run can still finish the work on its last steps")
+	}
+}
+
+// The judge is shown the run's OWN conversation, not a reconstruction of it.
+// Every fix to the judge for a week was another thing the hand-built summary had
+// dropped; two more were queued (background sub-agent answers, and results the
+// context trimmer had overwritten). Both of those are in the conversation.
+func TestJudgeSeesTheWholeConversation(t *testing.T) {
+	convo := []llm.Message{
+		llm.System("the AGENT's own system prompt, with its tools and learned notes"),
+		llm.User("write the report"),
+		toolCallReply("1", "file", `{"action":"write","params":{"path":"report.md","content":"# Report"}}`),
+		{Role: "tool", Name: "file", Content: "wrote report.md"},
+		// A background sub-agent's answer arrives as a USER message — the old
+		// scan only walked tool calls, so this was invisible to the judge.
+		llm.User("[background job #1 finished — codex] the migration is applied"),
+		{Role: "assistant", Content: "all done"},
+	}
+	msgs := judgePrompt("", "write the report", "all done", convo)
+
+	joined := ""
+	for _, m := range msgs {
+		joined += m.Role + ":" + m.Content + "\n"
+		for _, tc := range m.ToolCalls {
+			joined += "call:" + tc.Arguments + "\n"
+		}
+	}
+	for _, want := range []string{"wrote report.md", `"path":"report.md"`, "the migration is applied"} {
+		t.Run(want, func(t *testing.T) {
+			if !strings.Contains(joined, want) {
+				t.Errorf("the judge never sees %q:\n%s", want, joined)
+			}
+		})
+	}
+	// The AGENT's system prompt must not reach it: that carries the agent's
+	// instructions, its tools and the project's learned notes, none of which the
+	// judge should reason from. The judge's own takes its place.
+	if strings.Contains(joined, "learned notes") {
+		t.Error("the agent's system prompt leaked into the judge's context")
+	}
+	if n := len(msgs); msgs[0].Role != "system" || !strings.Contains(msgs[0].Content, "acceptance checker") {
+		t.Errorf("first of %d messages is not the judge's own system prompt", n)
+	}
+	// And the question comes last, after the record.
+	if last := msgs[len(msgs)-1]; last.Role != "user" || !strings.Contains(last.Content, "Now give your verdict") {
+		t.Errorf("the judge isn't asked anything at the end: %+v", last)
+	}
+}
+
+// The agent is the party being judged, so its own narration cannot be the proof.
+// Showing the judge the whole conversation hands it every confident claim the
+// model made along the way; the prompt has to say what those are worth.
+func TestJudgePromptDiscountsTheAgentsOwnClaims(t *testing.T) {
+	for _, want := range []string{
+		"agent's own words are not evidence",
+		"Judge from the RESULTS",
+		"party being judged",
+	} {
+		if !strings.Contains(judgeSystem, want) {
+			t.Errorf("the judge prompt is missing %q", want)
+		}
+	}
+}
+
+// Criteria still apply, and still on top of the goal rather than in place of it.
+func TestJudgePromptKeepsTheCriteria(t *testing.T) {
+	msgs := judgePrompt("tests must have been RUN", "ship it", "done", nil)
+	if !strings.Contains(msgs[0].Content, "tests must have been RUN") {
+		t.Error("criteria dropped from the judge's system prompt")
+	}
+	if !strings.Contains(msgs[len(msgs)-1].Content, "ship it") {
+		t.Error("the goal is no longer the acceptance target")
+	}
+}
+
+// The done call is intercepted, not dispatched — and the assistant message
+// carrying it is already in msgs. Every path that CONTINUES past this branch
+// (the judge's re-feed, the idle nudge, the empty-reply and refusal nudges) used
+// to leave that call with no matching tool result, which toWire sends verbatim
+// and nothing repairs: a backend enforcing the pairing rejects the next request
+// and pursuit ends for a protocol reason, short of its TTL.
+func TestDoneOnlyTurnLeavesNoUnansweredToolCall(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc(), tool.NewDone())
+	doneTurn := llm.Message{Role: "assistant", Content: "finished",
+		ToolCalls: []llm.ToolCall{{ID: "d1", Name: "done", Arguments: "{}"}}}
+
+	t.Run("judge says MORE and the run continues", func(t *testing.T) {
+		fake := &scriptLLM{replies: []llm.Message{
+			calcCall(),
+			doneTurn,
+			{Role: "assistant", Content: "MORE: no report"}, // → re-feed, continues past the done turn
+			calcCall(),
+			{Role: "assistant", Content: "really finished"},
+		}}
+		a := New(fake, reg, nil, nil, "", 20)
+		a.SetGoalLoop(1, false)
+		tr, _ := a.Run(context.Background(), "write the report")
+		if !everyToolCallAnswered(tr.Messages) {
+			t.Error("the re-fed conversation carries an unanswered done call")
+		}
+	})
+
+	t.Run("a bare done on the very first turn", func(t *testing.T) {
+		// No goal needed: the empty-reply nudge continues past it too.
+		fake := &scriptLLM{replies: []llm.Message{
+			{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "d1", Name: "done", Arguments: "{}"}}},
+			{Role: "assistant", Content: "sorry — here is the actual answer"},
+		}}
+		a := New(fake, reg, nil, nil, "", 20)
+		tr, _ := a.Run(context.Background(), "do the thing")
+		if !everyToolCallAnswered(tr.Messages) {
+			t.Error("the nudged conversation carries an unanswered done call")
+		}
+	})
+}
+
+// And the judge, which now reads those same messages, must not be told the goal
+// is met simply because the agent called done.
+func TestTheDoneAcknowledgementDoesNotReadAsAVerdict(t *testing.T) {
+	convo := []llm.Message{
+		llm.User("write the report"),
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "d1", Name: "done", Arguments: "{}"}}},
+		llm.ToolResult("d1", "done", "(noted — this only signals you think you're finished; whether the goal is met is decided separately)"),
+	}
+	joined := ""
+	for _, m := range judgePrompt("", "write the report", "", convo) {
+		joined += m.Content + "\n"
+	}
+	if v, _ := parseVerdict(joined); v == judgeDone {
+		t.Error("the done acknowledgement reads as a DONE verdict")
 	}
 }

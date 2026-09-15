@@ -8277,12 +8277,18 @@ func TestConfigGroupsGoalAndLearningSettings(t *testing.T) {
 // with no way to reach it. Growing the panel by two sections exposed it; any
 // short enough terminal would always have hit it.
 func TestConfigPanelFitsAShortTerminal(t *testing.T) {
-	m := &tuiModel{app: &app{cfg: config.Default(), workspace: t.TempDir()}, height: 20}
+	m := &tuiModel{app: &app{cfg: config.Default(), workspace: t.TempDir()}, height: 20, inputLines: 1}
 	m.openConfig()
 
+	// The panel lives in the log area, so it must fit the VIEWPORT — the status
+	// line, both rules, the hint and the input box sit below it. Sizing against
+	// the terminal height let the box run past the visible region, and the
+	// terminal then cut it from the top, taking the title and first header with
+	// it.
+	fits := m.viewportHeight()
 	out := m.renderConfigPanel()
-	if n := strings.Count(out, "\n") + 1; n > m.height {
-		t.Errorf("panel is %d lines on a %d-line terminal", n, m.height)
+	if n := strings.Count(out, "\n") + 1; n > fits {
+		t.Errorf("panel is %d lines in a %d-line viewport", n, fits)
 	}
 	if !strings.Contains(out, "config") {
 		t.Error("the title was pushed off the top")
@@ -8294,8 +8300,11 @@ func TestConfigPanelFitsAShortTerminal(t *testing.T) {
 	for i := range keys {
 		m.cfgCursor = i
 		out := m.renderConfigPanel()
-		if n := strings.Count(out, "\n") + 1; n > m.height {
+		if n := strings.Count(out, "\n") + 1; n > fits {
 			t.Fatalf("panel grew to %d lines at cursor %d", n, i)
+		}
+		if !strings.Contains(out, "config") {
+			t.Fatalf("the title scrolled away at cursor %d", i)
 		}
 		label, _, _ := m.configRowView(keys[i])
 		if !strings.Contains(out, label) {
@@ -8316,7 +8325,7 @@ func TestConfigPanelFitsAShortTerminal(t *testing.T) {
 
 // A tall terminal shows everything, with no scroll markers to explain.
 func TestConfigPanelShowsEverythingWhenItFits(t *testing.T) {
-	m := &tuiModel{app: &app{cfg: config.Default(), workspace: t.TempDir()}, height: 200}
+	m := &tuiModel{app: &app{cfg: config.Default(), workspace: t.TempDir()}, height: 200, inputLines: 1}
 	m.openConfig()
 	out := m.renderConfigPanel()
 	if strings.Contains(out, "more above") || strings.Contains(out, "more below") {

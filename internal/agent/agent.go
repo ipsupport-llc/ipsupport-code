@@ -774,6 +774,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	returns := 0           // goal re-feeds so far (TTL = a.maxReturns)
 	goalMet := false       // the judge confirmed the goal was met
 	refusalNudged := false // already pushed back on a "can't edit / here are the files" dodge?
+	emptyNudged := false   // already pushed back on a totally blank first reply?
 	idleNudged := false    // already pushed a no-progress model once since the last re-feed?
 	promptTokens := 0      // last known real prompt size from a MAIN-turn Chat call — see Transcript.PromptTokens
 	for step := 0; step < a.maxSteps; step++ {
@@ -850,6 +851,19 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		// (emitting "assistant" too would render the same text twice).
 		if len(assistant.ToolCalls) == 0 {
 			clean, suggest := splitSuggestion(assistant.Content)
+			// Reported live: a single genuinely empty reply (no content, no tool
+			// calls) on the very first turn — before anything productive happened —
+			// used to finalize the WHOLE run immediately, goal or not, with no retry
+			// at all. Every other flaky-reply case in this codebase already gets one
+			// retry (the judge's own empty-reply retry, the refusal nudge right
+			// below) — this is the same class of problem and deserves the same
+			// treatment before being accepted as a real (if silent) answer.
+			if !a.planMode && !emptyNudged && !acted && strings.TrimSpace(clean) == "" {
+				msgs = append(msgs, llm.User(emptyReplyNudge))
+				a.emit("nudge", map[string]any{})
+				emptyNudged = true
+				continue
+			}
 			// Refusal guard: a chat model answering an action task by pasting file
 			// contents or claiming it "can't access your files" — and doing nothing
 			// via tools this run. Push back once, hard, before accepting it.
@@ -1178,6 +1192,11 @@ func stuckNudgeFor(repeating bool) string {
 
 // stuckSuggest is offered to the user (one tap) when even the nudge didn't help.
 const stuckSuggest = "take a different approach — outline the steps first"
+
+// emptyReplyNudge is the one push-back on a totally blank first reply (no
+// content, no tool calls) — a flaky/cut-off response, not a real "nothing to
+// do" answer, so it gets one retry before being accepted at face value.
+const emptyReplyNudge = `Your last reply was empty — no answer and no tool call. Try again: either call a tool to make progress, or write an actual answer.`
 
 // refusalNudge is the one forceful push-back when a chat model dodges an action
 // task — pasting file contents or claiming it can't touch the filesystem —

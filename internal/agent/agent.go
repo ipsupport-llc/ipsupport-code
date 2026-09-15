@@ -1598,7 +1598,14 @@ func (a *Agent) judgeGoalOnce(ctx context.Context, goal, result, evidence string
 		slog.Debug("goal judge failed", a.debugArgs("err", err)...)
 		return judgeUnclear, ""
 	}
-	verdict, missing := parseJudgeReply(reply)
+	verdict, missing, source := parseJudgeReply(reply)
+	// Where the verdict came from. Caught live: a run came back "verdict=done"
+	// with the model having produced nothing, and the log could not say whether
+	// the judge had committed to that in Content, called done(), or merely left
+	// the word somewhere in a draft — which is the difference between the
+	// judge being wrong and this code being wrong.
+	slog.Debug("goal judge reply", a.debugArgs(
+		"verdict", verdict, "source", source, "finish_reason", reply.FinishReason)...)
 	if verdict == judgeUnclear {
 		// Reasoning logged alongside Content: a reasoning-capable local model
 		// can stream its whole verdict into Reasoning and leave Content empty
@@ -1656,22 +1663,22 @@ func judgeTools() []map[string]any {
 // plain-text "DONE"/"MORE: ..." convention, whichever the judge model actually
 // produced. Tool calls are checked first (when present, they're the more
 // reliable shape); free text is the fallback for a model that just answers.
-func parseJudgeReply(reply llm.Message) (judgeVerdict, string) {
+func parseJudgeReply(reply llm.Message) (verdict judgeVerdict, missing, source string) {
 	for _, tc := range reply.ToolCalls {
 		switch tc.Name {
 		case "done":
-			return judgeDone, ""
+			return judgeDone, "", "tool"
 		case "more":
 			var args struct {
 				Missing string `json:"missing"`
 			}
 			_ = json.Unmarshal([]byte(tc.Arguments), &args)
 			clipped, _ := textutil.Clip(strings.TrimSpace(args.Missing), 160)
-			return judgeMore, clipped
+			return judgeMore, clipped, "tool"
 		}
 	}
 	if verdict, missing := parseVerdict(reply.Content); verdict != judgeUnclear {
-		return verdict, missing
+		return verdict, missing, "content"
 	}
 	// Nothing usable in Content — look in the thinking. Reported live, eleven
 	// judge calls in one run, every single one "reply=\"\" reasoning=<long>":
@@ -1680,7 +1687,10 @@ func parseJudgeReply(reply llm.Message) (judgeVerdict, string) {
 	// as the main model does about the task, spends its whole output budget in
 	// reasoning_content, and never reaches Content. Its conclusion was in that
 	// text the whole time, logged and thrown away.
-	return parseReasonedVerdict(reply.Reasoning)
+	if verdict, missing := parseReasonedVerdict(reply.Reasoning); verdict != judgeUnclear {
+		return verdict, missing, "reasoning"
+	}
+	return judgeUnclear, "", ""
 }
 
 // verdictLine matches a line the judge wrote as its actual verdict — "DONE",
@@ -1691,26 +1701,31 @@ func parseJudgeReply(reply llm.Message) (judgeVerdict, string) {
 // word inside a sentence is not.
 var verdictLine = regexp.MustCompile("(?i)^[\\s>*_`\"'\\-]*(DONE|MORE)\\b[\\s:.\u2014-]*(.*)$")
 
-// parseReasonedVerdict recovers a verdict from the judge's reasoning when it
-// never wrote one to Content. Biased exactly like parseVerdict: any MORE line
-// anywhere wins over any DONE, so recovering a verdict from rambling thought can
-// never turn into a false "goal met" — the worst it does is keep pursuing a goal
-// that was already finished, which the TTL bounds and the user can end.
+// parseReasonedVerdict recovers a MORE — and only a MORE — from the judge's
+// reasoning when it never wrote a verdict to Content.
+//
+// Recovering DONE from thinking was tried and is wrong, caught live within the
+// hour: a run where the model read the code, ran it, found the API it depends on
+// dead, and was then cut off mid-sentence (finish_reason=length, no content, no
+// tool calls) came back "verdict=done … goal_met=true". Nothing had been fixed.
+// A line reading "Done." or "Done: read the code" is an utterly ordinary thing
+// to find inside free-running thought — a checklist, a note to self — and no
+// amount of anchoring distinguishes that from a verdict, because in thinking it
+// ISN'T one.
+//
+// The asymmetry is the point, and it is the same rule the whole goal loop runs
+// on: only an EXPLICIT confirmation ends a goal. Content and a done() tool call
+// are explicit; a fragment of a draft is not. "Not done yet" read out of a draft
+// costs nothing if wrong — the goal keeps going, bounded by the TTL and endable
+// by the user. "Done" read out of a draft ends the goal on work never finished.
 func parseReasonedVerdict(reasoning string) (judgeVerdict, string) {
-	done := false
 	for _, line := range strings.Split(reasoning, "\n") {
 		m := verdictLine.FindStringSubmatch(strings.TrimSpace(line))
-		if m == nil {
+		if m == nil || !strings.EqualFold(m[1], "more") {
 			continue
 		}
-		if strings.EqualFold(m[1], "more") {
-			clipped, _ := textutil.Clip(strings.TrimSpace(m[2]), 160)
-			return judgeMore, clipped
-		}
-		done = true
-	}
-	if done {
-		return judgeDone, ""
+		clipped, _ := textutil.Clip(strings.TrimSpace(m[2]), 160)
+		return judgeMore, clipped
 	}
 	return judgeUnclear, ""
 }

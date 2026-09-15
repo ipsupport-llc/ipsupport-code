@@ -646,6 +646,9 @@ internal/textutil · internal/atomicfile   shared helpers (clipping, atomic writ
 See [CONTRIBUTING.md](CONTRIBUTING.md). CI runs gofmt, `go vet`, the race suite,
 and a cross-compile of every target on each push and PR.
 
+[BACKLOG.md](BACKLOG.md) lists work that is designed but not built — each entry
+says what is wrong, what the fix is, and what that fix would break.
+
 ## License
 
 [MIT](LICENSE) © ipsupport-llc

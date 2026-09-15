@@ -818,8 +818,18 @@ func (m *tuiModel) renderConfigPanel() string {
 	}
 	cur := m.configKey()
 
+	// Only the rows that fit. Reported live: the panel rendered every row
+	// unconditionally, so on a short terminal the top — including the title and
+	// the first section — was simply pushed off the screen, with no way to reach
+	// it. Growing the panel by two sections is what exposed it, but any terminal
+	// short enough would always have hit this.
+	rows, first := m.configWindow()
+
 	lines := []string{accent.Bold(true).Render("config")}
-	for _, r := range configRows {
+	if first > 0 {
+		lines = append(lines, cDim.Render("   ↑ more above"))
+	}
+	for _, r := range rows {
 		if r.header != "" {
 			lines = append(lines, "", accent.Render("  "+r.header))
 			continue
@@ -835,6 +845,9 @@ func (m *tuiModel) renderConfigPanel() string {
 			lines = append(lines, "   "+cDim.Render(labelCol)+" "+valCol+" "+cDim.Render(hint))
 		}
 	}
+	if first+len(rows) < len(configRows) {
+		lines = append(lines, cDim.Render("   ↓ more below"))
+	}
 	footer := "  ↑↓ move · enter change · esc close"
 	if m.cancel != nil {
 		footer = "  ↑↓ move · view-only while a task runs · esc back to it"
@@ -844,6 +857,70 @@ func (m *tuiModel) renderConfigPanel() string {
 
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(m.accent).Padding(0, 1)
 	return box.Render(strings.Join(lines, "\n"))
+}
+
+// configWindow is the slice of configRows that fits on screen, always including
+// the selected row, plus the index it starts at.
+//
+// Scrolls by whole rows and keeps a row of context past the cursor where there
+// is one, so arrowing to the end of a section doesn't leave the next header
+// invisible. A terminal too short for even a few rows still gets those few
+// rather than a panel drawn off the top of the screen.
+func (m *tuiModel) configWindow() ([]cfgRow, int) {
+	// Title, the blank line and two footer lines, the box's two border lines,
+	// and BOTH scroll markers — in the middle of a long list both are drawn.
+	const chrome = 8
+	avail := m.height - chrome
+	if avail < 3 {
+		avail = 3
+	}
+	if cost(configRows) <= avail {
+		return configRows, 0
+	}
+	// Where the cursor's key actually sits among ALL rows, headers included —
+	// cfgCursor indexes the selectable keys only.
+	sel := 0
+	key := m.configKey()
+	for i, r := range configRows {
+		if r.key == key {
+			sel = i
+			break
+		}
+	}
+	// Grow outward from the selection while the window still fits. A section
+	// header costs TWO lines (a blank one precedes it), which is why the window
+	// is measured in emitted lines rather than in rows — sizing it by row count
+	// overflowed by exactly the number of headers on screen.
+	first, last := sel, sel
+	for {
+		grew := false
+		if last+1 < len(configRows) && cost(configRows[first:last+2]) <= avail {
+			last++
+			grew = true
+		}
+		if first > 0 && cost(configRows[first-1:last+1]) <= avail {
+			first--
+			grew = true
+		}
+		if !grew {
+			break
+		}
+	}
+	return configRows[first : last+1], first
+}
+
+// cost is how many lines a run of rows renders as: one per setting, two per
+// section header (it is preceded by a blank line).
+func cost(rows []cfgRow) int {
+	n := 0
+	for _, r := range rows {
+		if r.header != "" {
+			n += 2
+			continue
+		}
+		n++
+	}
+	return n
 }
 
 // runTimeoutLabel renders the run timeout for the panel (0 = the built-in 60s).

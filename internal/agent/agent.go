@@ -144,6 +144,11 @@ type Agent struct {
 	// judgeLLM is the goal judge's own connection, nil when it shares a.llm —
 	// see SetJudgeLLM.
 	judgeLLM llm.Chatter
+
+	// goalText is the STANDING goal's own text — what the judge accepts against
+	// and what a re-feed puts back in front of the model. Empty means "whatever
+	// this run was asked to do", which is right when the run IS the goal.
+	goalText string
 }
 
 // Archiver durably records every (goal, final answer + actions digest) pair
@@ -220,6 +225,26 @@ func (a *Agent) SetMaxHistory(n int) { a.maxHistory = n }
 // Compact/remember's cross-task cap, which never runs mid-task. 0 (the
 // default) disables this — no window known, nothing to check against.
 func (a *Agent) SetContextWindow(n int) { a.contextWindow = n }
+
+// SetGoalText sets the standing goal's own text as the acceptance target,
+// independent of what any one run was asked to do.
+//
+// The goal loop is in force for EVERY prompt while a goal stands, and without
+// this the judge was handed the run's own prompt as the goal. So with "implement
+// authentication and tests" outstanding, a follow-up "read README.md" was judged
+// as if READING THE README were the goal — the judge correctly answered DONE,
+// and the caller then closed the authentication goal on the strength of it. The
+// acceptance target has to be the goal, not the errand.
+func (a *Agent) SetGoalText(text string) { a.goalText = strings.TrimSpace(text) }
+
+// acceptanceTarget is what the judge decides about, and what a re-feed restates:
+// the standing goal when there is one, else this run's own request.
+func (a *Agent) acceptanceTarget(runGoal string) string {
+	if a.goalText != "" {
+		return a.goalText
+	}
+	return runGoal
+}
 
 // SetJudgeLLM points the goal judge at its own connection instead of the main
 // one. nil (the default) means the judge shares a.llm.
@@ -546,13 +571,14 @@ func estimateMsgTokens(msgs []llm.Message) int {
 // short of that is left untouchable when the alternative is silently blowing
 // through the entire context window.
 //
-// realTokens is the server's own prompt_tokens for the last main turn, 0 when
-// unknown; it calibrates the byte-based estimate (see sizedInTokens).
+// sentEst is the byte estimate of the messages exactly as they were sent, and
+// realTokens the server's own prompt_tokens for that same request (0 when
+// unknown); together they calibrate the estimate (see tokenScale).
 //
 // Mutates msgs in place; returns bytes freed (0 if nothing was trimmed).
-func trimIfNearWindow(msgs []llm.Message, contextWindow, realTokens int) int {
+func trimIfNearWindow(msgs []llm.Message, contextWindow, sentEst, realTokens int) int {
 	limit := int(float64(contextWindow) * inTaskTrimRatio)
-	scale := tokenScale(msgs, realTokens)
+	scale := tokenScale(sentEst, realTokens)
 	if sizedInTokens(msgs, scale) < limit {
 		return 0
 	}
@@ -578,8 +604,14 @@ func trimIfNearWindow(msgs []llm.Message, contextWindow, realTokens int) int {
 // made against a guess instead. One ratio folds the truth back in, and covers
 // the tool schemas and other per-request overhead that never appear in msgs at
 // all. Clamped, so one odd reading can't send it trimming the whole run away.
-func tokenScale(msgs []llm.Message, realTokens int) float64 {
-	est := estimateMsgTokens(msgs)
+// sentEst must be the estimate of the messages as they were SENT, not as they
+// are now: the reading describes that request, and by the time trimming runs
+// this turn's results have already been appended. Dividing the old reading by
+// the new, larger estimate produced a ratio below 1 and shrank the very number
+// it was meant to correct — so a set that had just outgrown the window measured
+// smaller than before and no trim happened.
+func tokenScale(sentEst, realTokens int) float64 {
+	est := sentEst
 	if realTokens <= 0 || est <= 0 {
 		return 1
 	}
@@ -873,6 +905,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	// finishGoal can OR it into the standing goal's persisted Progressed flag.
 	defer func() { tr.Productive = hadProductiveTurn }()
 	returns := 0           // goal re-feeds so far (TTL = a.maxReturns)
+	lastMissing := ""      // the final judge verdict's "what's still missing", once the TTL can buy no more attempts
 	goalMet := false       // the judge confirmed the goal was met
 	refusalNudged := false // already pushed back on a "can't edit / here are the files" dodge?
 	emptyNudged := false   // already pushed back on a totally blank first reply?
@@ -897,6 +930,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			}
 		}
 
+		sentEst := estimateMsgTokens(msgs) // what this request actually carried, for tokenScale below
 		assistant, err := a.llm.Chat(ctx, msgs, tools)
 		if err != nil {
 			tr.Messages = msgs
@@ -995,7 +1029,14 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// the goal loop is in force for EVERY prompt while a goal stands (see
 			// goalLoopBudget) — judging "thanks" against the goal and re-feeding it
 			// would trap an ordinary conversational turn in the loop.
-			if !a.planMode && a.maxReturns > 0 && returns < a.maxReturns && acted {
+			// NOT gated on returns < maxReturns. The TTL bounds how many times the
+			// goal may be RE-FED, not whether the last attempt it paid for gets
+			// looked at: with ttl 1, the model's one re-feed could finish the work
+			// and the run still ended "not confirmed", because returns had already
+			// reached the cap and the judge was skipped entirely. Funding an
+			// attempt and then refusing to grade it is the one combination that
+			// makes no sense.
+			if !a.planMode && a.maxReturns > 0 && acted {
 				// The goal was re-fed and the model finished WITHOUT doing any work
 				// since. Push it once first: a nudge is cheaper than a judge call and
 				// spends no return. returns > 0 implies acted (a return is only ever
@@ -1024,7 +1065,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// it nothing to judge. actionsDigest gives it the real record
 					// (files touched / commands run) instead, same fix already applied
 					// to the give-up paths (see judgeOnGiveUp).
-					verdict, missing := a.judgeGoal(ctx, goal, clean+actionsDigest(msgs), judgeEvidence(msgs))
+					verdict, missing := a.judgeGoal(ctx, a.acceptanceTarget(goal), clean+actionsDigest(msgs), judgeEvidence(msgs))
 					// Reported live: the judge's own decision (a separate LLM call)
 					// was entirely invisible in the debug log for its two NORMAL
 					// verdicts — only its failure ("goal judge failed") and
@@ -1050,12 +1091,17 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					if verdict == judgeDone {
 						goalMet = true // only an explicit DONE marks the goal verifiably met
 						a.emit("judge", map[string]any{"done": true})
-					} else {
+					} else if returns < a.maxReturns {
 						returns++
 						actedSinceReturn, idleNudged = false, false
-						msgs = append(msgs, llm.User(goalReturn(goal, missing)))
+						msgs = append(msgs, llm.User(goalReturn(a.acceptanceTarget(goal), missing)))
 						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing})
 						continue
+					} else {
+						// Budget spent: this verdict can no longer buy another
+						// attempt, but it is still the honest answer about where the
+						// goal stands, and the caller surfaces it (goalStalled).
+						lastMissing = missing
 					}
 				}
 			}
@@ -1078,6 +1124,9 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 				switch {
 				case goalStalled:
 					clean = fmt.Sprintf("(goal not confirmed complete — stopped after %d/%d continues; the model finished without further progress. `/goal go` to keep pushing, or switch to a stronger model with /model.)", returns, a.maxReturns)
+					if lastMissing != "" {
+						clean += "\n\n(still missing: " + lastMissing + ")"
+					}
 				case assistant.FinishReason == "length":
 					// Reported live: a reasoning model spent its ENTIRE output budget
 					// thinking and never reached Content — the server cut it off
@@ -1114,7 +1163,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		results, nErr := a.runToolCalls(ctx, assistant.ToolCalls)
 		msgs = append(msgs, results...)
 		if a.contextWindow > 0 {
-			if freed := trimIfNearWindow(msgs, a.contextWindow, promptTokens); freed > 0 {
+			if freed := trimIfNearWindow(msgs, a.contextWindow, sentEst, promptTokens); freed > 0 {
 				a.emit("context_trim", map[string]any{"bytes_freed": freed})
 			}
 		}
@@ -1159,7 +1208,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// actionsDigest gives it something real to go on instead: the actual
 					// files touched / commands run (and why they failed), the same record
 					// remember() below stores as cross-task memory.
-					met, missing := a.judgeOnGiveUp(ctx, goal, returns, hadProductiveTurn, "stuck_stop",
+					met, missing := a.judgeOnGiveUp(ctx, a.acceptanceTarget(goal), returns, hadProductiveTurn, "stuck_stop",
 						"(the agent got stuck repeating or failing tool calls before producing a coherent final answer.)"+actionsDigest(msgs),
 						judgeEvidence(msgs))
 					// Reported live: a single bad tool call, repeated until this stop,
@@ -1214,7 +1263,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	// is an isolated call with no access to msgs, so actionsDigest gives it
 	// something real to go on (files touched / commands run) instead of just
 	// the model's own possibly-empty final text.
-	met, missing := a.judgeOnGiveUp(ctx, goal, returns, hadProductiveTurn, "step_exhaustion", judgeResult+actionsDigest(msgs),
+	met, missing := a.judgeOnGiveUp(ctx, a.acceptanceTarget(goal), returns, hadProductiveTurn, "step_exhaustion", judgeResult+actionsDigest(msgs),
 		judgeEvidence(msgs))
 	tr.GoalMet = met
 	tr.Missing = missing
@@ -1228,6 +1277,20 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 
 // clip shortens s for a debug log line (rune-safe).
 func clip(s string, n int) string { out, _ := textutil.Clip(s, n); return out }
+
+// clipMarked is clip with the cut made VISIBLE. Evidence handed to the judge
+// must never be silently partial: an unmarked excerpt makes a complete report
+// look like it is missing the sections that sat past the cut, and hides a
+// disqualifying line that came after an otherwise clean prefix. The judge can
+// reason about "there is more I am not being shown"; it cannot reason about an
+// excerpt it believes is the whole thing.
+func clipMarked(s string, n int) string {
+	out, truncated := textutil.Clip(s, n)
+	if !truncated {
+		return out
+	}
+	return out + fmt.Sprintf("\n…[cut here — %d bytes in total]", len(s))
+}
 
 // toolNames extracts the function names from the OpenAI tool catalog (debug).
 func toolNames(tools []map[string]any) []string {
@@ -1401,8 +1464,13 @@ func goalReturn(goal, missing string) string {
 // a small local one, so this has to buy real verification without crowding out
 // the conversation it is attached to.
 const (
-	judgeEvidenceBudget  = 1800
-	judgeEvidencePerItem = 400
+	judgeEvidenceBudget  = 3000
+	judgeEvidencePerItem = 900
+	// judgeEvidenceLabelMax bounds the label too. A label carries a path or a
+	// whole command straight out of the model's own arguments, and the budget is
+	// checked BEFORE an entry is added — so one absurd path could otherwise blow
+	// past the whole allowance on its own.
+	judgeEvidenceLabelMax = 200
 )
 
 // judgeEvidence renders what the run actually PRODUCED — the real content of its
@@ -1441,13 +1509,18 @@ func judgeEvidence(msgs []llm.Message) string {
 			if k >= len(msgs) || msgs[k].Role != "tool" {
 				continue
 			}
-			body := strings.TrimSpace(msgs[k].Content)
-			label := evidenceLabel(tc)
-			if body == "" || seen[label] {
+			label, key := evidenceLabel(tc)
+			// Claimed BEFORE the empty check. An emptied file read back gives an
+			// empty result, and skipping it used to leave the key unclaimed — so
+			// the older, populated read of the same file was then shown as that
+			// file's current state. Whatever happened LAST is the truth, empty
+			// included.
+			if seen[key] {
 				continue
 			}
-			seen[label] = true
-			entry := label + ":\n" + clip(body, judgeEvidencePerItem)
+			seen[key] = true
+			body := evidenceBody(tc, msgs[k].Content)
+			entry := clip(label, judgeEvidenceLabelMax) + ":\n" + clipMarked(body, judgeEvidencePerItem)
 			used += len(entry)
 			out = append(out, entry)
 		}
@@ -1459,26 +1532,64 @@ func judgeEvidence(msgs []llm.Message) string {
 		strings.Join(out, "\n\n")
 }
 
+// evidenceBody is what the judge is shown for one call. A read returns the
+// content in its RESULT; a write or append returns only a receipt ("wrote
+// report.md (12 lines)") and carries the content it wrote in its ARGUMENTS
+// instead. Showing only the receipt is why the judge kept answering "cannot
+// verify the report's sections" about a report the run had just written, and
+// then asked — in its own words, with a tool it does not have — to go and read
+// the file itself. An empty result says so out loud rather than reading as a
+// missing entry.
+func evidenceBody(tc llm.ToolCall, result string) string {
+	body := strings.TrimSpace(result)
+	if _, params, _ := parseArgs(tc.Arguments); params != nil {
+		if content, ok := params["content"].(string); ok && strings.TrimSpace(content) != "" {
+			written := "content written:\n" + strings.TrimSpace(content)
+			if body != "" {
+				return body + "\n" + written
+			}
+			return written
+		}
+	}
+	if body == "" {
+		return "(empty result)"
+	}
+	return body
+}
+
 // evidenceLabel names what a tool call acted on — "file.write LAB_REPORT.md",
 // "run.shell go build ./..." — so the judge can tell one evidence entry from
 // another, and so repeats of the same target collapse to one.
-func evidenceLabel(tc llm.ToolCall) string {
+func evidenceLabel(tc llm.ToolCall) (label, key string) {
 	action, params, _ := parseArgs(tc.Arguments)
-	label := tc.Name
+	label = tc.Name
 	if action != "" {
 		label += "." + action
 	}
-	switch {
-	case params["path"] != nil:
-		if p, ok := params["path"].(string); ok && p != "" {
-			label += " " + p
-		}
-	case params["command"] != nil:
-		if c, ok := params["command"].(string); ok && c != "" {
-			label += " " + clip(strings.ReplaceAll(c, "\n", " "), 60)
-		}
+	key = label // default: one entry per tool+action
+	if p, ok := params["path"].(string); ok && strings.TrimSpace(p) != "" {
+		label += " " + p
+		// Keyed on the PATH, deliberately across actions. read, write, edit and
+		// append of one file are four labels but one artifact, and keeping them
+		// apart meant a stale pre-edit read was shown beside an "edited (+1 -1)"
+		// receipt with the current contents nowhere — exactly what a live judge
+		// complained it could not see. Whatever touched the file LAST describes
+		// it now.
+		return label, tc.Name + " path:" + p
 	}
-	return label
+	if c, ok := params["command"].(string); ok && strings.TrimSpace(c) != "" {
+		// The whole command, not a 60-byte prefix: two commands sharing a prefix
+		// are different work and must not collapse into one entry. Clipped for
+		// display only, by the caller.
+		label += " " + strings.ReplaceAll(c, "\n", " ")
+		return label, tc.Name + " cmd:" + c
+	}
+	// Nothing identifying: fall back to the raw arguments so two different calls
+	// of the same action (two searches, two sub-agent tasks) stay distinct.
+	if a := strings.TrimSpace(tc.Arguments); a != "" {
+		key += " args:" + a
+	}
+	return label, key
 }
 
 // judgeUsage reads a chatter's cumulative token counters when it exposes them,
@@ -1619,7 +1730,7 @@ func (a *Agent) judgeGoalOnce(ctx context.Context, goal, result, evidence string
 	p0, c0 := judgeUsage(a.judgeChatter())
 	reply, err := a.judgeChatter().Chat(ctx, []llm.Message{
 		llm.System(judgeSystem),
-		llm.User("GOAL:\n" + goal + "\n\nWHAT THE AGENT DID / ITS FINAL ANSWER:\n" + clip(result, 2000) + evidence),
+		llm.User("GOAL:\n" + goal + "\n\nWHAT THE AGENT DID / ITS FINAL ANSWER:\n" + clipMarked(result, 2000) + evidence),
 	}, judgeTools())
 	if err != nil {
 		slog.Debug("goal judge failed", a.debugArgs("err", err)...)
@@ -1693,18 +1804,45 @@ func judgeTools() []map[string]any {
 // produced. Tool calls are checked first (when present, they're the more
 // reliable shape); free text is the fallback for a model that just answers.
 func parseJudgeReply(reply llm.Message) (verdict judgeVerdict, missing, source string) {
+	// Every tool call is weighed, not just the first. A reply carrying both
+	// done() and more() is not a confirmation that happens to have a caveat
+	// attached — it is a judge that has not settled, and taking whichever came
+	// first meant the verdict flipped with the order of the array. MORE wins,
+	// the same way it does in text.
+	sawDone, sawMore, moreMissing := false, false, ""
 	for _, tc := range reply.ToolCalls {
 		switch tc.Name {
 		case "done":
-			return judgeDone, "", "tool"
+			sawDone = true
 		case "more":
 			var args struct {
 				Missing string `json:"missing"`
 			}
 			_ = json.Unmarshal([]byte(tc.Arguments), &args)
-			clipped, _ := textutil.Clip(strings.TrimSpace(args.Missing), 160)
-			return judgeMore, clipped, "tool"
+			if clipped, _ := textutil.Clip(strings.TrimSpace(args.Missing), 160); moreMissing == "" {
+				moreMissing = clipped
+			}
+			sawMore = true
+		default:
+			// The judge has exactly two tools; anything else is it trying to go
+			// and look at something. Reported live: three judge calls in a row
+			// came back finish_reason=tool_calls with no verdict, the judge
+			// saying in its own words "I need to check the current state of
+			// main.go after the edit" — it was asking for evidence it had not
+			// been given, and the call was dropped without even naming it.
+			slog.Debug("goal judge asked for a tool it doesn't have", "tool", tc.Name, "args", clip(tc.Arguments, 120))
 		}
+	}
+	switch {
+	case sawMore:
+		return judgeMore, moreMissing, "tool"
+	case sawDone:
+		// A done() call alongside text that says otherwise is the same
+		// unsettled answer in a different shape.
+		if v, missing := parseVerdict(reply.Content); v == judgeMore {
+			return judgeMore, missing, "tool+content"
+		}
+		return judgeDone, "", "tool"
 	}
 	if verdict, missing := parseVerdict(reply.Content); verdict != judgeUnclear {
 		return verdict, missing, "content"
@@ -1748,15 +1886,7 @@ var verdictLine = regexp.MustCompile("(?i)^[\\s>*_`\"'\\-]*(DONE|MORE)\\b[\\s:.\
 // costs nothing if wrong — the goal keeps going, bounded by the TTL and endable
 // by the user. "Done" read out of a draft ends the goal on work never finished.
 func parseReasonedVerdict(reasoning string) (judgeVerdict, string) {
-	for _, line := range strings.Split(reasoning, "\n") {
-		m := verdictLine.FindStringSubmatch(strings.TrimSpace(line))
-		if m == nil || !strings.EqualFold(m[1], "more") {
-			continue
-		}
-		clipped, _ := textutil.Clip(strings.TrimSpace(m[2]), 160)
-		return judgeMore, clipped
-	}
-	return judgeUnclear, ""
+	return scanVerdictLines(reasoning, false)
 }
 
 // parseVerdict reads the judge's whole reply (not just the first line) and biases
@@ -1764,15 +1894,42 @@ func parseReasonedVerdict(reasoning string) (judgeVerdict, string) {
 // it); only a MORE-free reply mentioning DONE counts as met. This keeps a rambling
 // weak judge from either false-accepting or matching "MOREOVER".
 func parseVerdict(s string) (judgeVerdict, string) {
-	if loc := moreToken.FindStringIndex(s); loc != nil {
-		gap := strings.TrimLeft(strings.TrimSpace(s[loc[1]:]), ":-—. \t")
-		if i := strings.IndexByte(gap, '\n'); i >= 0 {
-			gap = strings.TrimSpace(gap[:i])
+	return scanVerdictLines(s, true)
+}
+
+// scanVerdictLines reads a judge reply line by line and returns the verdict it
+// COMMITTED to. A line must BEGIN with the token to count: "DONE",
+// "MORE: no report", "**DONE**". Any MORE anywhere wins over any DONE.
+//
+// acceptDone=false is the reasoning variant: a draft may be scanned for MORE,
+// never for DONE (see parseReasonedVerdict).
+//
+// The anchoring is the whole point, and it was missing here far longer than it
+// was missing from the draft path. The old rule — "any bare done token, as long
+// as no more token appears" — accepted every one of these as a confirmed goal:
+//
+//	"The task is not done yet."
+//	"The agent said \"DONE\", but the report is absent."
+//	an evidence block echoed back that happens to contain the word
+//
+// A judge that says the work is NOT done must never be read as saying it is.
+// Anything that isn't a committed verdict is unclear, which keeps the goal
+// going — the only safe direction to be wrong in.
+func scanVerdictLines(s string, acceptDone bool) (judgeVerdict, string) {
+	done := false
+	for _, line := range strings.Split(s, "\n") {
+		m := verdictLine.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			continue
 		}
-		clipped, _ := textutil.Clip(gap, 160)
-		return judgeMore, clipped
+		if strings.EqualFold(m[1], "more") {
+			gap := strings.TrimLeft(strings.TrimSpace(m[2]), ":-—. \t")
+			clipped, _ := textutil.Clip(gap, 160)
+			return judgeMore, clipped
+		}
+		done = true
 	}
-	if doneToken.MatchString(s) {
+	if done && acceptDone {
 		return judgeDone, ""
 	}
 	// Logging moved to the caller (judgeGoalOnce), which also has the reply's

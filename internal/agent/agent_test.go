@@ -709,17 +709,21 @@ func TestArchiverReceivesEveryRememberedTurn(t *testing.T) {
 }
 
 type recTracer struct {
-	kinds        []string
-	finalSuggest string
-	sawJudge     bool
-	judgeDone    bool
-	judgeMissing string
+	kinds           []string
+	finalSuggest    string
+	sawJudge        bool
+	judgeDone       bool
+	judgeMissing    string
+	continueMissing string // last "continue" event's missing text
 }
 
 func (r *recTracer) Emit(kind string, f map[string]any) {
 	r.kinds = append(r.kinds, kind)
 	if kind == "final" {
 		r.finalSuggest, _ = f["suggest"].(string)
+	}
+	if kind == "continue" {
+		r.continueMissing, _ = f["missing"].(string)
 	}
 	if kind == "judge" {
 		r.sawJudge = true
@@ -2979,10 +2983,17 @@ func TestParseReasonedVerdictRecoversAVerdictFromTheThinking(t *testing.T) {
 		want      judgeVerdict
 		missing   string
 	}{
-		{"plain done", "Let me check the evidence.\nThe report exists and the build passed.\nDONE", judgeDone, ""},
-		{"decorated done", "Looks complete.\n**DONE**", judgeDone, ""},
+		// DONE is never taken from thinking, however deliberate the line looks.
+		// Caught live: a run where the model read the code, ran it, found the API
+		// it depends on dead, and was then cut off mid-sentence came back
+		// "verdict=done … goal_met=true" with nothing fixed. "Done." inside a
+		// draft is a checklist entry, not a verdict, and no anchoring can tell
+		// those apart because in thinking they are the same thing.
+		{"plain done is NOT taken", "Let me check the evidence.\nThe report exists and the build passed.\nDONE", judgeUnclear, ""},
+		{"decorated done is NOT taken", "Looks complete.\n**DONE**", judgeUnclear, ""},
+		{"checklist done is NOT taken", "Progress so far:\nDone: read the code\nDone: ran it", judgeUnclear, ""},
 		{"more with reason", "The report is there.\nMORE: no test results recorded", judgeMore, "no test results recorded"},
-		{"more wins over done", "DONE\nActually no.\nMORE: the build was never run", judgeMore, "the build was never run"},
+		{"more still recovered past a done", "DONE\nActually no.\nMORE: the build was never run", judgeMore, "the build was never run"},
 		// Free-running thought is full of these words; only a line that BEGINS
 		// with one is a verdict. Reading them loosely would turn "the task is not
 		// done" into a false "goal met" — the one direction that must be
@@ -3009,30 +3020,61 @@ func TestParseReasonedVerdictRecoversAVerdictFromTheThinking(t *testing.T) {
 // second opinion that can override what the judge actually committed to.
 func TestJudgeContentWinsOverTheReasoning(t *testing.T) {
 	reply := llm.Message{Role: "assistant", Content: "MORE: no report", Reasoning: "DONE"}
-	if v, missing := parseJudgeReply(reply); v != judgeMore || missing != "no report" {
+	v, missing, source := parseJudgeReply(reply)
+	if v != judgeMore || missing != "no report" {
 		t.Errorf("verdict = %v (%q), want more/\"no report\" — Content must win", v, missing)
+	}
+	if source != "content" {
+		t.Errorf("source = %q, want \"content\"", source)
 	}
 }
 
-// End to end: a judge that writes nothing to Content but concludes in its
-// thinking must still decide the goal, instead of being read as unclear and
-// costing a whole extra return.
-func TestRunHonorsAJudgeThatOnlyAnsweredInItsThinking(t *testing.T) {
+// Caught live, within the hour of shipping the reasoning fallback: a run where
+// the model read the code, ran it, found the API it depends on dead, and was
+// then cut off mid-sentence (finish_reason=length, no content, no tool calls)
+// came back "goal judge verdict=done … goal_met=true". Nothing had been fixed.
+// A "DONE" inside a draft must never end a goal — only Content or a done() call
+// is an explicit confirmation.
+func TestRunNeverMarksAGoalMetFromAWordInTheJudgesThinking(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
 	fake := &scriptLLM{replies: []llm.Message{
 		calcCall(),
 		{Role: "assistant", Content: "all set"},
-		{Role: "assistant", Content: "", Reasoning: "The evidence shows the work done.\nDONE"},
+		{Role: "assistant", Content: "", Reasoning: "Let me weigh this up.\nDONE"},
+		{Role: "assistant", Content: "", Reasoning: "Still thinking.\nDONE"}, // the retry
 	}}
-	a := New(fake, reg, nil, nil, "", 20)
-	a.SetGoalLoop(3, false)
+	a := New(fake, reg, nil, nil, "", 2)
+	a.SetGoalLoop(2, false)
 
 	tr, _ := a.Run(context.Background(), "add two numbers")
-	if !tr.GoalMet {
-		t.Error("GoalMet = false — the judge concluded DONE in its reasoning and was ignored")
+	if tr.GoalMet {
+		t.Error("GoalMet = true from a DONE found in the judge's draft — only Content or done() may end a goal")
 	}
-	if tr.Returns != 0 {
-		t.Errorf("returns = %d, want 0 — an answered judge must not cost a return", tr.Returns)
+}
+
+// A MORE is still worth recovering from the thinking: it cannot end anything,
+// and it carries the "what's still missing" text that steers the next round —
+// which is otherwise empty on every unreadable verdict.
+func TestRunRecoversAMoreFromTheJudgesThinking(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	rt := &recTracer{}
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "all set"},
+		{Role: "assistant", Content: "", Reasoning: "Weighing it up.\nMORE: the report is missing"},
+		calcCall(),
+		{Role: "assistant", Content: "now done"},
+		{Role: "assistant", Content: "DONE"},
+	}}
+	a := New(fake, reg, nil, rt, "", 20)
+	a.SetGoalLoop(3, false)
+
+	tr, _ := a.Run(context.Background(), "write the report")
+	if tr.Returns != 1 {
+		t.Errorf("returns = %d, want 1", tr.Returns)
+	}
+	if !strings.Contains(rt.continueMissing, "the report is missing") {
+		t.Errorf("re-feed missing-text = %q, want the text recovered from the judge's thinking", rt.continueMissing)
 	}
 }
 

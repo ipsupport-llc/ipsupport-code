@@ -814,7 +814,7 @@ func (a *app) buildSubReg(pol *policy.Engine, root string) *tool.Registry {
 	if a.cfg.Spawn.Exec {
 		tools = append(tools, tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.sandboxWrapperFor(root)))
 	}
-	tools = append(tools, tool.NewGit(pol, gatedApprover{a}), tool.NewWeb(nil, a.cfg.Offline), tool.NewCalc())
+	tools = append(tools, tool.NewGit(pol, gatedApprover{a}), tool.NewWeb(nil, a.cfg.Offline), tool.NewCalc(), tool.NewDone())
 	if a.skills != nil && a.skills.HasEnabled() {
 		tools = append(tools, tool.NewSkill(a.skills))
 	}
@@ -2399,6 +2399,7 @@ func (a *app) wire() error {
 		tool.NewWeb(nil, a.cfg.Offline), // nil → NewWeb's own 30s-timeout client; task ctx has no deadline of its own
 		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),
 		tool.NewCalc(),
+		tool.NewDone(),
 	}
 	// The skill tool only exists when a skill is enabled, so it costs nothing in
 	// the catalog until the user opts in.

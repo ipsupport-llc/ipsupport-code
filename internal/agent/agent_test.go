@@ -996,6 +996,93 @@ func TestRunAcceptsEmptyReplyAfterOneNudge(t *testing.T) {
 	}
 }
 
+// Reported live: a weak model that had genuinely finished kept re-announcing
+// it by repeatedly running a shell echo of "TASK COMPLETE"/"EXIT 0" instead of
+// just answering with no tool call. The done tool gives it a real, correct
+// channel for that: a turn whose ONLY tool call is "done" must finalize using
+// that same turn's Content, exactly like a plain no-tool-call reply would.
+func TestRunDoneOnlyCallFinalizesLikeAPlainReply(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc(), tool.NewDone())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "all done here", ToolCalls: []llm.ToolCall{{ID: "d1", Name: "done", Arguments: "{}"}}},
+	}}
+	a := New(fake, reg, nil, nil, "", 6)
+	tr, err := a.Run(context.Background(), "do the thing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Final != "all done here" {
+		t.Errorf("final = %q, want the done-turn's own Content", tr.Final)
+	}
+	if len(toolObservation(tr.Messages)) != 0 {
+		t.Error("done must never actually be dispatched as a real tool call")
+	}
+}
+
+// isDoneOnly keys ONLY on the call's Name — it never parses Arguments at all,
+// so a model that stuffs garbled/non-JSON text in there (a summary, a random
+// "why" note, anything) must still be recognized and finalize normally.
+func TestRunDoneOnlyInterceptsEvenWithGarbledArguments(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc(), tool.NewDone())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "all done here", ToolCalls: []llm.ToolCall{{ID: "d1", Name: "done", Arguments: "why would it say that, not even json"}}},
+	}}
+	a := New(fake, reg, nil, nil, "", 6)
+	tr, err := a.Run(context.Background(), "do the thing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Final != "all done here" {
+		t.Errorf("final = %q, want the done-turn's own Content despite garbled Arguments", tr.Final)
+	}
+}
+
+// done arriving ALONGSIDE a real tool call in the same turn must NOT
+// intercept — that other call still needs normal dispatch.
+func TestRunDoneAlongsideRealCallDoesNotIntercept(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc(), tool.NewDone())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", ToolCalls: []llm.ToolCall{
+			{ID: "c1", Name: "calc", Arguments: `{"action":"calculate","params":{"expression":"1+1"}}`},
+			{ID: "d1", Name: "done", Arguments: "{}"},
+		}},
+		{Role: "assistant", Content: "the real final answer"},
+	}}
+	a := New(fake, reg, nil, nil, "", 6)
+	tr, err := a.Run(context.Background(), "do the thing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Final != "the real final answer" {
+		t.Errorf("final = %q, want it to keep going past the mixed turn", tr.Final)
+	}
+	if len(toolObservation(tr.Messages)) != 2 {
+		t.Errorf("want both calls (calc and done) dispatched normally, got %d observations", len(toolObservation(tr.Messages)))
+	}
+}
+
+// Independent of the MAIN model's done tool: the standing goal is still only
+// ever confirmed met by the JUDGE's own verdict, never by the mere fact that
+// the model called done instead of replying with plain text.
+func TestRunDoneOnlyCallStillGoesThroughTheGoalJudge(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc(), tool.NewDone())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "all done", ToolCalls: []llm.ToolCall{{ID: "d1", Name: "done", Arguments: "{}"}}},
+		{Role: "assistant", Content: "MORE: needs a test"}, // judge: not actually done
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+
+	tr, _ := a.Run(context.Background(), "do the thing")
+	if tr.GoalMet {
+		t.Error("GoalMet = true despite the judge saying MORE — calling done must not bypass judgment")
+	}
+	if tr.Returns != 1 {
+		t.Errorf("returns = %d, want 1 — the judge's MORE must still re-feed normally", tr.Returns)
+	}
+}
+
 // The refusal nudge fires at most once: a model that refuses twice has its second
 // refusal accepted as the final answer (no infinite loop).
 func TestRunAcceptsRefusalAfterOneNudge(t *testing.T) {

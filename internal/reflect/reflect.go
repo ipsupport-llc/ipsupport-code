@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
@@ -34,9 +35,10 @@ type Reflector struct {
 // New constructs a Reflector.
 func New(l llm.Chatter) *Reflector { return &Reflector{LLM: l} }
 
-// Lessons is what a reflection pass distills: environment-general tool pitfalls
-// (saved to the global knowledge base) and durable facts about THIS project
-// (saved per workspace, folded into the prompt next time).
+// Lessons is what a reflection pass distills: general tool pitfalls (saved to
+// the workspace's lesson store) and durable facts about THIS project (saved
+// alongside them, folded into the prompt next time). Both are per workspace and
+// both are wiped by /clear.
 type Lessons struct {
 	Pitfalls []knowledge.Pitfall
 	Facts    []string
@@ -45,7 +47,17 @@ type Lessons struct {
 const reflectPrompt = `You review a finished run by a tool-using agent and extract two things for next time, as ONE JSON object:
 {"pitfalls": [...], "facts": [...]}
 
-"pitfalls" — environment-general tool lessons. Each: {"domain" (file|run|web|calc), "error_pattern" (a substring SPECIFIC enough that only errors like this one contain it — never a generic wrapper like an exit code alone, e.g. "exit 1", which every failed command has regardless of cause), "context", "proven_fix" (the concrete fix that worked)}. Include ONE only where an error was hit AND a later action fixed it. EXCLUDE anything specific to this project/path.
+"pitfalls" — general lessons about USING THE TOOLS, each: {"domain" (file|run|git|web|calc|agent|mcp|skill), "kind" ("fix" or "avoid"), "error_pattern", "context", "proven_fix"}.
+
+  kind "fix" — an error was hit and a later action actually fixed it. "proven_fix" = what worked.
+  kind "avoid" — an error was hit and the SAME approach was tried again and kept failing, right up to the end of the run. "proven_fix" = what to do DIFFERENTLY next time. Never write the failing approach itself as the advice.
+
+  "error_pattern" — copy a substring out of the error text itself, long enough that only this KIND of failure contains it. Never a generic wrapper like an exit code alone ("exit 1"), which every failed command has regardless of cause.
+  "context" — the tool action it happened during, e.g. "file: write".
+
+  HARD RULE for "error_pattern" and "proven_fix": no value taken from this run — no file path, filename, directory, project name, URL, or command argument. A lesson keyed on those never matches again, and one quoting them actively misleads a future run in a different project. Write the SHAPE of the problem, not this instance of it.
+
+  Emit a pitfall only for a genuine tool-usage failure. Use [] if none qualifies.
 
 "facts" — short, durable, reusable facts about THIS project worth remembering next time: build/test/run commands, where things live, conventions, gotchas. Solid reusable facts only, not one-off details.
 
@@ -137,6 +149,7 @@ func parseLessons(content string) Lessons {
 		var raw struct {
 			Pitfalls []struct {
 				Domain       string `json:"domain"`
+				Kind         string `json:"kind"`
 				ErrorPattern string `json:"error_pattern"`
 				Context      string `json:"context"`
 				ProvenFix    string `json:"proven_fix"`
@@ -159,8 +172,20 @@ func parseLessons(content string) Lessons {
 			if knowledge.IsGenericErrorPattern(pattern) {
 				continue // "exit N" alone can't discriminate this failure from any other
 			}
+			// The prompt already forbids carrying a value from this run into a
+			// lesson, and a model ignored it — the resulting entry quoted another
+			// project's file path and misled a later, unrelated run (see
+			// knowledge.IsProjectSpecific). Enforce it here rather than trusting
+			// the instruction, and say what was dropped: a silently rejected
+			// lesson is indistinguishable from reflection never producing one.
+			if knowledge.IsProjectSpecific(pattern) || knowledge.IsProjectSpecific(p.ProvenFix) {
+				slog.Debug("lesson rejected", "reason", "project-specific", "domain", domain,
+					"error_pattern", pattern, "proven_fix", p.ProvenFix)
+				continue
+			}
 			out.Pitfalls = append(out.Pitfalls, knowledge.Pitfall{
-				Domain: domain, ErrorPattern: pattern, Context: p.Context, ProvenFix: p.ProvenFix,
+				Domain: domain, Kind: normalizeKind(p.Kind), ErrorPattern: pattern,
+				Context: p.Context, ProvenFix: p.ProvenFix,
 			})
 		}
 		for _, f := range raw.Facts {
@@ -175,6 +200,19 @@ func parseLessons(content string) Lessons {
 		}
 	}
 	return Lessons{}
+}
+
+// normalizeKind maps the prompt's "kind" onto Pitfall.Kind. Only an explicit
+// "avoid" becomes KindAvoid; "fix", an omitted field (a model following the old
+// prompt, or a lesson replayed from an older store) and any unrecognized value
+// all mean the default "a fix that worked". Erring that way is deliberate: a
+// dead end mislabeled as a fix reads as bad advice, but a fix mislabeled as a
+// dead end tells the model to stop doing the thing that actually works.
+func normalizeKind(kind string) string {
+	if strings.EqualFold(strings.TrimSpace(kind), knowledge.KindAvoid) {
+		return knowledge.KindAvoid
+	}
+	return ""
 }
 
 // jsonObjectCandidates returns every substring of s that starts at a '{' and

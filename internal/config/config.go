@@ -369,8 +369,20 @@ func GlobalExists() bool {
 	return err == nil
 }
 
-// DefaultKBPath is the global knowledge-base location.
-func DefaultKBPath() string { return filepath.Join(configHome(), "knowledge.json") }
+// DefaultKBPath is the learned-lessons store for one workspace.
+//
+// Deliberately PER WORKSPACE, alongside the learned facts it is the twin of, and
+// no longer a single global file. Reported live, from a real debug log: a lesson
+// distilled in one project surfaced in an unrelated one and pointed the model at
+// the wrong cause, which it then quoted back in its own reasoning and kept acting
+// on. A store shared by every project on the machine turns one bad lesson into a
+// machine-wide problem; scoped this way the blast radius is the project it was
+// learned in, and /clear can wipe it like any other per-workspace state. An
+// explicit kb_path in config still overrides this (a deliberately shared store
+// is a choice, not the default).
+func DefaultKBPath(workspace string) string {
+	return filepath.Join(workspace, ".agent", "lessons.json")
+}
 
 // DefaultTracePath is the global decision-trace (training dataset) location.
 func DefaultTracePath() string { return filepath.Join(configHome(), "traces.jsonl") }
@@ -893,7 +905,7 @@ func Load(workspace string) (Config, error) {
 	cfg.Run.Deny = union(cfg.Run.Deny, runDenyFloor)
 	cfg.File.DenyWrite = union(cfg.File.DenyWrite, fileDenyFloor)
 	if cfg.KBPath == "" {
-		cfg.KBPath = DefaultKBPath()
+		cfg.KBPath = DefaultKBPath(abs)
 	}
 	if cfg.TracePath == "" {
 		cfg.TracePath = DefaultTracePath()

@@ -2329,7 +2329,7 @@ var commandList = []cmdInfo{
 	{"/update", "self-update from GitHub (stable|nightly)"},
 	{"/offline", "on|off — work without internet (disables web + update checks)"},
 	{"/cd", "set the working dir (Tab-completes sub-dirs; relative paths + sub-agents resolve there)"},
-	{"/knowledge", "learned-lessons store: report · clear · purge <days> · retain <days>"},
+	{"/knowledge", "learned-lessons store: report · list · drop <n> · clear · purge <days> · retain <days>"},
 	{"/mcp", "list configured MCP servers and their tools"},
 	{"/rewind", "pick a step to roll back to (restores files + trims the chat)"},
 	{"/reflect", "on|off|<profile> — post-task learning; run it on a stronger model"},
@@ -2497,7 +2497,7 @@ func (m *tuiModel) argCandidates(name string) []string {
 	case "/snip":
 		return append([]string{"save", "list", "rm"}, m.app.snipNames()...)
 	case "/knowledge", "/kb":
-		return []string{"clear", "purge", "retain"}
+		return []string{"list", "drop", "clear", "purge", "retain"}
 	case "/usage":
 		return []string{"clear", "purge", "retain"}
 	case "/sessions":

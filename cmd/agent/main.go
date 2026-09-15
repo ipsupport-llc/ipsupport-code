@@ -87,7 +87,7 @@ func main() {
 	flag.StringVar(&sessionName, "session", "", "use a named session (a separate saved thread)")
 	flag.BoolVar(&skipPermissions, "skip-permissions", false, "don't ask before file writes or shell commands this run (equivalent to -override run.default=allow -override file.default=allow); not persisted")
 	flag.Var(&overrides, "override", "override a config key for this run only, key=value (repeatable, e.g. -override llm.temperature=0.7); same dotted keys as `config set`, never persisted")
-	flag.BoolVar(&clearOnStart, "clear", false, "wipe this thread's history, learned facts, and session permissions before starting (like /clear, but at launch)")
+	flag.BoolVar(&clearOnStart, "clear", false, "wipe this thread's history, learned facts and lessons, and session permissions before starting (like /clear, but at launch)")
 	flag.BoolVar(&interactive, "it", false, "with a [task] argument, open the interactive TUI and auto-submit it instead of one-shot mode (same dispatch as typing it in — a /command or !shell line works too)")
 	flag.BoolVar(&showThinking, "show-thinking", false, "start with the live reasoning view on (same as pressing ctrl+t once a task is running)")
 	flag.Usage = printUsage
@@ -428,6 +428,7 @@ func build(workspace, sessionName string, overrides []string, reader *bufio.Read
 	cleanup := func() { a.shutdownJobs(); a.closeMCP() } // cancel background jobs (killing external-agent subprocesses too) and shut down any launched MCP servers on exit
 	a.applyUsageRetention()                              // honor usage_retention_days on startup
 	a.applyKnowledgeRetention()                          // honor knowledge_retention_days on startup
+	a.dropPoisonedLessons()                              // retire lessons quoting a path from the run that taught them
 	if ft, err := trace.NewFileTracer(cfg.TracePath, newRunID()); err != nil {
 		slog.Warn("trace disabled", "err", err)
 	} else {
@@ -2943,8 +2944,24 @@ func (a *app) clearSession() {
 	a.ag.Reset()
 	a.resetSessionAllow()
 	a.clearFacts()
+	a.clearLessons()
 	a.ag.SetSystem(a.systemPrompt())
 	a.saveSession()
+}
+
+// clearLessons drops every learned tool lesson for this workspace. Exactly the
+// reasoning behind clearFacts, applied to the store's other half: /clear is the
+// user's explicit "start fresh" signal, and a lesson distilled from an abandoned
+// line of work otherwise keeps surfacing on every failing tool call afterwards —
+// with the added sting that a lesson, unlike a fact, is injected precisely when
+// the model is already struggling and least able to tell good advice from bad.
+func (a *app) clearLessons() {
+	if a.kb.Clear() == 0 {
+		return
+	}
+	if err := a.kb.Save(); err != nil {
+		slog.Warn("knowledge save failed", "err", err)
+	}
 }
 
 // clearFacts drops every learned project fact for this workspace. Facts are
@@ -4544,6 +4561,10 @@ func (a *app) knowledgeCommand(rest string) []string {
 	switch sub {
 	case "":
 		return a.knowledgeReport()
+	case "list":
+		return a.knowledgeList()
+	case "drop", "rm":
+		return a.knowledgeDrop(arg)
 	case "clear":
 		n := a.kb.Clear()
 		if err := a.kb.Save(); err != nil {
@@ -4580,8 +4601,78 @@ func (a *app) knowledgeCommand(rest string) []string {
 		}
 		return []string{msg}
 	default:
-		return []string{"usage: /knowledge [clear] [purge <days>] [retain <days>]"}
+		return []string{"usage: /knowledge [list] [drop <n>] [clear] [purge <days>] [retain <days>]"}
 	}
+}
+
+// knowledgeList prints every stored lesson, numbered the way knowledgeDrop takes
+// them. Reported live: a lesson quoting another project's file path surfaced on
+// an unrelated failure and sent the model after the wrong cause — and there was
+// no way to find it, because the only view of the store was knowledgeReport's
+// per-domain counts and the only edit was wiping all of it.
+func (a *app) knowledgeList() []string {
+	all := a.kb.Sorted()
+	if len(all) == 0 {
+		return []string{"no learned lessons yet — they accrue from task reflections"}
+	}
+	out := []string{fmt.Sprintf("learned lessons: %d   ·   /knowledge drop <n> removes one", len(all))}
+	for i, p := range all {
+		where := p.Context
+		if strings.TrimSpace(where) == "" {
+			where = p.Domain
+		}
+		lead := "worked"
+		if p.Kind == knowledge.KindAvoid {
+			lead = "dead end — instead"
+		}
+		fix, _ := textutil.Clip(strings.ReplaceAll(p.ProvenFix, "\n", " "), 160)
+		out = append(out,
+			fmt.Sprintf("%3d [%s] %q", i+1, p.Domain, p.ErrorPattern),
+			fmt.Sprintf("    while %s · %s: %s", where, lead, fix),
+			fmt.Sprintf("    %d hit(s) · last seen %s", p.Hits, p.LastSeen))
+	}
+	return out
+}
+
+// knowledgeDrop removes the one lesson at position n in knowledgeList's output.
+// Both go through KB.Sorted, so the number printed stays pointed at the same
+// lesson (the store's own order depends on insertion and purge history).
+func (a *app) knowledgeDrop(arg string) []string {
+	all := a.kb.Sorted()
+	if len(all) == 0 {
+		return []string{"no learned lessons to drop"}
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(arg))
+	if err != nil || n < 1 || n > len(all) {
+		return []string{fmt.Sprintf("usage: /knowledge drop <n>  (1–%d, as numbered by /knowledge list)", len(all))}
+	}
+	p := all[n-1]
+	if !a.kb.Delete(p) {
+		return []string{"that lesson is no longer there — run /knowledge list again"}
+	}
+	if err := a.kb.Save(); err != nil {
+		return []string{"error: " + err.Error()}
+	}
+	return []string{fmt.Sprintf("dropped [%s] %q", p.Domain, p.ErrorPattern)}
+}
+
+// dropPoisonedLessons retires stored lessons that quote a value from the run they
+// were learned in (see knowledge.IsProjectSpecific). Such an entry could be
+// written before that rule existed to reject it, and one was observed misleading
+// a live run in a different project. Runs on startup so an existing store heals
+// itself instead of waiting for the entries to age out of retention.
+func (a *app) dropPoisonedLessons() {
+	n := a.kb.DropWhere(func(p knowledge.Pitfall) bool {
+		return knowledge.IsProjectSpecific(p.ErrorPattern) || knowledge.IsProjectSpecific(p.ProvenFix)
+	})
+	if n == 0 {
+		return
+	}
+	if err := a.kb.Save(); err != nil {
+		slog.Warn("knowledge save failed", "err", err)
+		return
+	}
+	slog.Info("dropped project-specific lessons", "n", n)
 }
 
 // knowledgeReport summarizes the lesson store: total, per-domain counts, retention.
@@ -4607,7 +4698,7 @@ func (a *app) knowledgeReport() []string {
 	if a.cfg.KnowledgeRetentionDays > 0 {
 		ret = fmt.Sprintf("%d days", a.cfg.KnowledgeRetentionDays)
 	}
-	out = append(out, "retention: "+ret, "  /knowledge clear · purge <days> · retain <days>")
+	out = append(out, "retention: "+ret, "  /knowledge list · drop <n> · clear · purge <days> · retain <days>")
 	return out
 }
 

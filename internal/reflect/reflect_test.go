@@ -24,6 +24,21 @@ func (f fixedLLM) Chat(_ context.Context, _ []llm.Message, _ []map[string]any) (
 	return llm.Message{Role: "assistant", Content: f.reply}, nil
 }
 
+// stoppedTranscript is a harness-stopped run with the SAME failure seen twice —
+// the only shape an "avoid" lesson can honestly come from.
+func stoppedTranscript() agent.Transcript {
+	return agent.Transcript{
+		Stopped: true,
+		Steps:   9,
+		Messages: []llm.Message{
+			llm.User("write the report"),
+			{Role: "tool", Name: "file", Content: "missing required param(s): path", IsError: true},
+			{Role: "tool", Name: "file", Content: "missing required param(s): path", IsError: true},
+		},
+		Final: "(stopped early — the model got stuck repeating the same tool call)",
+	}
+}
+
 func sampleTranscript() agent.Transcript {
 	return agent.Transcript{
 		Messages: []llm.Message{
@@ -318,8 +333,7 @@ func TestReflectTransportError(t *testing.T) {
 // repeated failures — and that was the one transcript excluded from reflection,
 // which made the whole lesson kind unreachable by construction.
 func TestReflectMinesAStoppedRunForOneAvoidLesson(t *testing.T) {
-	stopped := sampleTranscript()
-	stopped.Stopped = true
+	stopped := stoppedTranscript()
 	reply := `{"pitfalls":[` +
 		`{"domain":"file","error_pattern":"you gave {}","context":"file: write","proven_fix":"send params as a JSON object"},` +
 		`{"domain":"run","error_pattern":"permission denied","context":"run: shell","proven_fix":"ask the user"}` +
@@ -345,8 +359,7 @@ func TestReflectMinesAStoppedRunForOneAvoidLesson(t *testing.T) {
 // repeatedly, and say outright that a guess is worse than nothing — the lesson
 // it produces is injected exactly when the model is next struggling.
 func TestStoppedRunPromptRefusesToGuess(t *testing.T) {
-	stopped := sampleTranscript()
-	stopped.Stopped = true
+	stopped := stoppedTranscript()
 	p := &promptCapture{}
 	New(p).Reflect(context.Background(), stopped)
 	if len(p.systems) != 1 {
@@ -463,5 +476,44 @@ func TestParsedIsSetOnARealResult(t *testing.T) {
 	}
 	if !l.Parsed || len(l.Pitfalls) != 1 {
 		t.Errorf("lessons = %+v, parsed=%v", l.Pitfalls, l.Parsed)
+	}
+}
+
+// Reported live: a 5-step run died on one collapsed generation and the user then
+// waited 28 seconds for a learning pass that returned nothing readable — the
+// latency-after-frustration both reviews warned this change would add. An
+// "avoid" lesson needs a failure seen MORE THAN ONCE; a run that short cannot
+// have shown one, so asking is pure cost.
+func TestReflectSkipsAStoppedRunWithNothingRepeated(t *testing.T) {
+	short := agent.Transcript{
+		Stopped: true, Steps: 5,
+		Messages: []llm.Message{
+			llm.User("do the thing"),
+			{Role: "tool", Name: "file", Content: "no such file", IsError: true}, // one failure, not a pattern
+			{Role: "tool", Name: "run", Content: "exit 0\nok"},
+		},
+		Final: "(stopped early — looping)",
+	}
+	p := &promptCapture{}
+	l, err := New(p).Reflect(context.Background(), short)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.systems) != 0 {
+		t.Errorf("made %d model call(s) on a run with nothing repeated, want 0", len(p.systems))
+	}
+	// Parsed, not unreadable: we looked and there was nothing — the UI must not
+	// tell the user to try a stronger model.
+	if !l.Parsed {
+		t.Error("a deliberate skip reads as an unreadable reply")
+	}
+
+	// Two failures IS a pattern, and still gets the pass.
+	p2 := &promptCapture{}
+	if _, err := New(p2).Reflect(context.Background(), stoppedTranscript()); err != nil {
+		t.Fatal(err)
+	}
+	if len(p2.systems) != 1 {
+		t.Errorf("made %d call(s) on a repeated failure, want 1", len(p2.systems))
 	}
 }

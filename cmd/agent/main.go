@@ -441,10 +441,11 @@ func build(workspace, sessionName string, overrides []string, reader *bufio.Read
 		a.fileTracer = ft
 		cleanup = func() { a.shutdownJobs(); a.closeMCP(); _ = ft.Close() }
 	}
-	a.loadFacts()      // learned project facts → folded into the prompt by wire()
-	a.loadGoal()       // standing goal (if any) → resumable across restarts
-	a.loadPromptHist() // ↑ recall spans past runs (persisted per workspace)
-	a.loadSnippets()   // /snip prompt templates (persisted globally)
+	a.migrateLegacyState() // move an older install's state out of the workspace, once
+	a.loadFacts()          // learned project facts → folded into the prompt by wire()
+	a.loadGoal()           // standing goal (if any) → resumable across restarts
+	a.loadPromptHist()     // ↑ recall spans past runs (persisted per workspace)
+	a.loadSnippets()       // /snip prompt templates (persisted globally)
 	if err := a.wire(); err != nil {
 		return nil, nil, err
 	}
@@ -1258,7 +1259,58 @@ type goalState struct {
 	Progressed bool `json:"progressed,omitempty"`
 }
 
-func (a *app) goalPath() string { return filepath.Join(a.workspace, ".agent", "goal.json") }
+// statePath locates one of this workspace's runtime-state files — the standing
+// goal, learned facts and lessons, prompt history, saved sessions.
+//
+// Outside the workspace on purpose (see config.StateDir): these are files the
+// AGENT writes for itself, and keeping them in the project put them on the very
+// filesystem the agent reads. Observed live: a model listing the project found
+// .agent/goal.json, read it, and began echoing the goal text back until the
+// transport's repetition detector killed the run. Files the USER writes —
+// config.json, system.md, judge.md, compact.md — stay in the workspace, because
+// those are project content and belong under the project's own version control.
+//
+// atomicfile.Write creates the directory, so nothing has to pre-create it.
+func (a *app) statePath(parts ...string) string {
+	return filepath.Join(append([]string{config.StateDir(a.workspace)}, parts...)...)
+}
+
+// migrateLegacyState moves an existing installation's runtime state out of the
+// workspace's .agent/ directory, once. Only the files the agent writes for
+// itself move; anything else in .agent/ is the user's and is left alone, as is
+// the directory itself.
+//
+// Moved, not copied: leaving a stale duplicate behind is exactly the hazard this
+// change exists to remove — the model would still find and read it.
+func (a *app) migrateLegacyState() {
+	legacy := config.LegacyStateDir(a.workspace)
+	moved := 0
+	for _, name := range []string{"goal.json", "facts.json", "lessons.json", "history", "session.json", "sessions"} {
+		from, to := filepath.Join(legacy, name), a.statePath(name)
+		if _, err := os.Stat(from); err != nil {
+			continue
+		}
+		if _, err := os.Stat(to); err == nil {
+			continue // already migrated (or the user put something there) — never clobber
+		}
+		if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
+			slog.Warn("state migration failed", "file", name, "err", err)
+			continue
+		}
+		if err := os.Rename(from, to); err != nil {
+			// Rename fails across filesystems; a copy is not worth the complexity
+			// for state that is rebuilt by the next run anyway.
+			slog.Warn("state migration failed", "file", name, "err", err)
+			continue
+		}
+		moved++
+	}
+	if moved > 0 {
+		slog.Info("moved agent state out of the workspace", "files", moved, "to", config.StateDir(a.workspace))
+	}
+}
+
+func (a *app) goalPath() string { return a.statePath("goal.json") }
 
 // loadGoal reads the persisted goal (best-effort; a missing/garbled file = none).
 func (a *app) loadGoal() {
@@ -1527,7 +1579,7 @@ func (a *app) goalLoopBudget() int {
 
 const maxPromptHist = 200
 
-func (a *app) promptHistPath() string { return filepath.Join(a.workspace, ".agent", "history") }
+func (a *app) promptHistPath() string { return a.statePath("history") }
 
 // loadPromptHist reads the persisted input history (best-effort).
 func (a *app) loadPromptHist() {
@@ -2672,13 +2724,13 @@ func (a *app) shouldAutoCompact() bool {
 // (see /rename) keeps its own thread of context across restarts. /new and /clear
 // wipe the active one.
 func (a *app) sessionPath() string {
-	return filepath.Join(a.workspace, ".agent", "sessions", slugName(a.cfg.Name)+".json")
+	return a.statePath("sessions", slugName(a.cfg.Name)+".json")
 }
 
 // legacySessionPath is the pre-naming location, read as a fallback for the
 // default name so existing sessions still restore after upgrading.
 func (a *app) legacySessionPath() string {
-	return filepath.Join(a.workspace, ".agent", "session.json")
+	return a.statePath("session.json")
 }
 
 // slugName turns a display name into a safe filename stem.
@@ -2893,7 +2945,7 @@ func (a *app) listSessions() []sessionMeta {
 	active := slugName(a.cfg.Name)
 	seen := map[string]bool{}
 	var out []sessionMeta
-	dir := filepath.Join(a.workspace, ".agent", "sessions")
+	dir := a.statePath("sessions")
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
@@ -2978,10 +3030,10 @@ func (a *app) deleteSessionNamed(name string) []string {
 	}
 	slug := slugName(name)
 	removed := false
-	if os.Remove(filepath.Join(a.workspace, ".agent", "sessions", slug+".json")) == nil {
+	if os.Remove(a.statePath("sessions", slug+".json")) == nil {
 		removed = true
 	}
-	os.Remove(filepath.Join(a.workspace, ".agent", "sessions", slug+".archive.jsonl")) // best-effort: not every session has one
+	os.Remove(a.statePath("sessions", slug+".archive.jsonl")) // best-effort: not every session has one
 	if slug == "ipsupport-code" && os.Remove(a.legacySessionPath()) == nil {
 		removed = true
 	}
@@ -3023,7 +3075,7 @@ const maxFacts = 30
 // CONFIRMED rather than most recently phrased).
 const maxInjectedFacts = 15
 
-func (a *app) factsPath() string { return filepath.Join(a.workspace, ".agent", "facts.json") }
+func (a *app) factsPath() string { return a.statePath("facts.json") }
 
 func (a *app) loadFacts() {
 	if data, err := os.ReadFile(a.factsPath()); err == nil {

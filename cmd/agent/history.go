@@ -51,7 +51,7 @@ func (s *sessionArchiver) Archive(goal, entry string) {
 // archivePath is the durable per-session record — see sessionArchiver. It
 // sits alongside sessionPath, named after the same session identity.
 func (a *app) archivePath() string {
-	return filepath.Join(a.workspace, ".agent", "sessions", slugName(a.cfg.Name)+".archive.jsonl")
+	return a.statePath("sessions", slugName(a.cfg.Name)+".archive.jsonl")
 }
 
 // hasArchivedHistory reports whether there's anything for the `history` tool

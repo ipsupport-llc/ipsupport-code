@@ -1349,20 +1349,21 @@ func TestDiffRowsExpandTabsBeforeWidthMath(t *testing.T) {
 // stack to install its bridge, which rebuilds the agent; if that rebuild drops
 // the loaded history, every launch starts from a clean slate (the reported bug).
 func TestSessionSurvivesTUILaunch(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // agent state lives outside the workspace
 	ws := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(ws, ".agent"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	hist := []llm.Message{llm.User("build a thing"), {Role: "assistant", Content: "built it"}}
-	data, _ := json.Marshal(hist)
-	if err := os.WriteFile(filepath.Join(ws, ".agent", "session.json"), data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-
 	cfg := config.Default()
 	cfg.Workspace = ws
 	kb, _ := knowledge.Open("")
 	a := &app{cfg: cfg, workspace: ws, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+
+	hist := []llm.Message{llm.User("build a thing"), {Role: "assistant", Content: "built it"}}
+	data, _ := json.Marshal(hist)
+	if err := os.MkdirAll(filepath.Dir(a.statePath("session.json")), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.statePath("session.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := a.wire(); err != nil {
 		t.Fatal(err)
 	}
@@ -1754,7 +1755,7 @@ func TestInputHistoryRecallAndPersist(t *testing.T) {
 }
 
 // /ai key and /ai add key=<token> both carry a raw credential in plain text —
-// they must not be persisted verbatim to .agent/history (0644, readable back
+// they must not be persisted verbatim to the prompt-history file (0644, readable back
 // via file.read; not a designated secret store).
 func TestRedactSecrets(t *testing.T) {
 	cases := []struct{ in, want string }{
@@ -4124,7 +4125,7 @@ func TestSessionsKeyedByName(t *testing.T) {
 	if err := os.WriteFile(a.sessionPath(), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasSuffix(a.sessionPath(), filepath.Join(".agent", "sessions", "bob.json")) {
+	if !strings.HasSuffix(a.sessionPath(), filepath.Join("sessions", "bob.json")) {
 		t.Errorf("sessionPath = %q, want …/sessions/bob.json", a.sessionPath())
 	}
 	if got := a.listSessions(); len(got) != 1 || got[0].name != "bob" || got[0].count != 2 {
@@ -4474,9 +4475,10 @@ func TestSessionsListSwitchDelete(t *testing.T) {
 // session's companion .archive.jsonl file, not just its .json file — leaving
 // the archive behind leaks disk space and stale data indefinitely.
 func TestDeleteSessionRemovesArchive(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // agent state lives outside the workspace
 	ws := t.TempDir()
 	a := &app{workspace: ws, cfg: config.Config{Name: "bob"}}
-	sessionsDir := filepath.Join(ws, ".agent", "sessions")
+	sessionsDir := a.statePath("sessions")
 	if err := os.MkdirAll(sessionsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -4813,7 +4815,7 @@ func TestBuildAppliesSessionNameBeforeWire(t *testing.T) {
 	}
 
 	ws := t.TempDir()
-	archiveDir := filepath.Join(ws, ".agent", "sessions")
+	archiveDir := (&app{workspace: ws}).statePath("sessions")
 	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -4873,8 +4875,8 @@ func TestRenameRebindsArchive(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	oldPath := filepath.Join(ws, ".agent", "sessions", slugName("old-name")+".archive.jsonl")
-	newPath := filepath.Join(ws, ".agent", "sessions", slugName("new-name")+".archive.jsonl")
+	oldPath := a.statePath("sessions", slugName("old-name")+".archive.jsonl")
+	newPath := a.statePath("sessions", slugName("new-name")+".archive.jsonl")
 
 	if fi, err := os.Stat(oldPath); err == nil {
 		t.Errorf("turn archived to the OLD name's file %s (%d bytes) — /rename must rebind the archiver, not just relabel cfg.Name", oldPath, fi.Size())
@@ -8336,5 +8338,71 @@ func TestConfigPanelShowsEverythingWhenItFits(t *testing.T) {
 		if !strings.Contains(out, label) {
 			t.Errorf("row %q missing from a panel that should show all of them", k)
 		}
+	}
+}
+
+// The agent's own state used to live in the project's .agent/ directory, which
+// put it on the very filesystem the agent reads: observed live, a model listing
+// the project found .agent/goal.json, read it, and began echoing the goal text
+// back until the repetition detector killed the run. State the agent writes for
+// itself is not project content.
+func TestAgentStateLivesOutsideTheWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // configHome() reads HOME
+	ws := t.TempDir()
+	a := &app{cfg: config.Default(), workspace: ws}
+
+	for _, p := range []string{a.goalPath(), a.factsPath(), a.promptHistPath(), a.sessionPath(), a.archivePath()} {
+		if strings.HasPrefix(p, ws) {
+			t.Errorf("%q is inside the workspace — the model can read it as project content", p)
+		}
+	}
+	// Files the USER writes stay put: they are project content and belong under
+	// the project's own version control.
+	if got := config.DefaultKBPath(ws); strings.HasPrefix(got, ws) {
+		t.Errorf("the lesson store is still in the workspace: %q", got)
+	}
+}
+
+// An existing install's state is MOVED, not copied: leaving a duplicate behind
+// is exactly the hazard — the model would still find and read it.
+func TestLegacyStateIsMovedOutOfTheWorkspace(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // configHome() reads HOME
+	ws := t.TempDir()
+	legacy := filepath.Join(ws, ".agent")
+	if err := os.MkdirAll(filepath.Join(legacy, "sessions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"goal.json":   `{"text":"ship it","status":"active"}`,
+		"facts.json":  `["the build uses make"]`,
+		"config.json": `{"file":{"default":"ask"}}`, // the USER's file — must stay
+	} {
+		if err := os.WriteFile(filepath.Join(legacy, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a := &app{cfg: config.Default(), workspace: ws}
+	a.migrateLegacyState()
+
+	if _, err := os.Stat(filepath.Join(legacy, "goal.json")); err == nil {
+		t.Error("the goal is still in the workspace after migration — the model can still read it")
+	}
+	if _, err := os.Stat(a.goalPath()); err != nil {
+		t.Errorf("the goal did not arrive at its new home: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(legacy, "config.json")); err != nil {
+		t.Error("the user's own config.json was moved — only the agent's state should be")
+	}
+	// Idempotent, and never clobbers something already at the destination.
+	if err := os.WriteFile(filepath.Join(legacy, "facts.json"), []byte(`["stale"]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.migrateLegacyState()
+	data, err := os.ReadFile(a.factsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "stale") {
+		t.Error("a second migration overwrote already-migrated state")
 	}
 }

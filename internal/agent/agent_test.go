@@ -350,6 +350,46 @@ func TestHintsRequireErrorPatternMatch(t *testing.T) {
 	}
 }
 
+// A dead-end lesson (knowledge.KindAvoid) records an approach that kept failing
+// to the end of the run. Introducing it as "this worked" would hand the model the
+// exact behaviour the lesson exists to stop — and the model is reading this
+// precisely when it's already stuck and least able to tell good advice from bad.
+func TestHintsDoNotPresentADeadEndAsSomethingThatWorked(t *testing.T) {
+	kb, _ := knowledge.Open(filepath.Join(t.TempDir(), "k.json"))
+	kb.Add(knowledge.Pitfall{
+		Domain: "file", Kind: knowledge.KindAvoid, ErrorPattern: "you gave {}",
+		Context: "file: write", ProvenFix: "send params as a JSON object, never a JSON-encoded string",
+	})
+	a := New(&scriptLLM{}, tool.NewRegistry(tool.NewFile(nil, nil, nil)), kb, nil, "", 5)
+
+	h := a.hints("file", "write", "missing required param(s): path — file.write needs {path}; you gave {}")
+	if h == "" {
+		t.Fatal("dead-end lesson not surfaced at all")
+	}
+	if strings.Contains(h, "this worked") {
+		t.Errorf("a dead end was introduced as a fix that worked: %q", h)
+	}
+	if !strings.Contains(h, "did NOT work") || !strings.Contains(h, "send params as a JSON object") {
+		t.Errorf("hint = %q, want it to say the approach failed and give the alternative", h)
+	}
+}
+
+// A lesson stored before Kind existed has Kind == "" and must keep the original
+// "this worked" wording — the field is additive, not a reinterpretation of every
+// lesson already on disk.
+func TestHintsKeepTheOriginalWordingForAFixThatWorked(t *testing.T) {
+	kb, _ := knowledge.Open(filepath.Join(t.TempDir(), "k.json"))
+	kb.Add(knowledge.Pitfall{
+		Domain: "file", ErrorPattern: "missing required param(s): path",
+		Context: "file: edit", ProvenFix: "include the path param",
+	})
+	a := New(&scriptLLM{}, tool.NewRegistry(tool.NewFile(nil, nil, nil)), kb, nil, "", 5)
+
+	if h := a.hints("file", "edit", "missing required param(s): path"); !strings.Contains(h, "this worked: include the path param") {
+		t.Errorf("hint = %q, want the original fix wording", h)
+	}
+}
+
 // A domain often reuses the exact same generic validation text across
 // different actions (file's "missing required param(s): path" fires for
 // write, edit, AND append alike) — a lesson learned on one action must not

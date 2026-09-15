@@ -41,7 +41,7 @@ type KB struct {
 	// pending is the raw log of Add() calls not yet folded into the on-disk
 	// file — Save replays them (via mergeOne, same as Add itself) onto a
 	// freshly re-read copy of the file instead of blindly overwriting it, so a
-	// separate ipsupport-code process sharing the same global KB can't have its
+	// separate ipsupport-code process sharing the same store can't have its
 	// lessons silently lost. overwrite (set by Purge/Clear) skips that merge:
 	// those are a deliberate replace of the whole store, not a delta.
 	pending   []Pitfall
@@ -167,6 +167,65 @@ func (k *KB) Clear() int {
 	return n
 }
 
+// Sorted returns every lesson in a stable, content-derived order (domain, then
+// normalized error pattern). Listing and deleting a lesson by its position both
+// go through this: the store's own slice order depends on insertion history and
+// on Purge compaction, so a number printed by one command could otherwise point
+// at a different lesson by the time the next command runs.
+func (k *KB) Sorted() []Pitfall {
+	out := k.All()
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Domain != out[j].Domain {
+			return out[i].Domain < out[j].Domain
+		}
+		return norm(out[i].ErrorPattern) < norm(out[j].ErrorPattern)
+	})
+	return out
+}
+
+// Delete removes the one lesson matching p's (domain, normalized error pattern),
+// reporting whether anything was removed. Pass a Pitfall straight from Sorted.
+func (k *KB) Delete(p Pitfall) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	key := dedupeKey(p)
+	for i := range k.pitfalls {
+		if dedupeKey(k.pitfalls[i]) == key {
+			k.pitfalls = append(k.pitfalls[:i], k.pitfalls[i+1:]...)
+			// Same reasoning as Purge: k.pitfalls already reflects every pending
+			// Add, so replace the file wholesale rather than replaying pending
+			// lessons — which would resurrect the one just deleted.
+			k.pending = nil
+			k.overwrite = true
+			return true
+		}
+	}
+	return false
+}
+
+// DropWhere removes every lesson for which drop reports true, returning how many
+// went. Used to retire lessons a later rule made unstorable (see
+// IsProjectSpecific) without waiting for them to age out.
+func (k *KB) DropWhere(drop func(Pitfall) bool) int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	kept := k.pitfalls[:0]
+	dropped := 0
+	for _, p := range k.pitfalls {
+		if drop(p) {
+			dropped++
+			continue
+		}
+		kept = append(kept, p)
+	}
+	k.pitfalls = kept
+	if dropped > 0 {
+		k.pending = nil
+		k.overwrite = true
+	}
+	return dropped
+}
+
 // Count reports how many lessons are stored.
 func (k *KB) Count() int {
 	k.mu.Lock()
@@ -247,7 +306,7 @@ func readPitfalls(path string) ([]Pitfall, error) {
 // Before writing, it re-reads the file and replays this KB's own pending Add()
 // lessons onto that fresh copy instead of blindly overwriting it with
 // pitfalls — otherwise two separate ipsupport-code processes sharing the same
-// global KB could have one's learned lesson silently lost to the other's last
+// same store could have one's learned lesson silently lost to the other's last
 // write (the mutex only protects against races WITHIN one process). Purge/
 // Clear set overwrite, skipping the merge: those are a deliberate replace of
 // the whole store. When neither applies — nothing pending and no overwrite

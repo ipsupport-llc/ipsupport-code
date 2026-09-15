@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -516,4 +517,22 @@ func contains(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// The lesson store is per workspace, not one global file. Reported live: a lesson
+// distilled in one project surfaced in an unrelated one and pointed the model at
+// the wrong cause. A store shared by every project on the machine turns one bad
+// lesson into a machine-wide problem; scoped this way the blast radius is the
+// project that taught it, and /clear can wipe it like any other workspace state.
+func TestDefaultKBPathIsPerWorkspace(t *testing.T) {
+	a, b := DefaultKBPath("/tmp/project-a"), DefaultKBPath("/tmp/project-b")
+	if a == b {
+		t.Fatalf("both workspaces share one store: %q", a)
+	}
+	if !strings.HasPrefix(a, "/tmp/project-a") {
+		t.Errorf("path = %q, want it under the workspace", a)
+	}
+	if !strings.Contains(a, ".agent") {
+		t.Errorf("path = %q, want it alongside the workspace's other .agent state", a)
+	}
 }

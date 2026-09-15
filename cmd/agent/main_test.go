@@ -7670,3 +7670,134 @@ func TestSaveSessionHappensBeforeSlowReflection(t *testing.T) {
 		t.Fatalf("runOne: %v", err)
 	}
 }
+
+// knowledgeLessonsApp builds an app whose lesson store is a real file in a temp
+// workspace, so list/drop/clear round-trip through Save the way they do live.
+func knowledgeLessonsApp(t *testing.T, lessons ...knowledge.Pitfall) *app {
+	t.Helper()
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, err := knowledge.Open(filepath.Join(cfg.Workspace, "lessons.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range lessons {
+		kb.Add(p)
+	}
+	if err := kb.Save(); err != nil {
+		t.Fatal(err)
+	}
+	return &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+}
+
+// Reported live: a lesson quoting another project's file path surfaced on an
+// unrelated failure and sent the model after the wrong cause — and there was no
+// way to find it. The only view of the store was per-domain counts and the only
+// edit was wiping all of it, so the lesson text has to be readable.
+func TestKnowledgeListShowsTheActualLessons(t *testing.T) {
+	a := knowledgeLessonsApp(t,
+		knowledge.Pitfall{Domain: "file", ErrorPattern: "you gave {}", Context: "file: write",
+			ProvenFix: "send params as a JSON object"},
+		knowledge.Pitfall{Domain: "run", Kind: knowledge.KindAvoid, ErrorPattern: "permission denied",
+			Context: "run: shell", ProvenFix: "ask the user to run it"},
+	)
+	out := strings.Join(a.knowledgeCommand("list"), "\n")
+	for _, want := range []string{"you gave {}", "send params as a JSON object", "permission denied", "ask the user to run it"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("/knowledge list missing %q:\n%s", want, out)
+		}
+	}
+	// A dead end must not read as advice that worked — the same distinction the
+	// model itself is shown (see Agent.hints).
+	if !strings.Contains(out, "dead end") {
+		t.Errorf("/knowledge list doesn't distinguish a dead-end lesson:\n%s", out)
+	}
+}
+
+// /knowledge drop <n> takes the number /knowledge list printed, removes exactly
+// that lesson, and persists — so a bad lesson can be retired without wiping the
+// whole store.
+func TestKnowledgeDropRemovesTheNumberedLesson(t *testing.T) {
+	a := knowledgeLessonsApp(t,
+		knowledge.Pitfall{Domain: "file", ErrorPattern: "you gave {}", ProvenFix: "keep me"},
+		knowledge.Pitfall{Domain: "run", ErrorPattern: "permission denied", ProvenFix: "drop me"},
+	)
+	sorted := a.kb.Sorted() // list and drop agree on this order
+	victim := -1
+	for i, p := range sorted {
+		if p.ProvenFix == "drop me" {
+			victim = i + 1
+		}
+	}
+	if victim < 1 {
+		t.Fatal("test setup: victim lesson not found")
+	}
+	if out := strings.Join(a.knowledgeCommand(fmt.Sprintf("drop %d", victim)), "\n"); !strings.Contains(out, "dropped") {
+		t.Fatalf("drop said %q", out)
+	}
+	all := a.kb.All()
+	if len(all) != 1 || all[0].ProvenFix != "keep me" {
+		t.Fatalf("after drop = %+v, want only the kept lesson", all)
+	}
+	// Persisted, not just dropped in memory.
+	reopened, err := knowledge.Open(filepath.Join(a.workspace, "lessons.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.All(); len(got) != 1 || got[0].ProvenFix != "keep me" {
+		t.Errorf("on disk = %+v, want only the kept lesson", got)
+	}
+	// An out-of-range number explains itself instead of silently doing nothing.
+	if out := strings.Join(a.knowledgeCommand("drop 99"), "\n"); !strings.Contains(out, "usage") {
+		t.Errorf("drop 99 said %q, want a usage line", out)
+	}
+}
+
+// /clear is the user's explicit "start fresh" signal. It already wiped history
+// and learned facts; lessons belong with them — a lesson from an abandoned line
+// of work otherwise keeps surfacing on every failing tool call afterwards, and
+// unlike a fact it lands precisely when the model is already stuck.
+func TestClearSessionWipesLearnedLessons(t *testing.T) {
+	a := knowledgeLessonsApp(t,
+		knowledge.Pitfall{Domain: "file", ErrorPattern: "you gave {}", ProvenFix: "send a JSON object"},
+	)
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.clearSession()
+	if n := a.kb.Count(); n != 0 {
+		t.Errorf("lessons after /clear = %d, want 0", n)
+	}
+	reopened, err := knowledge.Open(filepath.Join(a.workspace, "lessons.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.All(); len(got) != 0 {
+		t.Errorf("on disk after /clear = %+v, want empty", got)
+	}
+}
+
+// A lesson quoting a path from the run that taught it could be written before the
+// rule rejecting it existed. Startup retires those, so an existing store heals
+// itself instead of waiting for them to age out of retention.
+func TestDropPoisonedLessonsRetiresPathCarryingEntriesOnStartup(t *testing.T) {
+	a := knowledgeLessonsApp(t,
+		knowledge.Pitfall{Domain: "file", ErrorPattern: "you gave {}", Context: "file: write",
+			ProvenFix: `Provide proper path parameter: {"path": "nemotron-extreme-quant/PLAN.md"}`},
+		knowledge.Pitfall{Domain: "file", ErrorPattern: "no such file", Context: "file: write",
+			ProvenFix: "create the parent directory first"},
+	)
+	a.dropPoisonedLessons()
+	all := a.kb.All()
+	if len(all) != 1 || all[0].ProvenFix != "create the parent directory first" {
+		t.Fatalf("remaining = %+v, want only the project-neutral lesson", all)
+	}
+	reopened, err := knowledge.Open(filepath.Join(a.workspace, "lessons.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.All(); len(got) != 1 {
+		t.Errorf("on disk = %+v, want the poisoned lesson gone there too", got)
+	}
+}

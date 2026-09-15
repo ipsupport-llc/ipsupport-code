@@ -1654,7 +1654,17 @@ func (a *Agent) hints(domain, action, errText string) string {
 		if b.Len() == 0 {
 			b.WriteString("Hints from past runs:")
 		}
-		fmt.Fprintf(&b, "\n- when you saw %q while %s, this worked: %s", p.ErrorPattern, p.Context, p.ProvenFix)
+		// A dead-end lesson (knowledge.KindAvoid) must NOT be introduced as
+		// something that worked — the whole point of recording one is that the
+		// approach kept failing, and "this worked: <the thing that never worked>"
+		// would push the model straight back into the loop the lesson exists to
+		// break. Lessons stored before Kind existed have Kind == "" and keep the
+		// original wording.
+		if p.Kind == knowledge.KindAvoid {
+			fmt.Fprintf(&b, "\n- when you saw %q while %s, retrying the same call did NOT work — do this instead: %s", p.ErrorPattern, p.Context, p.ProvenFix)
+		} else {
+			fmt.Fprintf(&b, "\n- when you saw %q while %s, this worked: %s", p.ErrorPattern, p.Context, p.ProvenFix)
+		}
 	}
 	return b.String()
 }

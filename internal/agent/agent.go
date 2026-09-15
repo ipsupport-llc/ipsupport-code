@@ -631,7 +631,7 @@ func actionsDigest(msgs []llm.Message) string {
 			continue
 		}
 		for j, tc := range m.ToolCalls {
-			action, params := parseArgs(tc.Arguments)
+			action, params, _ := parseArgs(tc.Arguments)
 			switch tc.Name {
 			case "file":
 				if action == "read" || action == "list" || action == "find" || action == "search" {
@@ -905,19 +905,31 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// call left no trace of ever having happened, making a
 					// tool_calls=[] turn's true fate unreadable from the log alone.
 					slog.Debug("goal judge", a.debugArgs("verdict", verdict, "missing", missing, "return", returns, "of", a.maxReturns, "reason", "normal")...)
-					switch verdict {
-					case judgeMore:
+					// judgeDone is the ONLY verdict that ends a goal run early. Both
+					// judgeMore and judgeUnclear mean the same thing — the goal is not
+					// confirmed met — so both re-feed it and keep going, up to the TTL.
+					//
+					// Reported live, with the debug log to prove it: a judge whose own
+					// reply came back empty on BOTH attempts (finish_reason=length —
+					// its reasoning ate the entire output budget, nothing reached
+					// Content) returned judgeUnclear, and judgeUnclear used to accept
+					// the final and end the run: "verdict=unclear return=1 of=255",
+					// i.e. a goal abandoned with 254 returns still unspent. The goal
+					// thus died neither because it was met, nor because the budget ran
+					// out, nor because the user turned it off — but because the judge
+					// couldn't speak. A judge that can't answer has confirmed nothing;
+					// silence is not acceptance. The only things that end goal pursuit
+					// are an explicit DONE, the TTL, and the user (/goal off).
+					if verdict == judgeDone {
+						goalMet = true // only an explicit DONE marks the goal verifiably met
+						a.emit("judge", map[string]any{"done": true})
+					} else {
 						returns++
 						actedSinceReturn, idleNudged = false, false
 						msgs = append(msgs, llm.User(goalReturn(goal, missing)))
 						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing})
 						continue
-					case judgeDone:
-						goalMet = true // only an explicit DONE marks the goal verifiably met
-						a.emit("judge", map[string]any{"done": true})
 					}
-					// judgeUnclear → accept this final (don't trap the loop), but leave
-					// goalMet false: an unverifiable judge is NOT a confirmed success.
 				case a.nudgeIdle && !idleNudged && returns > 0:
 					// The goal was just re-fed but the model finished WITHOUT doing any
 					// work this turn. Rather than silently give up, push it once.
@@ -946,6 +958,16 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 				switch {
 				case goalStalled:
 					clean = fmt.Sprintf("(goal not confirmed complete — stopped after %d/%d continues; the model finished without further progress. `/goal go` to keep pushing, or switch to a stronger model with /model.)", returns, a.maxReturns)
+				case assistant.FinishReason == "length":
+					// Reported live: a reasoning model spent its ENTIRE output budget
+					// thinking and never reached Content — the server cut it off
+					// (finish_reason=length) at a prompt size nowhere near the context
+					// window, so this has nothing to do with auto-compact. Ranked
+					// ABOVE the acted case: a cut-off reply is not a silent success,
+					// and the generic advice below is wrong on both counts —
+					// rephrasing doesn't move an output cap, and a stronger model
+					// burns more of it. Name the actual cap and the actual knob.
+					clean = "(the model hit its output limit mid-reply (finish_reason=length) and produced nothing — a reasoning model can spend the whole budget thinking. Raise `max output` in /config.)"
 				case acted:
 					clean = "(done — finished without a written summary; see the changes/output above.)"
 				default:
@@ -1257,7 +1279,7 @@ func goalReturn(goal, missing string) string {
 type judgeVerdict int
 
 const (
-	judgeUnclear judgeVerdict = iota // couldn't parse a verdict — accept but don't claim success
+	judgeUnclear judgeVerdict = iota // couldn't parse a verdict — treated as "not met" (see Run)
 	judgeDone                        // explicitly met
 	judgeMore                        // explicitly incomplete
 )
@@ -1329,8 +1351,8 @@ func goalNotConfirmedNote(maxReturns int, met bool, missing string) string {
 // judgeGoal asks the model, in a fresh side call (no tools), whether the goal is
 // actually met given the work just finished. Returns a tri-state so the caller can
 // treat "can't tell" differently from "confirmed done": on a transport error or an
-// unparseable reply it returns judgeUnclear — accept the final to avoid trapping
-// the loop, but do NOT record the goal as verifiably met.
+// unparseable reply it returns judgeUnclear, which never marks the goal met (only
+// an explicit DONE does) — see Run for what the callers do with it.
 //
 // One retry on judgeUnclear: reported live, a weak local judge model
 // occasionally returns a totally empty reply ("goal judge unparseable
@@ -1545,7 +1567,7 @@ func (a *Agent) anyMutating(calls []llm.ToolCall) bool {
 		if c.Name == "agent" {
 			return true
 		}
-		action, _ := parseArgs(c.Arguments)
+		action, _, _ := parseArgs(c.Arguments)
 		if a.reg.Mutates(c.Name, action) {
 			return true
 		}
@@ -1554,7 +1576,7 @@ func (a *Agent) anyMutating(calls []llm.ToolCall) bool {
 }
 
 func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool) {
-	action, params := parseArgs(c.Arguments)
+	action, params, argWarn := parseArgs(c.Arguments)
 	a.emit("tool_call", map[string]any{"tool": c.Name, "action": action, "params": params})
 
 	// Plan mode backstop: refuse mutating calls even if the model ignores the
@@ -1587,6 +1609,14 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool)
 		if len(extra) > 0 {
 			content = res.Content + "\n" + strings.Join(extra, "\n")
 		}
+	}
+	// parseArgs could see that params WERE sent but couldn't recover anything from
+	// them (see its warn return). Lead with that: the dispatch error can only
+	// report the empty params it actually received ("you gave {}"), which reads to
+	// the model as a flat contradiction of what it just sent, and it will keep
+	// re-sending the same broken shape trying to satisfy it.
+	if res.IsError && argWarn != "" {
+		content = argWarn + "\n" + content
 	}
 	a.emit("observation", map[string]any{
 		"tool": c.Name, "action": action, "is_error": res.IsError, "content": content,
@@ -1694,12 +1724,17 @@ func (a *Agent) debugArgs(args ...any) []any {
 // JSON-encoded STRING (double-encoded — a very common mistake), or the per-action
 // fields flattened at the top level. Action may live at the top level or inside
 // a stringified params blob.
-func parseArgs(raw string) (string, map[string]any) {
+//
+// The third return value is a diagnostic for the ONE case where params were
+// visibly sent but could not be recovered at all (a stringified params blob that
+// isn't valid JSON): empty otherwise, and only surfaced to the model when the
+// resulting call actually errors — see execOne.
+func parseArgs(raw string) (action string, params map[string]any, warn string) {
 	m := decodeObj(raw)
 	if m == nil {
-		return "", map[string]any{}
+		return "", map[string]any{}, ""
 	}
-	action, _ := m["action"].(string)
+	action, _ = m["action"].(string)
 
 	// A model can leak its own "<parameter=NAME>value</parameter>" tool-call
 	// convention into just the "action" field's own string value, rather than
@@ -1755,9 +1790,21 @@ func parseArgs(raw string) (string, map[string]any) {
 				p[k] = v
 			}
 		}
-		return action, p
+		return action, p, ""
 	case string: // params double-encoded as a JSON string — decode it
-		if inner := decodeObj(p); inner != nil {
+		if inner := decodeObj(p); inner == nil {
+			// Reported live, ten turns in a row: a model sent params as a JSON
+			// *string* whose inner JSON didn't parse (a long file body cut off
+			// mid-document), so decodeObj failed and the call fell through to the
+			// flattened branch below — yielding EMPTY params and a dispatch error
+			// reading "file.write needs {path}; you gave {}". The model could see
+			// in its own transcript that it HAD sent path and content, read the
+			// error as nonsense ("the error says I'm giving {} but I am passing
+			// path"), and retried the identical broken shape until the run died.
+			// The error wasn't wrong about what arrived — it just described the
+			// wreckage instead of the crash. Say what actually happened.
+			warn = fmt.Sprintf("note: \"params\" arrived as a JSON string rather than an object, and that string is not valid JSON (truncated or mis-escaped) — nothing could be read out of it, which is why the call below saw no params at all. Send params as a real JSON object, e.g. {\"action\": \"write\", \"params\": {\"path\": \"x.md\", \"content\": \"...\"}}. What arrived was: %s", clip(p, 200))
+		} else {
 			if a, ok := inner["action"].(string); ok && action == "" {
 				action = a
 			}
@@ -1772,18 +1819,18 @@ func parseArgs(raw string) (string, map[string]any) {
 					inner[k] = v
 				}
 			}
-			return action, inner
+			return action, inner, ""
 		}
 	}
 
 	// Flattened: everything except action/params is a param.
-	params := map[string]any{}
+	params = map[string]any{}
 	for k, v := range m {
 		if k != "action" && k != "params" {
 			params[k] = v
 		}
 	}
-	return action, params
+	return action, params, warn
 }
 
 // unwrapEnvelope salvages answers from models that emit their whole chat-message

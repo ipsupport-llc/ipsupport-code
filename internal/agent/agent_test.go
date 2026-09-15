@@ -875,7 +875,7 @@ func TestSplitSuggestion(t *testing.T) {
 
 func TestParseArgsFoldsTopLevel(t *testing.T) {
 	// Small models often omit the "params" wrapper.
-	action, params := parseArgs(`{"action":"calculate","expression":"2+2"}`)
+	action, params, _ := parseArgs(`{"action":"calculate","expression":"2+2"}`)
 	if action != "calculate" {
 		t.Errorf("action = %q, want calculate", action)
 	}
@@ -889,7 +889,7 @@ func TestParseArgsFoldsTopLevel(t *testing.T) {
 
 func TestParseArgsStringifiedParams(t *testing.T) {
 	// The most common malformation: params double-encoded as a JSON string.
-	action, params := parseArgs(`{"action":"write","params":"{\"path\":\"main.py\",\"content\":\"x\"}"}`)
+	action, params, _ := parseArgs(`{"action":"write","params":"{\"path\":\"main.py\",\"content\":\"x\"}"}`)
 	if action != "write" {
 		t.Errorf("action = %q, want write", action)
 	}
@@ -897,12 +897,99 @@ func TestParseArgsStringifiedParams(t *testing.T) {
 		t.Errorf("params = %v, want decoded path+content", params)
 	}
 	// Action nested inside the stringified blob, none at top level.
-	action, params = parseArgs(`{"params":"{\"action\":\"write\",\"path\":\"a.txt\",\"content\":\"hi\"}"}`)
+	action, params, _ = parseArgs(`{"params":"{\"action\":\"write\",\"path\":\"a.txt\",\"content\":\"hi\"}"}`)
 	if action != "write" || params["path"] != "a.txt" {
 		t.Errorf("nested-action: action=%q params=%v", action, params)
 	}
 	if _, leaked := params["action"]; leaked {
 		t.Error("action leaked into decoded params")
+	}
+}
+
+// Reported live, ten turns in a row: a model sent params as a JSON *string* whose
+// inner JSON was cut off mid-document, so nothing could be decoded out of it and
+// the call reached dispatch with EMPTY params. The resulting error — "file.write
+// needs {path}; you gave {}" — was accurate about what arrived but said nothing
+// about why, and the model, looking at the path it had plainly just sent, read it
+// as nonsense ("the error says I'm giving {} but I am passing path") and re-sent
+// the identical broken shape until the run died. parseArgs must hand back a
+// diagnostic naming the real problem.
+func TestParseArgsFlagsAnUnreadableStringifiedParamsBlob(t *testing.T) {
+	// Valid outer JSON; the stringified params inside it is truncated (no closing
+	// brace), so neither the strict decode nor decodeObj's brace-scan fallback
+	// can recover anything — exactly the live shape.
+	action, params, warn := parseArgs(`{"action":"write","params":"{\"path\": \"LAB_REPORT.md\", \"content\": \"# Lab Report"}`)
+	if action != "write" {
+		t.Errorf("action = %q, want write (the outer object still parsed)", action)
+	}
+	if len(params) != 0 {
+		t.Errorf("params = %v, want empty (nothing was recoverable)", params)
+	}
+	if warn == "" {
+		t.Fatal("warn is empty — an unreadable params string must be reported, not silently dropped")
+	}
+	if !strings.Contains(warn, "not valid JSON") || !strings.Contains(warn, "LAB_REPORT.md") {
+		t.Errorf("warn = %q, want it to name the problem and echo what actually arrived", warn)
+	}
+}
+
+// The same blob, but recoverable: a well-formed stringified params must NOT
+// produce a warning — the diagnostic is for the unrecoverable case only, and
+// firing it on every double-encoded call would bury real errors in noise.
+func TestParseArgsDoesNotWarnWhenTheStringifiedParamsDecodeFine(t *testing.T) {
+	if _, _, warn := parseArgs(`{"action":"write","params":"{\"path\":\"a.txt\",\"content\":\"hi\"}"}`); warn != "" {
+		t.Errorf("warn = %q, want empty for a params string that decoded cleanly", warn)
+	}
+}
+
+// End to end: the diagnostic is worthless unless it reaches the MODEL. It must
+// land in the tool result, ahead of the "you gave {}" dispatch error it exists to
+// explain — and without swallowing that error, which still carries the schema.
+func TestRunSendsTheUnreadableParamsDiagnosticBackToTheModel(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c", "calc", `{"action":"calculate","params":"{\"expression\": \"2+2"}`),
+		{Role: "assistant", Content: "gave up"},
+	}}
+	a := New(fake, reg, nil, nil, "", 10)
+
+	tr, err := a.Run(context.Background(), "add two numbers")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	result := ""
+	for _, m := range tr.Messages {
+		if m.Role == "tool" {
+			result = m.Content
+		}
+	}
+	if !strings.Contains(result, "not valid JSON") {
+		t.Errorf("tool result = %q, want the unreadable-params diagnostic in it", result)
+	}
+	if !strings.Contains(result, "missing required param") {
+		t.Errorf("tool result = %q, want the original dispatch error kept too", result)
+	}
+}
+
+// Reported live: a reasoning model spent its whole output budget thinking and
+// never reached Content — the server cut it off (finish_reason=length) at a
+// prompt size nowhere near the context window. The run ended telling the user to
+// rephrase or pick a stronger model, both of which are wrong: rephrasing doesn't
+// move an output cap, and a stronger model burns more of it. Name the real knob.
+func TestRunNamesTheOutputCapWhenTheModelWasCutOffMidReply(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", FinishReason: "length"},
+		{Role: "assistant", FinishReason: "length"}, // still nothing after the one nudge
+	}}
+	a := New(fake, reg, nil, nil, "", 10)
+
+	tr, err := a.Run(context.Background(), "do the thing")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(tr.Final, "max output") {
+		t.Errorf("final = %q, want it to name the output cap and the /config knob that raises it", tr.Final)
 	}
 }
 
@@ -1175,12 +1262,12 @@ func TestUnwrapEnvelope(t *testing.T) {
 }
 
 func TestParseArgsNestedObject(t *testing.T) {
-	action, params := parseArgs(`{"action":"edit","params":{"path":"a","find":"x","replace":"y"}}`)
+	action, params, _ := parseArgs(`{"action":"edit","params":{"path":"a","find":"x","replace":"y"}}`)
 	if action != "edit" || params["find"] != "x" || params["replace"] != "y" {
 		t.Errorf("nested object: action=%q params=%v", action, params)
 	}
 	// Mixed shape: path at the top level, the rest under params — fold them together.
-	action, params = parseArgs(`{"action":"edit","path":"main.go","params":{"find":"x","replace":"y"}}`)
+	action, params, _ = parseArgs(`{"action":"edit","path":"main.go","params":{"find":"x","replace":"y"}}`)
 	if action != "edit" || params["path"] != "main.go" || params["find"] != "x" {
 		t.Errorf("mixed shape dropped a sibling: action=%q params=%v", action, params)
 	}
@@ -1198,13 +1285,13 @@ func TestParseArgsNestedObject(t *testing.T) {
 // singleton array wrapping one object is unambiguous — there is exactly one
 // way to read it — so unwrapping it is a safe shape fix, not a guess.
 func TestParseArgsUnwrapsSingletonArrayParams(t *testing.T) {
-	action, params := parseArgs(`{"action":"write","params":[{"path":"README.md","content":"x"}]}`)
+	action, params, _ := parseArgs(`{"action":"write","params":[{"path":"README.md","content":"x"}]}`)
 	if action != "write" || params["path"] != "README.md" || params["content"] != "x" {
 		t.Errorf("array-wrapped params: action=%q params=%v, want write/README.md/x", action, params)
 	}
 	// A multi-element array has no single unambiguous reading — must NOT guess,
 	// leave params empty so the tool's own "missing param" error fires normally.
-	action, params = parseArgs(`{"action":"write","params":[{"path":"a"},{"path":"b"}]}`)
+	action, params, _ = parseArgs(`{"action":"write","params":[{"path":"a"},{"path":"b"}]}`)
 	if action != "write" || len(params) != 0 {
 		t.Errorf("multi-element array params: action=%q params=%v, want action=write and empty params", action, params)
 	}
@@ -1216,7 +1303,7 @@ func TestParseArgsUnwrapsSingletonArrayParams(t *testing.T) {
 // json.Unmarshal outright (doesn't even start with "{"). decodeObj falls back
 // to the embedded object instead of giving up and losing the params entirely.
 func TestParseArgsRecoversObjectWrappedInModelOwnTags(t *testing.T) {
-	action, params := parseArgs("<parameter=params>\n{\"url\": \"https://example.com\"}\n</parameter>")
+	action, params, _ := parseArgs("<parameter=params>\n{\"url\": \"https://example.com\"}\n</parameter>")
 	if params["url"] != "https://example.com" {
 		t.Errorf("action=%q params=%v, want url recovered from the tag-wrapped JSON", action, params)
 	}
@@ -1234,12 +1321,12 @@ func TestParseArgsRecoversObjectWrappedInModelOwnTags(t *testing.T) {
 // ran the literal tag text as a shell command ("sh: syntax error"), and for
 // file it surfaced as an unknown action.
 func TestParseArgsRecoversActionFieldWrappedInModelOwnTags(t *testing.T) {
-	action, params := parseArgs(`{"action":"<parameter=action>\nlist\n</parameter>","params":{"path":"."}}`)
+	action, params, _ := parseArgs(`{"action":"<parameter=action>\nlist\n</parameter>","params":{"path":"."}}`)
 	if action != "list" || params["path"] != "." {
 		t.Errorf("bare tag: action=%q params=%v, want action=list params.path=.", action, params)
 	}
 
-	action, params = parseArgs(`{"action":"<parameter=params>\n{\"command\": \"ls -la\", \"cwd\": \"/Users/roman220/test\"}\n</parameter>"}`)
+	action, params, _ = parseArgs(`{"action":"<parameter=params>\n{\"command\": \"ls -la\", \"cwd\": \"/Users/roman220/test\"}\n</parameter>"}`)
 	if action != "" || params["command"] != "ls -la" || params["cwd"] != "/Users/roman220/test" {
 		t.Errorf("object tag: action=%q params=%v, want action=\"\" command=\"ls -la\" cwd=\"/Users/roman220/test\"", action, params)
 	}
@@ -1249,7 +1336,7 @@ func TestParseArgsRecoversActionFieldWrappedInModelOwnTags(t *testing.T) {
 	// pick which of file's 8 actions was meant — that's the registry's job
 	// (inferAction, or the terse "no action given" error), not parseArgs'.
 	// This just confirms the params (path=".") still come through clean.
-	action, params = parseArgs(`{"action":"<parameter=params>\n{\"path\": \".\"}\n</parameter>"}`)
+	action, params, _ = parseArgs(`{"action":"<parameter=params>\n{\"path\": \".\"}\n</parameter>"}`)
 	if action != "" || params["path"] != "." {
 		t.Errorf("file object tag: action=%q params=%v, want action=\"\" path=\".\"", action, params)
 	}
@@ -1755,32 +1842,63 @@ func TestRunGoalLoopStopsAtTTL(t *testing.T) {
 	}
 }
 
-// The judge must NOT rubber-stamp an unparseable reply as a met goal: it accepts
-// the final (so it doesn't trap the loop) but leaves GoalMet false. judgeGoal
-// retries once on an unclear verdict (see judgeGoalOnce) — both scripted judge
-// replies here are unclear, so the retry fires too and still lands unclear.
-func TestRunGoalLoopUnclearJudgeDoesNotMarkMet(t *testing.T) {
+// A judge that can't produce a readable verdict has confirmed NOTHING, so it must
+// not end the goal run. Reported live, with the debug log to prove it: both judge
+// attempts came back empty (finish_reason=length — the judge's own reasoning ate
+// its entire output budget), judgeUnclear was treated as "accept this final", and
+// the goal was abandoned at "verdict=unclear return=1 of=255" — 254 returns still
+// unspent. An unreadable verdict must re-feed the goal exactly like MORE does.
+func TestRunGoalLoopUnclearJudgeReFeedsInsteadOfEndingTheGoal(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
 	fake := &scriptLLM{replies: []llm.Message{
 		calcCall(),
-		{Role: "assistant", Content: "I think that's everything"}, // finalize
+		{Role: "assistant", Content: "I think that's everything"}, // finalize 1
 		{Role: "assistant", Content: "hmm, hard to say really"},   // judge attempt 1: no DONE/MORE token
 		{Role: "assistant", Content: "still can't tell honestly"}, // judge attempt 2 (the retry): also unclear
+		calcCall(), // the re-feed put the model back to work
+		{Role: "assistant", Content: "really done"}, // finalize 2
+		{Role: "assistant", Content: "DONE"},        // judge: readable this time
 	}}
 	a := New(fake, reg, nil, nil, "", 20)
 	a.SetGoalLoop(3, false)
 
 	tr, _ := a.Run(context.Background(), "do the thing")
+	if tr.Returns != 1 {
+		t.Errorf("returns = %d, want 1 (an unreadable verdict must re-feed the goal, not accept the final)", tr.Returns)
+	}
+	if !tr.GoalMet {
+		t.Error("GoalMet = false, want true — the run kept going and the judge did eventually say DONE")
+	}
+	if tr.Final != "really done" {
+		t.Errorf("final = %q, want the SECOND finalize (the first was not the end of the run)", tr.Final)
+	}
+}
+
+// ...and an unreadable verdict still never counts as success on its own: with the
+// judge unreadable all the way to the TTL, the run ends on the budget (the only
+// bound besides an explicit DONE and the user), GoalMet stays false, and the final
+// says so instead of reading like a confirmed finish.
+func TestRunGoalLoopUnclearJudgeNeverMarksTheGoalMet(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "first pass done"},  // finalize 1
+		{Role: "assistant", Content: "hmm, hard to say"}, // judge attempt 1: unclear
+		{Role: "assistant", Content: "still can't tell"}, // judge attempt 2 (retry): unclear → re-feed
+		calcCall(), // work after the re-feed
+		{Role: "assistant", Content: "I think that's every"}, // finalize 2 — returns == TTL, no judge call
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(1, false)
+
+	tr, _ := a.Run(context.Background(), "do the thing")
 	if tr.GoalMet {
-		t.Error("GoalMet = true on an unparseable judge verdict, want false")
+		t.Error("GoalMet = true on an unreadable judge verdict, want false")
 	}
-	if tr.Returns != 0 {
-		t.Errorf("returns = %d, want 0 (unclear verdict accepts, doesn't re-feed)", tr.Returns)
+	if tr.Returns != 1 {
+		t.Errorf("returns = %d, want 1 (the TTL)", tr.Returns)
 	}
-	// The model's own text survives verbatim, but an unconfirmed goal — even on
-	// the very first attempt, never re-fed — must say so and point at /goal go;
-	// a bare "I think that's everything" would read as a confirmed finish.
-	if !strings.HasPrefix(tr.Final, "I think that's everything") || !strings.Contains(tr.Final, "/goal go") {
+	if !strings.HasPrefix(tr.Final, "I think that's every") || !strings.Contains(tr.Final, "/goal go") {
 		t.Errorf("final = %q, want the model's text plus a not-confirmed note pointing at /goal go", tr.Final)
 	}
 }
@@ -1998,7 +2116,7 @@ func TestRunAnswersAside(t *testing.T) {
 // A model that double-encodes params as a JSON string AND puts a param at the top
 // level (e.g. path) must not lose the top-level one.
 func TestParseArgsStringParamsKeepsSiblings(t *testing.T) {
-	action, params := parseArgs(`{"action":"write","path":"x.txt","params":"{\"content\":\"y\"}"}`)
+	action, params, _ := parseArgs(`{"action":"write","path":"x.txt","params":"{\"content\":\"y\"}"}`)
 	if action != "write" {
 		t.Errorf("action = %q, want write", action)
 	}

@@ -1033,3 +1033,21 @@ func TestChatStalledStreamRetriable(t *testing.T) {
 
 // compile-time guarantee the client satisfies the interface.
 var _ Chatter = (*OpenAIClient)(nil)
+
+// A local server reloading a model wants patience; an endpoint that simply is
+// not running wants to fail fast. 0 keeps the built-in default.
+func TestRetryAttemptsResolvesTheConfiguredCount(t *testing.T) {
+	if got := retryAttempts(0); got != defaultRetryAttempts {
+		t.Errorf("retryAttempts(0) = %d, want the built-in %d", got, defaultRetryAttempts)
+	}
+	if got := retryAttempts(-3); got != defaultRetryAttempts {
+		t.Errorf("retryAttempts(-3) = %d, want the built-in", got)
+	}
+	// 1 means try once and give up — no backoff at all.
+	if got := retryAttempts(1); got != 1 {
+		t.Errorf("retryAttempts(1) = %d, want 1", got)
+	}
+	if got := retryAttempts(16); got != 16 {
+		t.Errorf("retryAttempts(16) = %d, want 16", got)
+	}
+}

@@ -1976,7 +1976,7 @@ func (m *tuiModel) View() string {
 			meter = cDim.Render(" · ") + s
 		}
 		status = cDim.Render(fmt.Sprintf("%s · %s · ctx %s", m.app.providerModel(), filepath.Base(m.app.effectiveDir()), ctxStr)) +
-			meter + cDim.Render(fmt.Sprintf(" · ↑%s · ready", humanK(c)))
+			meter + m.goalBadge() + cDim.Render(fmt.Sprintf(" · ↑%s · ready", humanK(c)))
 	}
 
 	bottom := m.modeLine()
@@ -3131,6 +3131,30 @@ func outputLines(content, marker string, style lipgloss.Style) []string {
 		out = append(out, cDim.Render("    …"))
 	}
 	return out
+}
+
+// goalBadge shows that goal mode is ON, and how much of its budget is left.
+//
+// Nothing in the status line said a goal was standing. Reported live: a goal with
+// a 255-refeed budget ended a run having spent zero of them, and the only sign
+// anything had been pursued at all was the one-off "🎯 goal set" line, long
+// scrolled away. A mode that changes when a run is allowed to stop should be
+// visible while it is on.
+func (m *tuiModel) goalBadge() string {
+	g := m.app.goalSnapshot()
+	if g.Text == "" {
+		return ""
+	}
+	label := "🎯 goal"
+	if g.Status == "incomplete" {
+		label = "🎯 goal (resumable)"
+	}
+	if ttl := m.app.cfg.GoalMaxReturns; ttl > 0 {
+		label += fmt.Sprintf(" · judge re-feeds up to %d×", ttl)
+	} else {
+		label += " · judge off"
+	}
+	return cDim.Render(" · ") + cGoal.Render(label)
 }
 
 // ctxMeter renders the current context fill as a colored percentage — dim under

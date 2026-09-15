@@ -38,6 +38,7 @@ var configRows = []cfgRow{
 	{key: "max_output_tokens"},
 	{key: "loop_detection"},
 	{key: "idle_timeout"},
+	{key: "retry_attempts"},
 	{header: "Behavior"},
 	{key: "mode"},
 	{key: "perm_files"},
@@ -315,6 +316,12 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 			v, hint = "● "+src, "enter: how to edit it"
 		}
 		return "judge criteria", v, hint
+	case "retry_attempts":
+		v := "8 (default)"
+		if act.RetryAttempts > 0 {
+			v = fmt.Sprintf("%d", act.RetryAttempts)
+		}
+		return "retry attempts", v, "enter: cycle (transient failures; 1 = fail fast when the server is simply down)"
 	case "goal_ttl":
 		v := "off — the model's own finish stands"
 		if m.app.cfg.GoalMaxReturns > 0 {
@@ -524,6 +531,13 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		}
 	case "idle_timeout":
 		m.cycleIdleTimeout()
+	case "retry_attempts":
+		next := nextInt(m.app.activeLLM().RetryAttempts, retryAttemptsCycle)
+		if err := m.app.setRetryAttempts(next); err != nil {
+			m.push(cErr.Render("  could not persist: " + err.Error()))
+		} else {
+			_ = m.app.wire()
+		}
 	case "model": // needs the live model list — hand off to /model
 		m.state = stIdle
 		return m.runCommand("/model")
@@ -733,6 +747,12 @@ func (m *tuiModel) cycleJudgeMaxOutput() {
 	}
 	_ = m.app.wire()
 }
+
+// retryAttemptsCycle presets for the "retry attempts" row. 0 = the built-in 8;
+// 1 means try once and fail, which is what you want against an endpoint that
+// simply is not running — eight exponential backoffs to discover nothing is
+// listening is its own kind of wrong.
+var retryAttemptsCycle = []int{0, 1, 2, 4, 8, 16}
 
 // goalTTLCycle presets for the "goal TTL" row. 0 = pursuit off: the model's own
 // finish stands.

@@ -909,9 +909,34 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// goal plus what's missing (keeping the objective in focus, not buried) and
 			// keep going — up to maxReturns (a TTL). Only after real progress, so a
 			// model that just re-finalizes can't burn the budget.
-			if !a.planMode && a.maxReturns > 0 && returns < a.maxReturns {
-				switch {
-				case actedSinceReturn && acted:
+			//
+			// Gated on acted: a run that called no tool at all is a chat reply, and
+			// the goal loop is in force for EVERY prompt while a goal stands (see
+			// goalLoopBudget) — judging "thanks" against the goal and re-feeding it
+			// would trap an ordinary conversational turn in the loop.
+			if !a.planMode && a.maxReturns > 0 && returns < a.maxReturns && acted {
+				// The goal was re-fed and the model finished WITHOUT doing any work
+				// since. Push it once first: a nudge is cheaper than a judge call and
+				// spends no return. returns > 0 implies acted (a return is only ever
+				// incremented past a judge, which is itself gated on acted).
+				if a.nudgeIdle && !idleNudged && returns > 0 && !actedSinceReturn {
+					idleNudged = true
+					msgs = append(msgs, llm.User(idleNudge))
+					a.emit("nudge", map[string]any{"idle": true})
+					continue
+				}
+				// Everything else goes to the judge — including a model that
+				// finalizes idle a SECOND time, with the nudge already spent.
+				//
+				// Reported live: "(goal not confirmed complete — stopped after 3/255
+				// continues; the model finished without further progress.)" — the run
+				// ended with 252 returns unspent and no judge call at all. The old
+				// switch only judged when actedSinceReturn was true, so a model that
+				// idled once, got nudged, and idled again matched NEITHER case and
+				// fell straight out to the final. Same disease as an unclear verdict
+				// ending the run: the goal died neither on an explicit DONE, nor on
+				// the TTL, nor on the user turning it off.
+				{
 					// judgeGoal is an isolated call with no access to msgs — when the
 					// final turn itself has empty/uninformative content (a model that
 					// did real tool-call work but wrote no summary), clean alone told
@@ -951,13 +976,6 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing})
 						continue
 					}
-				case a.nudgeIdle && !idleNudged && returns > 0:
-					// The goal was just re-fed but the model finished WITHOUT doing any
-					// work this turn. Rather than silently give up, push it once.
-					idleNudged = true
-					msgs = append(msgs, llm.User(idleNudge))
-					a.emit("nudge", map[string]any{"idle": true})
-					continue
 				}
 			}
 			// The goal loop was in force, real work happened (acted), but the judge

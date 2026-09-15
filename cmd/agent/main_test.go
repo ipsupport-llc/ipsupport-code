@@ -5553,7 +5553,7 @@ func TestCompactResetsCheckpoints(t *testing.T) {
 	}
 
 	m := &tuiModel{app: a, ctx: context.Background(), input: textarea.New()}
-	cmd := m.startCompact(false)
+	cmd := m.startCompact(false, "")
 	msg := cmd().(compactDoneMsg)
 	if msg.err != nil || msg.n == 0 {
 		t.Fatalf("compact = (n=%d, err=%v), want a real (non no-op) compact for this test", msg.n, msg.err)
@@ -6596,7 +6596,7 @@ func TestStartCompactSetsCancelForConfigGuards(t *testing.T) {
 	}
 	m := &tuiModel{app: a, ctx: context.Background(), input: textarea.New()}
 
-	cmd := m.startCompact(false)
+	cmd := m.startCompact(false, "")
 	if m.cancel == nil {
 		t.Fatal("startCompact should set m.cancel immediately, before the async compact even runs")
 	}
@@ -7799,5 +7799,72 @@ func TestDropPoisonedLessonsRetiresPathCarryingEntriesOnStartup(t *testing.T) {
 	}
 	if got := reopened.All(); len(got) != 1 {
 		t.Errorf("on disk = %+v, want the poisoned lesson gone there too", got)
+	}
+}
+
+// The standing compaction instruction is a file, so it reaches the AUTOMATIC
+// compaction too — the one that fires on its own at the context threshold and
+// decides what survives, where a typed "/compact <steer>" can never reach. The
+// workspace's own file wins over the global one.
+func TestStandingCompactFocusPrefersTheWorkspaceFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	ws := t.TempDir()
+
+	if got := loadStandingCompactFocus(ws); got != "" {
+		t.Errorf("with no file = %q, want empty", got)
+	}
+
+	global := config.CompactPromptPath()
+	if err := os.MkdirAll(filepath.Dir(global), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(global, []byte("global rule"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadStandingCompactFocus(ws); got != "global rule" {
+		t.Errorf("global-only = %q, want the global rule", got)
+	}
+
+	if err := os.MkdirAll(filepath.Join(ws, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".agent", "compact.md"), []byte("workspace rule\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadStandingCompactFocus(ws); got != "workspace rule" {
+		t.Errorf("with both = %q, want the workspace file to win", got)
+	}
+}
+
+// A one-off "/compact <steer>" sharpens THIS compaction on top of the standing
+// rules — it must not silently suspend them, which would drop the very context
+// the user wrote the file to protect.
+func TestCompactFocusCombinesStandingAndOneShot(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader(""))}
+
+	if got := a.compactFocus("just this once"); got != "just this once" {
+		t.Errorf("no standing file = %q, want the one-shot alone", got)
+	}
+	if err := os.MkdirAll(filepath.Join(a.workspace, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.workspace, ".agent", "compact.md"), []byte("always keep the trunk that failed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.compactFocus(""); got != "always keep the trunk that failed" {
+		t.Errorf("auto-compact focus = %q, want the standing rule (this is the path /compact can't reach)", got)
+	}
+	both := a.compactFocus("and the SDP")
+	if !strings.Contains(both, "always keep the trunk that failed") || !strings.Contains(both, "and the SDP") {
+		t.Errorf("combined = %q, want both the standing rule and the one-shot", both)
 	}
 }

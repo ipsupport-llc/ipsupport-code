@@ -140,6 +140,10 @@ type Agent struct {
 	// end-of-task snapshot cannot do. This moves on every main turn and on
 	// nothing else, so it satisfies both.
 	lastPrompt atomic.Int64
+
+	// judgeLLM is the goal judge's own connection, nil when it shares a.llm —
+	// see SetJudgeLLM.
+	judgeLLM llm.Chatter
 }
 
 // Archiver durably records every (goal, final answer + actions digest) pair
@@ -216,6 +220,26 @@ func (a *Agent) SetMaxHistory(n int) { a.maxHistory = n }
 // Compact/remember's cross-task cap, which never runs mid-task. 0 (the
 // default) disables this — no window known, nothing to check against.
 func (a *Agent) SetContextWindow(n int) { a.contextWindow = n }
+
+// SetJudgeLLM points the goal judge at its own connection instead of the main
+// one. nil (the default) means the judge shares a.llm.
+//
+// Reported live: eleven judge calls in a single run, every one of them
+// "reply=\"\" reasoning=<long>". The judge inherited the main model's reasoning
+// settings along with its connection, so on a reasoning model it thought as hard
+// about a yes/no acceptance check as the main model did about the task, spent
+// its entire output budget in reasoning_content, and never reached Content. The
+// reflection pass has had its own scope for exactly this reason; the judge had
+// none, and no way to be told to stop thinking.
+func (a *Agent) SetJudgeLLM(c llm.Chatter) { a.judgeLLM = c }
+
+// judgeChatter is the connection judge calls go out on.
+func (a *Agent) judgeChatter() llm.Chatter {
+	if a.judgeLLM != nil {
+		return a.judgeLLM
+	}
+	return a.llm
+}
 
 // SetGoalLoop configures goal pursuit: when the model finalizes, a judge decides
 // whether the goal is met; if not, re-feed the goal and keep going, up to
@@ -1457,6 +1481,15 @@ func evidenceLabel(tc llm.ToolCall) string {
 	return label
 }
 
+// clipTail keeps the LAST n bytes of s, marking the cut — the mirror of clip,
+// for text whose conclusion is at the end (see the judge's reasoning log).
+func clipTail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "…" + s[len(s)-n:]
+}
+
 // judgeVerdict is the acceptance-checker's answer: the goal is met, needs more, or
 // the reply couldn't be read as either.
 type judgeVerdict int
@@ -1557,7 +1590,7 @@ func (a *Agent) judgeGoal(ctx context.Context, goal, result, evidence string) (j
 }
 
 func (a *Agent) judgeGoalOnce(ctx context.Context, goal, result, evidence string) (judgeVerdict, string) {
-	reply, err := a.llm.Chat(ctx, []llm.Message{
+	reply, err := a.judgeChatter().Chat(ctx, []llm.Message{
 		llm.System(judgeSystem),
 		llm.User("GOAL:\n" + goal + "\n\nWHAT THE AGENT DID / ITS FINAL ANSWER:\n" + clip(result, 2000) + evidence),
 	}, judgeTools())
@@ -1571,9 +1604,16 @@ func (a *Agent) judgeGoalOnce(ctx context.Context, goal, result, evidence string
 		// can stream its whole verdict into Reasoning and leave Content empty
 		// — without this, a future occurrence still couldn't tell "genuinely
 		// empty" from "reasoned it out but never committed it to Content".
+		// The TAIL of the reasoning, not its head: a judge that thinks its way to
+		// a verdict puts it at the END, and clipping from the front showed only
+		// the restatement of the goal every time — enough to see it was thinking,
+		// never enough to see whether it concluded. finish_reason separates "it
+		// stopped without answering" from "the server cut it off mid-thought",
+		// which need different fixes.
 		slog.Debug("goal judge unparseable", a.debugArgs(
 			"reply", clip(strings.TrimSpace(reply.Content), 120),
-			"reasoning", clip(strings.TrimSpace(reply.Reasoning), 200))...)
+			"finish_reason", reply.FinishReason,
+			"reasoning_tail", clipTail(strings.TrimSpace(reply.Reasoning), 300))...)
 	}
 	return verdict, missing
 }
@@ -1630,7 +1670,49 @@ func parseJudgeReply(reply llm.Message) (judgeVerdict, string) {
 			return judgeMore, clipped
 		}
 	}
-	return parseVerdict(reply.Content)
+	if verdict, missing := parseVerdict(reply.Content); verdict != judgeUnclear {
+		return verdict, missing
+	}
+	// Nothing usable in Content — look in the thinking. Reported live, eleven
+	// judge calls in one run, every single one "reply=\"\" reasoning=<long>":
+	// the judge shares the main model's connection AND its reasoning settings,
+	// so on a reasoning model it thinks as hard about a yes/no acceptance check
+	// as the main model does about the task, spends its whole output budget in
+	// reasoning_content, and never reaches Content. Its conclusion was in that
+	// text the whole time, logged and thrown away.
+	return parseReasonedVerdict(reply.Reasoning)
+}
+
+// verdictLine matches a line the judge wrote as its actual verdict — "DONE",
+// "MORE: no report yet", "**DONE**" — anchored to the start of a line on
+// purpose. The loose token match parseVerdict uses is safe on Content (one
+// deliberate line) but not on free-running thought, where "the task is not done"
+// would read as DONE. A line that BEGINS with the token is a verdict; the same
+// word inside a sentence is not.
+var verdictLine = regexp.MustCompile("(?i)^[\\s>*_`\"'\\-]*(DONE|MORE)\\b[\\s:.\u2014-]*(.*)$")
+
+// parseReasonedVerdict recovers a verdict from the judge's reasoning when it
+// never wrote one to Content. Biased exactly like parseVerdict: any MORE line
+// anywhere wins over any DONE, so recovering a verdict from rambling thought can
+// never turn into a false "goal met" — the worst it does is keep pursuing a goal
+// that was already finished, which the TTL bounds and the user can end.
+func parseReasonedVerdict(reasoning string) (judgeVerdict, string) {
+	done := false
+	for _, line := range strings.Split(reasoning, "\n") {
+		m := verdictLine.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			continue
+		}
+		if strings.EqualFold(m[1], "more") {
+			clipped, _ := textutil.Clip(strings.TrimSpace(m[2]), 160)
+			return judgeMore, clipped
+		}
+		done = true
+	}
+	if done {
+		return judgeDone, ""
+	}
+	return judgeUnclear, ""
 }
 
 // parseVerdict reads the judge's whole reply (not just the first line) and biases

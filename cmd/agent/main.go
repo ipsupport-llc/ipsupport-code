@@ -376,6 +376,12 @@ type app struct {
 	statusMu                sync.Mutex
 	tasks, steps, toolCalls int
 	lastPrompt, lastCompl   int // client usage snapshot for per-task ledger deltas
+	// judgeClient is the goal judge's own connection, built only when the user
+	// set a judge-scoped reasoning level (see judgeTarget); nil otherwise, and
+	// the judge shares the main client. Its own usage snapshot is tracked
+	// separately because recordUsage reads deltas per client.
+	judgeClient                     *llm.OpenAIClient
+	lastJudgePrompt, lastJudgeCompl int
 
 	// lastRealContext is the real conversation's prompt-token fullness (from the
 	// last Agent.Run's Transcript.PromptTokens), snapshotted right after Run
@@ -1829,6 +1835,40 @@ func autoMaxHistory(contextWindow int) int {
 	return n
 }
 
+// judgeScoped reports whether the user set a judge-scoped reasoning level for
+// (provider, model).
+func (a *app) judgeScoped(provider, model string) bool {
+	_, byModel := a.cfg.Reasoning["judge:"+provider+"/"+model]
+	_, byProvider := a.cfg.Reasoning["judge:"+provider]
+	return byModel || byProvider
+}
+
+// wireJudge gives the goal judge its own connection when — and only when — the
+// user set a judge-scoped reasoning level. Without an override the judge keeps
+// sharing the main client, which also keeps its token usage flowing into the
+// ledger through the ordinary path; a separate client's usage is drained
+// explicitly by recordUsage instead.
+//
+// Reported live: on a reasoning model the judge inherited the main model's
+// thinking settings along with its connection, spent its whole output budget in
+// reasoning_content deciding a yes/no acceptance check, and returned an empty
+// Content eleven times in one run. "/reasoning judge minimal" is the cure, and
+// this is what makes that setting reach the judge at all.
+func (a *app) wireJudge() {
+	prov, model := a.providerName(), a.activeLLM().Model
+	if !a.judgeScoped(prov, model) {
+		a.judgeClient = nil
+		a.lastJudgePrompt, a.lastJudgeCompl = 0, 0
+		a.ag.SetJudgeLLM(nil)
+		return
+	}
+	cfg := a.activeLLM()
+	cfg.Extra = a.reasoningParams(prov, model, "judge")
+	a.judgeClient = llm.NewOpenAIClient(cfg)
+	a.lastJudgePrompt, a.lastJudgeCompl = 0, 0
+	a.ag.SetJudgeLLM(a.judgeClient)
+}
+
 // reasoningParams resolves the merge-params for (provider, model). scope ""
 // checks "<provider>/<model>" then "<provider>"; scope "reflect" checks the
 // reflect-prefixed keys first (a separate setting for the learning pass), then
@@ -1899,11 +1939,21 @@ func (a *app) reasoningCommand(arg string) []string {
 	if rest, ok := strings.CutPrefix(arg, "reflect"); ok && (rest == "" || rest[0] == ' ') {
 		scope, arg = "reflect:", strings.TrimSpace(rest)
 		_, _, _, provider, model = a.reflectTarget()
+	} else if rest, ok := strings.CutPrefix(arg, "judge"); ok && (rest == "" || rest[0] == ' ') {
+		// The goal judge answers one question — met or not — and a reasoning
+		// model that thinks as hard about that as about the task itself can
+		// spend its whole output budget before writing any answer at all
+		// (reported live: eleven empty judge replies in one run). "minimal" or
+		// "off" here is usually the right setting.
+		scope, arg = "judge:", strings.TrimSpace(rest)
 	}
 	key := scope + provider + "/" + model
 	label := provider + " · " + model
-	if scope != "" {
+	switch scope {
+	case "reflect:":
 		label = "reflection · " + label
+	case "judge:":
+		label = "goal judge · " + label
 	}
 	if arg == "" {
 		cur := "default"
@@ -1916,6 +1966,7 @@ func (a *app) reasoningCommand(arg string) []string {
 			fmt.Sprintf("reasoning for %s: %s", label, cur),
 			"  /reasoning off|minimal|low|medium|high — set it for this model",
 			"  /reasoning reflect <level> — a separate setting for the learning pass",
+			"  /reasoning judge <level>   — a separate setting for the goal judge (minimal suits it)",
 			"  custom shapes: edit \"reasoning\" in config.json (key " + key + ")",
 		}
 	}
@@ -2467,6 +2518,7 @@ func (a *app) wire() error {
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
 	a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
 	a.ag.SetContextWindow(a.activeLLM().ContextWindow) // so a single long task can watch its OWN growing trail mid-run
+	a.wireJudge()                                      // its own connection only when /reasoning judge was set
 	a.ag.SetMaxStuckTurns(a.cfg.MaxStuckTurns)         // 0 = internal/agent's own default
 	// A local server's KV-cache only helps while the prompt PREFIX stays
 	// identical between requests; remember()'s trim cuts from the front, which
@@ -3170,6 +3222,15 @@ func (a *app) recordUsage(dur time.Duration) {
 	p, c := a.client.Usage()
 	dp, dc := p-a.lastPrompt, c-a.lastCompl
 	a.lastPrompt, a.lastCompl = p, c
+	// A judge running on its own connection (see wireJudge) spends real tokens
+	// that the main client never sees — fold them in here rather than letting
+	// them fall out of the ledger and the budget guard entirely.
+	if a.judgeClient != nil {
+		jp, jc := a.judgeClient.Usage()
+		dp += jp - a.lastJudgePrompt
+		dc += jc - a.lastJudgeCompl
+		a.lastJudgePrompt, a.lastJudgeCompl = jp, jc
+	}
 	if dp <= 0 && dc <= 0 {
 		return
 	}

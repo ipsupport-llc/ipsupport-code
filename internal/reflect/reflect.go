@@ -140,6 +140,18 @@ func (r *Reflector) Reflect(ctx context.Context, t agent.Transcript) (Lessons, e
 	// A harness-stopped run gets the narrow pass (see reflectStuckPrompt) on any
 	// provider: what it has to teach is one dead end, not project facts.
 	if t.Stopped {
+		// A run too short to have repeated anything has no dead end to report,
+		// and asking anyway costs a full model call at the worst possible moment.
+		// Reported live: a 5-step run died on one collapsed generation and the
+		// user then waited 28 seconds for a pass that returned nothing readable —
+		// exactly the latency-after-frustration both reviews warned this change
+		// would add. An "avoid" lesson needs a failure seen MORE THAN ONCE; a run
+		// this short cannot have shown one.
+		if failedToolResults(t) < 2 {
+			slog.Debug("reflect skipped", "reason", "stopped run too short to show a repeated failure",
+				"steps", t.Steps, "failed_results", failedToolResults(t))
+			return Lessons{Parsed: true}, nil
+		}
 		reply, err := r.LLM.Chat(ctx, []llm.Message{
 			llm.System(reflectStuckPrompt),
 			llm.User(summary),
@@ -271,6 +283,18 @@ func clipTail(s string, n int) string {
 		return s
 	}
 	return "…[earlier steps omitted]\n" + s[len(s)-n:]
+}
+
+// failedToolResults counts the run's failing tool results — the raw material an
+// "avoid" lesson is made of.
+func failedToolResults(t agent.Transcript) int {
+	n := 0
+	for _, m := range t.Messages {
+		if m.Role == "tool" && m.IsError {
+			n++
+		}
+	}
+	return n
 }
 
 // usedTools reports whether the run actually called any tool.

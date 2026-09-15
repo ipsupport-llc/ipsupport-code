@@ -3548,3 +3548,101 @@ func TestTheDoneAcknowledgementDoesNotReadAsAVerdict(t *testing.T) {
 		t.Error("the done acknowledgement reads as a DONE verdict")
 	}
 }
+
+// One generation collapsing into repetition is not the run failing: the
+// transport is fine and the context is nowhere near full. Reported live: a
+// 5-step run against a 128-step budget ended because the fifth generation
+// repeated a phrase, at 11% of the context window, with a standing goal.
+func TestOneCollapsedGenerationDoesNotEndTheRun(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptedLLM{steps: []scriptStep{
+		call(calcCall()),
+		fails(llm.ErrDegenerateForTest), // the second generation collapses
+		reply("recovered and finished"), // …and the nudged retry lands
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+
+	tr, err := a.Run(context.Background(), "do the thing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Stopped {
+		t.Error("the run ended on one collapsed generation instead of pushing back once")
+	}
+	if tr.Final != "recovered and finished" {
+		t.Errorf("final = %q, want the reply that came after the nudge", tr.Final)
+	}
+}
+
+// …but only once. A model that collapses again has earned the stop.
+func TestTwoCollapsedGenerationsStillStop(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptedLLM{steps: []scriptStep{
+		call(calcCall()),
+		fails(llm.ErrDegenerateForTest),
+		fails(llm.ErrDegenerateForTest), // collapses again, right after the nudge
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+
+	tr, _ := a.Run(context.Background(), "do the thing")
+	if !tr.Stopped {
+		t.Error("a model collapsing twice must still stop the run")
+	}
+}
+
+// Three paths end a run early and two of them accounted for the goal; this one
+// said nothing at all — no verdict, no "/goal go". From the user's seat the goal
+// had vanished, though it was still on disk.
+func TestAFailedTurnStillReportsWhereTheGoalStands(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptedLLM{steps: []scriptStep{
+		call(calcCall()),
+		fails(llm.ErrDegenerateForTest),
+		fails(llm.ErrDegenerateForTest), // twice → the run gives up here
+		reply("MORE: no report yet"),    // the give-up judge still answers
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(255, false)
+	a.SetPriorGoalProgress(true)
+
+	tr, _ := a.Run(context.Background(), "write the report")
+	if !strings.Contains(tr.Final, "/goal go") {
+		t.Errorf("final = %q, want it to say where the goal stands", tr.Final)
+	}
+	if tr.Missing == "" {
+		t.Error("the judge's account of what's missing was dropped")
+	}
+}
+
+// scriptedLLM plays an explicit sequence of outcomes: each entry is either a
+// reply or an error, so a test can put a failure exactly where it needs one
+// without the failure consuming a reply's slot.
+type scriptedLLM struct {
+	steps    []scriptStep
+	i        int
+	lastMsgs []llm.Message
+}
+
+type scriptStep struct {
+	reply llm.Message
+	err   error
+}
+
+func reply(content string) scriptStep {
+	return scriptStep{reply: llm.Message{Role: "assistant", Content: content}}
+}
+func call(m llm.Message) scriptStep { return scriptStep{reply: m} }
+func fails(err error) scriptStep    { return scriptStep{err: err} }
+
+func (s *scriptedLLM) Chat(_ context.Context, msgs []llm.Message, _ []map[string]any) (llm.Message, error) {
+	s.lastMsgs = msgs
+	if s.i >= len(s.steps) {
+		return llm.Message{Role: "assistant", Content: "(no more replies)"}, nil
+	}
+	st := s.steps[s.i]
+	s.i++
+	if st.err != nil {
+		return llm.Message{}, st.err
+	}
+	return st.reply, nil
+}

@@ -519,20 +519,31 @@ func contains(ss []string, s string) bool {
 	return false
 }
 
-// The lesson store is per workspace, not one global file. Reported live: a lesson
-// distilled in one project surfaced in an unrelated one and pointed the model at
-// the wrong cause. A store shared by every project on the machine turns one bad
-// lesson into a machine-wide problem; scoped this way the blast radius is the
-// project that taught it, and /clear can wipe it like any other workspace state.
-func TestDefaultKBPathIsPerWorkspace(t *testing.T) {
+// The lesson store is per workspace, but OUTSIDE it. Reported live: a lesson
+// distilled in one project surfaced in an unrelated one, so it had to stop being
+// global — and separately, a model listing the project found the agent's own
+// state in .agent/ and read it as project content, so it had to stop living in
+// the workspace.
+func TestStateIsPerWorkspaceAndOutsideIt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // configHome() reads HOME
 	a, b := DefaultKBPath("/tmp/project-a"), DefaultKBPath("/tmp/project-b")
 	if a == b {
 		t.Fatalf("both workspaces share one store: %q", a)
 	}
-	if !strings.HasPrefix(a, "/tmp/project-a") {
-		t.Errorf("path = %q, want it under the workspace", a)
+	for _, p := range []string{a, b} {
+		if strings.HasPrefix(p, "/tmp/project-") {
+			t.Errorf("state path %q is inside the workspace — the model can read it as project content", p)
+		}
 	}
-	if !strings.Contains(a, ".agent") {
-		t.Errorf("path = %q, want it alongside the workspace's other .agent state", a)
+	if !strings.Contains(a, "project-a") {
+		t.Errorf("path = %q, want the workspace recognizable by eye", a)
+	}
+	// Same basename, different paths: the digest keeps two checkouts apart.
+	if StateDir("/one/app") == StateDir("/two/app") {
+		t.Error("two checkouts of the same-named project share a state directory")
+	}
+	// Stable across calls, so the state isn't orphaned on the next run.
+	if StateDir("/one/app") != StateDir("/one/app") {
+		t.Error("StateDir is not stable")
 	}
 }

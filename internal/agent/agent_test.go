@@ -1690,8 +1690,11 @@ func TestRunGoalLoopUnclearJudgeDoesNotMarkMet(t *testing.T) {
 	if tr.Returns != 0 {
 		t.Errorf("returns = %d, want 0 (unclear verdict accepts, doesn't re-feed)", tr.Returns)
 	}
-	if tr.Final != "I think that's everything" {
-		t.Errorf("final = %q", tr.Final)
+	// The model's own text survives verbatim, but an unconfirmed goal — even on
+	// the very first attempt, never re-fed — must say so and point at /goal go;
+	// a bare "I think that's everything" would read as a confirmed finish.
+	if !strings.HasPrefix(tr.Final, "I think that's everything") || !strings.Contains(tr.Final, "/goal go") {
+		t.Errorf("final = %q, want the model's text plus a not-confirmed note pointing at /goal go", tr.Final)
 	}
 }
 
@@ -1975,6 +1978,34 @@ func TestStuckStopJudgeSeesRealActionsDigestNotACannedSentence(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "commands run") || !strings.Contains(prompt, "go test ./...") {
 		t.Errorf("judge prompt missing the real actions digest, got:\n%s", prompt)
+	}
+}
+
+// Same gap, for the NORMAL (non-give-up) judge call this time: reported live,
+// a run that did real file/run work but then finalized with a BLANK final
+// turn (no written summary) fed the judge only that empty string — the judge
+// had nothing to go on and almost certainly can't confirm anything. It must
+// get actionsDigest's real record too, not just this turn's own content.
+func TestNormalJudgeSeesRealActionsDigestEvenWithBlankFinalContent(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fileWrite := toolCallReply("c", "file", `{"action":"write","params":{"path":"x.txt","content":"hi"}}`)
+	fake := &scriptLLM{replies: []llm.Message{
+		fileWrite,
+		{Role: "assistant", Content: ""},     // blank finalize — real work happened, but no summary
+		{Role: "assistant", Content: "DONE"}, // the judge call
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+
+	if _, err := a.Run(context.Background(), "do x"); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.lastMsgs) == 0 {
+		t.Fatal("judge never ran")
+	}
+	prompt := fake.lastMsgs[len(fake.lastMsgs)-1].Content
+	if !strings.Contains(prompt, "files touched") || !strings.Contains(prompt, "x.txt") {
+		t.Errorf("normal-path judge prompt missing the real actions digest, got:\n%s", prompt)
 	}
 }
 

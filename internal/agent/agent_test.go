@@ -1197,9 +1197,10 @@ func TestRunDoneOnlyCallStillGoesThroughTheGoalJudge(t *testing.T) {
 		calcCall(),
 		{Role: "assistant", Content: "all done", ToolCalls: []llm.ToolCall{{ID: "d1", Name: "done", Arguments: "{}"}}},
 		{Role: "assistant", Content: "MORE: needs a test"}, // judge: not actually done
+		{Role: "assistant", Content: "still nothing"},      // after the re-feed; TTL is spent, so this stands
 	}}
 	a := New(fake, reg, nil, nil, "", 20)
-	a.SetGoalLoop(3, false)
+	a.SetGoalLoop(1, false) // one return, so the run ends on the TTL rather than on reply exhaustion
 
 	tr, _ := a.Run(context.Background(), "do the thing")
 	if tr.GoalMet {
@@ -2601,6 +2602,96 @@ func TestAnswerAsideSnapshotDoesNotRaceWithReset(t *testing.T) {
 	}()
 	a.Reset() // the idle /clear equivalent, run concurrently with the aside
 	<-done
+}
+
+// Reported live: "(goal not confirmed complete — stopped after 3/255 continues;
+// the model finished without further progress.)" — a goal run ended with 252
+// returns unspent and no judge call at all. The old switch only judged when the
+// model had acted SINCE the last re-feed, so a model that idled, got its one
+// nudge, and idled again matched neither case and fell straight out to the
+// final. Same disease as an unclear verdict ending the run: the goal died
+// neither on an explicit DONE, nor on the TTL, nor on the user turning it off.
+// The nudge is a cheaper first move, not a replacement for judgment.
+func TestRunJudgesAModelThatIdlesAgainAfterItsNudge(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "first pass done"}, // finalize 1
+		{Role: "assistant", Content: "MORE: no report"}, // judge → re-feed (returns=1)
+		{Role: "assistant", Content: "I'm finished"},    // idle: nothing done since the re-feed → nudge
+		{Role: "assistant", Content: "really finished"}, // idle AGAIN, nudge spent → must still judge
+		{Role: "assistant", Content: "MORE: still no report"},
+		calcCall(), // the second re-feed put it back to work
+		{Role: "assistant", Content: "report written"}, // finalize
+		{Role: "assistant", Content: "DONE"},           // judge confirms
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(5, true) // idle nudge on — the dead end needed it to be spent first
+
+	tr, _ := a.Run(context.Background(), "write the report")
+	if tr.Returns != 2 {
+		t.Errorf("returns = %d, want 2 — a second idle finalize must reach the judge, not end the run", tr.Returns)
+	}
+	if !tr.GoalMet {
+		t.Error("GoalMet = false, want true — the run kept going and the judge eventually said DONE")
+	}
+	if tr.Final != "report written" {
+		t.Errorf("final = %q, want the run to have continued past the idle turns", tr.Final)
+	}
+}
+
+// The idle nudge still comes FIRST, though: it costs no judge call and spends no
+// return, so a model that just needs one push shouldn't burn budget to get it.
+func TestRunStillNudgesAnIdleModelBeforeSpendingAReturn(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	rt := &recTracer{}
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "first pass done"}, // finalize 1
+		{Role: "assistant", Content: "MORE: no report"}, // judge → re-feed (returns=1)
+		{Role: "assistant", Content: "I'm finished"},    // idle → nudge, NOT a judge call
+		calcCall(), // the nudge worked
+		{Role: "assistant", Content: "report written"}, // finalize
+		{Role: "assistant", Content: "DONE"},           // judge confirms
+	}}
+	a := New(fake, reg, nil, rt, "", 20)
+	a.SetGoalLoop(5, true)
+
+	tr, _ := a.Run(context.Background(), "write the report")
+	if tr.Returns != 1 {
+		t.Errorf("returns = %d, want 1 — the idle nudge must not spend a return", tr.Returns)
+	}
+	if !tr.GoalMet {
+		t.Error("GoalMet = false, want true")
+	}
+	judgings := 0
+	for _, k := range rt.kinds {
+		if k == "judging" {
+			judgings++
+		}
+	}
+	if judgings != 2 {
+		t.Errorf("judge ran %d time(s), want 2 — the idle turn must be nudged, not judged", judgings)
+	}
+}
+
+// A tool-less reply still never reaches the judge. The goal loop is in force for
+// EVERY prompt while a goal stands (see the host's goalLoopBudget), so judging a
+// plain conversational turn against the goal and re-feeding it would trap an
+// ordinary question in the loop.
+func TestRunStillSkipsTheJudgeForAToollessReply(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "just an answer"}}}
+	a := New(fake, reg, nil, nil, "", 10)
+	a.SetGoalLoop(3, true)
+
+	tr, _ := a.Run(context.Background(), "hi")
+	if tr.Returns != 0 {
+		t.Errorf("returns = %d, want 0", tr.Returns)
+	}
+	if fake.i != 1 {
+		t.Errorf("Chat calls = %d, want 1 (no judge, no nudge for a tool-less answer)", fake.i)
+	}
 }
 
 // A compaction steer must actually reach the model's instruction, and must read

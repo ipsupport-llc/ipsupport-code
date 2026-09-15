@@ -1368,7 +1368,15 @@ func (a *app) finishGoal(tr agent.Transcript) {
 		// missing (if it ran at all) so /goal status shows something real
 		// instead of a bare "incomplete".
 		a.goal.Status, a.goal.Offered = "incomplete", false
-		a.goal.Missing = tr.Missing
+		// Never overwrite a known gap with nothing. This was unconditional, so a
+		// run that produced no verdict of its own — an unrelated question asked
+		// while the goal stands, a skipped give-up judge, an unreadable verdict —
+		// silently erased what an earlier attempt had established. Losing the
+		// only durable record of what the goal is still missing, on a run that
+		// never even looked at the goal.
+		if strings.TrimSpace(tr.Missing) != "" {
+			a.goal.Missing = tr.Missing
+		}
 		// OR, not overwrite: once ANY attempt at this goal ever had a productive
 		// turn, that stays true across every later resume, even one that stumbles
 		// again immediately — see goalState.Progressed and SetPriorGoalProgress.
@@ -2979,8 +2987,34 @@ func (a *app) deleteSessionNamed(name string) []string {
 	return []string{"deleted session " + slug}
 }
 
+// moveToEnd re-orders list so every entry in pick sits at the end, keeping the
+// relative order of both groups. Used when a later run re-derives a fact it
+// already knew: the entry is not new, but its re-derivation is what earns it a
+// place in the injected window.
+func moveToEnd(list, pick []string) []string {
+	want := make(map[string]bool, len(pick))
+	for _, p := range pick {
+		want[strings.ToLower(p)] = true
+	}
+	kept := make([]string, 0, len(list))
+	moved := make([]string, 0, len(pick))
+	for _, f := range list {
+		if want[strings.ToLower(f)] {
+			moved = append(moved, f)
+			continue
+		}
+		kept = append(kept, f)
+	}
+	return append(kept, moved...)
+}
+
 // maxFacts caps how many learned project facts we keep (most recent win).
 const maxFacts = 30
+
+// maxInjectedFacts is how many of them reach the system prompt (the newest, and
+// since a re-derived fact now moves to the end, "newest" means most recently
+// CONFIRMED rather than most recently phrased).
+const maxInjectedFacts = 15
 
 func (a *app) factsPath() string { return filepath.Join(a.workspace, ".agent", "facts.json") }
 
@@ -3054,27 +3088,53 @@ func (a *app) clearFacts() {
 
 // addFacts dedupe-appends learned facts (most recent maxFacts kept), persists,
 // and returns the genuinely new ones.
-func (a *app) addFacts(facts []string) []string {
+func (a *app) addFacts(facts []string) (added []string, promptChanged bool) {
 	a.statusMu.Lock()
+	before := injectedFacts(a.facts)
 	seen := map[string]bool{}
 	for _, f := range a.facts {
 		seen[strings.ToLower(f)] = true
 	}
-	var added []string
+	var confirmed []string
 	for _, f := range facts {
 		f = strings.TrimSpace(f)
-		if f == "" || seen[strings.ToLower(f)] {
+		if f == "" {
+			continue
+		}
+		if seen[strings.ToLower(f)] {
+			// A fact re-derived by a LATER, independent run is the strongest
+			// signal this store has that it is real — and it used to be thrown
+			// away, leaving the entry frozen at the position it first got. That
+			// is what turned the store into a diary: a durable fact ("the
+			// Makefile runs it with go run main.go") is rediscovered in the same
+			// words every run and so never moves, while narration ("switched to
+			// type.fit") is novel by construction — each run describes a
+			// different run — and therefore always appends. The most-recent
+			// window was structurally biased toward exactly the entries it
+			// should have been dropping. A repeat now moves the fact to the
+			// front of the queue.
+			confirmed = append(confirmed, f)
 			continue
 		}
 		seen[strings.ToLower(f)] = true
 		a.facts = append(a.facts, f)
 		added = append(added, f)
 	}
+	if len(confirmed) > 0 {
+		a.facts = moveToEnd(a.facts, confirmed)
+	}
 	if len(a.facts) > maxFacts {
 		a.facts = append([]string(nil), a.facts[len(a.facts)-maxFacts:]...)
 	}
+	// Only what the model will actually SEE counts as a prompt change. A
+	// re-derived fact that was already inside the injected window moves within
+	// the store but changes nothing in the prompt — and rebuilding the system
+	// prompt on every task would invalidate the provider's cached prefix for no
+	// benefit, which on a local server is the difference between a warm and a
+	// cold request.
+	promptChanged = !sameStrings(before, injectedFacts(a.facts))
 	var snapshot []string
-	if len(added) > 0 {
+	if len(added) > 0 || len(confirmed) > 0 {
 		snapshot = append([]string(nil), a.facts...)
 	}
 	a.statusMu.Unlock()
@@ -3083,7 +3143,29 @@ func (a *app) addFacts(facts []string) []string {
 			_ = atomicfile.Write(a.factsPath(), data, 0o644)
 		}
 	}
-	return added
+	return added, promptChanged
+}
+
+// injectedFacts is the tail of the store that systemPrompt actually shows —
+// the single definition both the prompt and the change check read, so they
+// cannot drift apart.
+func injectedFacts(all []string) []string {
+	if len(all) > maxInjectedFacts {
+		return all[len(all)-maxInjectedFacts:]
+	}
+	return all
+}
+
+func sameStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 const maxInstructions = 6000
@@ -3213,11 +3295,8 @@ func (a *app) systemPrompt() string {
 			out += "\n\n## Skills (load full instructions with the skill tool when the topic fits):\n" + idx
 		}
 	}
-	out += a.subagentTargetsPrompt()                // dynamic roster of delegate targets (empty if none)
-	if facts := a.factsSnapshot(); len(facts) > 0 { // learned project facts — keep the injected set small
-		if len(facts) > 15 {
-			facts = facts[len(facts)-15:]
-		}
+	out += a.subagentTargetsPrompt() // dynamic roster of delegate targets (empty if none)
+	if facts := injectedFacts(a.factsSnapshot()); len(facts) > 0 {
 		out += "\n\n## Known facts about this project (learned on past runs):\n- " + strings.Join(facts, "\n- ")
 	}
 	return out
@@ -3452,12 +3531,12 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 			slog.Warn("knowledge save failed", "err", err)
 		}
 	}
-	added := a.addFacts(lessons.Facts)
-	if len(added) > 0 {
-		a.ag.SetSystem(a.systemPrompt()) // fold new facts into the prompt for the next task
-		for _, f := range added {
-			a.emit("fact", map[string]any{"text": f})
-		}
+	added, promptChanged := a.addFacts(lessons.Facts)
+	if promptChanged {
+		a.ag.SetSystem(a.systemPrompt()) // fold the new set into the prompt for the next task
+	}
+	for _, f := range added {
+		a.emit("fact", map[string]any{"text": f})
 	}
 	// Say so on screen when a pass produced nothing new. Silence looked identical
 	// to the pass never running, which is what sent a user to /knowledge list

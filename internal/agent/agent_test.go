@@ -3563,3 +3563,45 @@ func TestTranscriptCarriesTheGapOnTheNormalPath(t *testing.T) {
 		t.Errorf("Transcript.Missing = %q, want the last judge's gap", tr.Missing)
 	}
 }
+
+// The doc comment on IsHarnessMessage always claimed it covered job notes, and
+// the list never included them — so a finished sub-agent's entire answer, and
+// every /btw the user dropped mid-run, reached the learning pass labelled as
+// the user's own goal.
+func TestIsHarnessMessageCoversDeliveredJobNotesAndAsides(t *testing.T) {
+	ours := []string{
+		"[background job #3 finished — codex · 2m1s]\nHere is the whole report it wrote…",
+		"[by the way] also check the tests",
+	}
+	for _, m := range ours {
+		if !IsHarnessMessage(m) {
+			t.Errorf("not recognized as ours: %q", clip(m, 60))
+		}
+	}
+	if IsHarnessMessage("background jobs keep failing, please look") {
+		t.Error("a real user message mentioning background jobs was taken for harness text")
+	}
+}
+
+// The TTL gate was removed from the normal judge path — funding an attempt and
+// then refusing to grade it is the one combination that makes no sense — and
+// left standing on the give-up paths, which are the endings where the run
+// produced the least on its own.
+func TestGiveUpJudgeStillRunsOnceTheTTLIsSpent(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "first pass"},
+		{Role: "assistant", Content: "MORE: no report"}, // spends the only return
+		calcCall(),                           // work after the re-feed
+		calcCall(),                           // …and the step budget runs out here
+		{Role: "assistant", Content: "DONE"}, // the give-up judge
+	}}
+	a := New(fake, reg, nil, nil, "", 4) // maxSteps 4 → step exhaustion
+	a.SetGoalLoop(1, false)
+
+	tr, _ := a.Run(context.Background(), "write the report")
+	if !tr.GoalMet {
+		t.Error("the give-up judge never ran with the TTL spent — a run can still finish the work on its last steps")
+	}
+}

@@ -85,6 +85,34 @@ Never put a file path, filename, directory or project name in "error_pattern" or
 
 Use {"pitfalls": []} if the run hit no tool errors. Do not explain.`
 
+// reflectStuckPrompt is used when a run was STOPPED by the harness — the
+// stuck-stop or the step budget — rather than finishing.
+//
+// Those runs used to be excluded from reflection entirely (`if !tr.Stopped`),
+// which made the "avoid" lesson kind unreachable by construction: it exists for
+// "the same approach was tried again and kept failing right up to the end of the
+// run", and that is precisely the transcript that was thrown away. Any run that
+// ended cleanly enough to be reflected on is one where the model got PAST the
+// failure — a fix.
+//
+// Deliberately narrower than the normal pass: one avoid lesson at most, and no
+// facts at all. A run that ended in repeated failure is the least trustworthy
+// source of "durable truths about this project" in the system, and the lesson it
+// does produce will be injected exactly when the model is next struggling — so
+// it must be about the call that demonstrably kept failing, and nothing else.
+const reflectStuckPrompt = `The agent run below was STOPPED by the harness: it kept repeating failing tool calls, or ran out of steps. It did NOT recover.
+
+Report at most ONE lesson, about a tool call that visibly failed more than once here. Reply with ONLY this JSON, nothing else:
+{"pitfalls": [{"domain": "...", "kind": "avoid", "error_pattern": "...", "context": "...", "proven_fix": "..."}]}
+
+"domain" is the tool that failed: file, run, git, web, calc, agent, mcp or skill.
+"error_pattern" is a few words copied from the error text itself.
+"context" is the action it happened during, like "file: write".
+"proven_fix" is what to do DIFFERENTLY. Never repeat the failing approach as the advice.
+Never put a file path, filename, directory or project name in "error_pattern" or "proven_fix".
+
+Only report what the transcript SHOWS failing repeatedly. If nothing failed more than once, or you cannot tell why it failed, reply {"pitfalls": []} — a confident guess about a failure you did not diagnose is worse than no lesson. Do not explain.`
+
 // Reflect distills lessons from t. A turn with no tool use (a plain chat) has
 // nothing to learn, so it skips the model call — no point making a small model
 // reason over an empty run.
@@ -99,6 +127,28 @@ func (r *Reflector) Reflect(ctx context.Context, t agent.Transcript) (Lessons, e
 	summary := summarize(t)
 	if strings.TrimSpace(summary) == "" {
 		return Lessons{}, nil
+	}
+	// A harness-stopped run gets the narrow pass (see reflectStuckPrompt) on any
+	// provider: what it has to teach is one dead end, not project facts.
+	if t.Stopped {
+		reply, err := r.LLM.Chat(ctx, []llm.Message{
+			llm.System(reflectStuckPrompt),
+			llm.User(summary),
+		}, nil)
+		if err != nil {
+			return Lessons{}, &ReflectionError{Err: err}
+		}
+		out := parseLessons(reply.Content)
+		out.Facts = nil // never from a run that ended in failure
+		if len(out.Pitfalls) > 1 {
+			out.Pitfalls = out.Pitfalls[:1]
+		}
+		for i := range out.Pitfalls {
+			// The prompt asks for "avoid" and the shape only makes sense that
+			// way here: nothing in this transcript was proven to work.
+			out.Pitfalls[i].Kind = knowledge.KindAvoid
+		}
+		return out, nil
 	}
 	if r.Lite {
 		return r.reflectLite(ctx, summary)
@@ -143,11 +193,28 @@ func (r *Reflector) reflectLite(ctx context.Context, summary string) (Lessons, e
 
 // summarize compacts a transcript into the error→recovery→outcome shape the
 // reflection prompt expects.
+// summaryBudget caps the whole transcript summary. Reported by review: this had
+// no total bound at all while judgeEvidence capped itself — a 40-step run
+// produced an ~40k-character prompt, which on the small local model the lite
+// path targets overruns the window, returns unparseable output, and makes the
+// entire pass (two calls) buy nothing. The END of a run is kept: that is where
+// the recovery, the outcome and the last state are.
+const summaryBudget = 12000
+
 func summarize(t agent.Transcript) string {
 	var b strings.Builder
 	for _, m := range t.Messages {
 		switch m.Role {
 		case "user":
+			// Only what the USER actually asked is the goal. Everything this
+			// program injects arrives as role "user" too — goal re-feeds and
+			// nudges — and labelling those "GOAL:" told the learning pass that
+			// our own scaffolding was the user's intent, which it could then
+			// distill into a "fact" about the project.
+			if agent.IsHarnessMessage(m.Content) {
+				fmt.Fprintf(&b, "HARNESS (not the user): %s\n", oneLine(m.Content))
+				continue
+			}
 			fmt.Fprintf(&b, "GOAL: %s\n", oneLine(m.Content))
 		case "assistant":
 			if len(m.ToolCalls) > 0 {
@@ -164,7 +231,29 @@ func summarize(t agent.Transcript) string {
 	if t.Final != "" {
 		fmt.Fprintf(&b, "FINAL: %s\n", oneLine(t.Final))
 	}
-	return b.String()
+	// The judge's own verdict is the sharpest signal in the run and the learning
+	// pass never saw it: the transcript it was handed carried GoalMet, Returns
+	// and Missing on the very struct, all ignored. A run that took four judge
+	// rounds to be accepted, or was never accepted at all, teaches something
+	// quite different from a one-shot success.
+	if t.Returns > 0 || t.GoalMet || strings.TrimSpace(t.Missing) != "" {
+		fmt.Fprintf(&b, "JUDGE: goal met=%v after %d re-feed(s)", t.GoalMet, t.Returns)
+		if m := strings.TrimSpace(t.Missing); m != "" {
+			fmt.Fprintf(&b, "; last unmet: %s", oneLine(m))
+		}
+		b.WriteString("\n")
+	}
+	return clipTail(b.String(), summaryBudget)
+}
+
+// clipTail keeps the LAST n bytes, marking the cut — the end of a run is where
+// the recovery and the outcome are, so an over-long transcript loses its
+// exploratory beginning rather than its conclusion.
+func clipTail(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return "…[earlier steps omitted]\n" + s[len(s)-n:]
 }
 
 // usedTools reports whether the run actually called any tool.

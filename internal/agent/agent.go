@@ -881,7 +881,13 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			if !a.planMode && a.maxReturns > 0 && returns < a.maxReturns {
 				switch {
 				case actedSinceReturn && acted:
-					verdict, missing := a.judgeGoal(ctx, goal, clean)
+					// judgeGoal is an isolated call with no access to msgs — when the
+					// final turn itself has empty/uninformative content (a model that
+					// did real tool-call work but wrote no summary), clean alone told
+					// it nothing to judge. actionsDigest gives it the real record
+					// (files touched / commands run) instead, same fix already applied
+					// to the give-up paths (see judgeOnGiveUp).
+					verdict, missing := a.judgeGoal(ctx, goal, clean+actionsDigest(msgs))
 					// Reported live: the judge's own decision (a separate LLM call)
 					// was entirely invisible in the debug log for its two NORMAL
 					// verdicts — only its failure ("goal judge failed") and
@@ -911,9 +917,18 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					continue
 				}
 			}
-			// The goal loop ran and re-fed at least once, but the judge never
-			// confirmed the goal met — say so plainly instead of implying success.
-			goalStalled := a.maxReturns > 0 && returns > 0 && !goalMet
+			// The goal loop was in force, real work happened (acted), but the judge
+			// never confirmed the goal met — say so plainly instead of implying
+			// success. Deliberately NOT gated on returns > 0 (a prior re-feed):
+			// reported live, a run whose very FIRST judge call came back unclear
+			// (returns never incremented) still finalized on a bare "(done —
+			// finished without a written summary...)" with zero indication the
+			// goal was left unconfirmed — the exact same problem the give-up
+			// paths' goalNotConfirmedNote already solves, just missing here on the
+			// normal finalize path. Still gated on acted, though: a run where
+			// NOTHING ever happened (the empty-reply case just above) is better
+			// described by its own more specific message than by this one.
+			goalStalled := a.maxReturns > 0 && acted && !goalMet
 			if strings.TrimSpace(clean) == "" {
 				// Blank final turn. If the model already did work via tools, say it
 				// finished (the changes/output are above); otherwise it produced

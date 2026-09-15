@@ -422,3 +422,46 @@ func TestSummarizeIsBounded(t *testing.T) {
 		t.Error("the bound dropped the run's own conclusion")
 	}
 }
+
+// "The model looked and found nothing" and "we could not read what it said" were
+// indistinguishable — both surfaced as an empty Lessons, and neither was logged.
+// They need opposite fixes, so they must be told apart.
+func TestParsedSeparatesNothingToLearnFromUnreadable(t *testing.T) {
+	// A well-formed empty answer IS an answer.
+	l, err := New(fixedLLM{reply: `{"pitfalls":[],"facts":[]}`}).Reflect(context.Background(), sampleTranscript())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.Parsed {
+		t.Error("an explicit empty result reads as unreadable")
+	}
+	if l.Reply != "" {
+		t.Errorf("Reply = %q, want empty when the answer was understood", l.Reply)
+	}
+
+	// Prose with no JSON in it at all is not.
+	l, err = New(fixedLLM{reply: "I think everything went fine, nothing to add really."}).
+		Reflect(context.Background(), sampleTranscript())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if l.Parsed {
+		t.Error("unreadable prose reads as a parsed empty result")
+	}
+	if !strings.Contains(l.Reply, "nothing to add") {
+		t.Errorf("Reply = %q, want the tail of what came back so the log can show it", l.Reply)
+	}
+}
+
+// A real result is parsed, obviously — but the flag must say so, since the
+// caller logs it on every pass.
+func TestParsedIsSetOnARealResult(t *testing.T) {
+	reply := `{"pitfalls":[{"domain":"run","error_pattern":"permission denied","context":"run: shell","proven_fix":"use sudo"}],"facts":[]}`
+	l, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.Parsed || len(l.Pitfalls) != 1 {
+		t.Errorf("lessons = %+v, parsed=%v", l.Pitfalls, l.Parsed)
+	}
+}

@@ -848,8 +848,18 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		msgs = append(msgs, assistant)
 
 		// A reply with no tool calls IS the final answer — emit only "final"
-		// (emitting "assistant" too would render the same text twice).
-		if len(assistant.ToolCalls) == 0 {
+		// (emitting "assistant" too would render the same text twice). A turn
+		// whose ONLY tool call is the bare "done" signal (see tool.NewDone)
+		// counts the same way: some models are so habituated to always calling
+		// something that they never produce a real no-tool-call reply, and
+		// invent a workaround instead (reported live: repeated shell echoes of
+		// "TASK COMPLETE"/"EXIT 0"). done gives them a correct channel for
+		// exactly that. Deliberately narrow: done arriving ALONGSIDE other real
+		// tool calls does NOT intercept — those still need normal dispatch.
+		// Independent of the goal judge's own done/more tools (judgeTools) —
+		// this only changes how the MAIN model signals "I think I'm finished";
+		// the judge still separately decides whether the goal is actually met.
+		if len(assistant.ToolCalls) == 0 || isDoneOnly(assistant.ToolCalls) {
 			clean, suggest := splitSuggestion(assistant.Content)
 			// Reported live: a single genuinely empty reply (no content, no tool
 			// calls) on the very first turn — before anything productive happened —
@@ -1103,6 +1113,15 @@ func callSig(calls []llm.ToolCall) string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// isDoneOnly reports whether a turn's ONLY tool call was the bare "done"
+// signal (see tool.NewDone) — the agent loop treats such a turn exactly like a
+// plain no-tool-call finalize. Deliberately narrow: done arriving ALONGSIDE
+// other real tool calls does not count — those still need normal dispatch and
+// a paired tool-result message, which ending the run here can't provide.
+func isDoneOnly(calls []llm.ToolCall) bool {
+	return len(calls) == 1 && calls[0].Name == "done"
 }
 
 // toolCallNames lists the action names the model called this turn (debug). nil

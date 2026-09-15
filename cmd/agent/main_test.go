@@ -4517,6 +4517,23 @@ func TestSubagentTargetsAndDepthCap(t *testing.T) {
 	}
 }
 
+// Sub-agents get the done tool too — the "always calls a tool" habit that
+// motivates it isn't specific to the top-level agent.
+func TestSubAgentRegistryHasDoneTool(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	a.cfg.Agents = map[string]config.AgentProfile{"rev": {Provider: "openrouter", Model: "m"}}
+	a.cfg.Providers = map[string]config.LLM{"openrouter": {APIKey: "x"}}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if !subRegHasTool(a.subReg, "done") {
+		t.Error("sub-agent registry must include the done tool")
+	}
+}
+
 // A background delegate spawned with no explicit dir must get its OWN
 // *policy.Engine snapshotted to the host's current dir — not a live reference
 // to a.pol (or the a.subReg wired from it at startup). a.pol.workdir has no

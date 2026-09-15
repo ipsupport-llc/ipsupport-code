@@ -1468,6 +1468,13 @@ func (a *app) goalTTLLabel() string {
 	return fmt.Sprintf("TTL %d re-feed(s)", a.cfg.GoalMaxReturns)
 }
 
+// setGoalNudge toggles the one push a re-fed goal gets when the model finishes
+// without doing any work, and persists it.
+func (a *app) setGoalNudge(on bool) error {
+	a.cfg.GoalNudge = on
+	return config.SaveGoalNudge(on)
+}
+
 // goalSetLine confirms a /goal launch actually registered. Without it, /goal's
 // output was visually identical to a plain task submission — nothing on screen
 // distinguished "the model will keep going until a judge signs off" from
@@ -3297,7 +3304,16 @@ func (a *app) systemPrompt() string {
 	}
 	out += a.subagentTargetsPrompt() // dynamic roster of delegate targets (empty if none)
 	if facts := injectedFacts(a.factsSnapshot()); len(facts) > 0 {
-		out += "\n\n## Known facts about this project (learned on past runs):\n- " + strings.Join(facts, "\n- ")
+		// Not "Known facts". These were written down by earlier runs of this
+		// agent, nothing has re-checked them since, and a heading that asserts
+		// them as known gives a stale line the same standing as the user's own
+		// instructions — in the system prompt, where the model has no reason to
+		// doubt it. Say where they came from and what outranks them.
+		out += "\n\n## Notes from earlier runs in this workspace\n" +
+			"Written down by past runs of this agent, not by the user, and not re-checked since. " +
+			"Use them as leads: if one matters to what you're doing, confirm it against the actual files or by running the command — the repository always wins over a note. " +
+			"If a note turns out to be wrong or out of date, say so in your answer.\n- " +
+			strings.Join(facts, "\n- ")
 	}
 	return out
 }
@@ -4821,18 +4837,24 @@ func (a *app) applyKnowledgeRetention() {
 func (a *app) knowledgeCommand(rest string) []string {
 	sub, arg := splitCommand(rest)
 	switch sub {
-	case "":
-		return a.knowledgeReport()
-	case "list":
+	case "", "list":
+		// Bare /knowledge used to print per-domain COUNTS — a summary of half the
+		// store, in a shape that answered no question anyone has. Show the thing
+		// itself.
 		return a.knowledgeList()
 	case "drop", "rm":
 		return a.knowledgeDrop(arg)
 	case "clear":
+		nf := len(a.factsSnapshot())
+		a.clearFacts()
 		n := a.kb.Clear()
 		if err := a.kb.Save(); err != nil {
 			return []string{"error: " + err.Error()}
 		}
-		return []string{fmt.Sprintf("cleared %d learned lessons", n)}
+		if a.ag != nil {
+			a.ag.SetSystem(a.systemPrompt())
+		}
+		return []string{fmt.Sprintf("cleared %d fact(s) and %d lesson(s)", nf, n)}
 	case "purge":
 		days, err := strconv.Atoi(strings.TrimSpace(arg))
 		if err != nil || days < 0 {
@@ -4873,49 +4895,124 @@ func (a *app) knowledgeCommand(rest string) []string {
 // no way to find it, because the only view of the store was knowledgeReport's
 // per-domain counts and the only edit was wiping all of it.
 func (a *app) knowledgeList() []string {
-	all := a.kb.Sorted()
-	if len(all) == 0 {
-		return []string{"no learned lessons yet — they accrue from task reflections"}
+	facts, lessons := a.factsSnapshot(), a.kb.Sorted()
+	if len(facts) == 0 && len(lessons) == 0 {
+		return []string{"nothing learned in this workspace yet — facts and lessons accrue from task reflections"}
 	}
-	out := []string{fmt.Sprintf("learned lessons: %d   ·   /knowledge drop <n> removes one", len(all))}
-	for i, p := range all {
-		where := p.Context
-		if strings.TrimSpace(where) == "" {
-			where = p.Domain
+	shown := len(injectedFacts(facts))
+	out := []string{fmt.Sprintf("learned here: %d fact(s), %d lesson(s)   ·   /knowledge drop <n> removes one", len(facts), len(lessons))}
+
+	// Facts first: they are in EVERY task's prompt, which makes them the more
+	// consequential half and the one worth reading. Reported live: a user saw
+	// five "noted" lines scroll past and then "no learned lessons yet", because
+	// this only ever listed the other half — and facts could not be read at all,
+	// anywhere, despite being the part that actually shapes every answer.
+	if len(facts) > 0 {
+		out = append(out, "", fmt.Sprintf("  FACTS — in every task's prompt (newest %d of %d shown to the model)", shown, len(facts)))
+		for i, f := range facts {
+			mark := "  "
+			if i >= len(facts)-shown {
+				mark = "→ " // this one is actually in the prompt right now
+			}
+			text, _ := textutil.Clip(strings.ReplaceAll(f, "\n", " "), 150)
+			out = append(out, fmt.Sprintf("%3d %s%s", i+1, mark, text))
 		}
-		lead := "worked"
-		if p.Kind == knowledge.KindAvoid {
-			lead = "dead end — instead"
+	}
+
+	if len(lessons) > 0 {
+		out = append(out, "", "  LESSONS — shown only when a matching tool call fails")
+		for i, p := range lessons {
+			where := p.Context
+			if strings.TrimSpace(where) == "" {
+				where = p.Domain
+			}
+			// ✔ worked / ✘ dead end: the same distinction the model is shown, so
+			// what you read here is what it reads.
+			mark, lead := "✔", "worked: "
+			if p.Kind == knowledge.KindAvoid {
+				mark, lead = "✘", "dead end — instead: "
+			}
+			fix, _ := textutil.Clip(strings.ReplaceAll(p.ProvenFix, "\n", " "), 150)
+			out = append(out,
+				fmt.Sprintf("%3d %s [%s] %q", factOffset(facts)+i+1, mark, p.Domain, p.ErrorPattern),
+				fmt.Sprintf("       while %s · %s%s", where, lead, fix),
+				fmt.Sprintf("       %d hit(s) · last seen %s", p.Hits, p.LastSeen))
 		}
-		fix, _ := textutil.Clip(strings.ReplaceAll(p.ProvenFix, "\n", " "), 160)
-		out = append(out,
-			fmt.Sprintf("%3d [%s] %q", i+1, p.Domain, p.ErrorPattern),
-			fmt.Sprintf("    while %s · %s: %s", where, lead, fix),
-			fmt.Sprintf("    %d hit(s) · last seen %s", p.Hits, p.LastSeen))
 	}
 	return out
 }
 
-// knowledgeDrop removes the one lesson at position n in knowledgeList's output.
-// Both go through KB.Sorted, so the number printed stays pointed at the same
-// lesson (the store's own order depends on insertion and purge history).
+// factOffset is where lesson numbering starts. One sequence across both halves:
+// which store an entry lives in is our bookkeeping, and a user removing a wrong
+// line should not have to know about it.
+func factOffset(facts []string) int { return len(facts) }
+
+// knowledgeDrop removes the one entry at position n in knowledgeList's output,
+// whichever half it lives in.
+//
+// The two stores share one numbering because the split is our bookkeeping, not
+// the user's problem — and because facts, the half that reaches every prompt,
+// had no removal path at all: the only way to drop a wrong one was /clear, which
+// also wipes the conversation and every lesson. A wrong fact could otherwise
+// only leave by being pushed out by fifteen newer ones.
 func (a *app) knowledgeDrop(arg string) []string {
-	all := a.kb.Sorted()
-	if len(all) == 0 {
-		return []string{"no learned lessons to drop"}
+	facts, lessons := a.factsSnapshot(), a.kb.Sorted()
+	total := len(facts) + len(lessons)
+	if total == 0 {
+		return []string{"nothing learned here yet — nothing to drop"}
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(arg))
-	if err != nil || n < 1 || n > len(all) {
-		return []string{fmt.Sprintf("usage: /knowledge drop <n>  (1–%d, as numbered by /knowledge list)", len(all))}
+	if err != nil || n < 1 || n > total {
+		return []string{fmt.Sprintf("usage: /knowledge drop <n>  (1–%d, as numbered by /knowledge list)", total)}
 	}
-	p := all[n-1]
+	if n <= len(facts) {
+		f := facts[n-1]
+		if !a.dropFact(f) {
+			return []string{"that fact is no longer there — run /knowledge list again"}
+		}
+		text, _ := textutil.Clip(strings.ReplaceAll(f, "\n", " "), 100)
+		return []string{"dropped fact: " + text}
+	}
+	p := lessons[n-len(facts)-1]
 	if !a.kb.Delete(p) {
 		return []string{"that lesson is no longer there — run /knowledge list again"}
 	}
 	if err := a.kb.Save(); err != nil {
 		return []string{"error: " + err.Error()}
 	}
-	return []string{fmt.Sprintf("dropped [%s] %q", p.Domain, p.ErrorPattern)}
+	return []string{fmt.Sprintf("dropped lesson [%s] %q", p.Domain, p.ErrorPattern)}
+}
+
+// dropFact removes one learned fact and persists the rest, rebuilding the system
+// prompt when the removal changed what the model is actually shown.
+func (a *app) dropFact(fact string) bool {
+	a.statusMu.Lock()
+	before := injectedFacts(a.facts)
+	kept := make([]string, 0, len(a.facts))
+	removed := false
+	for _, f := range a.facts {
+		if !removed && f == fact {
+			removed = true
+			continue
+		}
+		kept = append(kept, f)
+	}
+	if !removed {
+		a.statusMu.Unlock()
+		return false
+	}
+	a.facts = kept
+	changed := !sameStrings(before, injectedFacts(a.facts))
+	snapshot := append([]string(nil), a.facts...)
+	a.statusMu.Unlock()
+
+	if data, err := json.Marshal(snapshot); err == nil {
+		_ = atomicfile.Write(a.factsPath(), data, 0o644)
+	}
+	if changed && a.ag != nil {
+		a.ag.SetSystem(a.systemPrompt())
+	}
+	return true
 }
 
 // dropPoisonedLessons retires stored lessons that quote a value from the run they

@@ -264,8 +264,11 @@ func (k *KB) MarkUsed(p Pitfall) {
 	}
 }
 
-// Count reports how many lessons are stored.
+// Count reports how many lessons are stored. Nil-safe, like All.
 func (k *KB) Count() int {
+	if k == nil {
+		return 0
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return len(k.pitfalls)
@@ -399,8 +402,13 @@ func (k *KB) Save() error {
 	return nil
 }
 
-// All returns a copy of the stored pitfalls.
+// All returns a copy of the stored pitfalls. A nil KB reports none rather than
+// panicking: callers that merely DISPLAY what is known (the /config panel) must
+// not be the reason a session dies when the store failed to open.
 func (k *KB) All() []Pitfall {
+	if k == nil {
+		return nil
+	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	return append([]Pitfall(nil), k.pitfalls...)

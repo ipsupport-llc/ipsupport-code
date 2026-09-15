@@ -947,6 +947,55 @@ func TestRunNudgesRefusalThenActs(t *testing.T) {
 	}
 }
 
+// Reported live: a single genuinely empty reply (no content, no tool calls) on
+// the very first turn used to finalize the whole run immediately — even a
+// goal-pursuing one — with no retry at all. It must now get one push first,
+// then proceed normally once the model actually does something.
+func TestRunNudgesEmptyFirstReplyThenActs(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: ""}, // totally blank — no content, no tool calls
+		toolCallReply("c1", "calc", `{"action":"calculate","params":{"expression":"2+2"}}`),
+		{Role: "assistant", Content: "done — 4"},
+	}}
+	a := New(fake, reg, nil, nil, "", 6)
+	tr, err := a.Run(context.Background(), "do the thing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Final != "done — 4" {
+		t.Errorf("final = %q, want it to proceed past the empty reply", tr.Final)
+	}
+	if len(toolObservation(tr.Messages)) != 1 {
+		t.Error("expected the tool to run after the empty-reply nudge")
+	}
+}
+
+// The empty-reply nudge fires at most once: a model that stays blank twice in a
+// row has the second empty reply accepted as the final answer (no infinite
+// loop) — and for a goal-pursuing run, that must NOT be silently treated as a
+// finished goal (finishGoal marks it incomplete, not done).
+func TestRunAcceptsEmptyReplyAfterOneNudge(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	blank := llm.Message{Role: "assistant", Content: ""}
+	fake := &scriptLLM{replies: []llm.Message{blank, blank}}
+	a := New(fake, reg, nil, nil, "", 6)
+	a.SetGoalLoop(3, false)
+	tr, err := a.Run(context.Background(), "do the thing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(tr.Final, "empty reply") {
+		t.Errorf("final = %q, want the 2nd empty reply accepted with its usual message", tr.Final)
+	}
+	if tr.Steps != 2 {
+		t.Errorf("steps = %d, want 2 (blank → nudge → blank-accept)", tr.Steps)
+	}
+	if tr.GoalMet {
+		t.Error("GoalMet = true on two blank replies, want false — nothing productive ever happened")
+	}
+}
+
 // The refusal nudge fires at most once: a model that refuses twice has its second
 // refusal accepted as the final answer (no infinite loop).
 func TestRunAcceptsRefusalAfterOneNudge(t *testing.T) {

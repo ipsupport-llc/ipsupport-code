@@ -14,14 +14,15 @@ import (
 )
 
 type gitTool struct {
-	pol *policy.Engine
-	ap  Approver
+	pol    *policy.Engine
+	ap     Approver
+	maxOut int // per-call output cap in bytes (see OutputBudget)
 }
 
 // NewGit returns the git tool. It runs git directly (argv, no shell) in the
 // workspace; read-only actions run freely, mutating ones ask for approval.
-func NewGit(p *policy.Engine, ap Approver) Tool {
-	g := &gitTool{pol: p, ap: ap}
+func NewGit(p *policy.Engine, ap Approver, ctxWindow int) Tool {
+	g := &gitTool{pol: p, ap: ap, maxOut: OutputBudget(ctxWindow)}
 	return NewDomain(DomainSpec{
 		Name:    "git",
 		Summary: "Git in the workspace. Mutating actions (init/add/commit/branch/checkout) ask approval.",
@@ -309,7 +310,7 @@ func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ..
 	// its timeout — the same class of wedge the run tool already guards
 	// against (internal/procgroup).
 	procgroup.Set(cmd)
-	out := textutil.NewBoundedWriter(maxRunOutput)
+	out := textutil.NewBoundedWriter(g.maxOut)
 	cmd.Stdout, cmd.Stderr = out, out
 	runErr := cmd.Run()
 

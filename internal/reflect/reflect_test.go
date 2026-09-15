@@ -313,3 +313,112 @@ func TestReflectTransportError(t *testing.T) {
 		t.Errorf("err = %v, want *ReflectionError", err)
 	}
 }
+
+// The run that most needs an "avoid" lesson is the one the harness STOPPED after
+// repeated failures — and that was the one transcript excluded from reflection,
+// which made the whole lesson kind unreachable by construction.
+func TestReflectMinesAStoppedRunForOneAvoidLesson(t *testing.T) {
+	stopped := sampleTranscript()
+	stopped.Stopped = true
+	reply := `{"pitfalls":[` +
+		`{"domain":"file","error_pattern":"you gave {}","context":"file: write","proven_fix":"send params as a JSON object"},` +
+		`{"domain":"run","error_pattern":"permission denied","context":"run: shell","proven_fix":"ask the user"}` +
+		`],"facts":["this project uses go 1.27"]}`
+	l, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), stopped)
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if len(l.Pitfalls) != 1 {
+		t.Fatalf("pitfalls = %+v, want exactly one from a stopped run", l.Pitfalls)
+	}
+	if l.Pitfalls[0].Kind != knowledge.KindAvoid {
+		t.Errorf("kind = %q, want %q — nothing in a stopped run was proven to work", l.Pitfalls[0].Kind, knowledge.KindAvoid)
+	}
+	// A run that ended in repeated failure is the least trustworthy source of
+	// "durable truths about this project" there is.
+	if len(l.Facts) != 0 {
+		t.Errorf("facts = %v, want none from a stopped run", l.Facts)
+	}
+}
+
+// The stopped-run prompt must ask only for what the transcript SHOWS failing
+// repeatedly, and say outright that a guess is worse than nothing — the lesson
+// it produces is injected exactly when the model is next struggling.
+func TestStoppedRunPromptRefusesToGuess(t *testing.T) {
+	stopped := sampleTranscript()
+	stopped.Stopped = true
+	p := &promptCapture{}
+	New(p).Reflect(context.Background(), stopped)
+	if len(p.systems) != 1 {
+		t.Fatalf("made %d call(s), want 1 narrow pass", len(p.systems))
+	}
+	sys := p.systems[0]
+	for _, want := range []string{"failed more than once", "worse than no lesson"} {
+		if !strings.Contains(sys, want) {
+			t.Errorf("stopped-run prompt missing %q:\n%s", want, sys)
+		}
+	}
+	if strings.Contains(sys, `"facts"`) {
+		t.Error("the stopped-run pass still asks for facts")
+	}
+}
+
+// Everything the harness injects arrives as role "user". Labelling it "GOAL:"
+// told the learning pass our own nudge text was the user's intent — and a
+// distilled "fact" could come back reading like our own scaffolding.
+func TestSummarizeDoesNotPassOffHarnessTextAsTheGoal(t *testing.T) {
+	tr := agent.Transcript{Messages: []llm.Message{
+		llm.User("fix the parser"),
+		{Role: "tool", Name: "file", Content: "ok"},
+		llm.User(agent.GoalReturnForTest("fix the parser", "no tests")),
+	}}
+	// Counted by LINE: a re-feed restates the goal inside its own body, which is
+	// fine — what matters is that the line isn't introduced as the user's ask.
+	goals, harness := 0, 0
+	for _, line := range strings.Split(summarize(tr), "\n") {
+		switch {
+		case strings.HasPrefix(line, "GOAL:"):
+			goals++
+		case strings.HasPrefix(line, "HARNESS"):
+			harness++
+		}
+	}
+	if goals != 1 {
+		t.Errorf("%d lines presented as the user's goal, want 1:\n%s", goals, summarize(tr))
+	}
+	if harness != 1 {
+		t.Errorf("%d lines labelled as ours, want 1:\n%s", harness, summarize(tr))
+	}
+}
+
+// The judge's verdict is the sharpest signal in a run, and the learning pass
+// never saw it although it sat on the very struct it was handed.
+func TestSummarizeCarriesTheJudgesVerdict(t *testing.T) {
+	tr := sampleTranscript()
+	tr.Returns, tr.GoalMet, tr.Missing = 3, false, "the report has no test results"
+	out := summarize(tr)
+	if !strings.Contains(out, "JUDGE:") || !strings.Contains(out, "no test results") {
+		t.Errorf("the judge's verdict never reaches reflection:\n%s", out)
+	}
+}
+
+// summarize had no total budget while judgeEvidence capped itself — a long run
+// produced a prompt that overran the small local model the lite path targets,
+// returned unparseable output, and made the whole pass buy nothing.
+func TestSummarizeIsBounded(t *testing.T) {
+	tr := agent.Transcript{}
+	for i := 0; i < 400; i++ {
+		tr.Messages = append(tr.Messages,
+			llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{{Name: "run", Arguments: strings.Repeat("x", 400)}}},
+			llm.Message{Role: "tool", Name: "run", Content: strings.Repeat("y", 400)})
+	}
+	tr.Final = "THE FINAL ANSWER"
+	out := summarize(tr)
+	if len(out) > summaryBudget*2 {
+		t.Errorf("summary is %d bytes, want it bounded near %d", len(out), summaryBudget)
+	}
+	// The END of a run is kept: that is where the recovery and the outcome are.
+	if !strings.Contains(out, "THE FINAL ANSWER") {
+		t.Error("the bound dropped the run's own conclusion")
+	}
+}

@@ -482,6 +482,10 @@ func TestNoopPurgeDoesNotDiscardEarlierAddLesson(t *testing.T) {
 // contains a slash or a dot must survive, or the guard costs more than it saves.
 func TestIsProjectSpecific(t *testing.T) {
 	poisoned := []string{
+		// A bare filename counts: most file-tool errors carry one, and a lesson
+		// keyed on it can only ever re-fire on that same file.
+		"edit: 'find' text not present in main.go",
+		"the file is main.go in the current directory",
 		`Provide proper path parameter: {"path": "nemotron-extreme-quant/PLAN.md", "content": "..."}`,
 		"edit cmd/agent/main.go instead",
 		"the config lives at .agent/config.json",
@@ -494,8 +498,10 @@ func TestIsProjectSpecific(t *testing.T) {
 	general := []string{
 		"send params as a real JSON object, not a JSON-encoded string",
 		"run go test ./... from the module root",
+		// Ecosystem manifests are the same in every project of their kind.
+		"package.json must exist before npm install",
+		"go.mod already exists — skip init",
 		"pass --prefix=/usr/local to configure",
-		"the file is main.go in the current directory",
 		"use sudo",
 	}
 	for _, s := range general {
@@ -583,5 +589,58 @@ func TestDropWhereRetiresMatchingLessons(t *testing.T) {
 	all := kb.All()
 	if len(all) != 1 || all[0].ProvenFix != "create the directory first" {
 		t.Errorf("remaining = %+v, want only the project-neutral lesson", all)
+	}
+}
+
+// Hits used to move only in Add — i.e. only when reflection RE-DERIVED the same
+// lesson from a fresh failure. That made the ranking measure the wrong thing: a
+// lesson that works stops the failure recurring, so it is never re-derived, its
+// Hits and LastSeen freeze, and Purge eventually deletes it — while a lesson
+// that never helps keeps being re-derived, climbs the ranking and stays fresh.
+func TestMarkUsedCountsRetrievalNotRederivation(t *testing.T) {
+	kb := &KB{}
+	p := Pitfall{Domain: "file", ErrorPattern: "you gave {}", Context: "file: write", ProvenFix: "send a JSON object"}
+	kb.Add(p)
+	before := kb.All()[0]
+
+	kb.MarkUsed(p)
+	after := kb.All()[0]
+	if after.Hits <= before.Hits {
+		t.Errorf("Hits = %d after being surfaced, was %d — a useful lesson must not look stale", after.Hits, before.Hits)
+	}
+	if after.LastSeen == "" {
+		t.Error("LastSeen not refreshed, so a lesson that keeps helping still ages out")
+	}
+	// An unknown lesson is a no-op, not a panic or a stray insert.
+	kb.MarkUsed(Pitfall{Domain: "run", ErrorPattern: "never stored"})
+	if len(kb.All()) != 1 {
+		t.Errorf("store has %d lessons, want 1", len(kb.All()))
+	}
+}
+
+// A later run that actually RECOVERED must supersede an earlier dead end for the
+// same failure. Only Hits and LastSeen used to move, so the first answer stood
+// forever: once an "avoid" hypothesis was stored, no amount of later experience
+// proving what does work could replace it.
+func TestAProvenFixSupersedesAnEarlierDeadEnd(t *testing.T) {
+	kb := &KB{}
+	kb.Add(Pitfall{Domain: "file", Kind: KindAvoid, ErrorPattern: "you gave {}",
+		Context: "file: write", ProvenFix: "give up and ask the user"})
+	kb.Add(Pitfall{Domain: "file", ErrorPattern: "you gave {}",
+		Context: "file: write", ProvenFix: "send params as a real JSON object"})
+
+	got := kb.All()[0]
+	if got.Kind != "" {
+		t.Errorf("kind = %q, want the proven fix to have replaced the dead end", got.Kind)
+	}
+	if got.ProvenFix != "send params as a real JSON object" {
+		t.Errorf("proven_fix = %q, want the later recovery", got.ProvenFix)
+	}
+	// The reverse must NOT happen: a fix already demonstrated is not unlearned
+	// by a later run failing to reproduce it.
+	kb.Add(Pitfall{Domain: "file", Kind: KindAvoid, ErrorPattern: "you gave {}",
+		Context: "file: write", ProvenFix: "give up again"})
+	if got := kb.All()[0]; got.Kind == KindAvoid || got.ProvenFix != "send params as a real JSON object" {
+		t.Errorf("a proven fix was overwritten by a later dead end: %+v", got)
 	}
 }

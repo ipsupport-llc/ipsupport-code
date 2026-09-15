@@ -57,7 +57,18 @@ func IsGenericErrorPattern(pattern string) bool {
 // separator and an extension, so genuinely general advice survives:
 // "go test ./..." (no extension), "--prefix=/usr/local" (no extension) and a
 // bare "main.go" (no directory) are all left alone.
-var projectPath = regexp.MustCompile(`[\w.-]+/[\w.-]*\.\w+`)
+var projectPath = regexp.MustCompile(`(?:[\w.-]+/[\w.-]*\.\w+|\b[\w-]+\.(?:go|py|js|ts|tsx|jsx|rs|rb|java|c|h|cpp|md|json|yaml|yml|toml|txt|sh|sql|html|css)\b)`)
+
+// conventionalFile is the set of filenames that are the SAME in every project of
+// their ecosystem. A lesson naming one of these carries no run-specific value —
+// "package.json must exist before npm install" is as true in the next project as
+// in this one — so they are exempt from the project-specific rule below.
+var conventionalFile = map[string]bool{
+	"go.mod": true, "go.sum": true, "package.json": true, "package-lock.json": true,
+	"tsconfig.json": true, "cargo.toml": true, "cargo.lock": true, "makefile": true,
+	"dockerfile": true, "docker-compose.yml": true, "docker-compose.yaml": true,
+	"requirements.txt": true, "pyproject.toml": true, "setup.py": true, "gemfile": true,
+}
 
 // IsProjectSpecific reports whether s carries a value from the run it was
 // learned in rather than a general lesson. Reported live, from a real debug
@@ -69,5 +80,19 @@ var projectPath = regexp.MustCompile(`[\w.-]+/[\w.-]*\.\w+`)
 // says to exclude anything project-specific; a model that ignores it must not
 // be able to poison the store anyway, so this is enforced on the way in.
 func IsProjectSpecific(s string) bool {
-	return projectPath.MatchString(s)
+	// A bare filename counts too. The pattern used to demand BOTH a separator
+	// and an extension, so "edit: 'find' text not present in main.go" passed as
+	// general — and most file-tool errors carry a filename, which made the
+	// busiest domain the one whose lessons could only ever re-fire on the very
+	// same file.
+	//
+	// Ecosystem manifests are exempt (see conventionalFile): "package.json must
+	// exist before npm install" is a general lesson, not a leaked value. A
+	// string is project-specific only if something OTHER than those appears.
+	for _, m := range projectPath.FindAllString(s, -1) {
+		if !conventionalFile[strings.ToLower(m)] {
+			return true
+		}
+	}
+	return false
 }

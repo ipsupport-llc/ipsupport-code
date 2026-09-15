@@ -3468,6 +3468,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	a.ag.SetGoalLoop(a.goalLoopBudget(), a.cfg.GoalNudge)  // in force whenever a standing goal exists (any status) — see goalLoopBudget
 	a.ag.SetGoalText(a.goalSnapshot().Text)                // the judge accepts against the GOAL, never against this run's errand
 	a.ag.SetJudgeCriteria(loadJudgeCriteria(a.workspace))  // project acceptance criteria, re-read each run
+	a.ag.SetGoalGap(a.goalSnapshot().Missing)              // what the last attempt was found to be missing — see SetGoalGap
 	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again
 	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()
@@ -3491,7 +3492,12 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	} else {
 		fmt.Println("(no final answer — step budget exhausted)")
 	}
-	if !tr.Stopped {
+	// Not gated on tr.Stopped any more: a run the harness stopped after repeated
+	// failures is the one that can teach an "avoid" lesson, and excluding it made
+	// that whole lesson kind unreachable (internal/reflect takes a deliberately
+	// narrower pass on those). Cancellation stays excluded — esc means the user
+	// wants control back, not two more model calls.
+	if !tr.Cancelled {
 		reflStart := time.Now()
 		learned := a.reflectAndStore(ctx, tr)
 		// Reflection is itself a real LLM call (or two, on a dedicated client) —
@@ -3534,6 +3540,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	a.ag.SetGoalLoop(a.goalLoopBudget(), a.cfg.GoalNudge)  // in force whenever a standing goal exists (any status) — see goalLoopBudget
 	a.ag.SetGoalText(a.goalSnapshot().Text)                // the judge accepts against the GOAL, never against this run's errand
 	a.ag.SetJudgeCriteria(loadJudgeCriteria(a.workspace))  // project acceptance criteria, re-read each run
+	a.ag.SetGoalGap(a.goalSnapshot().Missing)              // what the last attempt was found to be missing — see SetGoalGap
 	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again
 	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()
@@ -3557,7 +3564,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	// (see commandWhileBusy) — saving here first means the just-finished exchange (the
 	// part the user actually sees and cares about) reaches disk before that race even
 	// becomes possible, instead of depending on reflection finishing first.
-	if !tr.Stopped { // reflect only on a clean finish, not on any premature stop
+	if !tr.Cancelled { // see the same gate in runOne — a stopped run still teaches
 		reflStart := time.Now()
 		a.reflectAndStore(ctx, tr)
 		// Flush reflection's own tokens now — same reasoning as runOne's matching

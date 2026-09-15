@@ -3426,3 +3426,140 @@ func TestJudgeCallCarriesTheCriteriaAndStillTheGoal(t *testing.T) {
 		t.Errorf("the goal is no longer the acceptance target:\n%s", clip(user, 200))
 	}
 }
+
+// A FAILED call's arguments still hold everything it MEANT to do. Pulling the
+// content out regardless turned "could not write the report" into evidence that
+// the report had been written — a straight path to accepting a goal on work that
+// never happened.
+func TestJudgeEvidenceLabelsAFailedCallAsAnAttempt(t *testing.T) {
+	msgs := []llm.Message{
+		toolCallReply("1", "file", `{"action":"write","params":{"path":"report.md","content":"# The whole report"}}`),
+		{Role: "tool", Name: "file", Content: "write denied by workspace policy", IsError: true},
+	}
+	ev := judgeEvidence(msgs)
+	if !strings.Contains(ev, "FAILED") {
+		t.Errorf("a failed write isn't marked as failed:\n%s", ev)
+	}
+	if strings.Contains(ev, "content written") {
+		t.Errorf("a failed write's payload is presented as accomplished work:\n%s", ev)
+	}
+}
+
+// An edit's result is a bare receipt and its content lives in find/replace, so a
+// newest-first edit claimed the file's key and suppressed the read that actually
+// showed the file — leaving the judge with strictly less than if the edit had
+// never happened.
+func TestJudgeEvidenceShowsWhatAnEditChanged(t *testing.T) {
+	msgs := []llm.Message{
+		toolCallReply("1", "file", `{"action":"edit","params":{"path":"main.go","find":"old url","replace":"https://new.example"}}`),
+		{Role: "tool", Name: "file", Content: "edited main.go (+1 -1)"},
+	}
+	ev := judgeEvidence(msgs)
+	if !strings.Contains(ev, "https://new.example") {
+		t.Errorf("an edit contributes only a receipt:\n%s", ev)
+	}
+}
+
+// Everything the harness injects arrives as role "user". The learning pass was
+// told all of it was the user's intent.
+func TestIsHarnessMessageSpotsOurOwnInjections(t *testing.T) {
+	ours := []string{goalReturn("ship it", "no tests"), idleNudge, refusalNudge, emptyReplyNudge, stuckNudgeRepeat, stuckNudgeFailing}
+	for _, m := range ours {
+		if !IsHarnessMessage(m) {
+			t.Errorf("harness message not recognized: %q", clip(m, 60))
+		}
+	}
+	theirs := []string{"fix the parser", "The GOAL is a moving target, please help", "why is this failing?"}
+	for _, m := range theirs {
+		if IsHarnessMessage(m) {
+			t.Errorf("a real user message was taken for harness text: %q", m)
+		}
+	}
+}
+
+// The eligibility gates must be applied BEFORE the cut to three. Query ranks on
+// loose word overlap, while the real gates are an exact substring and a matching
+// action — so lessons that merely share vocabulary could take all three slots and
+// then each fail the substring test, leaving no hint at all.
+func TestHintsFilterBeforeTruncatingToThree(t *testing.T) {
+	kb, _ := knowledge.Open(filepath.Join(t.TempDir(), "k.json"))
+	// Four decoys that share words with the error but cannot substring-match,
+	// plus the one lesson that does. All are ranked by overlap first.
+	for i, decoy := range []string{
+		"missing required param(s) for the alpha action",
+		"missing required param(s) for the beta action",
+		"missing required param(s) for the gamma action",
+		"missing required param(s) for the delta action",
+	} {
+		kb.Add(knowledge.Pitfall{Domain: "file", ErrorPattern: decoy, Context: "file: write",
+			ProvenFix: fmt.Sprintf("decoy %d", i)})
+	}
+	kb.Add(knowledge.Pitfall{Domain: "file", ErrorPattern: "you gave {}", Context: "file: write",
+		ProvenFix: "send params as a JSON object"})
+	a := New(&scriptLLM{}, tool.NewRegistry(tool.NewFile(nil, nil, nil)), kb, nil, "", 5)
+
+	h := a.hints("file", "write", "missing required param(s): path — file.write needs {path}; you gave {}")
+	if !strings.Contains(h, "send params as a JSON object") {
+		t.Errorf("the one matching lesson was crowded out by decoys:\n%s", h)
+	}
+	// Surfacing a lesson is what makes it useful, and that is what must keep it
+	// alive: Hits used to move only when reflection RE-DERIVED a lesson from a
+	// fresh failure, so a lesson that works — and therefore stops the failure
+	// recurring — went stale and was purged, while one that never helps stayed
+	// fresh forever.
+	for _, p := range kb.All() {
+		if p.ProvenFix == "send params as a JSON object" && p.Hits < 2 {
+			t.Errorf("Hits = %d after the lesson was actually surfaced, want it bumped", p.Hits)
+		}
+	}
+}
+
+// A resumed goal must carry the gap the judge already established, instead of
+// spending a fresh round rediscovering it.
+func TestResumedGoalCarriesTheKnownGapToTheJudge(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "done a bit"},
+		{Role: "assistant", Content: "DONE"},
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+	a.SetGoalText("write the report")
+	a.SetGoalGap("LAB_REPORT.md has no test results section")
+
+	if _, err := a.Run(context.Background(), "continue"); err != nil {
+		t.Fatal(err)
+	}
+	sent := ""
+	for _, m := range fake.lastMsgs {
+		if m.Role == "user" {
+			sent = m.Content
+		}
+	}
+	if !strings.Contains(sent, "no test results section") {
+		t.Errorf("the judge wasn't told what the previous attempt was missing:\n%s", clip(sent, 400))
+	}
+}
+
+// The gap must reach the transcript on the NORMAL finalize path too — it only
+// ever got there from the give-up paths, so a goal that ran out of TTL persisted
+// an empty "what's missing".
+func TestTranscriptCarriesTheGapOnTheNormalPath(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "first pass"},
+		{Role: "assistant", Content: "MORE: the report is missing"},
+		calcCall(),
+		{Role: "assistant", Content: "second pass"},
+		{Role: "assistant", Content: "MORE: the report is STILL missing"},
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(1, false)
+
+	tr, _ := a.Run(context.Background(), "write the report")
+	if !strings.Contains(tr.Missing, "STILL missing") {
+		t.Errorf("Transcript.Missing = %q, want the last judge's gap", tr.Missing)
+	}
+}

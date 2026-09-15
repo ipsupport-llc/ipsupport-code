@@ -2761,3 +2761,118 @@ func TestCompactFocusCannotDropTheActionDigests(t *testing.T) {
 		t.Errorf("a focus dropped the verbatim action record:\n%s", joined)
 	}
 }
+
+// Reported live, six returns in a row on one goal: the model wrote the required
+// file, read it back to prove it, and ran a build that printed "Build OK" — and
+// the judge answered "more" every time, asking to "verify that it compiles and
+// that the report includes all required sections". It had no way to check: all
+// it ever received was the model's own final text plus a one-line digest naming
+// which files were touched. The judge must see what the run actually produced.
+func TestJudgeEvidenceCarriesTheRealToolOutput(t *testing.T) {
+	msgs := []llm.Message{
+		llm.User("write the report"),
+		toolCallReply("1", "file", `{"action":"write","params":{"path":"LAB_REPORT.md","content":"..."}}`),
+		{Role: "tool", Name: "file", Content: "wrote LAB_REPORT.md (12 lines)"},
+		toolCallReply("2", "run", `{"action":"shell","params":{"command":"go build ./..."}}`),
+		{Role: "tool", Name: "run", Content: "exit 0\nBuild OK"},
+	}
+	ev := judgeEvidence(msgs)
+	for _, want := range []string{"Build OK", "wrote LAB_REPORT.md", "file.write LAB_REPORT.md", "run.shell go build ./..."} {
+		if !strings.Contains(ev, want) {
+			t.Errorf("evidence missing %q:\n%s", want, ev)
+		}
+	}
+}
+
+// The same target read repeatedly must cost ONE entry, showing its latest
+// content — the live run read the report back three times, and three identical
+// copies would crowd out everything else in the budget.
+func TestJudgeEvidenceKeepsOnlyTheLatestPerTarget(t *testing.T) {
+	read := func(id string) llm.Message {
+		return toolCallReply(id, "file", `{"action":"read","params":{"path":"LAB_REPORT.md"}}`)
+	}
+	msgs := []llm.Message{
+		read("1"), {Role: "tool", Name: "file", Content: "stale draft"},
+		read("2"), {Role: "tool", Name: "file", Content: "stale draft"},
+		read("3"), {Role: "tool", Name: "file", Content: "final content"},
+	}
+	ev := judgeEvidence(msgs)
+	if strings.Contains(ev, "stale draft") {
+		t.Errorf("evidence kept an outdated read:\n%s", ev)
+	}
+	if !strings.Contains(ev, "final content") {
+		t.Errorf("evidence lost the latest read:\n%s", ev)
+	}
+	if n := strings.Count(ev, "file.read LAB_REPORT.md"); n != 1 {
+		t.Errorf("same target appears %d times, want 1", n)
+	}
+}
+
+// The judge usually shares the main model's connection — often a small local
+// one — so the evidence block must stay bounded no matter how long the run was.
+func TestJudgeEvidenceStaysWithinItsBudget(t *testing.T) {
+	var msgs []llm.Message
+	for i := 0; i < 50; i++ {
+		id := fmt.Sprintf("%d", i)
+		msgs = append(msgs,
+			toolCallReply(id, "file", fmt.Sprintf(`{"action":"read","params":{"path":"f%d.txt"}}`, i)),
+			llm.Message{Role: "tool", Name: "file", Content: strings.Repeat("x", 5000)})
+	}
+	ev := judgeEvidence(msgs)
+	if len(ev) > judgeEvidenceBudget*2 {
+		t.Errorf("evidence is %d chars, want it bounded near the %d budget", len(ev), judgeEvidenceBudget)
+	}
+	// Newest-first: the budget is spent on the END of the run, not its beginning.
+	if !strings.Contains(ev, "f49.txt") {
+		t.Errorf("evidence dropped the most recent call:\n%s", clip(ev, 300))
+	}
+}
+
+// A run with no tool results has nothing to show — the block must be absent
+// rather than an empty header the judge has to reason about.
+func TestJudgeEvidenceIsEmptyWithoutToolResults(t *testing.T) {
+	if ev := judgeEvidence([]llm.Message{llm.User("hi"), {Role: "assistant", Content: "hello"}}); ev != "" {
+		t.Errorf("evidence = %q, want empty", ev)
+	}
+}
+
+// End to end: the evidence must actually reach the judge's own prompt, or none
+// of the above matters.
+func TestJudgeCallReceivesTheEvidence(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "all set"}, // finalize
+		{Role: "assistant", Content: "DONE"},    // judge
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+
+	if _, err := a.Run(context.Background(), "add two numbers"); err != nil {
+		t.Fatal(err)
+	}
+	sent := ""
+	for _, m := range fake.lastMsgs { // lastMsgs is the judge's own call
+		if m.Role == "user" {
+			sent = m.Content
+		}
+	}
+	if !strings.Contains(sent, "EVIDENCE") {
+		t.Errorf("the judge's prompt carries no evidence block:\n%s", sent)
+	}
+	if !strings.Contains(sent, "calc.calculate") {
+		t.Errorf("the judge's prompt doesn't name what was actually run:\n%s", sent)
+	}
+}
+
+// The judge prompt must not send the checker after verification it cannot do —
+// that was the live failure: "verify that it compiles" repeated forever by a
+// checker with no tools.
+func TestJudgeSystemForbidsAskingForChecksItCannotRun(t *testing.T) {
+	if !strings.Contains(judgeSystem, "EVIDENCE") {
+		t.Error("the judge prompt never mentions the evidence it is given")
+	}
+	if !strings.Contains(judgeSystem, "never ask for a check you are unable to perform") {
+		t.Error("the judge prompt doesn't rule out demanding a check it has no tools for")
+	}
+}

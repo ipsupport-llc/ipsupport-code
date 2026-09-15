@@ -145,6 +145,10 @@ type Agent struct {
 	// see SetJudgeLLM.
 	judgeLLM llm.Chatter
 
+	// judgeCriteria is the user's own acceptance criteria, appended to the
+	// judge's instruction — see judgeSystemWith.
+	judgeCriteria string
+
 	// goalText is the STANDING goal's own text — what the judge accepts against
 	// and what a re-feed puts back in front of the model. Empty means "whatever
 	// this run was asked to do", which is right when the run IS the goal.
@@ -1729,7 +1733,7 @@ func (a *Agent) judgeGoalOnce(ctx context.Context, goal, result, evidence string
 	// completion size.
 	p0, c0 := judgeUsage(a.judgeChatter())
 	reply, err := a.judgeChatter().Chat(ctx, []llm.Message{
-		llm.System(judgeSystem),
+		llm.System(judgeSystemWith(a.judgeCriteria)),
 		llm.User("GOAL:\n" + goal + "\n\nWHAT THE AGENT DID / ITS FINAL ANSWER:\n" + clipMarked(result, 2000) + evidence),
 	}, judgeTools())
 	if err != nil {
@@ -1948,6 +1952,25 @@ Judge from the EVIDENCE. It is the run's own output — file contents written or
 You have no tools and cannot inspect anything yourself, so never ask for a check you are unable to perform. "Verify that it works" is not a missing piece. If something is genuinely absent from the evidence, name that specific thing instead.
 
 Be skeptical of claims with nothing behind them: a change only described, or an artifact never shown, is NOT done.`
+
+// judgeSystemWith appends the user's own acceptance criteria to the judge's
+// instruction. Deliberately ADDITIVE and placed last: the GOAL stays the thing
+// being accepted, the criteria only say what to look for while deciding, and the
+// EVIDENCE stays what the decision is made from. Extra criteria can make the
+// judge stricter about a project's own standards — "a change isn't done until
+// the tests were actually RUN, not just written" — without any of them being
+// able to redefine, replace or dilute the goal itself.
+func judgeSystemWith(criteria string) string {
+	c := strings.TrimSpace(criteria)
+	if c == "" {
+		return judgeSystem
+	}
+	return judgeSystem + "\n\nThe user has additional acceptance criteria for this project. Apply them ON TOP of the goal — they add to what counts as done, they never replace the goal or excuse any part of it:\n" + c
+}
+
+// SetJudgeCriteria sets the user's own acceptance criteria, folded into the
+// judge's instruction on every judge call (see judgeSystemWith). Empty clears.
+func (a *Agent) SetJudgeCriteria(text string) { a.judgeCriteria = text }
 
 // looksLikeRefusal reports whether a no-tool-call reply is a chat model dodging
 // the work — pasting file/code in a fence, or claiming it can't reach the

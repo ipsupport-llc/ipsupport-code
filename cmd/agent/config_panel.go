@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -36,6 +37,7 @@ var configRows = []cfgRow{
 	{key: "top_p"},
 	{key: "max_output_tokens"},
 	{key: "judge_max_output_tokens"},
+	{key: "judge_criteria"},
 	{key: "loop_detection"},
 	{key: "idle_timeout"},
 	{header: "Behavior"},
@@ -293,6 +295,12 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 			v = fmt.Sprintf("%d", m.app.cfg.JudgeMaxOutputTokens)
 		}
 		return "judge max output", v, "enter: cycle (the goal judge is cut off mid-verdict on a small budget)"
+	case "judge_criteria":
+		v, hint := "— none", "enter: how to create it"
+		if src := m.app.judgeCriteriaSource(); src != "" {
+			v, hint = "● "+src, "enter: how to edit it"
+		}
+		return "judge criteria", v, hint
 	case "loop_detection":
 		return "loop detection", onOff(!act.DisableLoopDetection), "enter: toggle (aborts a model stuck repeating itself)"
 	case "idle_timeout":
@@ -438,6 +446,14 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		m.cycleMaxOutputTokens()
 	case "judge_max_output_tokens":
 		m.cycleJudgeMaxOutput()
+	case "judge_criteria":
+		// Prose, not a value to cycle: point at the file. It is re-read on every
+		// run, so an edit applies without a restart.
+		ws := filepath.Join(m.app.workspace, ".agent", "judge.md")
+		m.push(cDim.Render("  judge criteria — extra acceptance rules, applied ON TOP of the goal (never replacing it):"))
+		m.push(cDim.Render("    this project:  " + ws))
+		m.push(cDim.Render("    every project: " + config.JudgePromptPath()))
+		m.push(cDim.Render("  e.g. \"a fix is not done until the tests were actually RUN, not just written\""))
 	case "loop_detection": // toggle the active connection's repetition detectors
 		if err := m.app.toggleLoopDetection(); err != nil {
 			m.push(cErr.Render("  could not persist: " + err.Error()))

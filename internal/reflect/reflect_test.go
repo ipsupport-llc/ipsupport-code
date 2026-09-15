@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
+	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 )
 
@@ -81,6 +82,61 @@ func TestReflectDropsGenericExitCodePattern(t *testing.T) {
 	}
 	if len(l.Pitfalls) != 1 || l.Pitfalls[0].ErrorPattern != "go.mod already exists" {
 		t.Errorf("pitfalls = %+v, want only the specific (non-generic) pattern kept", l.Pitfalls)
+	}
+}
+
+// Reported live, from a real debug log: a stored lesson read "Provide proper
+// path parameter: {\"path\": \"nemotron-extreme-quant/PLAN.md\", ...}" and
+// surfaced — in a DIFFERENT project — on a failure whose real cause was the
+// encoding of the params blob, not the path. The model quoted that hint back in
+// its own reasoning and kept retrying the wrong thing. The prompt forbids
+// carrying a value from the run into a lesson; a model that ignores it must not
+// be able to poison the store anyway.
+func TestReflectDropsLessonsCarryingAPathFromThisRun(t *testing.T) {
+	reply := `{"pitfalls":[` +
+		`{"domain":"file","error_pattern":"you gave {}","context":"file: write","proven_fix":"Provide proper path parameter: {\"path\": \"nemotron-extreme-quant/PLAN.md\", \"content\": \"...\"}"},` +
+		`{"domain":"file","error_pattern":"missing required param(s): path","context":"file: write","proven_fix":"send params as a real JSON object, not a JSON-encoded string"}` +
+		`],"facts":[]}`
+	l, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if len(l.Pitfalls) != 1 {
+		t.Fatalf("pitfalls = %+v, want only the project-neutral lesson kept", l.Pitfalls)
+	}
+	if strings.Contains(l.Pitfalls[0].ProvenFix, "nemotron") {
+		t.Errorf("kept the lesson quoting another project's path: %+v", l.Pitfalls[0])
+	}
+}
+
+// A run that hit an error and never recovered still has the most useful lesson in
+// it — "this approach never worked". kind "avoid" records that; it must survive
+// parsing, because rendering it as a fix that worked would push the next model
+// straight back into the loop the lesson exists to break.
+func TestReflectKeepsAvoidKind(t *testing.T) {
+	reply := `{"pitfalls":[` +
+		`{"domain":"file","kind":"avoid","error_pattern":"you gave {}","context":"file: write","proven_fix":"send params as a JSON object, never a JSON-encoded string"},` +
+		`{"domain":"run","kind":"fix","error_pattern":"permission denied","context":"run: shell","proven_fix":"use sudo"},` +
+		`{"domain":"web","error_pattern":"certificate expired","context":"web: get","proven_fix":"use http"}` +
+		`],"facts":[]}`
+	l, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if len(l.Pitfalls) != 3 {
+		t.Fatalf("pitfalls = %+v, want all three", l.Pitfalls)
+	}
+	if l.Pitfalls[0].Kind != knowledge.KindAvoid {
+		t.Errorf("kind = %q, want %q", l.Pitfalls[0].Kind, knowledge.KindAvoid)
+	}
+	// "fix" and an omitted kind both mean the original default. Erring toward
+	// "a fix that worked" is deliberate: a dead end mislabeled as a fix reads as
+	// bad advice, but a fix mislabeled as a dead end tells the model to stop
+	// doing the thing that actually works.
+	for _, i := range []int{1, 2} {
+		if l.Pitfalls[i].Kind != "" {
+			t.Errorf("pitfall %d kind = %q, want \"\" (a fix)", i, l.Pitfalls[i].Kind)
+		}
 	}
 }
 

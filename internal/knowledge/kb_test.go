@@ -473,3 +473,115 @@ func TestNoopPurgeDoesNotDiscardEarlierAddLesson(t *testing.T) {
 		t.Errorf("on-disk lessons = %+v, want the one Add'd lesson from before the no-op Purge to survive", all)
 	}
 }
+
+// Reported live: a lesson reading "Provide proper path parameter: {"path":
+// "nemotron-extreme-quant/PLAN.md", ...}" surfaced in a DIFFERENT project and
+// sent the model after the wrong cause. A lesson keyed on or quoting a value
+// from the run that taught it never matches again and actively misleads, so
+// those are rejected on the way in — but only those: general advice that merely
+// contains a slash or a dot must survive, or the guard costs more than it saves.
+func TestIsProjectSpecific(t *testing.T) {
+	poisoned := []string{
+		`Provide proper path parameter: {"path": "nemotron-extreme-quant/PLAN.md", "content": "..."}`,
+		"edit cmd/agent/main.go instead",
+		"the config lives at .agent/config.json",
+	}
+	for _, s := range poisoned {
+		if !IsProjectSpecific(s) {
+			t.Errorf("IsProjectSpecific(%q) = false, want true", s)
+		}
+	}
+	general := []string{
+		"send params as a real JSON object, not a JSON-encoded string",
+		"run go test ./... from the module root",
+		"pass --prefix=/usr/local to configure",
+		"the file is main.go in the current directory",
+		"use sudo",
+	}
+	for _, s := range general {
+		if IsProjectSpecific(s) {
+			t.Errorf("IsProjectSpecific(%q) = true, want false — general advice must survive", s)
+		}
+	}
+}
+
+// /knowledge list numbers lessons and /knowledge drop takes that number, so both
+// must agree on an order that doesn't depend on insertion history — otherwise the
+// number printed by one command can point at a different lesson by the time the
+// other runs.
+func TestSortedIsStableRegardlessOfInsertionOrder(t *testing.T) {
+	a, b := &KB{}, &KB{}
+	lessons := []Pitfall{
+		{Domain: "run", ErrorPattern: "permission denied", ProvenFix: "1"},
+		{Domain: "file", ErrorPattern: "you gave {}", ProvenFix: "2"},
+		{Domain: "file", ErrorPattern: "no such file", ProvenFix: "3"},
+	}
+	for _, p := range lessons {
+		a.Add(p)
+	}
+	for i := len(lessons) - 1; i >= 0; i-- {
+		b.Add(lessons[i])
+	}
+	sa, sb := a.Sorted(), b.Sorted()
+	if len(sa) != 3 || len(sb) != 3 {
+		t.Fatalf("len = %d/%d, want 3", len(sa), len(sb))
+	}
+	for i := range sa {
+		if sa[i].ProvenFix != sb[i].ProvenFix {
+			t.Fatalf("position %d differs by insertion order: %q vs %q", i, sa[i].ProvenFix, sb[i].ProvenFix)
+		}
+	}
+	if sa[0].Domain != "file" || sa[2].Domain != "run" {
+		t.Errorf("order = %v, want grouped by domain", []string{sa[0].Domain, sa[1].Domain, sa[2].Domain})
+	}
+}
+
+// Deleting one lesson must remove exactly that one and survive a Save — the
+// pending-replay path that protects concurrent writers would otherwise merge the
+// deleted lesson straight back in.
+func TestDeleteRemovesOneLessonAndPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k.json")
+	kb, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb.Add(Pitfall{Domain: "file", ErrorPattern: "you gave {}", ProvenFix: "keep me"})
+	kb.Add(Pitfall{Domain: "file", ErrorPattern: "no such file", ProvenFix: "drop me"})
+	if err := kb.Save(); err != nil {
+		t.Fatal(err)
+	}
+	victim := Pitfall{Domain: "file", ErrorPattern: "No Such File"} // matched case-insensitively, like Add's dedupe
+	if !kb.Delete(victim) {
+		t.Fatal("Delete reported nothing removed")
+	}
+	if kb.Delete(victim) {
+		t.Error("second Delete of the same lesson should report nothing removed")
+	}
+	if err := kb.Save(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all := reopened.All()
+	if len(all) != 1 || all[0].ProvenFix != "keep me" {
+		t.Errorf("after reopen = %+v, want only the kept lesson", all)
+	}
+}
+
+// DropWhere retires lessons a later rule made unstorable, so an existing store
+// heals itself on startup instead of waiting for them to age out.
+func TestDropWhereRetiresMatchingLessons(t *testing.T) {
+	kb := &KB{}
+	kb.Add(Pitfall{Domain: "file", ErrorPattern: "you gave {}", ProvenFix: "use cmd/agent/main.go"})
+	kb.Add(Pitfall{Domain: "file", ErrorPattern: "no such file", ProvenFix: "create the directory first"})
+	n := kb.DropWhere(func(p Pitfall) bool { return IsProjectSpecific(p.ProvenFix) })
+	if n != 1 {
+		t.Fatalf("dropped %d, want 1", n)
+	}
+	all := kb.All()
+	if len(all) != 1 || all[0].ProvenFix != "create the directory first" {
+		t.Errorf("remaining = %+v, want only the project-neutral lesson", all)
+	}
+}

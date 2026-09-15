@@ -1806,6 +1806,37 @@ func TestJudgeGoalRetriesOnceAndCanRecoverFromAnUnclearFirstAttempt(t *testing.T
 	}
 }
 
+// Reported live: from the TUI, the isolated judge call was indistinguishable
+// from the main model still "thinking" — nothing on screen said a separate
+// check was even happening. judgeGoal must emit "judging" right before it
+// calls out, exactly once per judgeGoal call — the internal retry on an
+// unclear first attempt (see above) is plumbing, not a second visible event.
+func TestJudgeGoalEmitsJudgingExactlyOnceEvenAcrossARetry(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	rt := &recTracer{}
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "all done"}, // finalize
+		{Role: "assistant", Content: ""},         // judge attempt 1: empty/unparseable
+		{Role: "assistant", Content: "DONE"},     // judge attempt 2 (the retry): confirms it
+	}}
+	a := New(fake, reg, nil, rt, "", 20)
+	a.SetGoalLoop(3, false)
+
+	if _, err := a.Run(context.Background(), "do the thing"); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, k := range rt.kinds {
+		if k == "judging" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("\"judging\" emitted %d times, want exactly 1 (not once per internal retry)", n)
+	}
+}
+
 // The judge can express its verdict as a structured tool call instead of
 // plain text — OR, not instead of, the existing "DONE"/"MORE: ..." text
 // convention (see judgeSystem/parseJudgeReply). A judge model that's itself

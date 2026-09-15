@@ -2817,6 +2817,13 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 			line += ": " + oneLine(miss, 60)
 		}
 		return []string{cToolCall.Render(line)}
+	case "judging":
+		// Reported live: the isolated judge call was indistinguishable from the
+		// main model still "thinking" — nothing on screen said a separate check
+		// was even happening. Fires right before the call; the eventual verdict
+		// (or its absence, on the normal re-feed path with no gap) is its own
+		// "judge"/"continue" line below.
+		return []string{cDim.Render("  ⚖ checking if the goal is actually done…")}
 	case "judge":
 		if done, _ := e.fields["done"].(bool); done {
 			return []string{cOk.Render("  ✓ judge: goal met")}

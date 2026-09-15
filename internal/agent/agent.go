@@ -1338,6 +1338,12 @@ func goalNotConfirmedNote(maxReturns int, met bool, missing string) string {
 // pure noise — a single cheap, tools-free retry costs little and can turn a
 // wrongly-unclear verdict into a real one.
 func (a *Agent) judgeGoal(ctx context.Context, goal, result string) (judgeVerdict, string) {
+	// Reported live: from the TUI, the isolated judge call was indistinguishable
+	// from the main model still "thinking" — no visible sign a separate check was
+	// even happening, let alone which one. One event per judgeGoal call (not per
+	// judgeGoalOnce attempt) — the internal retry on judgeUnclear is plumbing,
+	// not something the user needs a second "now judging" line for.
+	a.emit("judging", map[string]any{})
 	verdict, missing := a.judgeGoalOnce(ctx, goal, result)
 	if verdict == judgeUnclear {
 		verdict, missing = a.judgeGoalOnce(ctx, goal, result)

@@ -8052,3 +8052,94 @@ func TestJudgeCriteriaPrefersTheWorkspaceFile(t *testing.T) {
 		t.Errorf("with both = %q, want the workspace file to win", got)
 	}
 }
+
+// A fact re-derived by a later, independent run is the strongest signal this
+// store has that it is real — and it used to be discarded, leaving the entry
+// frozen where it first landed. That is what turned the store into a diary: a
+// durable fact is rediscovered in the same words every run and so never moves,
+// while narration is novel by construction and always appends, so the
+// most-recent window filled with exactly the entries it should have dropped.
+func TestARederivedFactMovesBackIntoTheInjectedWindow(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	a := &app{cfg: cfg, workspace: cfg.Workspace}
+	if err := os.MkdirAll(filepath.Join(cfg.Workspace, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	const durable = "Makefile has 'run' and 'all' targets"
+	a.addFacts([]string{durable})
+	// Enough narration to push the durable fact clean out of the window.
+	for i := 0; i < maxInjectedFacts; i++ {
+		a.addFacts([]string{fmt.Sprintf("Switched the endpoint to service-%d", i)})
+	}
+	if containsString(injectedFacts(a.factsSnapshot()), durable) {
+		t.Fatal("test setup: the durable fact should have been pushed out by narration")
+	}
+
+	// The next run rediscovers it, word for word.
+	_, changed := a.addFacts([]string{durable})
+	if !containsString(injectedFacts(a.factsSnapshot()), durable) {
+		t.Error("a re-derived fact did not return to the prompt — the store still prefers novelty over confirmation")
+	}
+	if !changed {
+		t.Error("the injected set changed but the caller wasn't told to rebuild the prompt")
+	}
+	// It must not be duplicated.
+	n := 0
+	for _, f := range a.factsSnapshot() {
+		if f == durable {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("the fact appears %d times, want 1", n)
+	}
+}
+
+// Rebuilding the system prompt invalidates the provider's cached prefix, so it
+// must happen only when what the model SEES actually changed — not on every
+// re-derivation of something already in the window.
+func TestNoPromptRebuildWhenTheVisibleSetIsUnchanged(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	a := &app{cfg: cfg, workspace: cfg.Workspace}
+	if err := os.MkdirAll(filepath.Join(cfg.Workspace, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a.addFacts([]string{"one", "two"})
+
+	if _, changed := a.addFacts([]string{"two"}); changed {
+		t.Error("rebuilt the prompt for a re-derivation that changed nothing visible")
+	}
+	if _, changed := a.addFacts([]string{"three"}); !changed {
+		t.Error("a genuinely new fact must rebuild the prompt")
+	}
+}
+
+func containsString(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}
+
+// finishGoal used to overwrite the stored gap unconditionally, so a run that
+// produced no verdict of its own — an unrelated question asked while the goal
+// stands — silently erased what an earlier attempt had established.
+func TestAnUnrelatedRunDoesNotEraseTheKnownGap(t *testing.T) {
+	a := &app{cfg: config.Default(), workspace: t.TempDir()}
+	a.goal = goalState{Text: "ship it", Status: "incomplete", Missing: "tests still failing"}
+
+	a.finishGoal(agent.Transcript{}) // no verdict, nothing to say about the goal
+	if a.goal.Missing != "tests still failing" {
+		t.Errorf("Missing = %q, want the earlier attempt's gap kept", a.goal.Missing)
+	}
+	// A run that DOES have something to say still updates it.
+	a.finishGoal(agent.Transcript{Missing: "the report has no test section"})
+	if a.goal.Missing != "the report has no test section" {
+		t.Errorf("Missing = %q, want the newer gap", a.goal.Missing)
+	}
+}

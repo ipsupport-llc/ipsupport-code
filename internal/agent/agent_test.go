@@ -1719,6 +1719,60 @@ func TestJudgeGoalRetriesOnceAndCanRecoverFromAnUnclearFirstAttempt(t *testing.T
 	}
 }
 
+// The judge can express its verdict as a structured tool call instead of
+// plain text — OR, not instead of, the existing "DONE"/"MORE: ..." text
+// convention (see judgeSystem/parseJudgeReply). A judge model that's itself
+// habituated to always call something should be just as able to finish.
+func TestJudgeAcceptsDoneAsAToolCall(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "all done"}, // finalize
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "j1", Name: "done", Arguments: "{}"}}}, // judge: tool call, not text
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+
+	tr, _ := a.Run(context.Background(), "do the thing")
+	if !tr.GoalMet {
+		t.Error("want GoalMet=true — a done tool call from the judge must count exactly like text \"DONE\"")
+	}
+}
+
+// Same as above for a "more" tool call — the missing gap must be extracted
+// from its params, re-fed exactly like the text "MORE: ..." convention would,
+// and the loop must actually continue (returns increments) instead of ending.
+func TestJudgeAcceptsMoreAsAToolCallAndExtractsMissing(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "all done"}, // finalize
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "j1", Name: "more", Arguments: `{"missing":"needs a test"}`}}}, // judge: tool call
+		toolCallReply("c2", "calc", `{"action":"calculate","params":{"expression":"3+3"}}`),                               // the re-fed turn does more work
+		{Role: "assistant", Content: "now really done"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "j2", Name: "done", Arguments: "{}"}}},
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+
+	tr, _ := a.Run(context.Background(), "do the thing")
+	if !tr.GoalMet {
+		t.Error("want GoalMet=true after the re-fed turn")
+	}
+	if tr.Returns != 1 {
+		t.Errorf("returns = %d, want 1 (one MORE re-feed)", tr.Returns)
+	}
+	found := false
+	for _, m := range tr.Messages {
+		if strings.Contains(m.Content, "needs a test") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("the more tool call's missing param never reached the re-fed goal text")
+	}
+}
+
 // Reported live: a debug log's "run start"/"run end" pair couldn't be
 // attributed with certainty to the top-level run vs. a spawned sub-agent —
 // unlike a.emit's UI events (already tagged "agent": a.label for a sub-agent),

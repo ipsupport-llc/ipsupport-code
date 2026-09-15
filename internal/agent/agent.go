@@ -1330,12 +1330,12 @@ func (a *Agent) judgeGoalOnce(ctx context.Context, goal, result string) (judgeVe
 	reply, err := a.llm.Chat(ctx, []llm.Message{
 		llm.System(judgeSystem),
 		llm.User("GOAL:\n" + goal + "\n\nWHAT THE AGENT DID / ITS FINAL ANSWER:\n" + clip(result, 2000)),
-	}, nil)
+	}, judgeTools())
 	if err != nil {
 		slog.Debug("goal judge failed", a.debugArgs("err", err)...)
 		return judgeUnclear, ""
 	}
-	verdict, missing := parseVerdict(reply.Content)
+	verdict, missing := parseJudgeReply(reply)
 	if verdict == judgeUnclear {
 		// Reasoning logged alongside Content: a reasoning-capable local model
 		// can stream its whole verdict into Reasoning and leave Content empty
@@ -1352,6 +1352,56 @@ var (
 	moreToken = regexp.MustCompile(`(?i)\bMORE\b`) // \b avoids matching "MOREOVER"
 	doneToken = regexp.MustCompile(`(?i)\bDONE\b`)
 )
+
+// judgeTools offers the judge model a structured OR alternative to writing
+// "DONE"/"MORE: ..." as plain text — not a replacement for it. A judge model
+// that's itself habituated to always calling a tool (the same instinct behind
+// the "TASK COMPLETE"/echo problem this session traced on the MAIN model) can
+// express its verdict as a real function call instead of fighting that
+// instinct to produce free text, which is exactly the failure mode behind
+// "goal judge unparseable reply=\"\"". Either shape works; parseJudgeReply
+// checks both.
+func judgeTools() []map[string]any {
+	return []map[string]any{
+		{"type": "function", "function": map[string]any{
+			"name":        "done",
+			"description": "The goal is fully and verifiably met.",
+			"parameters":  map[string]any{"type": "object", "properties": map[string]any{}},
+		}},
+		{"type": "function", "function": map[string]any{
+			"name":        "more",
+			"description": "The goal is NOT fully met yet.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"missing": map[string]any{"type": "string", "description": "what is still missing, in a few words"},
+				},
+				"required": []string{"missing"},
+			},
+		}},
+	}
+}
+
+// parseJudgeReply reads the judge's answer — a done/more tool call OR the
+// plain-text "DONE"/"MORE: ..." convention, whichever the judge model actually
+// produced. Tool calls are checked first (when present, they're the more
+// reliable shape); free text is the fallback for a model that just answers.
+func parseJudgeReply(reply llm.Message) (judgeVerdict, string) {
+	for _, tc := range reply.ToolCalls {
+		switch tc.Name {
+		case "done":
+			return judgeDone, ""
+		case "more":
+			var args struct {
+				Missing string `json:"missing"`
+			}
+			_ = json.Unmarshal([]byte(tc.Arguments), &args)
+			clipped, _ := textutil.Clip(strings.TrimSpace(args.Missing), 160)
+			return judgeMore, clipped
+		}
+	}
+	return parseVerdict(reply.Content)
+}
 
 // parseVerdict reads the judge's whole reply (not just the first line) and biases
 // skeptical: any boundary-delimited MORE means not-done (with the gap that follows
@@ -1376,7 +1426,7 @@ func parseVerdict(s string) (judgeVerdict, string) {
 
 // judgeSystem instructs the side-call judge. Tight on purpose: a small local model
 // must answer in one parseable line.
-const judgeSystem = `You are a strict acceptance checker. Given a GOAL and what an agent did, decide if the goal is FULLY met. Reply with ONE line, nothing else:
+const judgeSystem = `You are a strict acceptance checker. Given a GOAL and what an agent did, decide if the goal is FULLY met. Answer either by calling a tool — done() if fully and verifiably accomplished, or more(missing: "...") if anything is incomplete, untested, or only described instead of done — or, if you prefer, reply with ONE line of plain text instead, nothing else:
 - "DONE" if the goal is fully and verifiably accomplished.
 - "MORE: <what is still missing, in a few words>" if anything is incomplete, untested, or only described instead of done.
 Be skeptical: describing a change instead of making it, or leaving it untested, is NOT done.`

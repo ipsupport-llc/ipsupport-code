@@ -2965,3 +2965,106 @@ func TestPromptTokensTracksMainTurnsAndSurvivesACompact(t *testing.T) {
 		t.Errorf("PromptTokens = %d after /compact, want it unchanged at %d — a side call must not repaint the session's size", got, afterRun)
 	}
 }
+
+// Reported live: eleven judge calls in one run, every one "reply=\"\"
+// reasoning=<long>". The judge shares the main model's connection AND its
+// reasoning settings, so on a reasoning model it thought as hard about a yes/no
+// acceptance check as the main model did about the task, spent its whole output
+// budget in reasoning_content, and never reached Content. Its conclusion was in
+// that text the whole time — logged, and thrown away.
+func TestParseReasonedVerdictRecoversAVerdictFromTheThinking(t *testing.T) {
+	cases := []struct {
+		name      string
+		reasoning string
+		want      judgeVerdict
+		missing   string
+	}{
+		{"plain done", "Let me check the evidence.\nThe report exists and the build passed.\nDONE", judgeDone, ""},
+		{"decorated done", "Looks complete.\n**DONE**", judgeDone, ""},
+		{"more with reason", "The report is there.\nMORE: no test results recorded", judgeMore, "no test results recorded"},
+		{"more wins over done", "DONE\nActually no.\nMORE: the build was never run", judgeMore, "the build was never run"},
+		// Free-running thought is full of these words; only a line that BEGINS
+		// with one is a verdict. Reading them loosely would turn "the task is not
+		// done" into a false "goal met" — the one direction that must be
+		// impossible.
+		{"incidental done", "The task is not done yet and I am unsure.", judgeUnclear, ""},
+		{"moreover", "Moreover, the report seems fine. I cannot tell.", judgeUnclear, ""},
+		{"more mid-sentence", "I think MORE work is needed here", judgeUnclear, ""},
+		{"nothing", "", judgeUnclear, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, missing := parseReasonedVerdict(c.reasoning)
+			if got != c.want {
+				t.Errorf("verdict = %v, want %v", got, c.want)
+			}
+			if missing != c.missing {
+				t.Errorf("missing = %q, want %q", missing, c.missing)
+			}
+		})
+	}
+}
+
+// Content still wins when it has a verdict: the thinking is a fallback, not a
+// second opinion that can override what the judge actually committed to.
+func TestJudgeContentWinsOverTheReasoning(t *testing.T) {
+	reply := llm.Message{Role: "assistant", Content: "MORE: no report", Reasoning: "DONE"}
+	if v, missing := parseJudgeReply(reply); v != judgeMore || missing != "no report" {
+		t.Errorf("verdict = %v (%q), want more/\"no report\" — Content must win", v, missing)
+	}
+}
+
+// End to end: a judge that writes nothing to Content but concludes in its
+// thinking must still decide the goal, instead of being read as unclear and
+// costing a whole extra return.
+func TestRunHonorsAJudgeThatOnlyAnsweredInItsThinking(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "all set"},
+		{Role: "assistant", Content: "", Reasoning: "The evidence shows the work done.\nDONE"},
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+
+	tr, _ := a.Run(context.Background(), "add two numbers")
+	if !tr.GoalMet {
+		t.Error("GoalMet = false — the judge concluded DONE in its reasoning and was ignored")
+	}
+	if tr.Returns != 0 {
+		t.Errorf("returns = %d, want 0 — an answered judge must not cost a return", tr.Returns)
+	}
+}
+
+// The judge's own connection, when one is configured.
+func TestSetJudgeLLMRoutesJudgeCallsAwayFromTheMainModel(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	main := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "all set"},
+	}}
+	judge := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "DONE"}}}
+	a := New(main, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+	a.SetJudgeLLM(judge)
+
+	tr, _ := a.Run(context.Background(), "add two numbers")
+	if judge.i != 1 {
+		t.Errorf("judge connection saw %d call(s), want 1", judge.i)
+	}
+	if !tr.GoalMet {
+		t.Error("GoalMet = false — the judge's own connection said DONE")
+	}
+}
+
+// The judge log clipped the reasoning from the FRONT, which showed the goal
+// being restated every time and never whether a verdict was reached. A verdict
+// is at the end.
+func TestClipTailKeepsTheEnd(t *testing.T) {
+	if got := clipTail("abcdef", 3); got != "…def" {
+		t.Errorf("clipTail = %q, want \"…def\"", got)
+	}
+	if got := clipTail("ab", 5); got != "ab" {
+		t.Errorf("clipTail = %q, want it untouched when short enough", got)
+	}
+}

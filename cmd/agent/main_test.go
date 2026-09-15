@@ -7870,3 +7870,67 @@ func TestCompactFocusCombinesStandingAndOneShot(t *testing.T) {
 		t.Errorf("combined = %q, want both the standing rule and the one-shot", both)
 	}
 }
+
+// The judge gets its own connection only when the user actually set a
+// judge-scoped reasoning level. Without one it keeps sharing the main client,
+// which also keeps its tokens flowing into the ledger through the ordinary path.
+func TestWireJudgeOnlyBuildsAClientWhenJudgeReasoningIsSet(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if a.judgeClient != nil {
+		t.Error("a judge client was built with no judge-scoped reasoning set")
+	}
+
+	a.cfg.Reasoning = map[string]json.RawMessage{
+		"judge:" + a.providerName(): json.RawMessage(`{"reasoning_effort":"minimal"}`),
+	}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if a.judgeClient == nil {
+		t.Fatal("no judge client after a judge-scoped level was set")
+	}
+	if a.judgeClient == a.client {
+		t.Error("the judge client is the main client — the reasoning override can't reach the judge")
+	}
+}
+
+// "/reasoning judge <level>" must store under the judge: scope, so it reaches
+// the goal judge and nothing else. Reported live: the judge inherited the main
+// model's thinking settings and returned an empty Content eleven times in one
+// run, and there was no setting that could tell it to stop thinking.
+func TestReasoningJudgeScopeIsSeparateFromTheTaskModel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.Model = "n30"
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	out := strings.Join(a.reasoningCommand("judge minimal"), "\n")
+	key := "judge:" + a.providerName() + "/n30"
+	if _, ok := a.cfg.Reasoning[key]; !ok {
+		t.Fatalf("nothing stored at %q; said: %s", key, out)
+	}
+	// The task model's own setting is untouched.
+	if _, ok := a.cfg.Reasoning[a.providerName()+"/n30"]; ok {
+		t.Error("/reasoning judge changed the TASK model's reasoning too")
+	}
+	if a.judgeClient == nil {
+		t.Error("the judge client wasn't rebuilt after the level was set")
+	}
+	// And it reports back under its own label, not the task model's.
+	if got := strings.Join(a.reasoningCommand("judge"), "\n"); !strings.Contains(got, "goal judge") {
+		t.Errorf("readback = %q, want it labelled as the goal judge", got)
+	}
+}

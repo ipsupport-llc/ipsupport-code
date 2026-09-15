@@ -149,6 +149,10 @@ type Agent struct {
 	// judge's instruction — see judgeSystemWith.
 	judgeCriteria string
 
+	// goalGap is what the judge said was missing when this goal was last
+	// attempted — see SetGoalGap.
+	goalGap string
+
 	// goalText is the STANDING goal's own text — what the judge accepts against
 	// and what a re-feed puts back in front of the model. Empty means "whatever
 	// this run was asked to do", which is right when the run IS the goal.
@@ -229,6 +233,16 @@ func (a *Agent) SetMaxHistory(n int) { a.maxHistory = n }
 // Compact/remember's cross-task cap, which never runs mid-task. 0 (the
 // default) disables this — no window known, nothing to check against.
 func (a *Agent) SetContextWindow(n int) { a.contextWindow = n }
+
+// SetGoalGap carries the judge's own account of what was still missing at the
+// END of the previous attempt at this goal, so a resumed run does not start
+// blind.
+//
+// The gap was computed by the judge, persisted to goal.json, shown in
+// /goal status — and then never read by any run path. A goal resumed after a
+// give-up re-derived its own shortfall from scratch, at the cost of a fresh
+// judge round, while the answer sat on disk. Empty when there is none.
+func (a *Agent) SetGoalGap(text string) { a.goalGap = strings.TrimSpace(text) }
 
 // SetGoalText sets the standing goal's own text as the acceptance target,
 // independent of what any one run was asked to do.
@@ -468,7 +482,15 @@ func (a *Agent) Compact(ctx context.Context, focus string) (int, error) {
 	if len(digests) > 0 {
 		// Starts with actionsDigestMarker (not bespoke wording) so a LATER Compact
 		// call's scan above recognizes and re-harvests this whole block too.
-		summary += actionsDigestMarker + " — exact record of actions across those turns, kept verbatim regardless of the summary above — do not repeat a command marked FAILED, it will fail the same way again:\n" +
+		// NOT "do not repeat a command marked FAILED, it will fail the same way
+		// again", which is what this said. A command's past failure is an
+		// observation about the state it ran against, not a property of the
+		// command: `go test ./...` fails before the fix and passes after it, and
+		// the old wording told the model never to run it again — directly
+		// against a judge that requires tests to have been RUN. What the record
+		// is actually good for is not blindly REPEATING a failure without
+		// changing anything first.
+		summary += actionsDigestMarker + " — exact record of actions across those turns, kept verbatim regardless of the summary above. A FAILED entry says what went wrong at the time, not that the command is forbidden: don't re-run one unchanged expecting a different result, but DO re-run it once you've addressed the cause (a verification step is worth repeating after a fix):\n" +
 			strings.Join(digests, "\n") + ")"
 	}
 	a.historyMu.Lock()
@@ -1069,7 +1091,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// it nothing to judge. actionsDigest gives it the real record
 					// (files touched / commands run) instead, same fix already applied
 					// to the give-up paths (see judgeOnGiveUp).
-					verdict, missing := a.judgeGoal(ctx, a.acceptanceTarget(goal), clean+actionsDigest(msgs), judgeEvidence(msgs))
+					verdict, missing := a.judgeGoal(ctx, a.acceptanceTarget(goal), clean+actionsDigest(msgs)+a.priorGapNote(returns), judgeEvidence(msgs))
 					// Reported live: the judge's own decision (a separate LLM call)
 					// was entirely invisible in the debug log for its two NORMAL
 					// verdicts — only its failure ("goal judge failed") and
@@ -1095,18 +1117,17 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					if verdict == judgeDone {
 						goalMet = true // only an explicit DONE marks the goal verifiably met
 						a.emit("judge", map[string]any{"done": true})
-					} else if returns < a.maxReturns {
+					} else if lastMissing = missing; returns < a.maxReturns {
 						returns++
 						actedSinceReturn, idleNudged = false, false
 						msgs = append(msgs, llm.User(goalReturn(a.acceptanceTarget(goal), missing)))
 						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing})
 						continue
-					} else {
-						// Budget spent: this verdict can no longer buy another
-						// attempt, but it is still the honest answer about where the
-						// goal stands, and the caller surfaces it (goalStalled).
-						lastMissing = missing
 					}
+					// lastMissing is set above for BOTH branches: the gap is the
+					// judge's account of this run's shortfall whether or not the
+					// budget could still buy another attempt, and it has to
+					// survive into the transcript either way.
 				}
 			}
 			// The goal loop was in force, real work happened (acted), but the judge
@@ -1153,6 +1174,13 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			tr.Final = clean
 			tr.Messages = msgs
 			tr.Returns, tr.GoalMet = returns, goalMet
+			// The normal finalize path never recorded the gap, so a goal that ran
+			// out of TTL persisted an EMPTY "what's missing" — the judge's own
+			// one-line account of the shortfall, computed and then dropped on the
+			// floor. Only the give-up paths were setting it.
+			if !goalMet {
+				tr.Missing = lastMissing
+			}
 			tr.PromptTokens = promptTokens
 			a.emit("final", map[string]any{"text": clean, "suggest": suggest})
 			a.remember(goal, clean, msgs)
@@ -1414,6 +1442,42 @@ func splitSuggestion(text string) (clean, suggestion string) {
 // patient default here costs little.
 const DefaultMaxStuckTurns = 8
 
+// IsHarnessMessage reports whether a user-role message is something THIS PROGRAM
+// injected — a goal re-feed, a nudge, a steer or job note — rather than anything
+// the user typed.
+//
+// Everything the harness pushes at the model arrives as role "user", and
+// internal/reflect labelled every one of them "GOAL:" when summarising a run for
+// the learning pass. A goal run with four judge rounds therefore showed the
+// reflecting model five different "GOAL:" lines, three of which were our own
+// scaffolding — and a distilled "fact" could come out reading "You're repeating
+// the same tool call(s) without making progress", which is our text, about our
+// nudge, stored as a durable truth about the user's project.
+func IsHarnessMessage(content string) bool {
+	c := strings.TrimSpace(content)
+	for _, p := range harnessPrefixes {
+		if strings.HasPrefix(c, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// harnessPrefixes are the opening words of every message the agent injects. Kept
+// as prefixes of the real constants (not copies) so a reworded nudge cannot
+// silently start reading as user intent again.
+var harnessPrefixes = []string{
+	goalReturnOpening,
+	stuckNudgeRepeat[:40],
+	stuckNudgeFailing[:40],
+	emptyReplyNudge[:40],
+	refusalNudge[:40],
+	idleNudge[:40],
+}
+
+// goalReturnOpening is the fixed opening of every goal re-feed (see goalReturn).
+const goalReturnOpening = "The GOAL is NOT complete yet"
+
 // stuckNudgeRepeat is injected when the model sent the exact same tool
 // call(s) as last turn — a literal repeat, whether it keeps failing or
 // keeps (uselessly) succeeding again.
@@ -1452,11 +1516,29 @@ const refusalNudge = `You changed nothing — you only described changes or past
 // but then finishes without touching a tool — do the next step, don't just stop.
 const idleNudge = `You re-read the GOAL but did nothing this turn — no tool call, no change on disk. Don't stop and don't just describe what to do: take the next concrete step now with your tools (file, run, git) toward the goal, then keep going. Only finish if the goal is genuinely already complete — and if so, state explicitly what's done and why.`
 
+// priorGapNote tells the judge what the LAST attempt at this goal was found to
+// be missing, on this run's first judge call only. It is context, not a verdict:
+// the judge still decides from the evidence in front of it, but it no longer has
+// to rediscover a shortfall that was already established and written down.
+// Silent once this run has produced a verdict of its own (returns > 0), which is
+// fresher than anything carried over.
+func (a *Agent) priorGapNote(returns int) string {
+	if returns > 0 || a.goalGap == "" {
+		return ""
+	}
+	return "\n\n(an earlier attempt at this same goal was judged incomplete, with this still missing: " + a.goalGap + " — check whether it has since been done.)"
+}
+
+// GoalReturnForTest exposes the goal re-feed's exact wording to tests in other
+// packages, so internal/reflect can assert that this program's own injected
+// messages are not mistaken for what the user asked for.
+func GoalReturnForTest(goal, missing string) string { return goalReturn(goal, missing) }
+
 // goalReturn re-states the goal when the judge finds it unmet, keeping the
 // objective in focus (recency) instead of letting it sink under the transcript,
 // and naming the gap so the model finishes the remaining work with tools.
 func goalReturn(goal, missing string) string {
-	s := "The GOAL is NOT complete yet — keep going. Do the remaining work now with tools (don't stop early, don't just describe it), and only finish once it's actually done."
+	s := goalReturnOpening + " — keep going. Do the remaining work now with tools (don't stop early, don't just describe it), and only finish once it's actually done."
 	if strings.TrimSpace(missing) != "" {
 		s += "\n\nStill missing: " + strings.TrimSpace(missing)
 	}
@@ -1523,7 +1605,7 @@ func judgeEvidence(msgs []llm.Message) string {
 				continue
 			}
 			seen[key] = true
-			body := evidenceBody(tc, msgs[k].Content)
+			body := evidenceBody(tc, msgs[k])
 			entry := clip(label, judgeEvidenceLabelMax) + ":\n" + clipMarked(body, judgeEvidencePerItem)
 			used += len(entry)
 			out = append(out, entry)
@@ -1544,8 +1626,18 @@ func judgeEvidence(msgs []llm.Message) string {
 // then asked — in its own words, with a tool it does not have — to go and read
 // the file itself. An empty result says so out loud rather than reading as a
 // missing entry.
-func evidenceBody(tc llm.ToolCall, result string) string {
-	body := strings.TrimSpace(result)
+func evidenceBody(tc llm.ToolCall, result llm.Message) string {
+	body := strings.TrimSpace(result.Content)
+	// A FAILED call's arguments still hold everything it MEANT to do. Pulling the
+	// content out of them regardless turned "could not write the report" into
+	// evidence that the report had been written — a straight path to accepting a
+	// goal on work that never happened. An attempt is labelled as one.
+	if result.IsError {
+		if body == "" {
+			return "(the call FAILED, with no error text)"
+		}
+		return "(the call FAILED) " + body
+	}
 	if _, params, _ := parseArgs(tc.Arguments); params != nil {
 		if content, ok := params["content"].(string); ok && strings.TrimSpace(content) != "" {
 			written := "content written:\n" + strings.TrimSpace(content)
@@ -1553,6 +1645,14 @@ func evidenceBody(tc llm.ToolCall, result string) string {
 				return body + "\n" + written
 			}
 			return written
+		}
+		// An edit's result is a bare "+1 -1" receipt and its content lives in
+		// find/replace, so a newest-first edit used to claim the file's key and
+		// suppress the read that actually showed the file — leaving the judge
+		// with strictly LESS than if the edit had never happened.
+		if replace, ok := params["replace"].(string); ok && strings.TrimSpace(replace) != "" {
+			find, _ := params["find"].(string)
+			return body + "\nreplaced:\n" + strings.TrimSpace(find) + "\nwith:\n" + strings.TrimSpace(replace)
 		}
 	}
 	if body == "" {
@@ -2035,7 +2135,8 @@ func (a *Agent) runToolCalls(ctx context.Context, calls []llm.ToolCall) ([]llm.M
 		wg.Wait()
 	}
 	n := 0
-	for _, e := range errs {
+	for i, e := range errs {
+		out[i].IsError = e // carried so evidence can tell an attempt from an accomplishment
 		if e {
 			n++
 		}
@@ -2138,7 +2239,17 @@ func (a *Agent) hints(domain, action, errText string) string {
 	low := strings.ToLower(errText)
 	knownActions := a.reg.Actions(domain)
 	var b strings.Builder
-	for _, p := range a.kb.Query(domain, errText, 3) {
+	shown := 0
+	// Query with NO cap, and cut to three only after the eligibility tests below.
+	// The cap used to be applied by Query, which ranks on loose word overlap,
+	// while the real gates here are an exact substring and a matching action —
+	// so three lessons that merely shared vocabulary could take all the slots
+	// and then each fail the substring test, leaving the model with no hint at
+	// all while a genuinely matching lesson sat unexamined.
+	for _, p := range a.kb.Query(domain, errText, 0) {
+		if shown == 3 {
+			break
+		}
 		if p.ErrorPattern == "" || !strings.Contains(low, strings.ToLower(p.ErrorPattern)) {
 			continue
 		}
@@ -2148,6 +2259,8 @@ func (a *Agent) hints(domain, action, errText string) string {
 		if b.Len() == 0 {
 			b.WriteString("Hints from past runs:")
 		}
+		shown++
+		a.kb.MarkUsed(p) // this lesson was actually surfaced — see KB.MarkUsed
 		// A dead-end lesson (knowledge.KindAvoid) must NOT be introduced as
 		// something that worked — the whole point of recording one is that the
 		// approach kept failing, and "this worked: <the thing that never worked>"

@@ -53,6 +53,13 @@ type Message struct {
 	// refusal, a trailed-off thought, or nothing at all are very different
 	// failures that empty Content alone can't tell apart.
 	Reasoning string
+	// IsError marks a tool result whose call FAILED. Same diagnostic-only status
+	// as the two fields above — toWire maps only the fields it explicitly lists,
+	// so this never reaches the server. It exists because a tool result is just
+	// text: nothing downstream could tell "wrote the report" from "could not
+	// write the report" without re-parsing prose, and the goal judge was being
+	// shown a failed write's intended content as though it had been written.
+	IsError bool
 }
 
 // Chatter is the one-method abstraction over any chat model with tool calling.

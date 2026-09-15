@@ -43,6 +43,15 @@ func (h *helpTool) lessons(_ context.Context, a Args) Result {
 	} else {
 		fmt.Fprintf(&b, "Lessons for %s:\n", domain)
 		for _, p := range lessons {
+			// A dead end must not read as a proven fix here either. pitfall.go
+			// states the rule outright — "the two must render differently
+			// wherever a lesson is shown to a model" — and this second display
+			// site was missed, so every avoid lesson was handed back as "this
+			// worked", advising the exact approach it was recorded to stop.
+			if p.Kind == knowledge.KindAvoid {
+				fmt.Fprintf(&b, "- when you saw %q while %s, retrying the same call did NOT work — do this instead: %s\n", p.ErrorPattern, p.Context, p.ProvenFix)
+				continue
+			}
 			fmt.Fprintf(&b, "- when you saw %q while %s, this worked: %s\n", p.ErrorPattern, p.Context, p.ProvenFix)
 		}
 	}

@@ -111,6 +111,18 @@ func mergeOne(list *[]Pitfall, p Pitfall, today string) bool {
 			if (*list)[i].Context == "" {
 				(*list)[i].Context = p.Context
 			}
+			// A later run that actually RECOVERED supersedes an earlier dead end
+			// for the same failure. Only Hits and LastSeen used to move, so the
+			// first answer stood forever: once an "avoid" hypothesis was stored,
+			// no amount of later experience proving what does work could replace
+			// it. The reverse never happens — a fix already demonstrated is not
+			// unlearned by a later run failing to reproduce it.
+			if (*list)[i].Kind == KindAvoid && p.Kind != KindAvoid && strings.TrimSpace(p.ProvenFix) != "" {
+				(*list)[i].Kind, (*list)[i].ProvenFix = p.Kind, p.ProvenFix
+				if strings.TrimSpace(p.Context) != "" {
+					(*list)[i].Context = p.Context
+				}
+			}
 			return false
 		}
 	}
@@ -224,6 +236,32 @@ func (k *KB) DropWhere(drop func(Pitfall) bool) int {
 		k.overwrite = true
 	}
 	return dropped
+}
+
+// MarkUsed records that a lesson was actually SURFACED to the model, bumping its
+// Hits and freshness.
+//
+// Hits used to move only in Add — i.e. only when the reflection pass re-derived
+// the same lesson from a fresh failure. That made the ranking measure exactly
+// the wrong thing: a lesson that WORKS stops the failure recurring, so it is
+// never re-derived, its Hits and LastSeen freeze, and Purge eventually deletes
+// it; a lesson that never helps keeps being re-derived, climbs the ranking and
+// stays fresh forever. Counting retrieval instead means usefulness, not
+// futility, is what keeps a lesson alive.
+//
+// Not persisted on its own: the next Save writes it, which is enough for a
+// ranking signal and keeps a hot path off the disk.
+func (k *KB) MarkUsed(p Pitfall) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	key := dedupeKey(p)
+	for i := range k.pitfalls {
+		if dedupeKey(k.pitfalls[i]) == key {
+			k.pitfalls[i].Hits++
+			k.pitfalls[i].LastSeen = k.today()
+			return
+		}
+	}
 }
 
 // Count reports how many lessons are stored.

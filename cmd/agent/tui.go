@@ -3121,11 +3121,20 @@ func outputLines(content, marker string, style lipgloss.Style) []string {
 // ctxMeter renders the current context fill as a colored percentage — dim under
 // half, warn as it approaches the auto-compact threshold, red once it will compact.
 // Empty when there's no window or nothing sent yet.
+// Reads the agent's own main-turn figure, not client.Context(): the client
+// reports whatever request went out LAST, and the judge, the reflection pass,
+// Compact and /btw asides all share that client. Reported live: right after
+// "/compact" the meter fell from 134% to 1% — the size of the compaction
+// request itself, not of the session. Agent.PromptTokens moves on main turns
+// and nothing else, so it still climbs live during a long task (which the
+// host's end-of-task lastRealContext cannot do) without any side call
+// repainting it.
 func (m *tuiModel) ctxMeter() string {
+	used := m.app.ag.PromptTokens()
 	if m.app.cfg.Memory == "raw" {
-		return ctxMeterFor(m.app.client.Context(), m.app.activeLLM().ContextWindow, 0) // no auto-compact threshold to warn toward
+		return ctxMeterFor(used, m.app.activeLLM().ContextWindow, 0) // no auto-compact threshold to warn toward
 	}
-	return ctxMeterFor(m.app.client.Context(), m.app.activeLLM().ContextWindow, compactThreshold(m.app.cfg.CompactThreshold))
+	return ctxMeterFor(used, m.app.activeLLM().ContextWindow, compactThreshold(m.app.cfg.CompactThreshold))
 }
 
 // ctxMeterFor is the pure part of the meter, split out for tests. ratio <= 0

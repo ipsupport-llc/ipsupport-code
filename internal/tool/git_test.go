@@ -21,7 +21,7 @@ func gitToolFor(t *testing.T, dir string, ap Approver) Tool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewGit(e, ap)
+	return NewGit(e, ap, 0)
 }
 
 func initRepo(t *testing.T) string {
@@ -309,7 +309,7 @@ func TestGitShowRejectsRevPathOutsideJailWhenJailIsSubdir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tl := NewGit(e, yes())
+	tl := NewGit(e, yes(), 0)
 	ctx := context.Background()
 
 	// The exploit: HEAD:outside.txt reads a file OUTSIDE the jail (at the
@@ -362,7 +362,7 @@ func TestGitDiffFromSubdirResolvesRepoRootRelativePaths(t *testing.T) {
 	if _, err := e.SetWorkdir("sub"); err != nil {
 		t.Fatal(err)
 	}
-	tl := NewGit(e, yes())
+	tl := NewGit(e, yes(), 0)
 
 	r := tl.Call(context.Background(), "diff", nil)
 	if r.IsError {

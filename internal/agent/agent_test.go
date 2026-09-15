@@ -3110,3 +3110,52 @@ func TestClipTailKeepsTheEnd(t *testing.T) {
 		t.Errorf("clipTail = %q, want it untouched when short enough", got)
 	}
 }
+
+// Reported live: nine judge calls in one run, every one "finish_reason=length",
+// and no way to tell from the log whether the cut came from the request's own
+// max_tokens (raise it) or from the context window filling up (raising it
+// changes nothing) — the two look identical without the completion size.
+func TestJudgeCallLogsWhatItSpent(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &usageLLM{scriptLLM: scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "all set"},
+		{Role: "assistant", Content: "DONE"},
+	}}, perCall: [2]int{300, 40}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+
+	if _, err := a.Run(context.Background(), "add two numbers"); err != nil {
+		t.Fatal(err)
+	}
+	// Three Chat calls happened; the judge's own spend must be the DELTA around
+	// its call, not the cumulative total.
+	p, c := judgeSpend(fake, 2*300, 2*40)
+	if p != 300 || c != 40 {
+		t.Errorf("judge spend = %d/%d, want 300/40 (one call's delta)", p, c)
+	}
+}
+
+// A chatter with no usage counters reports nothing rather than breaking.
+func TestJudgeUsageToleratesAChatterWithoutCounters(t *testing.T) {
+	if p, c := judgeUsage(&scriptLLM{}); p != 0 || c != 0 {
+		t.Errorf("usage = %d/%d, want 0/0", p, c)
+	}
+}
+
+// usageLLM is a scriptLLM that also reports cumulative token counters, like the
+// real client does.
+type usageLLM struct {
+	scriptLLM
+	perCall     [2]int
+	prompt, com int
+}
+
+func (u *usageLLM) Chat(ctx context.Context, msgs []llm.Message, tools []map[string]any) (llm.Message, error) {
+	m, err := u.scriptLLM.Chat(ctx, msgs, tools)
+	u.prompt += u.perCall[0]
+	u.com += u.perCall[1]
+	return m, err
+}
+
+func (u *usageLLM) Usage() (int, int) { return u.prompt, u.com }

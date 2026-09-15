@@ -1481,6 +1481,26 @@ func evidenceLabel(tc llm.ToolCall) string {
 	return label
 }
 
+// judgeUsage reads a chatter's cumulative token counters when it exposes them,
+// for the before/after snapshot around a judge call. A chatter that doesn't
+// (a test fake, a future transport) reports nothing and the log simply omits
+// the figures.
+func judgeUsage(c llm.Chatter) (prompt, completion int) {
+	if u, ok := c.(interface{ Usage() (int, int) }); ok {
+		return u.Usage()
+	}
+	return 0, 0
+}
+
+// judgeSpend is what one judge call cost, given the counters read before it.
+// Cumulative counters mean this is a delta; when the judge shares the main
+// client (no dedicated judge connection) nothing else runs between the two
+// reads, so the delta is still exactly this call.
+func judgeSpend(c llm.Chatter, p0, c0 int) (prompt, completion int) {
+	p1, c1 := judgeUsage(c)
+	return p1 - p0, c1 - c0
+}
+
 // clipTail keeps the LAST n bytes of s, marking the cut — the mirror of clip,
 // for text whose conclusion is at the end (see the judge's reasoning log).
 func clipTail(s string, n int) string {
@@ -1590,6 +1610,13 @@ func (a *Agent) judgeGoal(ctx context.Context, goal, result, evidence string) (j
 }
 
 func (a *Agent) judgeGoalOnce(ctx context.Context, goal, result, evidence string) (judgeVerdict, string) {
+	// Snapshotted around the call so the log can say how much the judge actually
+	// spent. Reported live: nine judge calls in one run, every one
+	// "finish_reason=length", and no way to tell whether the cut came from the
+	// request's own max_tokens (raise it) or from the context window filling up
+	// (raising it changes nothing) — the two are indistinguishable without the
+	// completion size.
+	p0, c0 := judgeUsage(a.judgeChatter())
 	reply, err := a.judgeChatter().Chat(ctx, []llm.Message{
 		llm.System(judgeSystem),
 		llm.User("GOAL:\n" + goal + "\n\nWHAT THE AGENT DID / ITS FINAL ANSWER:\n" + clip(result, 2000) + evidence),
@@ -1598,6 +1625,7 @@ func (a *Agent) judgeGoalOnce(ctx context.Context, goal, result, evidence string
 		slog.Debug("goal judge failed", a.debugArgs("err", err)...)
 		return judgeUnclear, ""
 	}
+	judgeP, judgeC := judgeSpend(a.judgeChatter(), p0, c0)
 	verdict, missing, source := parseJudgeReply(reply)
 	// Where the verdict came from. Caught live: a run came back "verdict=done"
 	// with the model having produced nothing, and the log could not say whether
@@ -1605,7 +1633,8 @@ func (a *Agent) judgeGoalOnce(ctx context.Context, goal, result, evidence string
 	// the word somewhere in a draft — which is the difference between the
 	// judge being wrong and this code being wrong.
 	slog.Debug("goal judge reply", a.debugArgs(
-		"verdict", verdict, "source", source, "finish_reason", reply.FinishReason)...)
+		"verdict", verdict, "source", source, "finish_reason", reply.FinishReason,
+		"prompt_tokens", judgeP, "completion_tokens", judgeC)...)
 	if verdict == judgeUnclear {
 		// Reasoning logged alongside Content: a reasoning-capable local model
 		// can stream its whole verdict into Reasoning and leave Content empty

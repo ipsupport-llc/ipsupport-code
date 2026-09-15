@@ -42,6 +42,15 @@ func New(l llm.Chatter) *Reflector { return &Reflector{LLM: l} }
 type Lessons struct {
 	Pitfalls []knowledge.Pitfall
 	Facts    []string
+	// Parsed reports whether a JSON object was actually read out of the model's
+	// reply. It separates "the model looked and found nothing to learn" from "we
+	// could not read what it said" — two different failures with two different
+	// fixes, which were indistinguishable because both surfaced as an empty
+	// Lessons and neither was logged at all.
+	Parsed bool
+	// Reply is what came back when nothing could be parsed, for the log. Empty
+	// once Parsed is true.
+	Reply string
 }
 
 const reflectPrompt = `You review a finished run by a tool-using agent and extract two things for next time, as ONE JSON object:
@@ -173,14 +182,22 @@ func (r *Reflector) reflectLite(ctx context.Context, summary string) (Lessons, e
 		llm.User(summary),
 	}, nil)
 	if factsErr == nil {
-		out.Facts = parseLessons(factsReply.Content).Facts
+		l := parseLessons(factsReply.Content)
+		out.Facts, out.Parsed, out.Reply = l.Facts, l.Parsed, l.Reply
 	}
 	pitReply, pitErr := r.LLM.Chat(ctx, []llm.Message{
 		llm.System(reflectPitfallsLite),
 		llm.User(summary),
 	}, nil)
 	if pitErr == nil {
-		out.Pitfalls = parseLessons(pitReply.Content).Pitfalls
+		l := parseLessons(pitReply.Content)
+		out.Pitfalls = l.Pitfalls
+		// Either half being readable counts as understood; the unread one's tail
+		// is what the log needs to show.
+		out.Parsed = out.Parsed || l.Parsed
+		if !l.Parsed && out.Reply == "" {
+			out.Reply = l.Reply
+		}
 	}
 	if factsErr != nil && pitErr != nil {
 		return Lessons{}, &ReflectionError{Err: factsErr}
@@ -283,6 +300,7 @@ var validDomain = map[string]bool{
 }
 
 func parseLessons(content string) Lessons {
+	parsedEmpty := false
 	for _, candidate := range jsonObjectCandidates(content) {
 		var raw struct {
 			Pitfalls []struct {
@@ -334,10 +352,24 @@ func parseLessons(content string) Lessons {
 		// Keep scanning past a decoy/empty object (e.g. a format-example `{}` the
 		// model emits before the real one) — only a candidate with actual content wins.
 		if len(out.Pitfalls) > 0 || len(out.Facts) > 0 {
+			out.Parsed = true
 			return out
 		}
+		// A well-formed but empty object IS an answer: the model looked and found
+		// nothing. Remember that we understood it, in case no later candidate
+		// carries content.
+		parsedEmpty = true
 	}
-	return Lessons{}
+	return Lessons{Parsed: parsedEmpty, Reply: unparsedReply(parsedEmpty, content)}
+}
+
+// unparsedReply is the tail of a reply nothing could be read out of, for the
+// log — empty when the reply WAS understood and simply said there was nothing.
+func unparsedReply(parsed bool, content string) string {
+	if parsed {
+		return ""
+	}
+	return clipTail(strings.TrimSpace(content), 200)
 }
 
 // normalizeKind maps the prompt's "kind" onto Pitfall.Kind. Only an explicit

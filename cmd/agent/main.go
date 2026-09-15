@@ -3428,6 +3428,15 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 		slog.Warn("reflection failed", "err", err)
 		return 0
 	}
+	// One line per pass, whatever the outcome. Reported live: a run with three
+	// failing turns produced no lessons at all, and the log could not say
+	// whether reflection had run and found nothing, had been handed something it
+	// could not read, or had never happened — every one of those was silence.
+	// "parsed" is the distinction that matters: a model saying "nothing to learn
+	// here" and a model whose answer we could not decode need opposite fixes.
+	slog.Debug("reflect done", "model", model, "lite", lite,
+		"facts", len(lessons.Facts), "pitfalls", len(lessons.Pitfalls),
+		"parsed", lessons.Parsed, "reply", lessons.Reply, "dur", dur)
 	learned := 0
 	for _, p := range lessons.Pitfalls {
 		if a.kb.Add(p) {
@@ -3443,11 +3452,18 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 			slog.Warn("knowledge save failed", "err", err)
 		}
 	}
-	if added := a.addFacts(lessons.Facts); len(added) > 0 {
+	added := a.addFacts(lessons.Facts)
+	if len(added) > 0 {
 		a.ag.SetSystem(a.systemPrompt()) // fold new facts into the prompt for the next task
 		for _, f := range added {
 			a.emit("fact", map[string]any{"text": f})
 		}
+	}
+	// Say so on screen when a pass produced nothing new. Silence looked identical
+	// to the pass never running, which is what sent a user to /knowledge list
+	// wondering why a run with three failed tool calls had taught nothing.
+	if learned == 0 && len(added) == 0 {
+		a.emit("reflected", map[string]any{"parsed": lessons.Parsed, "reply": lessons.Reply})
 	}
 	return learned
 }

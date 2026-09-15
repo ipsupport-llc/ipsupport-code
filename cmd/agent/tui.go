@@ -2842,6 +2842,21 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 	case "fact":
 		f, _ := e.fields["text"].(string)
 		return []string{cLesson.Render("  ✦ noted ") + cDim.Render(f)}
+	case "reflected":
+		// A pass that produced nothing used to print nothing, which looked exactly
+		// like the pass never running — and sent a user to /knowledge list asking
+		// why a run with three failed tool calls had taught nothing. The two
+		// outcomes need different answers, so they read differently.
+		if parsed, _ := e.fields["parsed"].(bool); parsed {
+			return []string{cDim.Render("  ✦ nothing new to learn from this run")}
+		}
+		reply, _ := e.fields["reply"].(string)
+		line := "  ✦ the learning pass returned nothing readable — try /reflect <profile> on a stronger model"
+		if strings.TrimSpace(reply) != "" {
+			clipped, _ := textutil.Clip(strings.ReplaceAll(reply, "\n", " "), 60)
+			line += " (it said: " + clipped + ")"
+		}
+		return []string{cDim.Render(line)}
 	case "job_started":
 		return []string{cToolCall.Render(fmt.Sprintf("  ⚙ background job #%d — ", toInt(e.fields["job"]))) +
 			fmt.Sprint(e.fields["profile"]) + cDim.Render("  · "+fmt.Sprint(e.fields["task"])+" · /jobs to watch")}

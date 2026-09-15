@@ -774,7 +774,7 @@ func TestCompactSummarizesSession(t *testing.T) {
 		t.Fatalf("SessionLen before compact = %d, want 4", a.SessionLen())
 	}
 
-	n, err := a.Compact(context.Background())
+	n, err := a.Compact(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -812,7 +812,7 @@ func TestCompactPreservesActionDigestsVerbatim(t *testing.T) {
 	a := New(fake, reg, nil, nil, "", 5)
 	a.Run(context.Background(), "по плану идем")
 
-	if _, err := a.Compact(context.Background()); err != nil {
+	if _, err := a.Compact(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
 	var got string
@@ -847,10 +847,10 @@ func TestCompactDigestSurvivesSecondCompaction(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := a.Compact(context.Background()); err != nil {
+	if _, err := a.Compact(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := a.Compact(context.Background()); err != nil {
+	if _, err := a.Compact(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2601,4 +2601,72 @@ func TestAnswerAsideSnapshotDoesNotRaceWithReset(t *testing.T) {
 	}()
 	a.Reset() // the idle /clear equivalent, run concurrently with the aside
 	<-done
+}
+
+// A compaction steer must actually reach the model's instruction, and must read
+// as "prioritize this", not "discard the rest" — a recap that obeys "only keep
+// X" literally strands the next task without what it needs to continue.
+func TestCompactFocusReachesTheSummaryInstruction(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "answer A"},
+		{Role: "assistant", Content: "answer B"},
+		{Role: "assistant", Content: "SUMMARY"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	a.Run(context.Background(), "task 1")
+	a.Run(context.Background(), "task 2")
+
+	if _, err := a.Compact(context.Background(), "keep which trunk failed"); err != nil {
+		t.Fatal(err)
+	}
+	sys := ""
+	for _, m := range fake.lastMsgs {
+		if m.Role == "system" {
+			sys = m.Content
+		}
+	}
+	if !strings.Contains(sys, "keep which trunk failed") {
+		t.Errorf("system prompt = %q, want the caller's focus in it", sys)
+	}
+	if !strings.Contains(sys, "still keep whatever is needed to continue") {
+		t.Errorf("system prompt = %q, want the steer framed as priority, not as discarding the rest", sys)
+	}
+}
+
+// With no focus the instruction is exactly what it always was — an empty steer
+// must not quietly reshape every automatic compaction.
+func TestCompactWithoutFocusKeepsTheOriginalInstruction(t *testing.T) {
+	plain, steered := compactSystem(""), compactSystem("  ")
+	if plain != steered {
+		t.Errorf("a whitespace-only focus changed the instruction:\n%q\nvs\n%q", plain, steered)
+	}
+	if strings.Contains(plain, "focus on") {
+		t.Errorf("unfocused instruction mentions a focus: %q", plain)
+	}
+}
+
+// The action digests are appended after the model has answered, so no focus,
+// however aggressive, can drop the record of what was actually done. This is the
+// whole reason the digests exist (see Compact): a weak model told to summarize
+// retries of a failing command blurred away the failure, and the next task
+// repeated it. A steer must not reopen that hole.
+func TestCompactFocusCannotDropTheActionDigests(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	a := New(&scriptLLM{}, reg, nil, nil, "", 5)
+	a.history = []llm.Message{
+		llm.User("set the module up"),
+		{Role: "assistant", Content: "done" + actionsDigestMarker +
+			" — commands run: go mod init x — FAILED: go.mod already exists;)"},
+	}
+	if _, err := a.Compact(context.Background(), "only mention the HTTP handler, nothing else"); err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, m := range a.history {
+		joined += m.Content
+	}
+	if !strings.Contains(joined, "go.mod already exists") {
+		t.Errorf("a focus dropped the verbatim action record:\n%s", joined)
+	}
 }

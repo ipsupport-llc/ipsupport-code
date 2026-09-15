@@ -3041,6 +3041,46 @@ func loadSystemOverride(workspace string) (text, source string) {
 	return "", ""
 }
 
+// loadStandingCompactFocus reads the standing compaction instruction — what a
+// recap must always keep — from the workspace's .agent/compact.md, else the
+// global one. Empty when neither exists.
+//
+// A FILE rather than a config value, and read fresh on every compaction: the
+// instruction is prose the user writes and revises ("keep the SIP trace details
+// and which trunk failed"), not something to cycle through in a settings panel.
+// It matters most for the AUTOMATIC compaction, which fires on its own at the
+// context threshold and decides what survives — a one-shot "/compact <steer>"
+// can only ever reach a compaction the user typed themselves.
+func loadStandingCompactFocus(workspace string) string {
+	for _, p := range []string{filepath.Join(workspace, ".agent", "compact.md"), config.CompactPromptPath()} {
+		data, err := os.ReadFile(p)
+		if err != nil || strings.TrimSpace(string(data)) == "" {
+			continue
+		}
+		clipped, _ := textutil.Clip(strings.TrimSpace(string(data)), maxInstructions)
+		return clipped
+	}
+	return ""
+}
+
+// compactFocus is the instruction handed to Agent.Compact: the standing one
+// (loadStandingCompactFocus) plus, for a compaction the user asked for by hand,
+// whatever they typed after /compact. Deliberately ADDITIVE — a one-off steer
+// sharpens this compaction on top of the standing rules; it doesn't silently
+// suspend them, which would quietly drop the very context the user wrote the
+// file to protect.
+func (a *app) compactFocus(oneShot string) string {
+	standing := loadStandingCompactFocus(a.workspace)
+	oneShot = strings.TrimSpace(oneShot)
+	switch {
+	case standing == "":
+		return oneShot
+	case oneShot == "":
+		return standing
+	}
+	return standing + "\n\nAnd for this compaction in particular: " + oneShot
+}
+
 // systemPrompt is the base prompt plus the real environment (OS + workspace) and
 // any project instructions. The base is the built-in default unless a system.md
 // override replaces it. Records the instructions and prompt sources for /status.
@@ -3348,7 +3388,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	a.detectContextWindow() // the model is loaded now — confirm the real window
 	if a.shouldAutoCompact() {
 		compactStart := time.Now()
-		n, err := a.ag.Compact(ctx)
+		n, err := a.ag.Compact(ctx, a.compactFocus(""))
 		a.recordUsage(time.Since(compactStart)) // compaction is a real LLM call too — flush it now, even on failure
 		if err == nil && n > 0 {
 			a.saveSession()
@@ -3494,7 +3534,7 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		a.clearSession()
 		fmt.Println("session cleared.")
 	case "/compact":
-		n, err := a.ag.Compact(ctx)
+		n, err := a.ag.Compact(ctx, a.compactFocus(rest))
 		if err != nil {
 			fmt.Println("compact failed:", err)
 		} else {

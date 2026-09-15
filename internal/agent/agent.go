@@ -345,6 +345,12 @@ func (a *Agent) SeedHistoryGen(g int64) { a.historyGen.Store(g) }
 // history with it, freeing context while keeping continuity. Returns how many
 // messages were compacted (0 if there was nothing worth compacting).
 //
+// focus is the user's own steer for THIS compaction ("/compact keep the SIP
+// details"), empty for the automatic one. It only reweights what the prose
+// summary dwells on — the action digests below are appended deterministically
+// after the model has answered, so no focus, however aggressive, can drop the
+// record of which files were touched or which commands failed.
+//
 // The deterministic action digests actionsDigest already baked into each
 // remembered entry — file paths touched, commands run, and WHY a command
 // failed — are preserved verbatim alongside the LLM's own prose summary, not
@@ -353,7 +359,7 @@ func (a *Agent) SeedHistoryGen(g int64) { a.historyGen.Store(g) }
 // specific fact like "go.mod already exists" — the compacted history read
 // like a fresh start, and the very next task blindly repeated the exact
 // command that had already failed every time.
-func (a *Agent) Compact(ctx context.Context) (int, error) {
+func (a *Agent) Compact(ctx context.Context, focus string) (int, error) {
 	a.historyMu.Lock()
 	if len(a.history) < 2 {
 		a.historyMu.Unlock()
@@ -382,7 +388,7 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 	}
 	a.historyMu.Unlock()
 	reply, err := a.llm.Chat(ctx, []llm.Message{
-		llm.System("Summarize the conversation so far into a compact recap that preserves the key facts, decisions, files touched, and context needed to keep going. A few sentences, no preamble."),
+		llm.System(compactSystem(focus)),
 		llm.User(b.String()),
 	}, nil)
 	if err != nil {
@@ -404,6 +410,21 @@ func (a *Agent) Compact(ctx context.Context) (int, error) {
 	a.historyMu.Unlock()
 	a.historyGen.Add(1)
 	return n, nil
+}
+
+// compactSystem builds the recap instruction, optionally steered by the user's
+// own focus for this one compaction. The steer says PRIORITIZE, not "discard
+// everything else": a recap that obeys "only keep X" literally can strand the
+// next task without the context it needs to continue, and the user asking for a
+// focus is asking for emphasis, not amnesia.
+func compactSystem(focus string) string {
+	const base = "Summarize the conversation so far into a compact recap that preserves the key facts, decisions, files touched, and context needed to keep going. A few sentences, no preamble."
+	f := strings.TrimSpace(focus)
+	if f == "" {
+		return base
+	}
+	return base + "\n\nThe user asked for this recap to focus on: " + f +
+		"\nGive that priority and detail; compress everything else hard, but still keep whatever is needed to continue the work."
 }
 
 // actionsDigestMarker is the literal marker actionsDigest's writer side always

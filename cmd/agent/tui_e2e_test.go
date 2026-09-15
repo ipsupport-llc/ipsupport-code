@@ -20,6 +20,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
+	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
 )
 
@@ -562,4 +563,39 @@ func TestMCPCommandDoesNotRaceConfigReload(t *testing.T) {
 		m.app.cfg = newCfg
 	}
 	wg.Wait()
+}
+
+// The context meter must read the agent's main-turn figure, not the shared
+// client's last-request size. Reported live: right after /compact the meter fell
+// from 134% to 1% — the size of the compaction request itself. The judge, the
+// reflection pass and /btw asides all repaint client.Context() the same way, so
+// the meter has to read something only main turns move.
+func TestCtxMeterReadsTheAgentsMainTurnFigure(t *testing.T) {
+	url := tuiFakeServer(t, tuiContent("hi"))
+	a := tuiTestApp(t, url)
+	a.cfg.LLM.ContextWindow = 32_800
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	m, err := a.newTUIModel(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A side call — the shape of /compact, the goal judge, the reflection pass,
+	// a /btw aside — goes out on the SAME client and leaves its own prompt size
+	// behind on it.
+	if _, err := m.app.client.Chat(context.Background(), []llm.Message{llm.User("summarize this")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if m.app.client.Context() == 0 {
+		t.Fatal("test setup: the side call left no reading on the client to be misread")
+	}
+	// No main turn has run, so the meter must stay silent rather than reporting
+	// that side call's size as if it were the session's.
+	if got := m.ctxMeter(); got != "" {
+		t.Errorf("meter = %q, want empty — it is showing a side call's prompt size", got)
+	}
+	if got := m.app.ag.PromptTokens(); got != 0 {
+		t.Errorf("PromptTokens = %d before any main turn, want 0", got)
+	}
 }

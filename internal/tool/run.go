@@ -16,8 +16,40 @@ import (
 const (
 	defaultRunTimeout = 60 * time.Second
 	maxRunTimeout     = 60 * time.Minute // ceiling for a per-call override
-	maxRunOutput      = 50_000
+	maxRunOutput      = 50_000           // ceiling for one call's captured output, in bytes
+	minRunOutput      = 4_000            // floor: below this even a short error message gets cut
 )
+
+// outputShare is the fraction of the model's context window one tool call may
+// spend on its own output, and charsPerToken the rough conversion used to get
+// there. Reported live, with the debug log to prove it: on a 32.8k-token window,
+// two curl commands that each dumped a whole HTML page took the run's context
+// from 5k to 44k tokens in two steps — past the window, after which the model
+// degenerated into echoing its own prompt and the client's loop detector killed
+// the run. maxRunOutput alone could not prevent that: 50 000 bytes is nothing
+// against a 200k window and roughly 40% of a 32.8k one, so the cap has to be
+// read against the window it is spending, not as an absolute.
+const (
+	outputShare   = 0.12
+	charsPerToken = 4
+)
+
+// OutputBudget is the per-call output cap for the run and git tools, scaled to
+// the active model's context window. A zero or unknown window keeps the old
+// absolute cap — better to behave exactly as before than to guess.
+func OutputBudget(ctxWindow int) int {
+	if ctxWindow <= 0 {
+		return maxRunOutput
+	}
+	n := int(float64(ctxWindow*charsPerToken) * outputShare)
+	if n > maxRunOutput {
+		n = maxRunOutput
+	}
+	if n < minRunOutput {
+		n = minRunOutput
+	}
+	return n
+}
 
 // CmdWrapper rewrites the exec (name, args) before it runs — used to wrap a
 // command in an OS sandbox. It knows nothing about the sandbox itself; the app
@@ -29,16 +61,17 @@ type runTool struct {
 	ap      Approver
 	timeout time.Duration // default per-command wall-clock limit
 	wrap    CmdWrapper    // optional OS-sandbox wrapper (nil = run directly)
+	maxOut  int           // per-call output cap in bytes (see OutputBudget)
 }
 
 // NewRun returns the run tool: a single `shell` action gated by the policy
 // engine, executed with a timeout and a jail-confined working directory. The
 // default timeout comes from config (run.timeout_seconds); 0 falls back to 60s.
-func NewRun(p *policy.Engine, ap Approver, defaultTimeout time.Duration, wrap ...CmdWrapper) Tool {
+func NewRun(p *policy.Engine, ap Approver, defaultTimeout time.Duration, ctxWindow int, wrap ...CmdWrapper) Tool {
 	if defaultTimeout <= 0 {
 		defaultTimeout = defaultRunTimeout
 	}
-	r := &runTool{pol: p, ap: ap, timeout: defaultTimeout}
+	r := &runTool{pol: p, ap: ap, timeout: defaultTimeout, maxOut: OutputBudget(ctxWindow)}
 	if len(wrap) > 0 {
 		r.wrap = wrap[0]
 	}
@@ -100,7 +133,7 @@ func (r *runTool) shell(ctx context.Context, a Args) Result {
 	// that outlives the shell while holding the output pipe (a dev server, a
 	// backgrounded process) can't hang this tool call forever.
 	procgroup.Set(cmd)
-	out := textutil.NewBoundedWriter(maxRunOutput)
+	out := textutil.NewBoundedWriter(r.maxOut)
 	cmd.Stdout = out
 	cmd.Stderr = out
 	runErr := cmd.Run()

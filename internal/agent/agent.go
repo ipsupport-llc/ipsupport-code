@@ -127,6 +127,19 @@ type Agent struct {
 	// place after a routine trim, instead of being discarded outright the way a
 	// genuine reshape (Reset/SetHistory/Compact) must be.
 	frontTrim atomic.Int64
+
+	// lastPrompt is the prompt size of the most recent MAIN model turn, in
+	// tokens. Distinct from the client's own Context(), which reports whatever
+	// request went out last — and the judge, the reflection pass, Compact and
+	// /btw asides all share that client, so every one of them repaints it with
+	// its own (much smaller) prompt. Reported live: right after "/compact" the
+	// UI's context meter dropped from 134% to 1%, which was the size of the
+	// compaction request itself, not of the session. The auto-compact DECISION
+	// was already protected from this (see the host's lastRealContext); the
+	// meter was not, because it also wants to move DURING a task, which that
+	// end-of-task snapshot cannot do. This moves on every main turn and on
+	// nothing else, so it satisfies both.
+	lastPrompt atomic.Int64
 }
 
 // Archiver durably records every (goal, final answer + actions digest) pair
@@ -273,6 +286,10 @@ func (a *Agent) SessionLen() int {
 	defer a.historyMu.Unlock()
 	return len(a.history)
 }
+
+// PromptTokens reports the prompt size of the most recent MAIN model turn (see
+// lastPrompt). 0 before the first turn.
+func (a *Agent) PromptTokens() int { return int(a.lastPrompt.Load()) }
 
 // MaxHistory reports the current trim cap (see SetMaxHistory).
 func (a *Agent) MaxHistory() int { return a.maxHistory }
@@ -505,23 +522,62 @@ func estimateMsgTokens(msgs []llm.Message) int {
 // short of that is left untouchable when the alternative is silently blowing
 // through the entire context window.
 //
+// realTokens is the server's own prompt_tokens for the last main turn, 0 when
+// unknown; it calibrates the byte-based estimate (see sizedInTokens).
+//
 // Mutates msgs in place; returns bytes freed (0 if nothing was trimmed).
-func trimIfNearWindow(msgs []llm.Message, contextWindow int) int {
+func trimIfNearWindow(msgs []llm.Message, contextWindow, realTokens int) int {
 	limit := int(float64(contextWindow) * inTaskTrimRatio)
-	if estimateMsgTokens(msgs) < limit {
+	scale := tokenScale(msgs, realTokens)
+	if sizedInTokens(msgs, scale) < limit {
 		return 0
 	}
-	freed := trimOldToolResults(msgs, limit, len(msgs)-trimKeepRecent)
-	if estimateMsgTokens(msgs) >= limit {
-		freed += trimOldToolResults(msgs, limit, len(msgs)-1)
+	freed := trimOldToolResults(msgs, limit, scale, len(msgs)-trimKeepRecent)
+	if sizedInTokens(msgs, scale) >= limit {
+		freed += trimOldToolResults(msgs, limit, scale, len(msgs)-1)
 	}
 	return freed
+}
+
+// tokenScale calibrates estimateMsgTokens against what the server actually
+// charged for the last main turn.
+//
+// Reported live, with the debug log to prove it: a run on a 32.8k-token window
+// went 5k → 20k → 44k tokens in two steps, blew past the window, and the model
+// degenerated into echoing its own prompt. trimIfNearWindow never fired. Its
+// arithmetic was self-consistent and wrong: two captured HTML pages, each
+// bounded to 50 000 bytes, estimate at 4 bytes/token to ~25k — just under the
+// 27 880 trigger — while the server reported 43 816 for the same messages.
+// HTML and minified JS tokenize at roughly half that assumed density, and that
+// is exactly the content that blows a window up. The true figure was already in
+// hand (Run snapshots prompt_tokens every turn); the decision was simply being
+// made against a guess instead. One ratio folds the truth back in, and covers
+// the tool schemas and other per-request overhead that never appear in msgs at
+// all. Clamped, so one odd reading can't send it trimming the whole run away.
+func tokenScale(msgs []llm.Message, realTokens int) float64 {
+	est := estimateMsgTokens(msgs)
+	if realTokens <= 0 || est <= 0 {
+		return 1
+	}
+	scale := float64(realTokens) / float64(est)
+	if scale < 0.5 {
+		scale = 0.5
+	}
+	if scale > 4 {
+		scale = 4
+	}
+	return scale
+}
+
+// sizedInTokens is estimateMsgTokens corrected by the calibration above.
+func sizedInTokens(msgs []llm.Message, scale float64) int {
+	return int(float64(estimateMsgTokens(msgs)) * scale)
 }
 
 // trimOldToolResults walks msgs[0:protectFrom] oldest-first, shrinking large
 // tool RESULT contents to a short placeholder (via trimPlaceholder) until the
 // estimate drops under limit or the range is exhausted. Returns bytes freed.
-func trimOldToolResults(msgs []llm.Message, limit, protectFrom int) int {
+func trimOldToolResults(msgs []llm.Message, limit int, scale float64, protectFrom int) int {
 	freed := 0
 	for i := 0; i < protectFrom; i++ {
 		m := &msgs[i]
@@ -531,7 +587,7 @@ func trimOldToolResults(msgs []llm.Message, limit, protectFrom int) int {
 		before := len(m.Content)
 		m.Content = trimPlaceholder(m.Content)
 		freed += before - len(m.Content)
-		if estimateMsgTokens(msgs) < limit {
+		if sizedInTokens(msgs, scale) < limit {
 			break
 		}
 	}
@@ -847,6 +903,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		// anyone reads it for auto-compact sizing.
 		if cr, ok := a.llm.(interface{ Context() int }); ok {
 			promptTokens = cr.Context()
+			a.lastPrompt.Store(int64(promptTokens))
 		}
 		// At IPS_LOG=debug this shows exactly what the model returned each turn —
 		// the actual tool calls, or text with NO tool calls (e.g. a chat model
@@ -1033,7 +1090,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		results, nErr := a.runToolCalls(ctx, assistant.ToolCalls)
 		msgs = append(msgs, results...)
 		if a.contextWindow > 0 {
-			if freed := trimIfNearWindow(msgs, a.contextWindow); freed > 0 {
+			if freed := trimIfNearWindow(msgs, a.contextWindow, promptTokens); freed > 0 {
 				a.emit("context_trim", map[string]any{"bytes_freed": freed})
 			}
 		}

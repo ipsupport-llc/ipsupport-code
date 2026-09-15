@@ -144,7 +144,7 @@ func TestTrimIfNearWindowProtectsRecentAndNonToolMessages(t *testing.T) {
 	// alone can't get under budget — that "protected zone still doesn't fit"
 	// case is the overflow-fallback pass's job, covered separately by
 	// TestTrimIfNearWindowOverflowFallback (which does reach into this zone).
-	freed := trimIfNearWindow(msgs, 3500)
+	freed := trimIfNearWindow(msgs, 3500, 0)
 	if freed <= 0 {
 		t.Fatal("expected trimIfNearWindow to free something")
 	}
@@ -178,7 +178,7 @@ func TestTrimIfNearWindowNoopWhenUnderThreshold(t *testing.T) {
 		{Role: "tool", Content: strings.Repeat("x", trimMinResultSize*2)},
 	}
 	before := append([]llm.Message(nil), msgs...)
-	if freed := trimIfNearWindow(msgs, 1_000_000); freed != 0 {
+	if freed := trimIfNearWindow(msgs, 1_000_000, 0); freed != 0 {
 		t.Errorf("freed = %d, want 0 (well under threshold)", freed)
 	}
 	for i := range msgs {
@@ -274,7 +274,7 @@ func TestTrimIfNearWindowOverflowFallback(t *testing.T) {
 		t.Fatalf("test setup: expected len(msgs) <= trimKeepRecent so the main pass is a no-op (protectFrom=%d)", protectFrom)
 	}
 
-	freed := trimIfNearWindow(msgs, contextWindow)
+	freed := trimIfNearWindow(msgs, contextWindow, 0)
 	if freed <= 0 {
 		t.Fatal("expected the overflow fallback to free something")
 	}
@@ -318,7 +318,7 @@ func TestTrimIfNearWindowPreservesFailureSignal(t *testing.T) {
 		t.Fatalf("test setup: the failing result at index 3 must be outside the protected zone (protectFrom=%d)", protectFrom)
 	}
 
-	freed := trimIfNearWindow(msgs, 10) // tiny window forces trimming
+	freed := trimIfNearWindow(msgs, 10, 0) // tiny window forces trimming
 	if freed <= 0 {
 		t.Fatal("test setup: expected trimIfNearWindow to trim something")
 	}
@@ -2874,5 +2874,94 @@ func TestJudgeSystemForbidsAskingForChecksItCannotRun(t *testing.T) {
 	}
 	if !strings.Contains(judgeSystem, "never ask for a check you are unable to perform") {
 		t.Error("the judge prompt doesn't rule out demanding a check it has no tools for")
+	}
+}
+
+// Reported live, with the debug log to prove it: a run on a 32.8k-token window
+// went 5k → 20k → 44k tokens in two steps and blew past the window, and
+// trimIfNearWindow never fired. Its arithmetic was self-consistent and wrong —
+// two captured HTML pages estimate at 4 bytes/token to ~25k, just under the
+// 27 880 trigger, while the server reported 43 816 for the same messages. HTML
+// and minified JS tokenize at roughly half that assumed density, and that is
+// exactly the content that blows a window up. The real figure is snapshotted
+// every turn; the decision must be made against it.
+func TestTrimUsesTheServersRealTokenCountNotAByteGuess(t *testing.T) {
+	// Two "HTML pages" at the per-call byte cap, which the byte estimate reads
+	// as ~25k tokens against a 27 880 trigger — not enough to trim on its own.
+	page := strings.Repeat("<div class=\"x\">y</div>", 50_000/22)
+	build := func() []llm.Message {
+		msgs := []llm.Message{llm.System("sys"), llm.User("fix the app")}
+		for i := 0; i < 2; i++ {
+			msgs = append(msgs,
+				toolCallReply(fmt.Sprintf("%d", i), "run", `{"action":"shell","params":{"command":"curl -s https://example.com"}}`),
+				llm.Message{Role: "tool", Name: "run", Content: page})
+		}
+		for i := 0; i < trimKeepRecent; i++ { // the protected tail, all small
+			msgs = append(msgs, llm.Message{Role: "assistant", Content: "ok"})
+		}
+		return msgs
+	}
+
+	const window = 32_800
+	if freed := trimIfNearWindow(build(), window, 0); freed != 0 {
+		t.Fatalf("freed %d bytes with no real reading — this case is meant to sit just under the byte-estimate trigger", freed)
+	}
+	if freed := trimIfNearWindow(build(), window, 43_816); freed == 0 {
+		t.Error("nothing trimmed although the server reported 43816 tokens against a 32800 window")
+	}
+}
+
+// The calibration folds the server's truth back into the byte proxy, and is
+// clamped so a single odd reading can't send it trimming a whole run away.
+func TestTokenScaleCalibratesAndIsClamped(t *testing.T) {
+	msgs := []llm.Message{{Role: "tool", Content: strings.Repeat("x", 4000)}} // estimates as 1000 tokens
+	if got := tokenScale(msgs, 2000); got != 2 {
+		t.Errorf("scale = %v, want 2 (the server charged double the byte estimate)", got)
+	}
+	if got := tokenScale(msgs, 0); got != 1 {
+		t.Errorf("scale with no reading = %v, want 1 (behave exactly as before)", got)
+	}
+	if got := tokenScale(msgs, 100_000); got != 4 {
+		t.Errorf("scale = %v, want it clamped to 4", got)
+	}
+	if got := tokenScale(msgs, 1); got != 0.5 {
+		t.Errorf("scale = %v, want it clamped to 0.5", got)
+	}
+}
+
+// The agent's own prompt figure must move on MAIN turns and on nothing else:
+// the judge, the reflection pass, Compact and /btw asides all share the client,
+// so anything reading client.Context() gets repainted by whichever of them ran
+// last. Reported live: right after /compact the UI meter fell from 134% to 1%,
+// which was the size of the compaction request.
+func TestPromptTokensTracksMainTurnsAndSurvivesACompact(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &ctxLLM{
+		scriptLLM: scriptLLM{replies: []llm.Message{
+			calcCall(),
+			{Role: "assistant", Content: "all set"},
+			{Role: "assistant", Content: "a recap"}, // Compact's own call
+		}},
+		// The main turns sit at 7000/7200; Compact's own request is tiny, exactly
+		// the shape that repainted the live meter from 134% to 1%.
+		ctxByCall: []int{7000, 7200, 439},
+	}
+	a := New(fake, reg, nil, nil, "", 20)
+
+	if a.PromptTokens() != 0 {
+		t.Errorf("PromptTokens = %d before any turn, want 0", a.PromptTokens())
+	}
+	if _, err := a.Run(context.Background(), "add two numbers"); err != nil {
+		t.Fatal(err)
+	}
+	afterRun := a.PromptTokens()
+	if afterRun == 0 {
+		t.Fatal("PromptTokens stayed 0 after a run")
+	}
+	if _, err := a.Compact(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.PromptTokens(); got != afterRun {
+		t.Errorf("PromptTokens = %d after /compact, want it unchanged at %d — a side call must not repaint the session's size", got, afterRun)
 	}
 }

@@ -404,6 +404,15 @@ func LogPath() string { return filepath.Join(configHome(), "agent.log") }
 // a workspace .agent/system.md) exists, it replaces the built-in base prompt.
 func SystemPromptPath() string { return filepath.Join(configHome(), "system.md") }
 
+// CompactPromptPath is the global standing instruction for session compaction —
+// what a recap must always keep. Mirrors SystemPromptPath (a workspace
+// .agent/compact.md wins over it), because the instruction is prose the user
+// writes and re-reads, not a value to cycle through in a settings panel, and
+// because it has to reach the AUTOMATIC compaction too: that one fires on its
+// own at the context threshold and decides what survives, where a one-shot
+// "/compact <steer>" can never reach.
+func CompactPromptPath() string { return filepath.Join(configHome(), "compact.md") }
+
 // SaveGlobal writes the machine-level settings (display name + LLM connection)
 // to the user config file, creating its directory.
 func SaveGlobal(name string, l LLM) error {

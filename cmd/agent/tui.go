@@ -657,7 +657,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.planTask = false
 		m.state = stIdle
 		if m.app.shouldAutoCompact() { // context near the limit — fold it down before draining the queue
-			return m, tea.Batch(detect, m.startCompact(true))
+			return m, tea.Batch(detect, m.startCompact(true, ""))
 		}
 		if len(m.queued) > 0 { // drain the next pending message(s): tasks + /commands
 			model, cmd := m.drainQueue()
@@ -1431,7 +1431,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		}
 		m.push(cDim.Render("cleared — fresh screen, same session"))
 	case "/compact":
-		return m, m.startCompact(false)
+		return m, m.startCompact(false, rest)
 	case "/plan":
 		m.push(cDim.Render(m.app.setMode(true)))
 	case "/auto":
@@ -1759,7 +1759,7 @@ func (m *tuiModel) startUpdate(arg string) tea.Cmd {
 // startCompact folds the session into a summary in the background (manual via
 // /compact, or auto when the context nears the limit), ending with
 // compactDoneMsg.
-func (m *tuiModel) startCompact(auto bool) tea.Cmd {
+func (m *tuiModel) startCompact(auto bool, focus string) tea.Cmd {
 	m.state = stRunning
 	m.taskStart = time.Now()
 	m.busyMsg = "compacting the session"
@@ -1780,7 +1780,7 @@ func (m *tuiModel) startCompact(auto bool) tea.Cmd {
 	m.cancel = cancel
 	ep := m.epoch // captured synchronously so a later force-detach can't shift it
 	return func() tea.Msg {
-		n, err := m.app.ag.Compact(ctx)
+		n, err := m.app.ag.Compact(ctx, m.app.compactFocus(focus))
 		return compactDoneMsg{n: n, err: err, epoch: ep}
 	}
 }
@@ -1869,7 +1869,7 @@ func (m *tuiModel) runLoop(interval time.Duration, max int, goal string) tea.Cmd
 			// mid-loop, so check inline here instead, exactly like runOne does
 			// synchronously for the plain (non-TUI) path.
 			if m.app.shouldAutoCompact() {
-				if n, err := m.app.ag.Compact(tctx); err == nil && n > 0 {
+				if n, err := m.app.ag.Compact(tctx, m.app.compactFocus("")); err == nil && n > 0 {
 					m.app.saveSession()
 				}
 			}
@@ -2320,7 +2320,7 @@ var commandList = []cmdInfo{
 	{"/login", "(re)configure server URL / model / key, then reload"},
 	{"/new", "start a NEW session (old stays in /sessions); /new <name> to name it"},
 	{"/clear", "wipe this session's context + the screen (same session)"},
-	{"/compact", "summarize the session so far to free up context"},
+	{"/compact", "[focus] — summarize the session so far to free up context"},
 	{"/plan", "plan mode — propose a plan, change nothing"},
 	{"/auto", "auto mode — execute the task (default)"},
 	{"/ai", "switch/add AI provider; key <name> <tok>; add <name> <url> [model] [key=<tok>] (custom, one step)"},

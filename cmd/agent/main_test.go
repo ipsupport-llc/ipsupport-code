@@ -8020,3 +8020,35 @@ func TestJudgeBudgetKeepsTheInheritedReasoning(t *testing.T) {
 		t.Errorf("judge reasoning params = %v, want the inherited high", got)
 	}
 }
+
+// The criteria file is per project first, global second, and re-read on every
+// run so an edit applies without a restart.
+func TestJudgeCriteriaPrefersTheWorkspaceFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	ws := t.TempDir()
+
+	if got := loadJudgeCriteria(ws); got != "" {
+		t.Errorf("with no file = %q, want empty", got)
+	}
+	global := config.JudgePromptPath()
+	if err := os.MkdirAll(filepath.Dir(global), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(global, []byte("global rule"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadJudgeCriteria(ws); got != "global rule" {
+		t.Errorf("global-only = %q, want the global rule", got)
+	}
+	if err := os.MkdirAll(filepath.Join(ws, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".agent", "judge.md"), []byte("project rule\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadJudgeCriteria(ws); got != "project rule" {
+		t.Errorf("with both = %q, want the workspace file to win", got)
+	}
+}

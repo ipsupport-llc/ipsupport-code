@@ -3139,6 +3139,37 @@ func loadStandingCompactFocus(workspace string) string {
 	return ""
 }
 
+// loadJudgeCriteria reads the project's own acceptance criteria for the goal
+// judge — the workspace's .agent/judge.md, else the global judge.md. Empty when
+// neither exists.
+//
+// Read fresh on every run, like the compaction instruction it mirrors, so an
+// edit applies without a restart. A file rather than a settings value: these are
+// the standards a project accumulates ("a fix isn't done until the tests were
+// actually run"), written and refined in an editor, and they must be able to
+// grow without any of them being able to redefine the goal.
+func loadJudgeCriteria(workspace string) string {
+	for _, p := range []string{filepath.Join(workspace, ".agent", "judge.md"), config.JudgePromptPath()} {
+		data, err := os.ReadFile(p)
+		if err != nil || strings.TrimSpace(string(data)) == "" {
+			continue
+		}
+		clipped, _ := textutil.Clip(strings.TrimSpace(string(data)), maxInstructions)
+		return clipped
+	}
+	return ""
+}
+
+// judgeCriteriaSource names the file the criteria came from, for /config.
+func (a *app) judgeCriteriaSource() string {
+	for _, p := range []string{filepath.Join(a.workspace, ".agent", "judge.md"), config.JudgePromptPath()} {
+		if data, err := os.ReadFile(p); err == nil && strings.TrimSpace(string(data)) != "" {
+			return p
+		}
+	}
+	return ""
+}
+
 // compactFocus is the instruction handed to Agent.Compact: the standing one
 // (loadStandingCompactFocus) plus, for a compaction the user asked for by hand,
 // whatever they typed after /compact. Deliberately ADDITIVE — a one-off steer
@@ -3436,6 +3467,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalLoopBudget(), a.cfg.GoalNudge)  // in force whenever a standing goal exists (any status) — see goalLoopBudget
 	a.ag.SetGoalText(a.goalSnapshot().Text)                // the judge accepts against the GOAL, never against this run's errand
+	a.ag.SetJudgeCriteria(loadJudgeCriteria(a.workspace))  // project acceptance criteria, re-read each run
 	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again
 	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()
@@ -3501,6 +3533,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalLoopBudget(), a.cfg.GoalNudge)  // in force whenever a standing goal exists (any status) — see goalLoopBudget
 	a.ag.SetGoalText(a.goalSnapshot().Text)                // the judge accepts against the GOAL, never against this run's errand
+	a.ag.SetJudgeCriteria(loadJudgeCriteria(a.workspace))  // project acceptance criteria, re-read each run
 	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again
 	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()

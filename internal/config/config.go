@@ -421,6 +421,13 @@ func SystemPromptPath() string { return filepath.Join(configHome(), "system.md")
 // "/compact <steer>" can never reach.
 func CompactPromptPath() string { return filepath.Join(configHome(), "compact.md") }
 
+// JudgePromptPath is the global acceptance criteria for the goal judge — what
+// counts as done in addition to the goal itself. Mirrors CompactPromptPath (a
+// workspace .agent/judge.md wins over it): it is prose the user writes and
+// refines as a project's standards settle, not a value to cycle through in a
+// panel, and it must be able to grow without ever touching the goal.
+func JudgePromptPath() string { return filepath.Join(configHome(), "judge.md") }
+
 // SaveGlobal writes the machine-level settings (display name + LLM connection)
 // to the user config file, creating its directory.
 func SaveGlobal(name string, l LLM) error {

@@ -3368,3 +3368,61 @@ func TestTheAttemptTheTTLPaidForIsStillJudged(t *testing.T) {
 		t.Errorf("returns = %d, want 1 (the judge must not buy another attempt past the TTL)", tr.Returns)
 	}
 }
+
+// Project acceptance criteria add to what counts as done; they must never be
+// able to redefine, replace or excuse the goal. The goal stays the thing being
+// accepted, the criteria only say what else to look for, and the evidence stays
+// what the decision is made from.
+func TestJudgeCriteriaAddToTheGoalWithoutReplacingIt(t *testing.T) {
+	plain := judgeSystemWith("")
+	if plain != judgeSystem {
+		t.Error("empty criteria changed the instruction")
+	}
+	if judgeSystemWith("   ") != judgeSystem {
+		t.Error("whitespace-only criteria changed the instruction")
+	}
+	with := judgeSystemWith("a fix is not done until the tests were actually RUN")
+	if !strings.HasPrefix(with, judgeSystem) {
+		t.Error("the criteria displaced the base instruction instead of adding to it")
+	}
+	if !strings.Contains(with, "tests were actually RUN") {
+		t.Error("the criteria never reach the judge")
+	}
+	if !strings.Contains(with, "never replace the goal") {
+		t.Error("nothing tells the judge the criteria cannot override the goal")
+	}
+}
+
+// End to end: the criteria must land in the judge's own system message, and the
+// goal must still be the acceptance target alongside them.
+func TestJudgeCallCarriesTheCriteriaAndStillTheGoal(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "all set"},
+		{Role: "assistant", Content: "DONE"},
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+	a.SetGoalText("ship the parser")
+	a.SetJudgeCriteria("tests must have been RUN, not just written")
+
+	if _, err := a.Run(context.Background(), "do it"); err != nil {
+		t.Fatal(err)
+	}
+	var system, user string
+	for _, m := range fake.lastMsgs { // the judge's own call
+		switch m.Role {
+		case "system":
+			system = m.Content
+		case "user":
+			user = m.Content
+		}
+	}
+	if !strings.Contains(system, "tests must have been RUN") {
+		t.Errorf("criteria missing from the judge's instruction:\n%s", clipTail(system, 300))
+	}
+	if !strings.Contains(user, "ship the parser") {
+		t.Errorf("the goal is no longer the acceptance target:\n%s", clip(user, 200))
+	}
+}

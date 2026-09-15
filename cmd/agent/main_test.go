@@ -7934,3 +7934,44 @@ func TestReasoningJudgeScopeIsSeparateFromTheTaskModel(t *testing.T) {
 		t.Errorf("readback = %q, want it labelled as the goal judge", got)
 	}
 }
+
+// The goal judge can be given its own output budget. Reported live: nine judge
+// calls in one run, every one "finish_reason=length" — the judge reasoning
+// sensibly about the evidence and being cut off before it ever wrote a verdict.
+// It inherits the task model's budget, which is sized for producing code, not
+// for a check that thinks before answering in one word.
+func TestJudgeMaxOutputBuildsItsOwnClientAndAppliesTheBudget(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if a.judgeClient != nil {
+		t.Fatal("a judge client exists with neither a judge reasoning level nor a judge budget set")
+	}
+
+	if err := a.setJudgeMaxOutput(16000); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if a.judgeClient == nil {
+		t.Fatal("no judge client after a judge budget was set — the budget can't reach the judge")
+	}
+	if a.judgeClient == a.client {
+		t.Error("the judge shares the main client, so its own budget does nothing")
+	}
+	// The task model's own budget is left alone: this describes the judging
+	// step, not the connection.
+	if a.cfg.LLM.MaxOutputTokens != 0 {
+		t.Errorf("task model max output = %d, want it untouched", a.cfg.LLM.MaxOutputTokens)
+	}
+	if a.cfg.JudgeMaxOutputTokens != 16000 {
+		t.Errorf("judge budget = %d, want 16000", a.cfg.JudgeMaxOutputTokens)
+	}
+}

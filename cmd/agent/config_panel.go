@@ -35,6 +35,7 @@ var configRows = []cfgRow{
 	{key: "temperature"},
 	{key: "top_p"},
 	{key: "max_output_tokens"},
+	{key: "judge_max_output_tokens"},
 	{key: "loop_detection"},
 	{key: "idle_timeout"},
 	{header: "Behavior"},
@@ -286,6 +287,12 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 			v = fmt.Sprintf("%d", act.MaxOutputTokens)
 		}
 		return "max output", v, "enter: cycle (server's own cap can cut a reasoning model off early)"
+	case "judge_max_output_tokens":
+		v := "same as the task model"
+		if m.app.cfg.JudgeMaxOutputTokens > 0 {
+			v = fmt.Sprintf("%d", m.app.cfg.JudgeMaxOutputTokens)
+		}
+		return "judge max output", v, "enter: cycle (the goal judge is cut off mid-verdict on a small budget)"
 	case "loop_detection":
 		return "loop detection", onOff(!act.DisableLoopDetection), "enter: toggle (aborts a model stuck repeating itself)"
 	case "idle_timeout":
@@ -429,6 +436,8 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		m.cycleTopP()
 	case "max_output_tokens":
 		m.cycleMaxOutputTokens()
+	case "judge_max_output_tokens":
+		m.cycleJudgeMaxOutput()
 	case "loop_detection": // toggle the active connection's repetition detectors
 		if err := m.app.toggleLoopDetection(); err != nil {
 			m.push(cErr.Render("  could not persist: " + err.Error()))
@@ -628,6 +637,19 @@ var maxOutputTokensCycle = []int{0, 2000, 4000, 8000, 16000, 32000}
 func (m *tuiModel) cycleMaxOutputTokens() {
 	next := nextInt(m.app.activeLLM().MaxOutputTokens, maxOutputTokensCycle)
 	if err := m.app.setMaxOutputTokens(next); err != nil {
+		m.push(cErr.Render("  could not persist: " + err.Error()))
+		return
+	}
+	_ = m.app.wire()
+}
+
+// cycleJudgeMaxOutput advances the goal judge's own max_tokens through the same
+// presets, persists it, and re-wires so wireJudge picks it up. Reported live:
+// nine judge calls in one run, all "finish_reason=length" — the judge reasoning
+// sensibly about the evidence and being cut off before writing a verdict.
+func (m *tuiModel) cycleJudgeMaxOutput() {
+	next := nextInt(m.app.cfg.JudgeMaxOutputTokens, maxOutputTokensCycle)
+	if err := m.app.setJudgeMaxOutput(next); err != nil {
 		m.push(cErr.Render("  could not persist: " + err.Error()))
 		return
 	}

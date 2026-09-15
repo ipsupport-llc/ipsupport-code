@@ -1856,17 +1856,32 @@ func (a *app) judgeScoped(provider, model string) bool {
 // this is what makes that setting reach the judge at all.
 func (a *app) wireJudge() {
 	prov, model := a.providerName(), a.activeLLM().Model
-	if !a.judgeScoped(prov, model) {
+	scoped, budget := a.judgeScoped(prov, model), a.cfg.JudgeMaxOutputTokens
+	if !scoped && budget <= 0 {
 		a.judgeClient = nil
 		a.lastJudgePrompt, a.lastJudgeCompl = 0, 0
 		a.ag.SetJudgeLLM(nil)
 		return
 	}
 	cfg := a.activeLLM()
-	cfg.Extra = a.reasoningParams(prov, model, "judge")
+	if scoped {
+		cfg.Extra = a.reasoningParams(prov, model, "judge")
+	}
+	if budget > 0 {
+		cfg.MaxOutputTokens = budget
+	}
 	a.judgeClient = llm.NewOpenAIClient(cfg)
 	a.lastJudgePrompt, a.lastJudgeCompl = 0, 0
 	a.ag.SetJudgeLLM(a.judgeClient)
+}
+
+// setJudgeMaxOutput sets the goal judge's own request max_tokens and persists it
+// globally (it is not a per-provider connection setting: it describes what the
+// judging STEP needs, which is the same wherever it runs). 0 = inherit the task
+// model's.
+func (a *app) setJudgeMaxOutput(v int) error {
+	a.cfg.JudgeMaxOutputTokens = v
+	return config.SaveJudgeMaxOutput(v)
 }
 
 // reasoningParams resolves the merge-params for (provider, model). scope ""

@@ -241,7 +241,15 @@ type Config struct {
 	// CompactThreshold overrides the fraction of the context window at which
 	// "summary" memory folds history into a recap. 0 = built-in default (0.75).
 	CompactThreshold float64 `json:"compact_threshold,omitempty"`
-	Workspace        string  `json:"-"` // resolved absolute workspace root
+	// JudgeMaxOutputTokens is the goal judge's OWN request max_tokens, 0 = the
+	// same as the task model's. Reported live, with the log to prove it: nine
+	// judge calls in one run, every one "finish_reason=length" — the judge was
+	// reasoning sensibly about the evidence and being cut off before it ever
+	// wrote a verdict. It inherits the task model's budget, which is sized for
+	// producing code and tool calls, not for a check that thinks before
+	// answering in one word.
+	JudgeMaxOutputTokens int    `json:"judge_max_output_tokens,omitempty"`
+	Workspace            string `json:"-"` // resolved absolute workspace root
 }
 
 // ProviderTemplates are built-in OpenAI-compatible providers: base URL (and a
@@ -531,6 +539,11 @@ func SaveCompactThreshold(t float64) error {
 // SaveReflectCfg persists the reflection flag + profile globally.
 func SaveReflectCfg(disabled bool, profile string) error {
 	return mergeGlobalKeys(map[string]any{"reflect_disabled": disabled, "reflect_profile": profile})
+}
+
+// SaveJudgeMaxOutput persists the goal judge's own max_tokens globally.
+func SaveJudgeMaxOutput(n int) error {
+	return mergeGlobalKeys(map[string]any{"judge_max_output_tokens": n})
 }
 
 // SaveReasoning persists the per-model reasoning params map globally.

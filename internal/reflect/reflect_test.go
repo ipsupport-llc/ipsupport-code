@@ -189,33 +189,86 @@ func TestReflectNoJSONIsEmpty(t *testing.T) {
 	}
 }
 
-type promptCapture struct{ system string }
+type promptCapture struct{ systems []string }
 
 func (p *promptCapture) Chat(_ context.Context, msgs []llm.Message, _ []map[string]any) (llm.Message, error) {
 	for _, m := range msgs {
 		if m.Role == "system" {
-			p.system = m.Content
+			p.systems = append(p.systems, m.Content)
 		}
 	}
 	return llm.Message{Role: "assistant", Content: `{"facts":["x"]}`}, nil
 }
 
-func TestReflectLiteUsesFactsOnlyPrompt(t *testing.T) {
+func (p *promptCapture) asked(what string) bool {
+	for _, s := range p.systems {
+		if strings.Contains(s, what) {
+			return true
+		}
+	}
+	return false
+}
+
+// The full prompt asks for both halves in one call. Lite splits that into two
+// single-purpose calls — it must still ASK for pitfalls.
+//
+// Lite used to mean facts only, on the reasoning that a weak model loops on the
+// combined ask. Reported live, with the store to prove it: a whole session on a
+// local model produced facts and not one lesson, because the lite prompt never
+// mentioned pitfalls at all — the lesson mechanism was disabled for exactly the
+// models it exists for. A weak model repeating the same broken tool call every
+// run is the entire reason the store is there.
+func TestReflectLiteStillAsksForPitfallsJustSeparately(t *testing.T) {
 	full, lite := &promptCapture{}, &promptCapture{}
 	New(full).Reflect(context.Background(), sampleTranscript())
 	r := New(lite)
 	r.Lite = true
 	r.Reflect(context.Background(), sampleTranscript())
 
-	if !strings.Contains(full.system, "pitfalls") {
-		t.Error("the full prompt should ask for pitfalls")
+	if !full.asked("pitfalls") || len(full.systems) != 1 {
+		t.Errorf("full mode: %d call(s), want one combined ask including pitfalls", len(full.systems))
 	}
-	if strings.Contains(lite.system, "pitfalls") {
-		t.Error("the lite prompt must NOT ask for pitfalls (facts only)")
+	if !lite.asked("pitfalls") {
+		t.Error("lite mode never asks for pitfalls — the lesson store can never fill on a local model")
 	}
-	if !strings.Contains(lite.system, "facts") {
-		t.Error("the lite prompt should ask for facts")
+	if !lite.asked("facts") {
+		t.Error("lite mode stopped asking for facts")
 	}
+	// Two calls, not one: each has a single output shape, which is the whole
+	// point of the split for a model that loops on the combined ask.
+	if len(lite.systems) != 2 {
+		t.Errorf("lite made %d call(s), want 2 (facts and pitfalls asked separately)", len(lite.systems))
+	}
+	for _, s := range lite.systems {
+		if strings.Contains(s, "pitfalls") && strings.Contains(s, `{"facts"`) {
+			t.Errorf("a lite call asks for both shapes at once:\n%s", s)
+		}
+	}
+}
+
+// One weak-model reply coming back unusable must not throw away the other half
+// that parsed fine — half the lessons beats none.
+func TestReflectLiteKeepsTheHalfThatWorked(t *testing.T) {
+	r := New(&flakyHalfLLM{})
+	r.Lite = true
+	l, err := r.Reflect(context.Background(), sampleTranscript())
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if len(l.Pitfalls) != 1 || l.Pitfalls[0].ProvenFix != "use sudo" {
+		t.Errorf("pitfalls = %+v, want the half that succeeded kept", l.Pitfalls)
+	}
+}
+
+// flakyHalfLLM fails the first (facts) call and answers the second (pitfalls).
+type flakyHalfLLM struct{ n int }
+
+func (f *flakyHalfLLM) Chat(_ context.Context, _ []llm.Message, _ []map[string]any) (llm.Message, error) {
+	f.n++
+	if f.n == 1 {
+		return llm.Message{}, errors.New("boom")
+	}
+	return llm.Message{Role: "assistant", Content: `{"pitfalls":[{"domain":"run","kind":"fix","error_pattern":"permission denied","context":"run: shell","proven_fix":"use sudo"}]}`}, nil
 }
 
 type recordingLLM struct{ called bool }

@@ -930,13 +930,14 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	// (LIFO: runs before the "run end" log defer above, which reads it) so
 	// finishGoal can OR it into the standing goal's persisted Progressed flag.
 	defer func() { tr.Productive = hadProductiveTurn }()
-	returns := 0           // goal re-feeds so far (TTL = a.maxReturns)
-	lastMissing := ""      // the final judge verdict's "what's still missing", once the TTL can buy no more attempts
-	goalMet := false       // the judge confirmed the goal was met
-	refusalNudged := false // already pushed back on a "can't edit / here are the files" dodge?
-	emptyNudged := false   // already pushed back on a totally blank first reply?
-	idleNudged := false    // already pushed a no-progress model once since the last re-feed?
-	promptTokens := 0      // last known real prompt size from a MAIN-turn Chat call — see Transcript.PromptTokens
+	returns := 0              // goal re-feeds so far (TTL = a.maxReturns)
+	lastMissing := ""         // the final judge verdict's "what's still missing", once the TTL can buy no more attempts
+	goalMet := false          // the judge confirmed the goal was met
+	refusalNudged := false    // already pushed back on a "can't edit / here are the files" dodge?
+	emptyNudged := false      // already pushed back on a totally blank first reply?
+	degenerateNudged := false // already pushed back on ONE collapsed generation?
+	idleNudged := false       // already pushed a no-progress model once since the last re-feed?
+	promptTokens := 0         // last known real prompt size from a MAIN-turn Chat call — see Transcript.PromptTokens
 	for step := 0; step < a.maxSteps; step++ {
 		tr.Steps = step + 1
 
@@ -958,6 +959,22 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 
 		sentEst := estimateMsgTokens(msgs) // what this request actually carried, for tokenScale below
 		assistant, err := a.llm.Chat(ctx, msgs, tools)
+		// One generation collapsing into repetition is not the run failing. The
+		// transport is fine, the context is usually nowhere near full, and every
+		// other flaky-reply case here already gets exactly one retry — an empty
+		// reply, a refusal, the judge's own unreadable verdict. Reported live: a
+		// 5-step run against a 128-step budget ended because the fifth generation
+		// repeated a phrase, at 11% of the context window, with a standing goal
+		// that then went unassessed and unmentioned. Push back once, the same way
+		// the repeated-tool-call nudge does, and only give up if the very next
+		// turn collapses too.
+		if err != nil && ctx.Err() == nil && !degenerateNudged && llm.IsDegenerateOutput(err) {
+			slog.Debug("degenerate turn", a.debugArgs("step", step+1, "err", err)...)
+			msgs = append(msgs, llm.User(degenerateNudge))
+			a.emit("nudge", map[string]any{})
+			degenerateNudged = true
+			continue
+		}
 		if err != nil {
 			tr.Messages = msgs
 			cancelled := ctx.Err() != nil
@@ -969,6 +986,23 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 				tr.Cancelled, tr.Stopped = cancelled, true
 				tr.Returns = returns
 				tr.Final = stopNote(msgs, cancelled, err)
+				// Three paths end a run early and two of them account for the goal;
+				// this one said nothing at all. Reported live: a run with a standing
+				// goal died here on one collapsed generation, and the ending never
+				// mentioned the goal — no verdict, no "/goal go", nothing. From the
+				// user's seat the goal had simply vanished, though it was still on
+				// disk. Cancellation is excluded: esc means give control back, not
+				// spend another model call.
+				if !cancelled {
+					met, missing := a.judgeOnGiveUp(ctx, a.acceptanceTarget(goal), returns, hadProductiveTurn,
+						"turn_failed", stopNote(msgs, false, err)+actionsDigest(msgs)+a.priorGapNote(returns), msgs)
+					goalMet = met
+					if !met {
+						tr.Missing = firstNonEmpty(missing, lastMissing)
+					}
+					tr.GoalMet = met
+					tr.Final += goalNotConfirmedNote(a.maxReturns, met, tr.Missing)
+				}
 				tr.PromptTokens = promptTokens
 				a.emit("final", map[string]any{"text": tr.Final})
 				if acted {
@@ -1498,6 +1532,11 @@ var harnessPrefixes = []string{
 // goalReturnOpening is the fixed opening of every goal re-feed (see goalReturn).
 const goalReturnOpening = "The GOAL is NOT complete yet"
 
+// degenerateNudge is injected when ONE generation collapsed into repetition and
+// the transport aborted it. Deliberately concrete about what happened: a model
+// told only "try again" tends to resume the same sentence it was stuck on.
+const degenerateNudge = `Your last reply collapsed into repeating the same text over and over, and was cut off. Do not continue or restate it. Look at the LAST tool result you received, decide the single next concrete step from there, and take it with one tool call — or, if the work is finished, say so in one short sentence.`
+
 // stuckNudgeRepeat is injected when the model sent the exact same tool
 // call(s) as last turn — a literal repeat, whether it keeps failing or
 // keeps (uselessly) succeeding again.
@@ -1689,6 +1728,16 @@ func (a *Agent) judgeOnGiveUp(ctx context.Context, goal string, returns int, had
 		a.emit("judge", map[string]any{"done": met, "missing": missing})
 	}
 	return met, missing
+}
+
+// firstNonEmpty returns the first non-blank of its arguments.
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // goalNotConfirmedNote points a give-up ending (stuck-stop or step-exhaustion)

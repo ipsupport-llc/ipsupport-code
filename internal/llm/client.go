@@ -414,6 +414,27 @@ const (
 	phraseRepeatWindow   = 400
 )
 
+// ErrDegenerateForTest is a degenerate-output error other packages can use to
+// exercise the recovery path without reproducing a real model collapse.
+var ErrDegenerateForTest error = &phraseRepeatError{phrase: "the same sentence over and over"}
+
+// IsDegenerateOutput reports whether err is the model collapsing into
+// repetition — a runaway length, a repeated character, or a repeated phrase —
+// rather than a transport or protocol failure.
+//
+// The distinction matters to the caller: a transport error is about the
+// connection and ends the run, while this is about ONE generation. Reported
+// live: a 5-step run against a 128-step budget died because the fifth
+// generation repeated a phrase, at 11% of the context window, with a standing
+// goal — and the caller could not tell that apart from the server going away,
+// so it ended the whole task.
+func IsDegenerateOutput(err error) bool {
+	var re *runawayError
+	var de *degenerateOutputError
+	var pe *phraseRepeatError
+	return errors.As(err, &re) || errors.As(err, &de) || errors.As(err, &pe)
+}
+
 // phraseRepeatError marks the model looping on a repeated phrase/sentence.
 // Like runawayError and degenerateOutputError, retrying won't help.
 type phraseRepeatError struct{ phrase string }

@@ -8,6 +8,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -377,6 +378,59 @@ func GlobalExists() bool {
 	return err == nil
 }
 
+// StateDir is where the agent keeps its own runtime state for one workspace —
+// the standing goal, learned facts and lessons, prompt history and saved
+// sessions.
+//
+// Deliberately OUTSIDE the workspace. It used to live in the project's own
+// .agent/ directory, which put the agent's private state on the very filesystem
+// the agent reads: observed live, a model listing the project found
+// .agent/goal.json, read it, and began echoing the goal text back until the
+// transport's repetition detector killed the run. State the agent writes for
+// itself is not project content and must not be discoverable as project
+// content — quite apart from it cluttering someone's repository.
+//
+// Keyed by the workspace's absolute path, so two checkouts of the same project
+// keep separate state and a moved directory starts clean rather than silently
+// inheriting another tree's goal.
+func StateDir(workspace string) string {
+	return filepath.Join(configHome(), "state", workspaceSlug(workspace))
+}
+
+// workspaceSlug names a workspace's state directory: its readable basename plus
+// a short digest of the full path, so the directory is recognizable by eye and
+// still unique across same-named checkouts.
+func workspaceSlug(workspace string) string {
+	abs, err := filepath.Abs(workspace)
+	if err != nil {
+		abs = workspace
+	}
+	sum := sha256.Sum256([]byte(abs))
+	base := filepath.Base(abs)
+	var b strings.Builder
+	for _, r := range base {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + 32)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	name := strings.Trim(b.String(), "-")
+	if name == "" {
+		name = "workspace"
+	}
+	return fmt.Sprintf("%s-%x", name, sum[:4])
+}
+
+// LegacyStateDir is the in-workspace directory state USED to live in. Read once
+// per path, to move an existing installation's state out; never written to.
+func LegacyStateDir(workspace string) string {
+	return filepath.Join(workspace, ".agent")
+}
+
 // DefaultKBPath is the learned-lessons store for one workspace.
 //
 // Deliberately PER WORKSPACE, alongside the learned facts it is the twin of, and
@@ -389,7 +443,7 @@ func GlobalExists() bool {
 // explicit kb_path in config still overrides this (a deliberately shared store
 // is a choice, not the default).
 func DefaultKBPath(workspace string) string {
-	return filepath.Join(workspace, ".agent", "lessons.json")
+	return filepath.Join(StateDir(workspace), "lessons.json")
 }
 
 // DefaultTracePath is the global decision-trace (training dataset) location.

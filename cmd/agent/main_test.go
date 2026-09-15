@@ -5285,8 +5285,10 @@ func TestModelSwitchDoesNotMisattributeReflectionTokens(t *testing.T) {
 			io.WriteString(w, toolCallRespWithUsage("calc", `{"expression":"1+1"}`, 10, 5))
 		case 2:
 			io.WriteString(w, contentRespWithUsage("the answer", 10, 5))
-		case 3: // reflection — still running on model-a
+		case 3: // reflection, facts half — still running on model-a
 			io.WriteString(w, contentRespWithUsage(`{"facts":[]}`, 1000, 500))
+		case 4: // reflection, pitfalls half — a local provider asks the two separately
+			io.WriteString(w, contentRespWithUsage(`{"pitfalls":[]}`, 200, 100))
 		default: // the second task, after switching to model-b
 			io.WriteString(w, contentRespWithUsage("done", 7, 3))
 		}
@@ -5318,8 +5320,8 @@ func TestModelSwitchDoesNotMisattributeReflectionTokens(t *testing.T) {
 	for _, tt := range a.usage.ByModel() {
 		byModel[tt.Key] = tt
 	}
-	if got := byModel["local/model-a"].Completion; got != 510 {
-		t.Errorf("model-a completion tokens = %d, want 510 (its task's 10 + reflection's 500, all attributed to the model actually active when they ran)", got)
+	if got := byModel["local/model-a"].Completion; got != 610 {
+		t.Errorf("model-a completion tokens = %d, want 610 (its task's 10 + both reflection halves' 500+100, all attributed to the model actually active when they ran)", got)
 	}
 	if got := byModel["local/model-b"].Completion; got != 3 {
 		t.Errorf("model-b completion tokens = %d, want 3 (only its own task's tokens — not model-a's leftover reflection tokens misattributed, and mispriced at model-b's rate)", got)

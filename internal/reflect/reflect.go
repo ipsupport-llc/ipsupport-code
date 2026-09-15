@@ -63,13 +63,35 @@ const reflectPrompt = `You review a finished run by a tool-using agent and extra
 
 Use [] for an empty list. Return ONLY the JSON object.`
 
-// reflectPromptLite is the small-model variant: facts only (the more useful
-// half), terse, to avoid the looping a weak model does on the full two-part ask.
-const reflectPromptLite = `From the finished agent run below, list a few short, durable facts about THIS project worth remembering next time — build/test/run commands, where files live, conventions. Reply with ONLY this JSON, nothing else: {"facts": ["...", "..."]}. Use {"facts": []} if there's nothing solid. Do not explain.`
+// reflectFactsLite and reflectPitfallsLite split the full two-part ask into two
+// single-purpose calls for a small model. Lite used to mean facts ONLY, on the
+// reasoning that a weak model loops on "give me pitfalls AND facts in one JSON"
+// — true about the combined ask, but the wrong conclusion: it silently removed
+// the lesson mechanism from exactly the models it exists for. A weak local model
+// repeating the same broken tool call every run is the whole reason the store is
+// there; a strong hosted one rarely needs it. Two short asks, each with one
+// output shape, keep the weak model on rails without giving up half the output.
+const reflectFactsLite = `From the finished agent run below, list a few short, durable facts about THIS project worth remembering next time — build/test/run commands, where files live, conventions. Reply with ONLY this JSON, nothing else: {"facts": ["...", "..."]}. Use {"facts": []} if there's nothing solid. Do not explain.`
+
+const reflectPitfallsLite = `The agent run below may have hit tool errors. Report what to do differently next time. Reply with ONLY this JSON, nothing else:
+{"pitfalls": [{"domain": "...", "kind": "...", "error_pattern": "...", "context": "...", "proven_fix": "..."}]}
+
+"domain" is the tool that failed: file, run, git, web, calc, agent, mcp or skill.
+"kind" is "fix" if an error was hit and a later action fixed it — "proven_fix" is what worked.
+"kind" is "avoid" if the same thing was tried again and kept failing — "proven_fix" is what to do INSTEAD. Never repeat the failing approach as the advice.
+"error_pattern" is a few words copied from the error text itself.
+"context" is the action it happened during, like "file: write".
+Never put a file path, filename, directory or project name in "error_pattern" or "proven_fix" — describe the shape of the problem, not this one case.
+
+Use {"pitfalls": []} if the run hit no tool errors. Do not explain.`
 
 // Reflect distills lessons from t. A turn with no tool use (a plain chat) has
 // nothing to learn, so it skips the model call — no point making a small model
 // reason over an empty run.
+//
+// Lite runs two narrow calls instead of one combined one (see the prompts
+// above); a failure of either is not fatal to the other, since half the lessons
+// beats none.
 func (r *Reflector) Reflect(ctx context.Context, t agent.Transcript) (Lessons, error) {
 	if !usedTools(t) {
 		return Lessons{}, nil
@@ -78,18 +100,45 @@ func (r *Reflector) Reflect(ctx context.Context, t agent.Transcript) (Lessons, e
 	if strings.TrimSpace(summary) == "" {
 		return Lessons{}, nil
 	}
-	prompt := reflectPrompt
 	if r.Lite {
-		prompt = reflectPromptLite
+		return r.reflectLite(ctx, summary)
 	}
 	reply, err := r.LLM.Chat(ctx, []llm.Message{
-		llm.System(prompt),
+		llm.System(reflectPrompt),
 		llm.User(summary),
 	}, nil)
 	if err != nil {
 		return Lessons{}, &ReflectionError{Err: err}
 	}
 	return parseLessons(reply.Content), nil
+}
+
+// reflectLite asks for facts and pitfalls separately. Only a failure of BOTH
+// calls surfaces as an error: one weak-model reply that comes back unusable
+// shouldn't throw away the other half that parsed fine.
+func (r *Reflector) reflectLite(ctx context.Context, summary string) (Lessons, error) {
+	var out Lessons
+	factsReply, factsErr := r.LLM.Chat(ctx, []llm.Message{
+		llm.System(reflectFactsLite),
+		llm.User(summary),
+	}, nil)
+	if factsErr == nil {
+		out.Facts = parseLessons(factsReply.Content).Facts
+	}
+	pitReply, pitErr := r.LLM.Chat(ctx, []llm.Message{
+		llm.System(reflectPitfallsLite),
+		llm.User(summary),
+	}, nil)
+	if pitErr == nil {
+		out.Pitfalls = parseLessons(pitReply.Content).Pitfalls
+	}
+	if factsErr != nil && pitErr != nil {
+		return Lessons{}, &ReflectionError{Err: factsErr}
+	}
+	if factsErr != nil || pitErr != nil {
+		slog.Debug("reflect lite half failed", "facts_err", factsErr, "pitfalls_err", pitErr)
+	}
+	return out, nil
 }
 
 // summarize compacts a transcript into the error→recovery→outcome shape the

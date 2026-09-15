@@ -8271,3 +8271,61 @@ func TestConfigGroupsGoalAndLearningSettings(t *testing.T) {
 		}
 	}
 }
+
+// Reported live: /config rendered every row unconditionally, so on a short
+// terminal the top — title and first section included — was pushed off screen
+// with no way to reach it. Growing the panel by two sections exposed it; any
+// short enough terminal would always have hit it.
+func TestConfigPanelFitsAShortTerminal(t *testing.T) {
+	m := &tuiModel{app: &app{cfg: config.Default(), workspace: t.TempDir()}, height: 20}
+	m.openConfig()
+
+	out := m.renderConfigPanel()
+	if n := strings.Count(out, "\n") + 1; n > m.height {
+		t.Errorf("panel is %d lines on a %d-line terminal", n, m.height)
+	}
+	if !strings.Contains(out, "config") {
+		t.Error("the title was pushed off the top")
+	}
+
+	// The selected row stays visible all the way down, and the panel keeps
+	// fitting.
+	keys := cfgKeys()
+	for i := range keys {
+		m.cfgCursor = i
+		out := m.renderConfigPanel()
+		if n := strings.Count(out, "\n") + 1; n > m.height {
+			t.Fatalf("panel grew to %d lines at cursor %d", n, i)
+		}
+		label, _, _ := m.configRowView(keys[i])
+		if !strings.Contains(out, label) {
+			t.Fatalf("selected row %q (index %d) is not on screen", keys[i], i)
+		}
+	}
+
+	// Markers say which way the rest is.
+	m.cfgCursor = 0
+	if !strings.Contains(m.renderConfigPanel(), "more below") {
+		t.Error("no hint that there are rows below")
+	}
+	m.cfgCursor = len(keys) - 1
+	if !strings.Contains(m.renderConfigPanel(), "more above") {
+		t.Error("no hint that there are rows above")
+	}
+}
+
+// A tall terminal shows everything, with no scroll markers to explain.
+func TestConfigPanelShowsEverythingWhenItFits(t *testing.T) {
+	m := &tuiModel{app: &app{cfg: config.Default(), workspace: t.TempDir()}, height: 200}
+	m.openConfig()
+	out := m.renderConfigPanel()
+	if strings.Contains(out, "more above") || strings.Contains(out, "more below") {
+		t.Error("scroll markers shown although everything fits")
+	}
+	for _, k := range cfgKeys() {
+		label, _, _ := m.configRowView(k)
+		if !strings.Contains(out, label) {
+			t.Errorf("row %q missing from a panel that should show all of them", k)
+		}
+	}
+}

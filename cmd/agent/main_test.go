@@ -3037,13 +3037,27 @@ func TestAsyncOpsDrainQueue(t *testing.T) {
 
 // With the judge loop off (/goal off) a clean finish must mark the goal done —
 // otherwise the startup resume prompt nags forever. Cancelled runs stay incomplete.
-func TestGoalDoneWithJudgeOff(t *testing.T) {
+// With the judge loop off (ttl 0) a clean reply used to count as completion and
+// delete the goal. That is a second way to close a goal without any verdict:
+// an unrelated question, or an empty reply accepted after its nudge, silently
+// deleted an untouched goal. "Don't pursue it automatically" is not "the next
+// thing you say finishes it" — the user closes it with /goal clear.
+func TestGoalSurvivesACleanReplyWithTheJudgeOff(t *testing.T) {
 	a := &app{cfg: config.Default(), workspace: t.TempDir()}
 	a.cfg.GoalMaxReturns = 0 // judge loop off
 	a.goal = goalState{Text: "ship it", Status: "active"}
-	a.finishGoal(agent.Transcript{}) // clean finish, GoalMet never set → counts as done
+	a.finishGoal(agent.Transcript{}) // clean finish, no verdict
+	if a.goal.Text != "ship it" {
+		t.Errorf("a clean reply deleted an unjudged goal, got %+v", a.goal)
+	}
+	if a.goal.Status != "incomplete" {
+		t.Errorf("status = %q, want incomplete (still there, resumable)", a.goal.Status)
+	}
+	// A confirmed verdict still closes it, ttl or no ttl.
+	a.goal = goalState{Text: "ship it", Status: "active"}
+	a.finishGoal(agent.Transcript{GoalMet: true})
 	if a.goal.Text != "" || a.goal.Status != "" {
-		t.Errorf("clean TTL-off finish should clear the goal, got %+v", a.goal)
+		t.Errorf("a confirmed goal should be cleared, got %+v", a.goal)
 	}
 	a.goal = goalState{Text: "ship it", Status: "active"}
 	a.finishGoal(agent.Transcript{Cancelled: true})
@@ -7973,5 +7987,36 @@ func TestJudgeMaxOutputBuildsItsOwnClientAndAppliesTheBudget(t *testing.T) {
 	}
 	if a.cfg.JudgeMaxOutputTokens != 16000 {
 		t.Errorf("judge budget = %d, want 16000", a.cfg.JudgeMaxOutputTokens)
+	}
+}
+
+// Setting only the judge's output budget must not silently change its reasoning
+// too. reasoningParams falls back to the task model's own keys, so an unscoped
+// judge keeps exactly the reasoning it had while sharing the main client —
+// otherwise one knob changes two things and confounds the very measurement the
+// budget exists to make.
+func TestJudgeBudgetKeepsTheInheritedReasoning(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.Model = "n30"
+	cfg.Reasoning = map[string]json.RawMessage{
+		"local/n30": json.RawMessage(`{"reasoning_effort":"high"}`),
+	}
+	cfg.JudgeMaxOutputTokens = 16000
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if a.judgeClient == nil {
+		t.Fatal("no judge client although a budget is set")
+	}
+	// The judge-scoped lookup falls back to the task model's key, so the
+	// inherited reasoning must still be on the judge's connection.
+	got := a.reasoningParams(a.providerName(), "n30", "judge")
+	if got == nil || got["reasoning_effort"] != "high" {
+		t.Errorf("judge reasoning params = %v, want the inherited high", got)
 	}
 }

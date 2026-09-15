@@ -1967,7 +1967,7 @@ func (m *tuiModel) View() string {
 		// ctx = size of the last prompt vs the window (auto-compacts as it fills);
 		// ↑ = tokens the model generated this whole session.
 		act := m.app.activeLLM()
-		ctxStr := humanK(m.app.client.Context())
+		ctxStr := humanK(m.app.ag.PromptTokens()) // main turns only — see ctxMeter
 		if act.ContextWindow > 0 {
 			ctxStr += "/" + humanK(act.ContextWindow)
 		}

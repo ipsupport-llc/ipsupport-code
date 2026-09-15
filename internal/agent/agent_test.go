@@ -144,7 +144,7 @@ func TestTrimIfNearWindowProtectsRecentAndNonToolMessages(t *testing.T) {
 	// alone can't get under budget — that "protected zone still doesn't fit"
 	// case is the overflow-fallback pass's job, covered separately by
 	// TestTrimIfNearWindowOverflowFallback (which does reach into this zone).
-	freed := trimIfNearWindow(msgs, 3500, 0)
+	freed := trimIfNearWindow(msgs, 3500, 0, 0)
 	if freed <= 0 {
 		t.Fatal("expected trimIfNearWindow to free something")
 	}
@@ -178,7 +178,7 @@ func TestTrimIfNearWindowNoopWhenUnderThreshold(t *testing.T) {
 		{Role: "tool", Content: strings.Repeat("x", trimMinResultSize*2)},
 	}
 	before := append([]llm.Message(nil), msgs...)
-	if freed := trimIfNearWindow(msgs, 1_000_000, 0); freed != 0 {
+	if freed := trimIfNearWindow(msgs, 1_000_000, 0, 0); freed != 0 {
 		t.Errorf("freed = %d, want 0 (well under threshold)", freed)
 	}
 	for i := range msgs {
@@ -274,7 +274,7 @@ func TestTrimIfNearWindowOverflowFallback(t *testing.T) {
 		t.Fatalf("test setup: expected len(msgs) <= trimKeepRecent so the main pass is a no-op (protectFrom=%d)", protectFrom)
 	}
 
-	freed := trimIfNearWindow(msgs, contextWindow, 0)
+	freed := trimIfNearWindow(msgs, contextWindow, 0, 0)
 	if freed <= 0 {
 		t.Fatal("expected the overflow fallback to free something")
 	}
@@ -318,7 +318,7 @@ func TestTrimIfNearWindowPreservesFailureSignal(t *testing.T) {
 		t.Fatalf("test setup: the failing result at index 3 must be outside the protected zone (protectFrom=%d)", protectFrom)
 	}
 
-	freed := trimIfNearWindow(msgs, 10, 0) // tiny window forces trimming
+	freed := trimIfNearWindow(msgs, 10, 0, 0) // tiny window forces trimming
 	if freed <= 0 {
 		t.Fatal("test setup: expected trimIfNearWindow to trim something")
 	}
@@ -2173,6 +2173,12 @@ func TestParseArgsStringParamsKeepsSiblings(t *testing.T) {
 	}
 }
 
+// A verdict must be COMMITTED to — a line that begins with the token — not
+// merely mentioned. The old rule was "any bare done token as long as no more
+// token appears anywhere", which read a judge saying the work is NOT done as
+// saying it is. That is the one direction a mistake here must be impossible in:
+// a wrong DONE closes a goal on unfinished work, a wrong unclear just keeps it
+// going.
 func TestParseVerdict(t *testing.T) {
 	cases := []struct {
 		in       string
@@ -2180,12 +2186,19 @@ func TestParseVerdict(t *testing.T) {
 		wantMiss string
 	}{
 		{"DONE", judgeDone, ""},
-		{"The task is DONE.", judgeDone, ""},
+		{"**DONE**", judgeDone, ""},
+		{"DONE — no more work remains", judgeDone, ""}, // a committed DONE, not a MORE
 		{"MORE: add the tests", judgeMore, "add the tests"},
-		{"The plan needs MORE work: no tests yet", judgeMore, "work: no tests yet"},
-		{"MOREOVER, it looks done", judgeDone, ""}, // MOREOVER must not match MORE
+		// Negation, quotation and echo: all previously accepted as a met goal.
+		{"The task is not done yet.", judgeUnclear, ""},
+		{"The agent said \"DONE\", but the report is absent.", judgeUnclear, ""},
+		{"The task is DONE.", judgeUnclear, ""},
+		{"The plan needs MORE work: no tests yet", judgeUnclear, ""},
+		{"MOREOVER, it looks done", judgeUnclear, ""},
 		{"yeah looks fine to me", judgeUnclear, ""},
 		{"", judgeUnclear, ""},
+		// Both present: the skeptical one wins, wherever it sits.
+		{"DONE\nMORE: tests are still failing", judgeMore, "tests are still failing"},
 	}
 	for _, tc := range cases {
 		got, miss := parseVerdict(tc.in)
@@ -2907,10 +2920,10 @@ func TestTrimUsesTheServersRealTokenCountNotAByteGuess(t *testing.T) {
 	}
 
 	const window = 32_800
-	if freed := trimIfNearWindow(build(), window, 0); freed != 0 {
+	if freed := trimIfNearWindow(build(), window, 0, 0); freed != 0 {
 		t.Fatalf("freed %d bytes with no real reading — this case is meant to sit just under the byte-estimate trigger", freed)
 	}
-	if freed := trimIfNearWindow(build(), window, 43_816); freed == 0 {
+	if freed := trimIfNearWindow(build(), window, estimateMsgTokens(build()), 43_816); freed == 0 {
 		t.Error("nothing trimmed although the server reported 43816 tokens against a 32800 window")
 	}
 }
@@ -2919,16 +2932,16 @@ func TestTrimUsesTheServersRealTokenCountNotAByteGuess(t *testing.T) {
 // clamped so a single odd reading can't send it trimming a whole run away.
 func TestTokenScaleCalibratesAndIsClamped(t *testing.T) {
 	msgs := []llm.Message{{Role: "tool", Content: strings.Repeat("x", 4000)}} // estimates as 1000 tokens
-	if got := tokenScale(msgs, 2000); got != 2 {
+	if got := tokenScale(estimateMsgTokens(msgs), 2000); got != 2 {
 		t.Errorf("scale = %v, want 2 (the server charged double the byte estimate)", got)
 	}
-	if got := tokenScale(msgs, 0); got != 1 {
+	if got := tokenScale(estimateMsgTokens(msgs), 0); got != 1 {
 		t.Errorf("scale with no reading = %v, want 1 (behave exactly as before)", got)
 	}
-	if got := tokenScale(msgs, 100_000); got != 4 {
+	if got := tokenScale(estimateMsgTokens(msgs), 100_000); got != 4 {
 		t.Errorf("scale = %v, want it clamped to 4", got)
 	}
-	if got := tokenScale(msgs, 1); got != 0.5 {
+	if got := tokenScale(estimateMsgTokens(msgs), 1); got != 0.5 {
 		t.Errorf("scale = %v, want it clamped to 0.5", got)
 	}
 }
@@ -3159,3 +3172,199 @@ func (u *usageLLM) Chat(ctx context.Context, msgs []llm.Message, tools []map[str
 }
 
 func (u *usageLLM) Usage() (int, int) { return u.prompt, u.com }
+
+// A reply carrying both done() and more() is a judge that has not settled, not a
+// confirmation with a caveat. Taking whichever came first meant the verdict
+// flipped with the order of the array.
+func TestJudgeContradictoryToolCallsAreNotAConfirmation(t *testing.T) {
+	doneCall := llm.ToolCall{ID: "1", Name: "done", Arguments: "{}"}
+	moreCall := llm.ToolCall{ID: "2", Name: "more", Arguments: `{"missing":"tests fail"}`}
+	for _, order := range [][]llm.ToolCall{{doneCall, moreCall}, {moreCall, doneCall}} {
+		v, missing, _ := parseJudgeReply(llm.Message{Role: "assistant", ToolCalls: order})
+		if v != judgeMore || missing != "tests fail" {
+			t.Errorf("order %v → verdict %v (%q), want more/\"tests fail\"", order[0].Name+","+order[1].Name, v, missing)
+		}
+	}
+	// done() while the text says otherwise is the same unsettled answer.
+	v, missing, _ := parseJudgeReply(llm.Message{
+		Role: "assistant", Content: "MORE: tests fail", ToolCalls: []llm.ToolCall{doneCall},
+	})
+	if v != judgeMore || missing != "tests fail" {
+		t.Errorf("done() with contradicting text → %v (%q), want more", v, missing)
+	}
+}
+
+// The judge has exactly two tools. Anything else is it trying to go and look at
+// something it wasn't shown — which happened live, three calls running, the
+// judge saying "I need to check the current state of main.go after the edit".
+// It must not be read as a verdict.
+func TestJudgeStrayToolCallIsNotAVerdict(t *testing.T) {
+	v, _, source := parseJudgeReply(llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{
+		{ID: "1", Name: "file", Arguments: `{"action":"read","params":{"path":"main.go"}}`},
+	}})
+	if v != judgeUnclear || source != "" {
+		t.Errorf("stray tool call → %v (source %q), want unclear", v, source)
+	}
+}
+
+// Reported live: with "implement authentication and tests" outstanding, a
+// follow-up "read README.md" was judged AS IF reading the README were the goal.
+// The judge correctly said DONE, and the caller closed the authentication goal
+// on the strength of it. The acceptance target must be the goal, not the errand.
+func TestJudgeAcceptsAgainstTheStandingGoalNotTheRunsErrand(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "read it"},
+		{Role: "assistant", Content: "DONE"},
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+	a.SetGoalText("implement authentication and tests")
+
+	if _, err := a.Run(context.Background(), "read README.md"); err != nil {
+		t.Fatal(err)
+	}
+	sent := ""
+	for _, m := range fake.lastMsgs { // the judge's own call
+		if m.Role == "user" {
+			sent = m.Content
+		}
+	}
+	if !strings.Contains(sent, "implement authentication and tests") {
+		t.Errorf("the judge was given the wrong acceptance target:\n%s", clip(sent, 300))
+	}
+	if strings.Contains(sent, "GOAL:\nread README.md") {
+		t.Errorf("the run's errand was passed as the GOAL:\n%s", clip(sent, 300))
+	}
+}
+
+// Without a standing goal the run's own request IS the goal.
+func TestAcceptanceTargetFallsBackToTheRunsRequest(t *testing.T) {
+	a := New(&scriptLLM{}, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
+	if got := a.acceptanceTarget("do the thing"); got != "do the thing" {
+		t.Errorf("target = %q, want the run's own request", got)
+	}
+	a.SetGoalText("  the standing goal  ")
+	if got := a.acceptanceTarget("do the thing"); got != "the standing goal" {
+		t.Errorf("target = %q, want the standing goal", got)
+	}
+}
+
+// An emptied file read back gives an empty result. Skipping it used to leave its
+// key unclaimed, so the older populated read of the SAME file was then presented
+// as that file's current state.
+func TestJudgeEvidenceDoesNotResurrectStaleContentBehindAnEmptyResult(t *testing.T) {
+	read := func(id string) llm.Message {
+		return toolCallReply(id, "file", `{"action":"read","params":{"path":"report.md"}}`)
+	}
+	msgs := []llm.Message{
+		read("1"), {Role: "tool", Name: "file", Content: "# Report\nall the sections"},
+		read("2"), {Role: "tool", Name: "file", Content: "   "},
+	}
+	ev := judgeEvidence(msgs)
+	if strings.Contains(ev, "all the sections") {
+		t.Errorf("an emptied file still shows its old contents:\n%s", ev)
+	}
+	if !strings.Contains(ev, "(empty result)") {
+		t.Errorf("the empty current state isn't stated:\n%s", ev)
+	}
+}
+
+// read, write, edit and append of one file are four labels but ONE artifact.
+// Keeping them apart showed a stale pre-edit read beside an "edited (+1 -1)"
+// receipt, with the current contents nowhere — exactly what a live judge said it
+// could not see.
+func TestJudgeEvidenceKeepsOnlyTheLastTouchOfAFile(t *testing.T) {
+	msgs := []llm.Message{
+		toolCallReply("1", "file", `{"action":"read","params":{"path":"main.go"}}`),
+		{Role: "tool", Name: "file", Content: "package main // THE OLD BROKEN ONE"},
+		toolCallReply("2", "file", `{"action":"write","params":{"path":"main.go","content":"package main // the fixed one"}}`),
+		{Role: "tool", Name: "file", Content: "wrote main.go (2 lines)"},
+	}
+	ev := judgeEvidence(msgs)
+	if strings.Contains(ev, "THE OLD BROKEN ONE") {
+		t.Errorf("the pre-write content is still presented as current:\n%s", ev)
+	}
+	// And a write's receipt alone is not evidence — the content it wrote is in
+	// the ARGUMENTS, and the judge has to see it.
+	if !strings.Contains(ev, "the fixed one") {
+		t.Errorf("what was actually written never reaches the judge:\n%s", ev)
+	}
+}
+
+// Two commands sharing a prefix are different work; a 60-byte key merged them.
+func TestJudgeEvidenceKeepsCommandsThatOnlyDifferLate(t *testing.T) {
+	long := strings.Repeat("x", 70)
+	msgs := []llm.Message{
+		toolCallReply("1", "run", `{"action":"shell","params":{"command":"go test ./`+long+`a"}}`),
+		{Role: "tool", Name: "run", Content: "exit 0\nfirst command output"},
+		toolCallReply("2", "run", `{"action":"shell","params":{"command":"go test ./`+long+`b"}}`),
+		{Role: "tool", Name: "run", Content: "exit 1\nsecond command output"},
+	}
+	ev := judgeEvidence(msgs)
+	for _, want := range []string{"first command output", "second command output"} {
+		if !strings.Contains(ev, want) {
+			t.Errorf("evidence merged two distinct commands, missing %q:\n%s", want, ev)
+		}
+	}
+}
+
+// Evidence must never be silently partial: an unmarked excerpt makes a complete
+// report look like it is missing the sections that sat past the cut.
+func TestJudgeEvidenceMarksWhereItCut(t *testing.T) {
+	msgs := []llm.Message{
+		toolCallReply("1", "file", `{"action":"read","params":{"path":"report.md"}}`),
+		{Role: "tool", Name: "file", Content: strings.Repeat("section\n", 5000)},
+	}
+	if ev := judgeEvidence(msgs); !strings.Contains(ev, "cut here") {
+		t.Errorf("a truncated result is presented as whole:\n%s", clip(ev, 300))
+	}
+	if got := clipMarked("short", 100); got != "short" {
+		t.Errorf("clipMarked marked an untruncated string: %q", got)
+	}
+}
+
+// The calibration must divide the reading by the estimate of what was SENT. Using
+// the current, larger set produced a ratio below 1 and shrank the very number it
+// was meant to correct.
+func TestTokenScaleUsesTheEstimateOfWhatWasActuallySent(t *testing.T) {
+	// 6000 real tokens for a request that estimated at 6000 → no correction.
+	if got := tokenScale(6000, 6000); got != 1 {
+		t.Errorf("scale = %v, want 1", got)
+	}
+	// The same reading against the now-doubled set must NOT read as 0.5 — that
+	// was the bug; the caller passes the sent estimate, so this stays 1.
+	if got := tokenScale(6000, 6000); got < 1 {
+		t.Errorf("scale = %v, want no shrinking", got)
+	}
+	if got := tokenScale(3000, 6000); got != 2 {
+		t.Errorf("scale = %v, want 2 (the server charged double the sent estimate)", got)
+	}
+}
+
+// The TTL bounds how many times a goal may be RE-FED, not whether the attempt it
+// paid for gets graded. With ttl 1 the model's one re-feed could finish the work
+// and the run still ended "not confirmed", because returns had hit the cap and
+// the judge was skipped.
+func TestTheAttemptTheTTLPaidForIsStillJudged(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "first pass"},
+		{Role: "assistant", Content: "MORE: no report"}, // → the one re-feed
+		calcCall(), // the model finishes the work
+		{Role: "assistant", Content: "report written"},
+		{Role: "assistant", Content: "DONE"}, // the judge on the final attempt
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(1, false)
+
+	tr, _ := a.Run(context.Background(), "write the report")
+	if !tr.GoalMet {
+		t.Error("the attempt the TTL funded was never judged — goal left unconfirmed although it was finished")
+	}
+	if tr.Returns != 1 {
+		t.Errorf("returns = %d, want 1 (the judge must not buy another attempt past the TTL)", tr.Returns)
+	}
+}

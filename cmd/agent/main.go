@@ -1353,7 +1353,12 @@ func (a *app) finishGoal(tr agent.Transcript) {
 	// progress and confirm the goal WAS actually met even though the run
 	// technically stopped early (see internal/agent's Run) — only Cancelled
 	// (the user pressed esc) is an unconditional block.
-	done := !tr.Cancelled && (tr.GoalMet || (a.cfg.GoalMaxReturns == 0 && !tr.Stopped))
+	// ONLY a confirmed judge verdict closes a goal. With the loop off (ttl 0)
+	// this used to treat any clean uninterrupted reply as completion — so an
+	// unrelated question, or an empty reply accepted after its nudge, silently
+	// deleted an untouched goal. "Don't pursue it automatically" is not "the
+	// next thing you say finishes it"; the user closes it with /goal clear.
+	done := !tr.Cancelled && tr.GoalMet
 	if done {
 		// Done: clear it entirely so it never resurfaces after a restart.
 		a.goal = goalState{}
@@ -1864,9 +1869,13 @@ func (a *app) wireJudge() {
 		return
 	}
 	cfg := a.activeLLM()
-	if scoped {
-		cfg.Extra = a.reasoningParams(prov, model, "judge")
-	}
+	// Always resolved, not only when a judge override exists: reasoningParams
+	// falls back to the task model's own keys, so an unscoped judge keeps
+	// exactly the reasoning it had while sharing the main client. Applying it
+	// only when scoped meant setting the BUDGET silently dropped the inherited
+	// reasoning settings too — one knob quietly changing two things, and
+	// confounding the very measurement the budget was added to make.
+	cfg.Extra = a.reasoningParams(prov, model, "judge")
 	if budget > 0 {
 		cfg.MaxOutputTokens = budget
 	}
@@ -3426,6 +3435,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalLoopBudget(), a.cfg.GoalNudge)  // in force whenever a standing goal exists (any status) — see goalLoopBudget
+	a.ag.SetGoalText(a.goalSnapshot().Text)                // the judge accepts against the GOAL, never against this run's errand
 	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again
 	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()
@@ -3490,6 +3500,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalLoopBudget(), a.cfg.GoalNudge)  // in force whenever a standing goal exists (any status) — see goalLoopBudget
+	a.ag.SetGoalText(a.goalSnapshot().Text)                // the judge accepts against the GOAL, never against this run's errand
 	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again
 	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()

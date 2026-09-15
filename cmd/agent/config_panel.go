@@ -36,8 +36,6 @@ var configRows = []cfgRow{
 	{key: "temperature"},
 	{key: "top_p"},
 	{key: "max_output_tokens"},
-	{key: "judge_max_output_tokens"},
-	{key: "judge_criteria"},
 	{key: "loop_detection"},
 	{key: "idle_timeout"},
 	{header: "Behavior"},
@@ -52,6 +50,22 @@ var configRows = []cfgRow{
 	{key: "max_steps"},
 	{key: "max_history"},
 	{key: "max_stuck_turns"},
+	// Goal pursuit and the learning store used to have no home here at all: the
+	// judge's two settings sat under "Model & provider" (they describe the
+	// judging STEP, not the connection), and goal TTL, the idle nudge, the
+	// judge's reasoning level, reflection and knowledge retention were reachable
+	// only as slash commands — discoverable only if you already knew they
+	// existed.
+	{header: "Goal & judge"},
+	{key: "goal_ttl"},
+	{key: "goal_nudge"},
+	{key: "judge_reasoning"},
+	{key: "judge_max_output_tokens"},
+	{key: "judge_criteria"},
+	{header: "Learning"},
+	{key: "reflection"},
+	{key: "knowledge_retention"},
+	{key: "knowledge"},
 	{header: "Sub-agents"},
 	{key: "agents"},
 	{key: "spawn"},
@@ -301,6 +315,38 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 			v, hint = "● "+src, "enter: how to edit it"
 		}
 		return "judge criteria", v, hint
+	case "goal_ttl":
+		v := "off — the model's own finish stands"
+		if m.app.cfg.GoalMaxReturns > 0 {
+			v = fmt.Sprintf("%d re-feed(s)", m.app.cfg.GoalMaxReturns)
+		}
+		return "goal TTL", v, "enter: cycle (how many times an unmet goal is re-fed)"
+	case "goal_nudge":
+		return "idle nudge", onOff(m.app.cfg.GoalNudge), "enter: toggle (push once when a re-fed goal does no work)"
+	case "judge_reasoning":
+		prov := m.app.providerName()
+		v := "same as the task model"
+		if m.app.judgeScoped(prov, act.Model) {
+			v = m.app.reasoningLevel("judge:"+prov, act.Model)
+		}
+		return "judge reasoning", v, "enter: cycle (a yes/no check shouldn't be a thinking task — minimal suits it)"
+	case "reflection":
+		v := "on"
+		if m.app.cfg.ReflectDisabled {
+			v = "off"
+		} else if p := strings.TrimSpace(m.app.cfg.ReflectProfile); p != "" {
+			v += " · " + p
+		}
+		return "reflection", v, "enter: toggle (distills facts and lessons after each task)"
+	case "knowledge_retention":
+		v := "off (kept forever)"
+		if m.app.cfg.KnowledgeRetentionDays > 0 {
+			v = fmt.Sprintf("%d days", m.app.cfg.KnowledgeRetentionDays)
+		}
+		return "knowledge retention", v, "enter: cycle (drop lessons not seen for N days)"
+	case "knowledge":
+		nf, nl := m.app.factsCount(), len(m.app.kb.All())
+		return "knowledge", fmt.Sprintf("%d fact(s) · %d lesson(s)", nf, nl), "enter: list them (facts are in every prompt)"
 	case "loop_detection":
 		return "loop detection", onOff(!act.DisableLoopDetection), "enter: toggle (aborts a model stuck repeating itself)"
 	case "idle_timeout":
@@ -446,6 +492,22 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 		m.cycleMaxOutputTokens()
 	case "judge_max_output_tokens":
 		m.cycleJudgeMaxOutput()
+	case "goal_ttl":
+		m.pushLines(m.app.goalTTL("ttl", []string{"ttl", fmt.Sprint(nextInt(m.app.cfg.GoalMaxReturns, goalTTLCycle))}))
+	case "goal_nudge":
+		if err := m.app.setGoalNudge(!m.app.cfg.GoalNudge); err != nil {
+			m.push(cErr.Render("  could not persist: " + err.Error()))
+		} else {
+			m.push(cDim.Render("  idle nudge → " + onOff(m.app.cfg.GoalNudge)))
+		}
+	case "judge_reasoning":
+		m.pushLines(m.app.reasoningCommand("judge " + nextLevel(m.app.reasoningLevel("judge:"+m.app.providerName(), m.app.activeLLM().Model))))
+	case "reflection":
+		m.pushLines(m.app.reflectCommand(map[bool]string{true: "on", false: "off"}[m.app.cfg.ReflectDisabled]))
+	case "knowledge_retention":
+		m.pushLines(m.app.knowledgeCommand(fmt.Sprintf("retain %d", nextInt(m.app.cfg.KnowledgeRetentionDays, knowledgeRetentionCycle))))
+	case "knowledge":
+		m.pushLines(m.app.knowledgeCommand("list"))
 	case "judge_criteria":
 		// Prose, not a value to cycle: point at the file. It is re-read on every
 		// run, so an edit applies without a restart.
@@ -670,6 +732,28 @@ func (m *tuiModel) cycleJudgeMaxOutput() {
 		return
 	}
 	_ = m.app.wire()
+}
+
+// goalTTLCycle presets for the "goal TTL" row. 0 = pursuit off: the model's own
+// finish stands.
+var goalTTLCycle = []int{0, 1, 2, 3, 6, 12, 255}
+
+// knowledgeRetentionCycle presets (days) for the "knowledge retention" row.
+// 0 = keep forever.
+var knowledgeRetentionCycle = []int{0, 7, 30, 90, 180}
+
+// nextLevel cycles a reasoning level for the judge row. "minimal" is first after
+// the inherited default because a yes/no acceptance check is not a thinking
+// task — a judge that reasons its way through its whole output budget never
+// reaches a verdict at all.
+func nextLevel(cur string) string {
+	order := []string{"minimal", "low", "medium", "high", "off"}
+	for i, l := range order {
+		if l == cur {
+			return order[(i+1)%len(order)]
+		}
+	}
+	return order[0]
 }
 
 // idleTimeoutCycle presets (seconds) for the /config "idle_timeout" row. 0 =

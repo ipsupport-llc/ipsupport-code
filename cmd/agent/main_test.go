@@ -8143,3 +8143,131 @@ func TestAnUnrelatedRunDoesNotEraseTheKnownGap(t *testing.T) {
 		t.Errorf("Missing = %q, want the newer gap", a.goal.Missing)
 	}
 }
+
+// /knowledge used to list only lessons, so a user who had just watched five
+// "noted" lines scroll past was told "no learned lessons yet" — and facts, the
+// half that reaches EVERY prompt, could not be read anywhere at all.
+func TestKnowledgeListsFactsAndLessonsTogether(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open(filepath.Join(cfg.Workspace, "lessons.json"))
+	kb.Add(knowledge.Pitfall{Domain: "file", ErrorPattern: "no such file",
+		Context: "file: read", ProvenFix: "create the parent directory first"})
+	kb.Add(knowledge.Pitfall{Domain: "file", Kind: knowledge.KindAvoid, ErrorPattern: "you gave {}",
+		Context: "file: write", ProvenFix: "send params as a JSON object"})
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb}
+	if err := os.MkdirAll(filepath.Join(cfg.Workspace, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a.addFacts([]string{"Makefile has a 'run' target"})
+
+	out := strings.Join(a.knowledgeCommand(""), "\n") // bare /knowledge, not "list"
+	for _, want := range []string{"Makefile has a 'run' target", "create the parent directory first", "send params as a JSON object"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("/knowledge is missing %q:\n%s", want, out)
+		}
+	}
+	// The two halves are labelled by WHERE they act, and a dead end reads
+	// differently from a proven fix.
+	if !strings.Contains(out, "every task's prompt") || !strings.Contains(out, "when a matching tool call fails") {
+		t.Errorf("/knowledge doesn't say where each half applies:\n%s", out)
+	}
+	if !strings.Contains(out, "✘") || !strings.Contains(out, "✔") {
+		t.Errorf("/knowledge doesn't mark pluses and minuses:\n%s", out)
+	}
+}
+
+// One numbering across both halves: which store an entry lives in is our
+// bookkeeping. Facts had no removal path at all — the only way to drop a wrong
+// one was /clear, which also wipes the conversation and every lesson.
+func TestKnowledgeDropRemovesAFactByItsListedNumber(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open(filepath.Join(cfg.Workspace, "lessons.json"))
+	kb.Add(knowledge.Pitfall{Domain: "run", ErrorPattern: "permission denied", ProvenFix: "use sudo"})
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb}
+	if err := os.MkdirAll(filepath.Join(cfg.Workspace, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a.addFacts([]string{"keep me", "Switched the endpoint to type.fit"})
+
+	// Facts are numbered first; drop the diary entry by its printed number.
+	if out := strings.Join(a.knowledgeCommand("drop 2"), "\n"); !strings.Contains(out, "dropped fact") {
+		t.Fatalf("drop 2 said %q", out)
+	}
+	if got := a.factsSnapshot(); len(got) != 1 || got[0] != "keep me" {
+		t.Errorf("facts = %v, want only the kept one", got)
+	}
+	// Persisted, not just dropped in memory.
+	data, err := os.ReadFile(a.factsPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "type.fit") {
+		t.Errorf("the dropped fact is still on disk: %s", data)
+	}
+	// Numbering continues into the lessons half.
+	if out := strings.Join(a.knowledgeCommand("drop 2"), "\n"); !strings.Contains(out, "dropped lesson") {
+		t.Errorf("the number after the last fact should address a lesson, said %q", out)
+	}
+	if out := strings.Join(a.knowledgeCommand("drop 9"), "\n"); !strings.Contains(out, "usage") {
+		t.Errorf("out-of-range drop said %q, want a usage line", out)
+	}
+}
+
+// The heading asserted these as "Known facts" in the system prompt, giving a
+// stale line written by a past run the same standing as the user's own
+// instructions. It must say where they came from and what outranks them.
+func TestFactsHeadingDoesNotAssertThemAsKnownTruth(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	a := &app{cfg: cfg, workspace: cfg.Workspace}
+	if err := os.MkdirAll(filepath.Join(cfg.Workspace, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a.addFacts([]string{"the build uses make"})
+
+	p := a.systemPrompt()
+	if strings.Contains(p, "Known facts") {
+		t.Error("the prompt still asserts unchecked notes as known facts")
+	}
+	for _, want := range []string{"past runs of this agent", "not re-checked", "repository always wins"} {
+		if !strings.Contains(p, want) {
+			t.Errorf("the notes heading is missing %q", want)
+		}
+	}
+}
+
+// Goal pursuit and the learning store had no home in /config at all: the
+// judge's two settings sat under "Model & provider" (they describe the judging
+// STEP, not the connection), and goal TTL, the idle nudge, the judge's
+// reasoning level, reflection and knowledge retention were reachable only as
+// slash commands — discoverable only if you already knew they existed.
+func TestConfigGroupsGoalAndLearningSettings(t *testing.T) {
+	var section string
+	where := map[string]string{}
+	for _, r := range configRows {
+		if r.header != "" {
+			section = r.header
+			continue
+		}
+		where[r.key] = section
+	}
+	for _, k := range []string{"goal_ttl", "goal_nudge", "judge_reasoning", "judge_max_output_tokens", "judge_criteria"} {
+		if where[k] != "Goal & judge" {
+			t.Errorf("%q is under %q, want \"Goal & judge\"", k, where[k])
+		}
+	}
+	for _, k := range []string{"reflection", "knowledge_retention", "knowledge"} {
+		if where[k] != "Learning" {
+			t.Errorf("%q is under %q, want \"Learning\"", k, where[k])
+		}
+	}
+	// Every new row renders.
+	m := &tuiModel{app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	for k := range where {
+		if l, _, h := m.configRowView(k); l == "" || h == "" {
+			t.Errorf("configRowView(%q) = %q/%q, want both set", k, l, h)
+		}
+	}
+}

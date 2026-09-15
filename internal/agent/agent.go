@@ -1473,6 +1473,13 @@ var harnessPrefixes = []string{
 	emptyReplyNudge[:40],
 	refusalNudge[:40],
 	idleNudge[:40],
+	// Delivered background-job results and /btw notes. The doc comment above
+	// always claimed these were covered and the list never included them, so a
+	// finished sub-agent's entire answer — and every /btw the user dropped
+	// mid-run — reached the learning pass labelled as the user's own goal.
+	// Matched on the bracketed opening these are built with (cmd/agent/jobs.go).
+	"[background job #",
+	"[by the way]",
 }
 
 // goalReturnOpening is the fixed opening of every goal re-feed (see goalReturn).
@@ -1764,7 +1771,13 @@ func (v judgeVerdict) String() string {
 // same goal. reason tags the "goal judge" debug log so it's clear which
 // give-up path triggered it.
 func (a *Agent) judgeOnGiveUp(ctx context.Context, goal string, returns int, hadProductiveTurn bool, reason, result, evidence string) (met bool, missing string) {
-	if a.planMode || a.maxReturns == 0 || returns >= a.maxReturns || !(hadProductiveTurn || a.priorGoalProgress) {
+	// NOT gated on returns >= maxReturns. That gate was removed from the normal
+	// path with the argument that funding an attempt and then refusing to grade
+	// it is the one combination that makes no sense — and then left standing
+	// here, on the two endings where the run produced the least on its own. With
+	// the default TTL of 6, a run that takes its sixth re-feed and then burns its
+	// step budget got no assessment at all.
+	if a.planMode || a.maxReturns == 0 || !(hadProductiveTurn || a.priorGoalProgress) {
 		return false, ""
 	}
 	verdict, missing := a.judgeGoal(ctx, goal, result, evidence)

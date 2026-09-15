@@ -26,6 +26,11 @@ Two reviews (codex + a second agent, run separately) agreed on the diagnosis:
 the injected window instead of being discarded) and `#314` made facts readable
 and removable. Neither makes a fact *checkable*.
 
+This is now the largest item here: the judge-side entries that used to sit
+alongside it were closed by showing the judge the conversation itself (`#316`),
+which deleted the hand-built evidence summary and with it the two queued fixes
+for what that summary dropped.
+
 **The design.** Store a fact as a claim plus the means to re-establish it:
 
 ```json
@@ -64,87 +69,7 @@ and removable. Neither makes a fact *checkable*.
 
 ---
 
-## 2. A `done`-only turn leaves an unpaired tool call in the conversation
-
-**What is wrong.** In `Agent.Run`, the assistant message is appended *before* the
-`isDoneOnly` branch, and that branch never dispatches the call or appends a tool
-result. When the judge then answers MORE, the loop appends a goal re-feed and
-continues with an orphan `tool_calls` entry in `msgs`. `llm.toWire` serializes it
-unchanged and there is no repair pass, so a strict backend can reject the next
-request — ending pursuit before the TTL, for a protocol reason.
-
-Both reviews rated this the highest-priority remaining defect. The easiest
-trigger needs no goal at all: a model whose very first turn is a bare `done` with
-no content takes the empty-reply nudge down the same path.
-
-`TestRunDoneOnlyCallStillGoesThroughTheGoalJudge` scripts exactly this sequence
-and passes only because the fake LLM does not validate.
-
-**The fix.** Append a tool result for the intercepted `done` call before
-continuing — the tool already exists (`tool.NewDone`) and returns a one-line
-acknowledgement; it is simply never dispatched on this path.
-
-**What it breaks.** The result becomes part of the transcript the judge sees via
-`judgeEvidence` and the reflection pass sees via `summarize`, so it must read as
-the no-op it is and not as work performed. It also changes what
-`actionsDigest` walks past.
-
----
-
-## 3. Background sub-agent results never reach the judge
-
-**What is wrong.** `judgeEvidence` walks assistant messages with `ToolCalls` and
-the `tool`-role result that follows each. A background `agent` spawn's tool
-result is only the acknowledgement (`"background job #N started …"`); the real
-answer arrives later as a **user-role** message (`jobNote`), delivered through
-`beforeTurn` or `injectJobResults`. Evidence never includes it, and
-`actionsDigest` ignores it too (it reads only `file` and `run` calls).
-
-**Trigger.** The model delegates the report to a sub-agent with
-`background=true`, the job finishes mid-run, the model finalizes. The judge is
-shown *"background job #1 started"* as the sole evidence for that work and
-answers MORE — correctly, and forever.
-
-**The fix.** Recognize delivered job notes in `judgeEvidence` and include their
-content as evidence for the spawn that produced them.
-
-**What it breaks.** Job notes can be large (a whole sub-agent answer) and would
-compete for the evidence budget with the run's own tool results. Needs its own
-per-item clip. Note that `IsHarnessMessage` already identifies these messages
-(`#313`) — the same predicate can find them here, but for the opposite purpose,
-so the two uses must not be collapsed into one flag.
-
----
-
-## 4. Context trimming destroys the evidence the judge is about to read
-
-**What is wrong.** `trimIfNearWindow` rewrites tool results **in place**
-(`m.Content = trimPlaceholder(...)`) partway through a run, and `judgeEvidence`
-later reads the same slice. The judge is shown placeholders where the proof was.
-
-Bounded, but live: `trimKeepRecent` (6) and `trimMinResultSize` (500) limit the
-damage, and `evidenceBody` recovers write/edit payloads from the call's
-*arguments*, which are never trimmed. **Reads and command output are not
-recoverable.**
-
-**Trigger.** A long run on a modest context window reads a large file early;
-trimming fires on a later step; nothing touches that path again. At finalize the
-judge sees `[N bytes … trimmed to stay within the context window]` — which is the
-exact failure `judgeEvidence` was built to cure, arriving through the back door.
-
-**The fix.** Keep a small, separate record of what was trimmed away for the
-judge's use — or build the evidence block *before* trimming can reach the
-messages it will quote.
-
-**What it breaks.** Retaining trimmed content costs the memory the trim was
-performed to reclaim, so the record must be bounded independently and must not be
-what gets sent back to the model. A stale retained copy presented as current is
-the failure mode to avoid — evidence must stay "what is true now", which is the
-same trap `#309` fixed for file reads.
-
----
-
-## 5. `knowledge budget` — one knob, measured in prompt, not in entries
+## 2. `knowledge budget` — one knob, measured in prompt, not in entries
 
 **What is wrong.** `maxFacts` (30) and `maxInjectedFacts` (15) are constants.
 Neither is settable, and the count is the wrong unit: fifteen entries is 300
@@ -166,7 +91,7 @@ wrong quantity.
 
 ---
 
-## 6. Lessons are keyed on error text, which is unstable
+## 3. Lessons are keyed on error text, which is unstable
 
 **What is wrong.** A pitfall is retrieved only when the stored `error_pattern` is
 a literal substring of a later error *and* `contextMatchesAction` passes. Both
@@ -194,7 +119,7 @@ across two packages.
 
 ---
 
-## 7. A lesson cannot describe a mistake that did not fail
+## 4. A lesson cannot describe a mistake that did not fail
 
 **What is wrong.** `hints` fires inside `if res.IsError`, so the lesson store can
 only ever describe errors. The mistakes that cost the most are not errors:

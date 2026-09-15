@@ -867,10 +867,18 @@ func (m *tuiModel) renderConfigPanel() string {
 // invisible. A terminal too short for even a few rows still gets those few
 // rather than a panel drawn off the top of the screen.
 func (m *tuiModel) configWindow() ([]cfgRow, int) {
-	// Title, the blank line and two footer lines, the box's two border lines,
-	// and BOTH scroll markers — in the middle of a long list both are drawn.
+	// The panel is drawn INTO the log area, not onto the whole screen, so the
+	// budget is the viewport's — the status line, both rules, the hint line and
+	// the input box all sit below it. Sizing against m.height instead let the
+	// box grow past the visible region, and the terminal cut it from the TOP:
+	// the title and the first section header scrolled away with no way back to
+	// them, which is the opposite of what a scrolling panel is for.
+	//
+	// Inside that: the title, the blank line and two footer lines, the box's two
+	// border lines, and BOTH scroll markers — in the middle of a long list both
+	// are drawn.
 	const chrome = 8
-	avail := m.height - chrome
+	avail := m.viewportHeight() - chrome
 	if avail < 3 {
 		avail = 3
 	}

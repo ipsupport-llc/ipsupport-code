@@ -158,6 +158,17 @@ func TestJudgeRenderShowsNotDoneWithMissingGap(t *testing.T) {
 	}
 }
 
+// Reported live: from the TUI, the isolated judge call looked identical to
+// the main model still "thinking" — nothing distinguished them on screen.
+func TestJudgingRenderShowsALiveIndicator(t *testing.T) {
+	m := &tuiModel{width: 60}
+	lines := m.renderEvent(uiEvent{kind: "judging"})
+	joined := stripAnsi(strings.Join(lines, " "))
+	if !strings.Contains(joined, "checking if the goal is actually done") {
+		t.Errorf("judging indicator not rendered:\n%v", lines)
+	}
+}
+
 func TestSubagentRenderShowsFullTask(t *testing.T) {
 	m := &tuiModel{width: 60}
 	task := "Fix ALL issues identified in the code review of the notecli repository and then open a pull request"

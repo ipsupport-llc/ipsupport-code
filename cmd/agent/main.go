@@ -1546,12 +1546,20 @@ func (a *app) goalStatus() []string {
 		}
 	}
 	out := []string{
-		fmt.Sprintf("goal [%s]: %s", g.Status, g.Text),
-		"  " + ttl + " · /goal go to resume · /goal clear to drop · /goal ttl <n>",
+		fmt.Sprintf("goal [%s] · %s", g.Status, ttl),
+		"",
+		"  the judge accepts against exactly this text:",
+	}
+	for _, line := range strings.Split(g.Text, "\n") {
+		out = append(out, "    "+line)
 	}
 	if g.Missing != "" {
-		out = append(out, "  missing: "+g.Missing)
+		out = append(out, "", "  last verdict — still missing: "+g.Missing)
 	}
+	if src := a.judgeCriteriaSource(); src != "" {
+		out = append(out, "  extra acceptance criteria: "+src)
+	}
+	out = append(out, "", "  /goal go to resume · /goal clear to drop · /goal ttl <n>")
 	return out
 }
 
@@ -4338,6 +4346,23 @@ func (a *app) setIdleTimeout(v int) error {
 	}
 	p := a.cfg.Providers[a.cfg.Provider]
 	p.IdleTimeoutSeconds = v
+	a.cfg.Providers[a.cfg.Provider] = p
+	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+}
+
+// setRetryAttempts sets how many times a TRANSIENT request failure is retried
+// before the task gives up, for the CURRENTLY ACTIVE provider — same
+// local-vs-named-provider branching as setIdleTimeout. 0 = the built-in 8.
+func (a *app) setRetryAttempts(v int) error {
+	if a.isLocal() {
+		a.cfg.LLM.RetryAttempts = v
+		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
+	}
+	if a.cfg.Providers == nil {
+		a.cfg.Providers = map[string]config.LLM{}
+	}
+	p := a.cfg.Providers[a.cfg.Provider]
+	p.RetryAttempts = v
 	a.cfg.Providers[a.cfg.Provider] = p
 	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
 }

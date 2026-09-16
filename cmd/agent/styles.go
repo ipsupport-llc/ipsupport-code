@@ -12,7 +12,10 @@ var (
 	cOk       = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
 	cErr      = lipgloss.NewStyle().Foreground(lipgloss.Color("9"))
 	cLesson   = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
-	cDim      = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
+	// cGoal marks the standing-goal badge in the status line: goal mode changes
+	// when a run is allowed to stop, so it has to be visible while it is on.
+	cGoal = lipgloss.NewStyle().Foreground(lipgloss.Color("13"))
+	cDim  = lipgloss.NewStyle().Foreground(lipgloss.Color("8"))
 
 	// diffCtx styles unchanged context lines in a diff. Added/removed rows are
 	// built with raw ANSI in tui.go so a full-row background can coexist with

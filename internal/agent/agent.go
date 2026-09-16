@@ -999,8 +999,24 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					goalMet = met
 					if !met {
 						tr.Missing = firstNonEmpty(missing, lastMissing)
+						lastMissing = tr.Missing
 					}
 					tr.GoalMet = met
+					// The judge said it isn't done and the budget is untouched, so
+					// the goal has not ended by any of the three things that end it.
+					// A model-level failure — a generation that collapsed — says
+					// nothing about whether the goal is reachable; re-feed and keep
+					// going. A TRANSPORT failure is the machine being unavailable,
+					// not the model failing the goal, and no amount of re-feeding
+					// changes that: the verdict is recorded and the run ends, with
+					// the goal left standing and resumable.
+					if !met && returns < a.maxReturns && llm.IsDegenerateOutput(err) {
+						returns++
+						actedSinceReturn, idleNudged, degenerateNudged = false, false, false
+						msgs = append(msgs, llm.User(goalReturn(a.acceptanceTarget(goal), missing)))
+						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing})
+						continue
+					}
 					tr.Final += goalNotConfirmedNote(a.maxReturns, met, tr.Missing)
 				}
 				tr.PromptTokens = promptTokens
@@ -1098,10 +1114,25 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// keep going — up to maxReturns (a TTL). Only after real progress, so a
 			// model that just re-finalizes can't burn the budget.
 			//
-			// Gated on acted: a run that called no tool at all is a chat reply, and
-			// the goal loop is in force for EVERY prompt while a goal stands (see
-			// goalLoopBudget) — judging "thanks" against the goal and re-feeding it
-			// would trap an ordinary conversational turn in the loop.
+			// While goal mode is on, the JUDGE decides — every time, on every
+			// ending. The only things that finish a goal are an explicit DONE, the
+			// TTL running out, and the user.
+			//
+			// This used to be gated on `acted`, on the argument that a run calling
+			// no tool is a chat reply and shouldn't be dragged into the loop. The
+			// argument was about the model ANSWERING IN PROSE; the gate asked
+			// whether a tool ran, which is not the same question. A reply with no
+			// text AND no tool call is not a conversational turn — it is nothing at
+			// all — and it was ending goal runs outright. Reported live: a goal
+			// with a 255-refeed budget spent zero of them and handed control back
+			// after two empty replies, and the user had to paste the whole task in
+			// again.
+			//
+			// So the gate is now what it always meant: skip only a reply that
+			// actually SAID something without doing anything — an answer to a
+			// question asked alongside the goal. /btw exists for those, and /goal
+			// off turns this off entirely.
+			//
 			// NOT gated on returns < maxReturns. The TTL bounds how many times the
 			// goal may be RE-FED, not whether the last attempt it paid for gets
 			// looked at: with ttl 1, the model's one re-feed could finish the work
@@ -1109,11 +1140,11 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// reached the cap and the judge was skipped entirely. Funding an
 			// attempt and then refusing to grade it is the one combination that
 			// makes no sense.
-			if !a.planMode && a.maxReturns > 0 && acted {
+			chatReply := !acted && strings.TrimSpace(clean) != ""
+			if !a.planMode && a.maxReturns > 0 && !chatReply {
 				// The goal was re-fed and the model finished WITHOUT doing any work
 				// since. Push it once first: a nudge is cheaper than a judge call and
-				// spends no return. returns > 0 implies acted (a return is only ever
-				// incremented past a judge, which is itself gated on acted).
+				// spends no return.
 				if a.nudgeIdle && !idleNudged && returns > 0 && !actedSinceReturn {
 					idleNudged = true
 					msgs = append(msgs, llm.User(idleNudge))
@@ -2486,6 +2517,69 @@ func decodeObjStrict(s string) map[string]any {
 		return nil
 	}
 	return m
+}
+
+// textToolCallRe matches a whole tool call a model wrote as TEXT instead of
+// emitting it through the tool-calling protocol: the function name, and the body
+// that carries its parameters.
+//
+// Reported live, and it cost a whole run: the model decided to call file.list,
+// wrote the call into its reasoning as
+//
+//	<tool_call><function=file><parameter=action>list</parameter>
+//	<parameter=params>{}</parameter></function></tool_call>
+//
+// and returned finish_reason=stop with empty Content and no ToolCalls. From our
+// side that is an empty reply, so it got the empty-reply nudge, repeated itself
+// verbatim, and the run ended having done nothing — while the user watched a
+// perfectly well-formed intent being thrown away twice.
+//
+// This is the third salvage of the same class already in this file
+// (recoverActionTag for a tag inside the arguments, unwrapEnvelope for a whole
+// chat envelope emitted as content). A model whose chat template and
+// tool-calling format disagree is a normal thing to meet locally.
+var (
+	textToolCallRe = regexp.MustCompile(`(?s)<function=([A-Za-z0-9_.-]+)\s*>(.*?)</function>`)
+	textParamRe    = regexp.MustCompile(`(?s)<parameter=([A-Za-z0-9_.-]+)\s*>(.*?)</parameter>`)
+)
+
+// recoverTextToolCall rebuilds a tool call a model wrote as text.
+//
+// Only ever consulted for a reply that is otherwise EMPTY — no content, no tool
+// calls — which is what makes it safe: a model discussing a tool call in prose
+// still has prose, and nothing here touches it. When the alternative is "the
+// model said nothing at all", acting on the intent it plainly expressed is
+// strictly better than discarding it.
+func recoverTextToolCall(reply llm.Message) []llm.ToolCall {
+	for _, src := range []string{reply.Content, reply.Reasoning} {
+		m := textToolCallRe.FindStringSubmatch(src)
+		if m == nil {
+			continue
+		}
+		args := map[string]any{}
+		for _, p := range textParamRe.FindAllStringSubmatch(m[2], -1) {
+			name, raw := p[1], strings.TrimSpace(p[2])
+			// A parameter whose value is itself JSON (params={...}) has to go in
+			// as JSON, not as a string — parseArgs would otherwise see the
+			// double-encoded shape it already has to work around.
+			if obj := decodeObjStrict(raw); obj != nil {
+				args[name] = obj
+				continue
+			}
+			args[name] = raw
+		}
+		if len(args) == 0 {
+			// A named function with no readable parameters is still a better
+			// guess than nothing: dispatch will name what's missing.
+			args = map[string]any{}
+		}
+		encoded, err := json.Marshal(args)
+		if err != nil {
+			return nil
+		}
+		return []llm.ToolCall{{ID: "recovered-1", Name: m[1], Arguments: string(encoded)}}
+	}
+	return nil
 }
 
 // paramTagRe matches a model's own "<parameter=NAME>value</parameter>" tool-

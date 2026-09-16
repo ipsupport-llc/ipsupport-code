@@ -73,6 +73,14 @@ type LLM struct {
 	// data before it's aborted and retried. 0 uses the default (90s). Raise it for a
 	// hosted reasoning model that can think silently (no streamed deltas) for longer.
 	IdleTimeoutSeconds int `json:"idle_timeout_seconds,omitempty"`
+	// RetryAttempts is how many times a TRANSIENT request failure (a 5xx, a
+	// network error, a local server still reloading a model) is retried with
+	// exponential backoff before the task gives up. 0 uses the default (8,
+	// roughly half a minute of trying). Raise it for a server that reloads
+	// slowly; lower it to fail fast when the endpoint is simply not there — a
+	// dead server is not the model failing, and waiting out eight backoffs to
+	// learn that is its own kind of wrong.
+	RetryAttempts int `json:"retry_attempts,omitempty"`
 	// DisableLoopDetection turns off the degenerate-repetition detectors (a
 	// single character, or a whole phrase, repeating back to back) for this
 	// connection. Enabled by default everywhere — a capable hosted model

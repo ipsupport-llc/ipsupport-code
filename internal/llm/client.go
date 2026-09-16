@@ -102,6 +102,12 @@ type OpenAIClient struct {
 	// usually a reasoning model looping in its own monologue — and would otherwise
 	// stream for many minutes. Derived from the context window at construction.
 	maxRespTk int
+	// retryAttempts bounds the transient-failure retry loop in Chat. Configurable
+	// because the right answer differs sharply: a local server reloading a model
+	// wants patience, while an endpoint that simply is not running wants to fail
+	// fast — waiting out eight exponential backoffs to discover nothing is
+	// listening is its own kind of wrong.
+	retryAttempts int
 
 	// disableLoopDetection turns off the degenerate-repetition detectors
 	// (config.LLM.DisableLoopDetection) — set once at construction. The
@@ -185,6 +191,7 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 		},
 		idle:                 idle,
 		maxRespTk:            maxResponseTokens(c.ContextWindow),
+		retryAttempts:        retryAttempts(c.RetryAttempts),
 		disableLoopDetection: c.DisableLoopDetection,
 	}
 }
@@ -324,7 +331,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	// Local servers (LM Studio) hiccup with transient 5xx and need time to
 	// reload a model unloaded by the idle timeout. Retry those (and network
 	// errors) with exponential backoff instead of failing the whole task.
-	const maxAttempts = 8 // ride out a longer network glitch before giving up (it's the internet)
+	maxAttempts := c.retryAttempts // ride out a network glitch before giving up
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		// reqCompl counts THIS attempt's own live per-delta bumps (c.bumpToken),
@@ -355,6 +362,19 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 		}
 	}
 	return Message{}, lastErr
+}
+
+// defaultRetryAttempts rides out a longer network glitch before giving up (it's
+// the internet), and is what a 0 in config means.
+const defaultRetryAttempts = 8
+
+// retryAttempts resolves the configured count: 0 = the default, and at least one
+// attempt always happens (a setting of 1 means "try once, don't retry").
+func retryAttempts(n int) int {
+	if n <= 0 {
+		return defaultRetryAttempts
+	}
+	return n
 }
 
 // backoff grows exponentially (500ms, 1s, 2s, 4s…) capped at 8s.

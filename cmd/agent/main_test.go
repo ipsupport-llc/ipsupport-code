@@ -8406,3 +8406,70 @@ func TestLegacyStateIsMovedOutOfTheWorkspace(t *testing.T) {
 		t.Error("a second migration overwrote already-migrated state")
 	}
 }
+
+// Goal mode changes when a run is allowed to stop, so it has to be visible while
+// it is on. Reported live: a goal with a 255-refeed budget ended a run having
+// spent zero of them, and the only sign anything had been pursued at all was the
+// one-off "goal set" line, long scrolled away.
+func TestStatusLineShowsGoalMode(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.GoalMaxReturns = 255
+	m := &tuiModel{app: &app{cfg: cfg, workspace: cfg.Workspace}}
+
+	if got := m.goalBadge(); got != "" {
+		t.Errorf("badge = %q with no goal, want empty", got)
+	}
+	m.app.goal = goalState{Text: "ship it", Status: "active"}
+	badge := m.goalBadge()
+	if !strings.Contains(badge, "goal") {
+		t.Errorf("badge = %q, want it to say a goal is standing", badge)
+	}
+	if !strings.Contains(badge, "255") {
+		t.Errorf("badge = %q, want the re-feed budget visible", badge)
+	}
+	// A goal left incomplete reads differently from one being pursued.
+	m.app.goal.Status = "incomplete"
+	if !strings.Contains(m.goalBadge(), "resumable") {
+		t.Errorf("badge = %q, want an incomplete goal marked resumable", m.goalBadge())
+	}
+}
+
+// /goal must show the exact text the judge accepts against — it is the prompt
+// that decides whether the run is allowed to stop.
+func TestGoalStatusShowsTheAcceptanceText(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	a := &app{cfg: cfg, workspace: cfg.Workspace}
+	a.goal = goalState{Text: "fix the parser\nthen write the report", Status: "active", Missing: "no report yet"}
+
+	out := strings.Join(a.goalStatus(), "\n")
+	for _, want := range []string{"fix the parser", "then write the report", "accepts against exactly this text", "still missing: no report yet"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("/goal is missing %q:\n%s", want, out)
+		}
+	}
+}
+
+// A dead endpoint should be able to fail fast: eight exponential backoffs to
+// discover nothing is listening is its own kind of wrong.
+func TestRetryAttemptsIsConfigurablePerConnection(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	a := &app{cfg: cfg, workspace: cfg.Workspace}
+
+	if a.activeLLM().RetryAttempts != 0 {
+		t.Fatalf("default = %d, want 0 (meaning the built-in)", a.activeLLM().RetryAttempts)
+	}
+	if err := a.setRetryAttempts(1); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.activeLLM().RetryAttempts; got != 1 {
+		t.Errorf("RetryAttempts = %d, want 1", got)
+	}
+	m := &tuiModel{app: a}
+	if l, v, _ := m.configRowView("retry_attempts"); l == "" || !strings.Contains(v, "1") {
+		t.Errorf("config row = %q/%q, want the configured value shown", l, v)
+	}
+}

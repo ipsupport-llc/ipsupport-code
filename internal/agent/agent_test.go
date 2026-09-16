@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -1111,7 +1112,8 @@ func TestRunAcceptsEmptyReplyAfterOneNudge(t *testing.T) {
 	blank := llm.Message{Role: "assistant", Content: ""}
 	fake := &scriptLLM{replies: []llm.Message{blank, blank}}
 	a := New(fake, reg, nil, nil, "", 6)
-	a.SetGoalLoop(3, false)
+	// No goal in force: with goal mode ON the judge decides instead, and an
+	// empty reply is re-fed rather than accepted (see the test below).
 	tr, err := a.Run(context.Background(), "do the thing")
 	if err != nil {
 		t.Fatal(err)
@@ -3598,19 +3600,51 @@ func TestAFailedTurnStillReportsWhereTheGoalStands(t *testing.T) {
 	fake := &scriptedLLM{steps: []scriptStep{
 		call(calcCall()),
 		fails(llm.ErrDegenerateForTest),
-		fails(llm.ErrDegenerateForTest), // twice → the run gives up here
-		reply("MORE: no report yet"),    // the give-up judge still answers
+		fails(llm.ErrDegenerateForTest), // twice → the give-up judge runs
+		reply("MORE: no report yet"),    // …and says the goal isn't met
+		call(calcCall()),                // the re-feed put it back to work
+		reply("report written"),
+		reply("DONE"),
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(1, false) // one re-feed, so the run ends deterministically
+	a.SetPriorGoalProgress(true)
+
+	tr, _ := a.Run(context.Background(), "write the report")
+	// The judge said "not met" with budget untouched, so the run must NOT have
+	// ended there: goal mode means the judge decides, and it hadn't said DONE.
+	if tr.Returns != 1 {
+		t.Errorf("returns = %d, want 1 — a failed turn with budget left must re-feed, not end the run", tr.Returns)
+	}
+	if !tr.GoalMet {
+		t.Error("the run never got back to work after the failed turn")
+	}
+}
+
+// A TRANSPORT failure is the machine being unavailable, not the model failing
+// the goal — re-feeding cannot change that, so the run ends. But the judge is
+// still consulted and the ending still says where the goal stands, which is the
+// part that used to be missing entirely.
+func TestATransportFailureEndsTheRunButStillReportsTheGoal(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptedLLM{steps: []scriptStep{
+		call(calcCall()),
+		fails(errors.New("dial tcp 127.0.0.1:8765: connection refused")),
+		reply("MORE: no report yet"), // the give-up judge still answers
 	}}
 	a := New(fake, reg, nil, nil, "", 20)
 	a.SetGoalLoop(255, false)
 	a.SetPriorGoalProgress(true)
 
 	tr, _ := a.Run(context.Background(), "write the report")
-	if !strings.Contains(tr.Final, "/goal go") {
-		t.Errorf("final = %q, want it to say where the goal stands", tr.Final)
+	if tr.Returns != 0 {
+		t.Errorf("returns = %d, want 0 — a dead server is not the model failing the goal", tr.Returns)
 	}
 	if tr.Missing == "" {
 		t.Error("the judge's account of what's missing was dropped")
+	}
+	if !strings.Contains(tr.Final, "/goal go") {
+		t.Errorf("final = %q, want it to say where the goal stands", tr.Final)
 	}
 }
 
@@ -3645,4 +3679,51 @@ func (s *scriptedLLM) Chat(_ context.Context, msgs []llm.Message, _ []map[string
 		return llm.Message{}, st.err
 	}
 	return st.reply, nil
+}
+
+// While goal mode is on, the JUDGE decides — every time. This used to be gated
+// on `acted`, on the argument that a run calling no tool is a chat reply. The
+// argument was about the model ANSWERING IN PROSE; the gate asked whether a tool
+// ran, which is not the same question. Reported live: a goal with a 255-refeed
+// budget spent zero of them and handed control back after two empty replies, and
+// the user had to paste the whole task in again.
+func TestAnEmptyReplyReachesTheJudgeWhileAGoalStands(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant"}, // nothing at all — not an answer
+		{Role: "assistant"}, // still nothing, after the one empty-reply nudge
+		{Role: "assistant", Content: "MORE: nothing has been done yet"}, // the judge
+		calcCall(), // the re-feed put it to work
+		{Role: "assistant", Content: "done now"},
+		{Role: "assistant", Content: "DONE"},
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+	a.SetGoalLoop(3, false)
+
+	tr, _ := a.Run(context.Background(), "write the report")
+	if tr.Returns == 0 {
+		t.Error("a 3-refeed budget spent zero of it on an empty reply — the run ended without the judge ever deciding")
+	}
+	if !tr.GoalMet {
+		t.Error("the run never got going after the empty replies")
+	}
+}
+
+// The gate is now what it always meant: a reply that actually SAID something
+// without doing anything is an answer to a question asked alongside the goal,
+// and is left alone.
+func TestAProseReplyIsStillLeftAloneWhileAGoalStands(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "the README describes the build"}}}
+	a := New(fake, reg, nil, nil, "", 10)
+	a.SetGoalLoop(3, true)
+	a.SetGoalText("implement authentication")
+
+	tr, _ := a.Run(context.Background(), "what does the README say?")
+	if tr.Returns != 0 {
+		t.Errorf("returns = %d, want 0 — an answered question must not be dragged into the goal loop", tr.Returns)
+	}
+	if fake.i != 1 {
+		t.Errorf("Chat calls = %d, want 1 (no judge, no nudge for an answered question)", fake.i)
+	}
 }

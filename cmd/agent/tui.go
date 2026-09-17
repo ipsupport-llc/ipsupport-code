@@ -409,7 +409,7 @@ func bannerLines(name, ver, provider, model, cwd string, window int, accent lipg
 		Padding(0, 2).
 		Render(body)
 	tip := cDim.Render(`type a task — e.g. "explain what main.go does" — or /help for commands`)
-	keys := cDim.Render("Tab complete · ctrl+r history · alt+enter newline · ctrl+u clear · ctrl+c quit · shift+tab plan⇄auto")
+	keys := cDim.Render("Tab complete · ctrl+r history · alt+enter newline · ctrl+u clear · ctrl+g redraw · ctrl+c quit · shift+tab plan⇄auto")
 	return append(strings.Split(box, "\n"), "", tip, keys)
 }
 
@@ -826,6 +826,23 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.vp.SetContent("")
 		}
 		return m, nil
+	case "ctrl+g":
+		// Repaint everything, keeping the log. A terminal picture can come apart
+		// on its own — a resize the program didn't see, an escape sequence from a
+		// command's own output, a multiplexer redrawing underneath — and until
+		// now the only way back was ctrl+l, which fixes the display by throwing
+		// the scrollback away. This rebuilds it instead: every cached wrapped
+		// line is recomputed at the current width (the cache is the thing most
+		// likely to be stale), the viewport is re-laid-out, and the terminal is
+		// told to clear so nothing of the old frame survives underneath.
+		m.syncInputHeight()
+		m.rewrapLog()
+		if m.ready {
+			m.vp.Height = m.viewportHeight()
+			m.vp.SetContent(m.renderContent())
+			m.vp.GotoBottom()
+		}
+		return m, tea.ClearScreen
 	case "ctrl+u":
 		// Nuke the whole input — fast recovery from a bad clipboard paste. (In the
 		// profile builder's name step it clears that field instead.)

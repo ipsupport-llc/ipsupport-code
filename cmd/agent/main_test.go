@@ -8473,3 +8473,34 @@ func TestRetryAttemptsIsConfigurablePerConnection(t *testing.T) {
 		t.Errorf("config row = %q/%q, want the configured value shown", l, v)
 	}
 }
+
+// A terminal picture can come apart on its own — a resize the program didn't
+// see, an escape sequence from a command's own output, a multiplexer redrawing
+// underneath. The only way back was ctrl+l, which fixes the display by throwing
+// the scrollback away. ctrl+g rebuilds it instead.
+func TestCtrlGRedrawsWithoutLosingTheLog(t *testing.T) {
+	in := textarea.New()
+	in.SetWidth(76)
+	m := &tuiModel{app: &app{cfg: config.Default(), workspace: t.TempDir()},
+		width: 80, height: 24, ready: true, input: in, inputLines: 1}
+	m.vp = viewport.New(80, 10)
+	m.push("first line", "second line")
+	before := len(m.history)
+
+	_, cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlG})
+	if len(m.history) != before {
+		t.Errorf("history went from %d to %d lines — redraw must not clear the log", before, len(m.history))
+	}
+	if cmd == nil {
+		t.Error("no repaint command issued, so a garbled frame would survive underneath")
+	}
+	// The content is rebuilt, not just left as-is.
+	if !strings.Contains(m.renderContent(), "second line") {
+		t.Error("the log is missing from the rebuilt content")
+	}
+
+	// ctrl+l still does the other thing: clears.
+	if _, _ = m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlL}); len(m.history) != 0 {
+		t.Errorf("ctrl+l left %d lines, want it to clear", len(m.history))
+	}
+}

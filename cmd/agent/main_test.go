@@ -35,6 +35,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
+	kbreflect "github.com/ipsupport-llc/ipsupport-code/internal/reflect"
 	"github.com/ipsupport-llc/ipsupport-code/internal/sandbox"
 	"github.com/ipsupport-llc/ipsupport-code/internal/skill"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
@@ -4985,17 +4986,17 @@ func TestReflectTargetAllowsKeylessCustomProvider(t *testing.T) {
 	cfg.ReflectProfile = "reflector"
 	a := &app{cfg: cfg}
 
-	_, _, _, provider, model := a.reflectTarget()
+	_, _, provider, model := a.reflectTarget()
 	if provider != "ollama" || model != "reflect-model" {
 		t.Errorf("reflectTarget() = provider %q model %q, want ollama/reflect-model (the dedicated keyless custom provider, not a silent fallback to the main model)", provider, model)
 	}
 }
 
-// A dedicated reflect-profile/reasoning-override client (reflectTarget's
-// separate=true path) must count its spend toward the session budget guard,
-// same as the main-client path (recordUsage). Force "separate" via a
-// reflect-scope reasoning override so a fresh OpenAIClient is built, point it
-// at a fake server that reports token usage, and confirm sessionCostUSD moves.
+// The reflection client's spend must count toward the session budget guard.
+// It always has its own connection now (reflectTarget), so recordUsage — which
+// only ever sees the main client — can never pick it up as a delta: applyLessons
+// is the one place those tokens can enter the ledger at all. Point it at a fake
+// server that reports token usage and confirm sessionCostUSD moves.
 func TestReflectSeparateClientCountsTowardBudget(t *testing.T) {
 	const resp = `{"choices":[{"message":{"role":"assistant","content":"{\"facts\":[]}"}}],` +
 		`"usage":{"prompt_tokens":1000,"completion_tokens":500}}`
@@ -5023,7 +5024,7 @@ func TestReflectSeparateClientCountsTowardBudget(t *testing.T) {
 	}
 }
 
-// A dedicated reflect client's spend must be recorded even when its call
+// The reflection client's spend must be recorded even when its call
 // ultimately FAILS — a non-retriable failure (the model looping) still bills
 // real tokens already streamed before the error. Before this fix, the
 // separate-client accounting in reflectAndStore only ran on the success path;
@@ -5048,7 +5049,7 @@ func TestReflectSeparateClientRecordsUsageOnFailedCall(t *testing.T) {
 	cfg := config.Default()
 	cfg.LLM.BaseURL = srv.URL
 	cfg.LLM.Model = "gpt-4o-mini"                                                      // priced, so a nonzero session cost is a meaningful assertion
-	cfg.Reasoning = map[string]json.RawMessage{"reflect:local": json.RawMessage(`{}`)} // forces reflectTarget's separate=true path
+	cfg.Reasoning = map[string]json.RawMessage{"reflect:local": json.RawMessage(`{}`)} // a reflect-scope override, exercised end to end
 	u, _ := usage.Open("")
 	a := &app{cfg: cfg, usage: u}
 
@@ -5191,9 +5192,7 @@ func notFoundOffPOST(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-// Reflection running on the SAME client as the main task (the default, no
-// reflect_profile/reflect reasoning-override configured) must have its tokens
-// land in the usage ledger before runOne returns — not only once picked up as
+// Reflection must have its tokens land in the usage ledger before runOne returns — not only once picked up as
 // a delta by some LATER task's recordUsage call. Before this fix, recordUsage
 // fired exactly once per task, right after a.ag.Run() returned and BEFORE
 // reflectAndStore's own LLM call; a process that exits before another task
@@ -5240,9 +5239,11 @@ func TestReflectionTokensFlushedBeforeRunOneReturns(t *testing.T) {
 	}
 }
 
-// Same as TestReflectionTokensFlushedBeforeRunOneReturns, but for the TUI's
-// streaming path (runTaskStreaming) — the other call site the fix touches.
-func TestReflectionTokensFlushedAfterRunTaskStreaming(t *testing.T) {
+// The TUI's streaming path does NOT reflect inline: it hands the transcript back
+// and the caller decides where the pass runs. This pins both halves of that — the
+// task returns without having made the learning call, and the ledger still gets
+// every token once the pass is applied.
+func TestRunTaskStreamingLeavesTheLearningPassToItsCaller(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	n := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -5272,10 +5273,77 @@ func TestReflectionTokensFlushedAfterRunTaskStreaming(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a.runTaskStreaming(context.Background(), "do the thing", a.taskEpoch.Load())
+	tr, learn := a.runTaskStreaming(context.Background(), "do the thing", a.taskEpoch.Load())
+	if !learn {
+		t.Fatal("runTaskStreaming said this run isn't worth reflecting on; it finished normally")
+	}
+	// Nothing has reflected yet, and that IS the change: the pass used to sit
+	// between the finished answer and the prompt coming back.
+	if got := a.usage.Total().Completion; got >= 500 {
+		t.Fatalf("usage ledger completion tokens = %d — reflection ran inside runTaskStreaming again, holding the prompt for the length of two model calls", got)
+	}
+
+	a.applyLessons(a.runReflect(context.Background(), a.prepareReflect(), tr))
 
 	if got := a.usage.Total().Completion; got < 500 {
-		t.Errorf("usage ledger completion tokens = %d, want >= 500 — reflection's tokens must be flushed by the time runTaskStreaming returns", got)
+		t.Errorf("usage ledger completion tokens = %d, want >= 500 — applying a pass must bill what it cost", got)
+	}
+}
+
+// The pass is billed to the model that actually ran it, even when the model
+// changes while it is in flight. That is newly possible: the prompt comes back
+// the moment the task ends, so the user can open /config and switch models with
+// the learning call still running. applyLessons therefore bills res.job's own
+// provider/model — captured when the pass was prepared — never whatever happens
+// to be active when it lands.
+func TestReflectionBilledToTheModelThatRanIt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	n := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if notFoundOffPOST(w, r) {
+			return
+		}
+		n++
+		io.Copy(io.Discard, r.Body)
+		switch n {
+		case 1:
+			io.WriteString(w, toolCallRespWithUsage("calc", `{"expression":"1+1"}`, 10, 5))
+		case 2:
+			io.WriteString(w, contentRespWithUsage("the answer", 10, 5))
+		default: // the reflection call — distinctively large
+			io.WriteString(w, contentRespWithUsage(`{"facts":[]}`, 1000, 500))
+		}
+	}))
+	defer srv.Close()
+
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	a.cfg.LLM.BaseURL, a.cfg.LLM.Model = srv.URL, "model-a"
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	tr, _ := a.runTaskStreaming(context.Background(), "do the thing", a.taskEpoch.Load())
+	res := a.runReflect(context.Background(), a.prepareReflect(), tr) // the pass runs on model-a
+
+	a.cfg.LLM.Model = "model-b" // …and the user switches models before it lands
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.applyLessons(res)
+
+	byModel := map[string]usage.Total{}
+	for _, tt := range a.usage.ByModel() {
+		byModel[tt.Key] = tt
+	}
+	if got := byModel["local/model-a"].Completion; got < 500 {
+		t.Errorf("model-a completion tokens = %d, want >= 500 — the pass ran on model-a and must be billed there", got)
+	}
+	if got := byModel["local/model-b"].Completion; got >= 500 {
+		t.Errorf("model-b completion tokens = %d — model-a's learning pass was misattributed to the model the user switched to", got)
 	}
 }
 
@@ -8553,5 +8621,78 @@ func TestTypingWithNoGoalStillQueues(t *testing.T) {
 	}
 	if len(m.steer) != 0 {
 		t.Errorf("steer = %v, want none without a goal", m.steer)
+	}
+}
+
+// Starting a task cancels a learning pass still running behind the last one.
+// They compete for the same local model: without this the new task would queue
+// behind two calls it never asked for, with nothing on screen to explain the
+// wait. Lessons are best-effort; the task the user just typed is not.
+func TestANewTaskCancelsTheLearningPass(t *testing.T) {
+	in := textarea.New()
+	in.SetWidth(76)
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	a := &app{cfg: cfg, workspace: cfg.Workspace, client: llm.NewOpenAIClient(cfg.LLM)}
+	m := &tuiModel{app: a, ctx: context.Background(), bridge: newBridge(),
+		width: 80, height: 24, ready: true, input: in, inputLines: 1}
+
+	cancelled := false
+	m.reflectCancel, m.learning = func() { cancelled = true }, true
+
+	_, cancel := m.startTask()
+	defer cancel()
+
+	if !cancelled {
+		t.Error("starting a task left the previous task's learning pass running — it competes with the new task for the model")
+	}
+	if m.learning || m.reflectCancel != nil {
+		t.Errorf("learning=%v reflectCancel!=nil=%v, want both cleared", m.learning, m.reflectCancel != nil)
+	}
+}
+
+// A pass that finishes just as a new task starts must not write the knowledge
+// store, the facts list or the agent's system prompt underneath that run — it is
+// held and applied when the run ends. (Rare, since starting a task cancels the
+// pass, but a call already returning at that instant still lands.)
+func TestLessonsLandingUnderARunningTaskAreHeldUntilItEnds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	in := textarea.New()
+	in.SetWidth(76)
+	m := &tuiModel{app: a, ctx: context.Background(), bridge: newBridge(),
+		width: 80, height: 24, ready: true, input: in, inputLines: 1, state: stRunning}
+	m.vp = viewport.New(80, 10)
+	_, taskCancel := context.WithCancel(context.Background())
+	m.cancel, m.epoch = taskCancel, a.taskEpoch.Load() // a task is running
+
+	res := reflectResult{
+		job:     &reflectJob{provider: "local", model: "fake"},
+		lessons: kbreflect.Lessons{Facts: []string{"the parser lives in internal/parse"}, Parsed: true},
+	}
+	m.Update(reflectDoneMsg{res: res})
+
+	if m.heldLessons == nil {
+		t.Fatal("lessons were applied while a task was running — that writes a.kb and the system prompt under a live run")
+	}
+	if n := a.factsCount(); n != 0 {
+		t.Fatalf("facts = %d, want 0 — nothing should be stored until the running task ends", n)
+	}
+
+	m.cancel = nil // the task ends
+	m.Update(taskDoneMsg{epoch: m.epoch})
+
+	if m.heldLessons != nil {
+		t.Error("held lessons survived the task that was blocking them")
+	}
+	if n := a.factsCount(); n != 1 {
+		t.Errorf("facts = %d, want 1 — the held pass must be applied once the run is over, not dropped", n)
 	}
 }

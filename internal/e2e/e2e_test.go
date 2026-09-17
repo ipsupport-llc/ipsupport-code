@@ -142,7 +142,7 @@ func buildStack(t *testing.T, url, ws string, kb *knowledge.KB) (*agent.Agent, *
 	reg = tool.NewRegistry(
 		tool.NewFile(pol, ap, nil),
 		tool.NewRun(pol, ap, 0, 0),
-		tool.NewGit(pol, ap, 0),
+		tool.NewGit(pol, ap, 0, false),
 		tool.NewWeb(http.DefaultClient, false),
 		tool.NewHelp(kb, func(d string) string { return reg.Usage(d) }),
 		tool.NewCalc(),

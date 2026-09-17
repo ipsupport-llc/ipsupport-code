@@ -21,7 +21,7 @@ func gitToolFor(t *testing.T, dir string, ap Approver) Tool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewGit(e, ap, 0)
+	return NewGit(e, ap, 0, false)
 }
 
 func initRepo(t *testing.T) string {
@@ -309,7 +309,7 @@ func TestGitShowRejectsRevPathOutsideJailWhenJailIsSubdir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tl := NewGit(e, yes(), 0)
+	tl := NewGit(e, yes(), 0, false)
 	ctx := context.Background()
 
 	// The exploit: HEAD:outside.txt reads a file OUTSIDE the jail (at the
@@ -362,7 +362,7 @@ func TestGitDiffFromSubdirResolvesRepoRootRelativePaths(t *testing.T) {
 	if _, err := e.SetWorkdir("sub"); err != nil {
 		t.Fatal(err)
 	}
-	tl := NewGit(e, yes(), 0)
+	tl := NewGit(e, yes(), 0, false)
 
 	r := tl.Call(context.Background(), "diff", nil)
 	if r.IsError {
@@ -598,5 +598,208 @@ func TestGitMutatingDeniedByUser(t *testing.T) {
 	r := tl.Call(context.Background(), "commit", map[string]any{"message": "x"})
 	if !r.IsError || !strings.Contains(r.Content, "denied") {
 		t.Errorf("commit with deny = %+v, want denied", r)
+	}
+}
+
+// offlineGitTool is the same tool with offline mode on.
+func offlineGitTool(t *testing.T, dir string) Tool {
+	t.Helper()
+	c := config.Default()
+	c.Workspace = dir
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	e, err := policy.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewGit(e, yes(), 0, true)
+}
+
+// "ext::sh -c <cmd>" is a valid git URL whose transport is an arbitrary command:
+// cloning one executes it. Nothing about the string looks like a command, which
+// is exactly why the model would pass it along from a page it read.
+func TestCloneRejectsRemoteHelperURLs(t *testing.T) {
+	dir := initRepo(t)
+	tl := gitToolFor(t, dir, yes())
+	marker := filepath.Join(dir, "pwned")
+
+	r := tl.Call(context.Background(), "clone", map[string]any{
+		"url": "ext::sh -c touch% " + marker,
+	})
+
+	if !r.IsError {
+		t.Fatalf("clone accepted an ext:: URL: %s", r.Content)
+	}
+	if _, err := os.Stat(marker); err == nil {
+		t.Fatal("the ext:: transport actually ran — it created its marker file")
+	}
+	if !strings.Contains(r.Content, "remote-helper") {
+		t.Errorf("error should say why:\n%s", r.Content)
+	}
+}
+
+// A clone writes a whole tree, so its destination is jailed like any other write.
+// Cloned from a LOCAL repo on purpose: an unreachable URL fails on its own and
+// would let this pass with no jail at all.
+func TestCloneDestinationStaysInTheWorkspace(t *testing.T) {
+	src := initRepo(t)
+	if out, err := exec.Command("git", "-C", src, "commit", "--allow-empty", "-m", "seed").CombinedOutput(); err != nil {
+		t.Fatalf("seed commit: %v\n%s", err, out)
+	}
+	ws := t.TempDir()
+	tl := gitToolFor(t, ws, yes())
+	ctx := context.Background()
+
+	r := tl.Call(ctx, "clone", map[string]any{"url": src, "dir": "../escaped"})
+
+	if !r.IsError {
+		t.Fatalf("clone accepted a destination outside the workspace: %s", r.Content)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(ws), "escaped")); err == nil {
+		t.Fatal("it cloned outside the jail")
+	}
+	// The same clone INSIDE the workspace works — so what was refused was the
+	// destination, not the clone.
+	if r := tl.Call(ctx, "clone", map[string]any{"url": src, "dir": "copy"}); r.IsError {
+		t.Fatalf("clone into the workspace: %s", r.Content)
+	}
+	if _, err := os.Stat(filepath.Join(ws, "copy", ".git")); err != nil {
+		t.Errorf("the in-workspace clone didn't land: %v", err)
+	}
+}
+
+func TestCloneDirDefaultsToTheRepoName(t *testing.T) {
+	for _, tc := range []struct{ url, want string }{
+		{"https://github.com/o/repo.git", "repo"},
+		{"https://github.com/o/repo", "repo"},
+		{"https://github.com/o/repo.git/", "repo"},
+		{"git@github.com:o/repo.git", "repo"},
+		{"ssh://git@host:22/o/repo.git", "repo"},
+	} {
+		if got := repoDirFromURL(tc.url); got != tc.want {
+			t.Errorf("repoDirFromURL(%q) = %q, want %q", tc.url, got, tc.want)
+		}
+	}
+}
+
+// Offline mode is the user saying "no internet right now". The actions that need
+// a server must say so rather than hang until the timeout kills them.
+func TestOfflineRefusesNetworkGitActions(t *testing.T) {
+	dir := initRepo(t)
+	tl := offlineGitTool(t, dir)
+	ctx := context.Background()
+
+	for _, action := range []string{"clone", "fetch", "pull", "push"} {
+		params := map[string]any{}
+		if action == "clone" {
+			params["url"] = "https://example.invalid/x.git"
+		}
+		r := tl.Call(ctx, action, params)
+		if !r.IsError || !strings.Contains(r.Content, "offline") {
+			t.Errorf("%s while offline = %q, want an offline refusal", action, r.Content)
+		}
+	}
+	// …and the local actions still work.
+	if r := tl.Call(ctx, "status", nil); r.IsError {
+		t.Errorf("status must still work offline: %s", r.Content)
+	}
+	if r := tl.Call(ctx, "remote", nil); r.IsError {
+		t.Errorf("listing remotes touches no server, it must work offline: %s", r.Content)
+	}
+}
+
+// pull is fast-forward only: a diverged branch fails cleanly instead of leaving
+// a conflicted merge the agent then has to reason about mid-task.
+func TestPullIsFastForwardOnly(t *testing.T) {
+	dir := initRepo(t)
+	var asked string
+	tl := gitToolFor(t, dir, approverFunc(func(_, detail string) bool {
+		asked = detail
+		return false // deny: we only care what it was asked to approve
+	}))
+
+	tl.Call(context.Background(), "pull", map[string]any{"remote": "origin"})
+
+	if !strings.Contains(asked, "--ff-only") {
+		t.Errorf("approval asked for %q, want a --ff-only pull", asked)
+	}
+}
+
+// push publishes. The approval must show where, and a leading dash must never
+// reach git as an option.
+func TestPushApprovalShowsTheDestination(t *testing.T) {
+	dir := initRepo(t)
+	var asked string
+	tl := gitToolFor(t, dir, approverFunc(func(_, detail string) bool {
+		asked = detail
+		return false
+	}))
+	ctx := context.Background()
+
+	tl.Call(ctx, "push", map[string]any{"remote": "origin", "branch": "main"})
+	if !strings.Contains(asked, "origin") || !strings.Contains(asked, "main") {
+		t.Errorf("approval detail = %q, want the remote and branch being published to", asked)
+	}
+	if strings.Contains(asked, "--force") {
+		t.Errorf("approval detail = %q, force-push must not be reachable", asked)
+	}
+
+	if r := tl.Call(ctx, "push", map[string]any{"remote": "--delete"}); !r.IsError {
+		t.Error("a leading-dash remote must be refused, not passed to git as an option")
+	}
+}
+
+func TestRemoteListsAndAdds(t *testing.T) {
+	dir := initRepo(t)
+	tl := gitToolFor(t, dir, yes())
+	ctx := context.Background()
+
+	if r := tl.Call(ctx, "remote", map[string]any{"name": "origin", "url": "https://example.invalid/x.git"}); r.IsError {
+		t.Fatalf("remote add: %s", r.Content)
+	}
+	r := tl.Call(ctx, "remote", nil)
+	if r.IsError || !strings.Contains(r.Content, "example.invalid") {
+		t.Fatalf("remote list = %q, want the remote just added", r.Content)
+	}
+	// Adding the same name again repoints it rather than failing.
+	if r := tl.Call(ctx, "remote", map[string]any{"name": "origin", "url": "https://other.invalid/y.git"}); r.IsError {
+		t.Fatalf("repointing an existing remote: %s", r.Content)
+	}
+	if r := tl.Call(ctx, "remote", nil); !strings.Contains(r.Content, "other.invalid") {
+		t.Errorf("remote list = %q, want the new URL", r.Content)
+	}
+	if r := tl.Call(ctx, "remote", map[string]any{"name": "origin"}); !r.IsError {
+		t.Error("a name with no url should say what's missing, not silently do nothing")
+	}
+}
+
+// The policy engine stops the file tool READING a secrets file, but nothing
+// stopped git staging one — and now that push exists, a staged secret is one
+// commit away from leaving the machine. "git add ." is the case that matters:
+// it names no secret at all while staging every one of them.
+func TestAddRefusesToStageSecrets(t *testing.T) {
+	dir := initRepo(t)
+	tl := gitToolFor(t, dir, yes())
+	ctx := context.Background()
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("TOKEN=hunter2"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if r := tl.Call(ctx, "add", map[string]any{"paths": ".env"}); !r.IsError {
+		t.Error("staged a secrets file by name")
+	}
+	if r := tl.Call(ctx, "add", map[string]any{"paths": "."}); !r.IsError {
+		t.Errorf("'git add .' staged the secrets file alongside everything else: %s", r.Content)
+	}
+	staged := exec.Command("git", "-C", dir, "diff", "--staged", "--name-only")
+	out, _ := staged.CombinedOutput()
+	if strings.Contains(string(out), ".env") {
+		t.Errorf("the secrets file reached the index anyway:\n%s", out)
+	}
+	// An ordinary file still stages fine.
+	if r := tl.Call(ctx, "add", map[string]any{"paths": "main.go"}); r.IsError {
+		t.Errorf("add main.go: %s", r.Content)
 	}
 }

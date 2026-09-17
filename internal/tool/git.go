@@ -3,10 +3,12 @@ package tool
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/procgroup"
@@ -14,18 +16,26 @@ import (
 )
 
 type gitTool struct {
-	pol    *policy.Engine
-	ap     Approver
-	maxOut int // per-call output cap in bytes (see OutputBudget)
+	pol     *policy.Engine
+	ap      Approver
+	maxOut  int // per-call output cap in bytes (see OutputBudget)
+	offline bool
 }
 
+// gitNetTimeout bounds the actions that talk to a server. The 60s a local action
+// gets is barely a clone's warm-up on a real repository, and the cost of being
+// generous is a wait, not a wedge: the process group is still killed on expiry.
+const gitNetTimeout = 5 * time.Minute
+
 // NewGit returns the git tool. It runs git directly (argv, no shell) in the
-// workspace; read-only actions run freely, mutating ones ask for approval.
-func NewGit(p *policy.Engine, ap Approver, ctxWindow int) Tool {
-	g := &gitTool{pol: p, ap: ap, maxOut: OutputBudget(ctxWindow)}
+// workspace; read-only actions run freely, mutating ones ask for approval. When
+// offline is true the actions that need a server refuse, the same way the web
+// tool does.
+func NewGit(p *policy.Engine, ap Approver, ctxWindow int, offline bool) Tool {
+	g := &gitTool{pol: p, ap: ap, maxOut: OutputBudget(ctxWindow), offline: offline}
 	return NewDomain(DomainSpec{
 		Name:    "git",
-		Summary: "Git in the workspace. Mutating actions (init/add/commit/branch/checkout) ask approval.",
+		Summary: "Git in the workspace. Mutating actions (add/commit/clone/pull/push…) ask approval.",
 		NotHere: "NOT here — non-git shell → run; files → file.",
 		Actions: []Action{
 			{Name: "init", Mutates: true, Run: g.initRepo, Note: "(start a repo in the workspace)"},
@@ -37,8 +47,187 @@ func NewGit(p *policy.Engine, ap Approver, ctxWindow int) Tool {
 			{Name: "commit", Mutates: true, Params: []Param{Req("message", "str")}, Run: g.commit},
 			{Name: "branch", Mutates: true, Params: []Param{Opt("name", "str", "")}, Note: "(none=list, name=create)", Run: g.branch},
 			{Name: "checkout", Mutates: true, Params: []Param{Req("ref", "str")}, Run: g.checkout},
+			{Name: "clone", Mutates: true, Params: []Param{Req("url", "str"), Opt("dir", "str", "")},
+				Note: "(into the workspace)", Run: g.clone},
+			{Name: "fetch", Mutates: true, Params: []Param{Opt("remote", "str", "origin")}, Run: g.fetch},
+			{Name: "pull", Mutates: true, Params: []Param{Opt("remote", "str", ""), Opt("branch", "str", "")},
+				Note: "(ff-only)", Run: g.pull},
+			{Name: "push", Mutates: true, Params: []Param{Opt("remote", "str", ""), Opt("branch", "str", ""), Opt("set_upstream", "bool", "")},
+				Note: "(PUBLISHES; never force)", Run: g.push},
+			{Name: "remote", Mutates: true, Params: []Param{Opt("name", "str", ""), Opt("url", "str", "")},
+				Note: "(none=list)", Run: g.remote},
 		},
 	})
+}
+
+// checkRemoteURL rejects the two shapes that turn a remote into something other
+// than a remote: git's remote-helper syntax, where "ext::sh -c …" runs its
+// argument as the transport — an arbitrary command, from a plain-looking URL —
+// and a leading dash, which git reads as an option instead of an address.
+func checkRemoteURL(u string) error {
+	switch {
+	case u == "":
+		return errors.New("url is required")
+	case strings.HasPrefix(u, "-"):
+		return errors.New("invalid url (leading dash): " + u)
+	case strings.Contains(u, "::"):
+		return errors.New("remote-helper URLs are not allowed (ext:: runs a command as the transport) — use https://, ssh:// or git@host:path")
+	}
+	return nil
+}
+
+// checkGitName guards a remote name, branch or refspec passed straight to git.
+func checkGitName(what, v string) error {
+	switch {
+	case strings.HasPrefix(v, "-"):
+		return errors.New("invalid " + what + " (leading dash): " + v)
+	case strings.Contains(v, "::"):
+		return errors.New("invalid " + what + " (remote-helper syntax): " + v)
+	}
+	return nil
+}
+
+// repoDirFromURL is the directory git itself would clone into, worked out here
+// so the destination can be jailed BEFORE git runs rather than discovered after.
+func repoDirFromURL(u string) string {
+	s := strings.TrimSuffix(strings.TrimRight(u, "/"), ".git")
+	if i := strings.LastIndexAny(s, "/:"); i >= 0 {
+		s = s[i+1:]
+	}
+	return s
+}
+
+func (g *gitTool) clone(ctx context.Context, a Args) Result {
+	url := strings.TrimSpace(a.Str("url"))
+	if err := checkRemoteURL(url); err != nil {
+		return Err(err.Error())
+	}
+	dir := strings.TrimSpace(a.Str("dir"))
+	if dir == "" {
+		dir = repoDirFromURL(url)
+	}
+	if dir == "" {
+		return Err("could not work out a directory name from " + url + " — pass dir explicitly")
+	}
+	if strings.HasPrefix(dir, "-") {
+		return Err("invalid dir (leading dash): " + dir)
+	}
+	// A clone writes a whole tree to disk, so its destination goes through the
+	// same jail the file tool enforces — resolved here, and handed to git as an
+	// absolute path, so a "../.." in dir is refused before git ever runs.
+	abs, err := g.pol.Resolve(dir)
+	if err != nil {
+		return Err(err.Error())
+	}
+	return g.runNet(ctx, "clone", "clone", "--", url, abs)
+}
+
+func (g *gitTool) fetch(ctx context.Context, a Args) Result {
+	remote := strings.TrimSpace(a.Str("remote"))
+	if remote == "" {
+		remote = "origin"
+	}
+	if err := checkGitName("remote", remote); err != nil {
+		return Err(err.Error())
+	}
+	return g.runNet(ctx, "fetch", "fetch", "--", remote)
+}
+
+func (g *gitTool) pull(ctx context.Context, a Args) Result {
+	remote, branch := strings.TrimSpace(a.Str("remote")), strings.TrimSpace(a.Str("branch"))
+	if branch != "" && remote == "" {
+		return Err("a branch needs a remote too (e.g. remote=origin branch=main)")
+	}
+	// --ff-only: a plain pull can start a MERGE, and a conflicted merge leaves a
+	// working tree the agent then has to understand mid-task. Failing cleanly on
+	// a diverged branch is the better answer — fetch and merge deliberately.
+	args := []string{"pull", "--ff-only"}
+	for what, v := range map[string]string{"remote": remote, "branch": branch} {
+		if v != "" {
+			if err := checkGitName(what, v); err != nil {
+				return Err(err.Error())
+			}
+		}
+	}
+	if remote != "" {
+		args = append(args, "--", remote)
+		if branch != "" {
+			args = append(args, branch)
+		}
+	}
+	return g.runNet(ctx, "pull", args...)
+}
+
+func (g *gitTool) push(ctx context.Context, a Args) Result {
+	remote, branch := strings.TrimSpace(a.Str("remote")), strings.TrimSpace(a.Str("branch"))
+	if branch != "" && remote == "" {
+		return Err("a branch needs a remote too (e.g. remote=origin branch=main)")
+	}
+	for what, v := range map[string]string{"remote": remote, "branch": branch} {
+		if v != "" {
+			if err := checkGitName(what, v); err != nil {
+				return Err(err.Error())
+			}
+		}
+	}
+	// No --force, and no way to ask for one: a force-push destroys history on a
+	// server, which is the one git mistake an approval prompt cannot undo.
+	args := []string{"push"}
+	if a.Bool("set_upstream") {
+		args = append(args, "--set-upstream")
+	}
+	if remote != "" {
+		args = append(args, "--", remote)
+		if branch != "" {
+			args = append(args, branch)
+		}
+	}
+	return g.runNet(ctx, "push", args...)
+}
+
+// remote lists remotes, or adds one (repointing it if the name already exists).
+// It touches no server, so it works offline and keeps the local timeout.
+func (g *gitTool) remote(ctx context.Context, a Args) Result {
+	name, url := strings.TrimSpace(a.Str("name")), strings.TrimSpace(a.Str("url"))
+	if name == "" && url == "" {
+		return g.run(ctx, "remote", false, "remote", "-v")
+	}
+	if name == "" || url == "" {
+		return Err("adding a remote needs both name and url (pass neither to list them)")
+	}
+	if err := checkGitName("remote", name); err != nil {
+		return Err(err.Error())
+	}
+	if err := checkRemoteURL(url); err != nil {
+		return Err(err.Error())
+	}
+	// Probe first (read-only, no approval) so the one approved call is the right
+	// one: "remote add" fails on an existing name, "set-url" on a missing one.
+	verb := "add"
+	if probe := g.run(ctx, "remote", false, "remote", "get-url", "--", name); !probe.IsError {
+		verb = "set-url"
+	}
+	return g.run(ctx, "remote", true, "remote", verb, "--", name, url)
+}
+
+// runNet runs an action that talks to a server.
+func (g *gitTool) runNet(ctx context.Context, action string, args ...string) Result {
+	if g.offline {
+		return Err("offline mode is ON — git " + action + " needs the network. This is temporary: run /offline off when you're back online.")
+	}
+	// protocol.ext.allow=never is the second lock behind checkRemoteURL: a
+	// .gitmodules entry or a server redirect can name an ext:: URL that never
+	// passed through the url parameter at all, and ext:: runs its argument as a
+	// command. It's a global -c flag, so it's kept out of the approval text.
+	flags := []string{"-c", "protocol.ext.allow=never"}
+	// Without these, a private repo with no usable credentials does not fail —
+	// it BLOCKS, on a username prompt or an ssh passphrase prompt, against a
+	// stdin nobody is typing into, until the timeout kills it minutes later.
+	env := []string{"GIT_TERMINAL_PROMPT=0"}
+	if os.Getenv("GIT_SSH_COMMAND") == "" { // don't stomp a deliberately configured one
+		env = append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
+	}
+	return g.runWith(ctx, action, true, gitNetTimeout, env, flags, args...)
 }
 
 func (g *gitTool) initRepo(ctx context.Context, _ Args) Result {
@@ -248,7 +437,52 @@ func (g *gitTool) checkRevPathPolicy(ctx context.Context, path string) error {
 }
 
 func (g *gitTool) add(ctx context.Context, a Args) Result {
-	return g.run(ctx, "add", true, append([]string{"add", "--"}, strings.Fields(a.Str("paths"))...)...)
+	paths := strings.Fields(a.Str("paths"))
+	if len(paths) == 0 {
+		return Err("paths is required (space-separated)")
+	}
+	// Check what would actually be STAGED, not what was typed. This matters now
+	// that push exists: a secrets file the policy engine will not let the file
+	// tool read can still be committed and published, and "git add ." — by far
+	// the most common call — names no secret at all while staging every one of
+	// them. --dry-run prints exactly the paths the real add would take, the same
+	// enumerate-then-check shape diff already uses.
+	dry := append([]string{"add", "--dry-run", "--ignore-missing", "--"}, paths...)
+	if listed := g.run(ctx, "add", false, dry...); !listed.IsError {
+		var blocked []string
+		for _, line := range strings.Split(listed.Content, "\n") {
+			name, ok := addedPath(line)
+			if !ok {
+				continue
+			}
+			root, err := g.repoRoot(ctx)
+			if err != nil {
+				return Err(err.Error())
+			}
+			if abs, err := g.pol.Resolve(filepath.Join(root, name)); err != nil || g.pol.IsSecret(abs) {
+				blocked = append(blocked, name)
+			}
+		}
+		if len(blocked) > 0 {
+			return Err("refusing to stage " + strings.Join(blocked, ", ") +
+				" — it looks like a secrets/credentials file, and a staged secret is one commit away from being pushed")
+		}
+	}
+	return g.run(ctx, "add", true, append([]string{"add", "--"}, paths...)...)
+}
+
+// addedPath pulls the path out of one "git add --dry-run" line, which reads
+// `add 'some/path'` (or `remove 'some/path'`). Anything else is not a staging.
+func addedPath(line string) (string, bool) {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(line), "add ")
+	if !ok {
+		return "", false
+	}
+	rest = strings.TrimSpace(rest)
+	if len(rest) < 2 || rest[0] != '\'' || rest[len(rest)-1] != '\'' {
+		return "", false
+	}
+	return rest[1 : len(rest)-1], true
 }
 
 func (g *gitTool) commit(ctx context.Context, a Args) Result {
@@ -280,6 +514,14 @@ func (g *gitTool) checkout(ctx context.Context, a Args) Result {
 }
 
 func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ...string) Result {
+	return g.runWith(ctx, action, mutating, defaultRunTimeout, nil, nil, args...)
+}
+
+// runWith is run with the knobs the networked actions need: a longer timeout,
+// extra environment, and extra global "-c" flags. The flags are deliberately not
+// part of the approval text — what the user is asked to approve is the command
+// they would have typed, not our hardening.
+func (g *gitTool) runWith(ctx context.Context, action string, mutating bool, timeout time.Duration, extraEnv, gitFlags []string, args ...string) Result {
 	if mutating && !g.ap.Approve(ctx, "git", "git "+strings.Join(args, " ")) {
 		return Err("git " + action + " denied by user")
 	}
@@ -288,7 +530,7 @@ func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ..
 		return Err(err.Error())
 	}
 
-	cctx, cancel := context.WithTimeout(ctx, defaultRunTimeout)
+	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	// -c core.fsmonitor=: applied to EVERY action, mutating or not. A
 	// workspace's local .git/config can bind core.fsmonitor to an arbitrary
@@ -301,9 +543,12 @@ func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ..
 	// It must precede the subcommand (git -c is a global option, unlike
 	// diff's --no-textconv/--no-ext-diff, which are the diff subcommand's own
 	// flags and stay action-specific since they'd be invalid on e.g. commit).
-	gitArgs := append([]string{"-c", "core.fsmonitor="}, args...)
+	gitArgs := append(append([]string{"-c", "core.fsmonitor="}, gitFlags...), args...)
 	cmd := exec.CommandContext(cctx, "git", gitArgs...)
 	cmd.Dir = dir
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	// Kill the WHOLE process group on timeout/cancel, and bound Wait so a
 	// hook, pager, or external diff/merge tool that outlives git itself (and
 	// keeps holding the shared stdout/stderr pipe) can't hang this call past

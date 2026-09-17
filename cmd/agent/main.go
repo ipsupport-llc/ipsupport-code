@@ -823,7 +823,7 @@ func (a *app) buildSubReg(pol *policy.Engine, root string) *tool.Registry {
 	if a.cfg.Spawn.Exec {
 		tools = append(tools, tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, a.sandboxWrapperFor(root)))
 	}
-	tools = append(tools, tool.NewGit(pol, gatedApprover{a}, a.activeLLM().ContextWindow), tool.NewWeb(nil, a.cfg.Offline), tool.NewCalc(), tool.NewDone())
+	tools = append(tools, tool.NewGit(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.cfg.Offline), tool.NewWeb(nil, a.cfg.Offline), tool.NewCalc(), tool.NewDone())
 	if a.skills != nil && a.skills.HasEnabled() {
 		tools = append(tools, tool.NewSkill(a.skills))
 	}
@@ -2547,7 +2547,7 @@ func (a *app) wire() error {
 	tools := []tool.Tool{
 		tool.NewFile(pol, gatedApprover{a}, a.snapFile),
 		tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, a.sandboxWrapper()),
-		tool.NewGit(pol, gatedApprover{a}, a.activeLLM().ContextWindow),
+		tool.NewGit(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.cfg.Offline),
 		tool.NewWeb(nil, a.cfg.Offline), // nil → NewWeb's own 30s-timeout client; task ctx has no deadline of its own
 		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),
 		tool.NewCalc(),

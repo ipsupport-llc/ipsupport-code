@@ -280,6 +280,23 @@ piped run silently **continues** the saved thread; the interactive TUI opens a
 delete, **esc** for the newest) when any exist. To start clean or pick a thread
 from the CLI:
 
+Flags go **before** the task text — anything after it is part of the task, not a
+flag, and the agent says so rather than quietly sending it to the model:
+
+```
+$ ipsupport-code "do the thing" -override provider=openai
+error: -override provider=openai must come BEFORE the task text — written there it was read as part of the task, not as a flag
+```
+
+To point a single run at a different provider or model without touching
+`config.json` (the provider must already be configured):
+
+```sh
+./ipsupport-code -override provider=openai "task"                    # this run only
+./ipsupport-code -override provider=openai \
+                 -override providers.openai.model=gpt-5 "task"       # …and its model
+```
+
 ```sh
 ./ipsupport-code -new "fresh task"              # ignore the saved session
 ./ipsupport-code -session review "look at X"    # start a named thread

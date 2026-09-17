@@ -3789,3 +3789,69 @@ func TestStrayParameterTagSalvageStaysNarrow(t *testing.T) {
 		t.Errorf("read %q as a parameter name from a shell redirect", name)
 	}
 }
+
+// The same failure came back a day later wearing a colon instead of the tag's
+// closing bracket — "command: git clone …" where it had been "command>\ngit
+// clone …" — and the >-only pattern sailed straight past it. Measured: 14 calls
+// in one run, none recovered.
+func TestParamsRecoveredFromANameGluedToItsValue(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw  string
+		wantAction string
+		wantParams map[string]any
+	}{
+		{
+			name:       "colon separator",
+			raw:        `{"action":"shell","params":"command: git clone https://example.invalid/x.git"}`,
+			wantAction: "shell",
+			wantParams: map[string]any{"command": "git clone https://example.invalid/x.git"},
+		},
+		{
+			name:       "colon then newline",
+			raw:        `{"action":"list","params":"path:\n/w/coding-agent-test"}`,
+			wantAction: "list",
+			wantParams: map[string]any{"path": "/w/coding-agent-test"},
+		},
+		{
+			name:       "the bracket shape still works",
+			raw:        `{"action":"shell","params":"command>\nls -la"}`,
+			wantAction: "shell",
+			wantParams: map[string]any{"command": "ls -la"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			action, params, warn := parseArgs(tc.raw)
+			if action != tc.wantAction {
+				t.Errorf("action = %q, want %q", action, tc.wantAction)
+			}
+			if warn != "" {
+				t.Errorf("warn = %q, want none", warn)
+			}
+			for k, want := range tc.wantParams {
+				if got := params[k]; got != want {
+					t.Errorf("params[%q] = %v, want %v (all: %v)", k, got, want, params)
+				}
+			}
+		})
+	}
+}
+
+// The colon form must not swallow a value that merely contains one. A URL is the
+// case that matters: "https://example.com" would otherwise become a parameter
+// called "https".
+func TestColonSalvageRequiresWhitespaceAfterTheSeparator(t *testing.T) {
+	for _, s := range []string{
+		"https://example.com/api",
+		"note:this has no space",
+		"12:34",
+	} {
+		if name, _, ok := splitParamTag(s); ok {
+			t.Errorf("splitParamTag(%q) read a parameter %q out of it", s, name)
+		}
+	}
+	// …and a bare name with no value at all stays unrecoverable, which is right:
+	// there is nothing to recover, and a "missing param" error is the honest answer.
+	if _, _, ok := splitParamTag("path"); ok {
+		t.Error(`splitParamTag("path") invented a value`)
+	}
+}

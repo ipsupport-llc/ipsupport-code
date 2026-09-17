@@ -2541,14 +2541,24 @@ func decodeObjStrict(s string) map[string]any {
 	return m
 }
 
-// strayParamTagRe matches what is left of a "<parameter=NAME>" tag when only
-// its opening half was stripped: "NAME>" in front of the bare value. paramTagRe
-// (below) handles the intact tag; this is the mangled sibling, and it needs its
-// own pattern because there is no "<parameter=" prefix left to key on.
+// strayParamTagRe matches a parameter NAME that arrived glued to its value
+// instead of as a JSON key, in either shape a leaked tool-call template leaves
+// behind. paramTagRe (below) handles the intact "<parameter=NAME>" tag; these
+// are the mangled siblings, with no "<parameter=" prefix left to key on:
 //
-// The name must start with a LETTER, so a value that happens to lead with a
-// shell redirect ("2>&1 …") is not read as a parameter called "2".
-var strayParamTagRe = regexp.MustCompile(`(?s)^\s*([A-Za-z][A-Za-z0-9_.-]*)>\s*(.*)$`)
+//	"command>\ngit clone …"   the tag's closing bracket survived
+//	"command: git clone …"    only the separator survived
+//	"path: /Users/…/main.go"
+//
+// Both were measured in real runs, a day apart, from the same task — so
+// matching only one of them fixes the log you happen to be holding.
+//
+// The name must start with a LETTER, so a value leading with a shell redirect
+// ("2>&1 …") is not read as a parameter called "2". After a COLON the separator
+// must be followed by whitespace, which is what keeps "https://example.com" from
+// being read as a parameter called "https" — after ">" it need not be, since a
+// ">" cannot occur in a parameter name at all.
+var strayParamTagRe = regexp.MustCompile(`(?s)^\s*([A-Za-z][A-Za-z0-9_.-]*)(?:>\s*|:\s+)(.*)$`)
 
 // splitParamTag pulls (name, value) out of that fragment. Only ever consulted
 // for a params string that already failed to parse as JSON, so it cannot

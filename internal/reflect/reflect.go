@@ -29,6 +29,13 @@ func (e *ReflectionError) Unwrap() error { return e.Err }
 // simpler, facts-only prompt — for a small local model that loops on the full
 // two-part ask.
 type Reflector struct {
+	// Model and Provider name the connection for the log. Without them a failed
+	// pass says only that "the model" looped, and the first question — which one,
+	// the task's or a reflect profile's — could not be answered from the log at
+	// all. Optional; empty is fine.
+	Model    string
+	Provider string
+
 	LLM  llm.Chatter
 	Lite bool
 }
@@ -54,6 +61,20 @@ type Lessons struct {
 	Reply string
 }
 
+// The HARD RULE below is deliberately SHORT, and says the principle rather than
+// listing what it forbids. It used to spell out the whole set — "no file path,
+// filename, directory, project name, URL, host, port, command argument, or
+// anything resembling a key, token or password" — and two different models, one
+// of them hosted, latched onto that comma list and re-emitted it until the
+// repetition detector aborted the call (internal/llm: an 80-byte slice repeating
+// inside the preceding 400). Reflection produced nothing at all, twice, for
+// 2m17s and 1m16s. A long negative enumeration is a high-probability
+// continuation of itself; a model that starts reciting one rarely stops.
+//
+// Dropping the list costs no enforcement: knowledge.IsProjectSpecific rejects
+// every one of those classes on the way into the store, and is tested there
+// (TestIsProjectSpecific). The prompt asks for the right thing; the code is what
+// guarantees it.
 const reflectPrompt = `You review a finished run by a tool-using agent and extract two things for next time, as ONE JSON object:
 {"pitfalls": [...], "facts": [...]}
 
@@ -65,7 +86,7 @@ const reflectPrompt = `You review a finished run by a tool-using agent and extra
   "error_pattern" — copy a substring out of the error text itself, long enough that only this KIND of failure contains it. Never a generic wrapper like an exit code alone ("exit 1"), which every failed command has regardless of cause.
   "context" — the tool action it happened during, e.g. "file: write".
 
-  HARD RULE for "error_pattern", "context" AND "proven_fix": no value taken from this run — no file path, filename, directory, project name, URL, host, port, command argument, or anything resembling a key, token or password. A lesson keyed on those never matches again, one quoting them actively misleads a future run, and a secret written into a lesson is stored on disk and replayed to a model later. Write the SHAPE of the problem, not this instance of it.
+  HARD RULE for all three fields: write the SHAPE of the problem, never this run's own specifics. A lesson quoting them never matches again, and it is checked and dropped on the way in anyway.
 
   Emit a pitfall only for a genuine tool-usage failure. Use [] if none qualifies.
 
@@ -91,7 +112,7 @@ const reflectPitfallsLite = `The agent run below may have hit tool errors. Repor
 "kind" is "avoid" if the same thing was tried again and kept failing — "proven_fix" is what to do INSTEAD. Never repeat the failing approach as the advice.
 "error_pattern" is a few words copied from the error text itself.
 "context" is the action it happened during, like "file: write".
-Never put anything from this run — a file path, filename, directory, project name, URL, host, port, key, token or password — in "error_pattern", "context" or "proven_fix". Describe the shape of the problem, not this one case.
+In all three fields describe the SHAPE of the problem, never this run's own specifics.
 
 Use {"pitfalls": []} if the run hit no tool errors. Do not explain.`
 
@@ -119,7 +140,7 @@ Report at most ONE lesson, about a tool call that visibly failed more than once 
 "error_pattern" is a few words copied from the error text itself.
 "context" is the action it happened during, like "file: write".
 "proven_fix" is what to do DIFFERENTLY. Never repeat the failing approach as the advice.
-Never put anything from this run — a file path, directory, project name, URL, host, port, key or token — in "error_pattern", "context" or "proven_fix".
+Describe the shape of the problem, never this run's own specifics.
 
 Only report what the transcript SHOWS failing repeatedly. If nothing failed more than once, or you cannot tell why it failed, reply {"pitfalls": []} — a confident guess about a failure you did not diagnose is worse than no lesson. Do not explain.`
 
@@ -134,7 +155,8 @@ func (r *Reflector) ask(ctx context.Context, half, system, summary string) (llm.
 	start := time.Now()
 	reply, err := r.LLM.Chat(ctx, []llm.Message{llm.System(system), llm.User(summary)}, nil)
 	if err != nil {
-		slog.Debug("reflect call failed", "half", half, "dur", time.Since(start), "err", err)
+		slog.Debug("reflect call failed", "half", half, "provider", r.Provider, "model", r.Model,
+			"dur", time.Since(start), "summary_bytes", len(summary), "err", err)
 		return reply, err
 	}
 	p, c := reflectSpend(r.LLM)

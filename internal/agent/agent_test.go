@@ -3727,3 +3727,65 @@ func TestAProseReplyIsStillLeftAloneWhileAGoalStands(t *testing.T) {
 		t.Errorf("Chat calls = %d, want 1 (no judge, no nudge for an answered question)", fake.i)
 	}
 }
+
+// A model leaking the closing half of its own "<parameter=NAME>" tag lands the
+// tag's tail in params: "command>\ngit clone …". There is no JSON in there for
+// decodeObj to find, so the call used to yield empty params and the model was
+// told its JSON was malformed — which it was not. Measured in one real run: 11
+// of 84 turns went to this, the model re-deriving the right shape over three
+// turns and relapsing a turn later, every time.
+func TestParamsRecoveredFromAStrayParameterTag(t *testing.T) {
+	for _, tc := range []struct {
+		name, raw  string
+		wantAction string
+		wantParams map[string]any
+	}{
+		{
+			name:       "run, command split off by the tag",
+			raw:        `{"cwd":"/w","action":"shell","params":"command>\ngit clone https://example.invalid/x.git"}`,
+			wantAction: "shell",
+			wantParams: map[string]any{"command": "git clone https://example.invalid/x.git", "cwd": "/w"},
+		},
+		{
+			name:       "file, path split off by the tag",
+			raw:        `{"params":"path>\n/w/coding-agent-test","action":"list"}`,
+			wantAction: "list",
+			wantParams: map[string]any{"path": "/w/coding-agent-test"},
+		},
+		{
+			name:       "closing tag still attached",
+			raw:        `{"action":"write","params":"path>notes.md</parameter>"}`,
+			wantAction: "write",
+			wantParams: map[string]any{"path": "notes.md"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			action, params, warn := parseArgs(tc.raw)
+			if action != tc.wantAction {
+				t.Errorf("action = %q, want %q", action, tc.wantAction)
+			}
+			if warn != "" {
+				t.Errorf("warn = %q, want none — the call was recovered, not rejected", warn)
+			}
+			for k, want := range tc.wantParams {
+				if got := params[k]; got != want {
+					t.Errorf("params[%q] = %v, want %v (all: %v)", k, got, want, params)
+				}
+			}
+		})
+	}
+}
+
+// The salvage must not reinterpret a params string that is merely bad JSON, and
+// must not read a leading shell redirect as a parameter name.
+func TestStrayParameterTagSalvageStaysNarrow(t *testing.T) {
+	// Truncated JSON: still the honest "that isn't valid JSON" diagnostic.
+	_, _, warn := parseArgs(`{"action":"write","params":"{\"path\": \"x.md\", \"content\": \"unterminated"}`)
+	if warn == "" {
+		t.Error("truncated JSON in params should still be reported as such")
+	}
+	// A value leading with "2>&1" names no parameter "2".
+	if name, _, ok := splitParamTag("2>&1 tail -f log"); ok {
+		t.Errorf("read %q as a parameter name from a shell redirect", name)
+	}
+}

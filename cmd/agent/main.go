@@ -508,6 +508,17 @@ func build(workspace, sessionName string, overrides []string, reader *bufio.Read
 			return nil, nil, fmt.Errorf("-override %s: %w", key, err)
 		}
 	}
+	// An active provider that doesn't resolve is refused HERE, before anything
+	// runs. /ai use has always validated the name (see setProvider); -override
+	// provider=… and a hand-edited config.json went straight past that check
+	// into activeLLM's silent fallback to the LOCAL connection — so the run
+	// dialled localhost while the status line, which takes the NAME from
+	// cfg.Provider and the MODEL from the fallback, read "openroute · n30".
+	// Reported live: the one place you look to confirm an override took effect
+	// actively confirmed a thing that wasn't happening.
+	if err := checkActiveProvider(cfg); err != nil {
+		return nil, nil, err
+	}
 	if sessionName != "" { // must land before wire() — see the call site in main()
 		cfg.Name = sessionName
 	}
@@ -568,7 +579,39 @@ func (a *app) activeLLM() config.LLM {
 	if l, ok := config.ResolveProvider(a.cfg, a.cfg.Provider); ok {
 		return l
 	}
+	// Unreachable through any supported path — checkActiveProvider refuses an
+	// unresolvable provider at startup, and setProvider refuses one at runtime.
+	// Kept as a safety net, but no longer a SILENT one: this fallback returning
+	// the local connection while providerName() keeps reporting the configured
+	// name is precisely how a run ended up dialling localhost under the banner
+	// of a cloud provider.
+	slog.Warn("active provider does not resolve — falling back to the local connection",
+		"provider", a.cfg.Provider)
 	return a.cfg.LLM
+}
+
+// checkActiveProvider rejects a configured provider that cannot be resolved,
+// with the same wording /ai use gives (see setProvider) — the two paths differ only
+// in when they run, so they should not differ in what they say.
+func checkActiveProvider(cfg config.Config) error {
+	name := cfg.Provider
+	if name == "" || name == "local" {
+		return nil
+	}
+	l, ok := config.ResolveProvider(cfg, name)
+	if !ok {
+		return fmt.Errorf("unknown provider %q — try: local, %s", name, strings.Join(config.KnownProviders(), ", "))
+	}
+	if config.IsCustomProvider(cfg, name) {
+		if l.BaseURL == "" {
+			return fmt.Errorf("provider %q has no base_url — set providers.%s.base_url", name, name)
+		}
+		return nil
+	}
+	if l.APIKey == "" { // built-in cloud template
+		return fmt.Errorf("provider %q needs an API key — run: ipsupport-code config set providers.%s.api_key <token> (or set its env var)", name, name)
+	}
+	return nil
 }
 
 func (a *app) isLocal() bool { return a.cfg.Provider == "" || a.cfg.Provider == "local" }
@@ -3750,6 +3793,7 @@ func (a *app) runReflect(ctx context.Context, j *reflectJob, tr agent.Transcript
 	a.emit("reflecting", map[string]any{"model": j.model})
 	refl := reflect.New(j.client)
 	refl.Lite = j.lite // facts-only, terse — for a small local model that loops
+	refl.Provider, refl.Model = j.provider, j.model
 	start := time.Now()
 	lessons, err := refl.Reflect(ctx, tr)
 	res := reflectResult{job: j, lessons: lessons, dur: time.Since(start), err: err}

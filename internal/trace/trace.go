@@ -6,6 +6,7 @@ package trace
 
 import (
 	"encoding/json"
+	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
 	"os"
 	"path/filepath"
 	"sync"
@@ -32,6 +33,12 @@ func NewFileTracer(path, runID string) (*FileTracer, error) {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, err
 		}
+	}
+	// The trace file is global: every run on the machine appends to it. A record
+	// is large enough that an O_APPEND write is not atomic, so two processes can
+	// interleave mid-line and corrupt both records.
+	if unlock, err := filelock.Lock(path); err == nil {
+		defer unlock()
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 	if err != nil {

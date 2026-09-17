@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 )
 
@@ -138,11 +137,17 @@ func (a *app) loadSnippets() {
 }
 
 // saveSnippets writes the snippets store atomically (0600 — a template may hold
-// anything the user pasted).
+// anything the user pasted) and under the cross-process lock, since the store is
+// global: any two runs on the machine share it.
+//
+// Serialized but deliberately NOT merged, unlike the facts store. Merging a map
+// means unioning it, and a union cannot express a deletion: "/snip delete x"
+// would be undone by any other process that still had x. Last writer wins is the
+// honest behaviour for a list the user edits by hand.
 func (a *app) saveSnippets() error {
 	data, err := json.MarshalIndent(a.snippets, "", "  ")
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(config.SnippetsPath(), data, 0o600)
+	return writeShared(config.SnippetsPath(), data, 0o600)
 }

@@ -414,9 +414,20 @@ func workspaceSlug(workspace string) string {
 		abs = workspace
 	}
 	sum := sha256.Sum256([]byte(abs))
-	base := filepath.Base(abs)
+	return fmt.Sprintf("%s-%x", WorkspaceName(workspace), sum[:4])
+}
+
+// WorkspaceName is a workspace's readable basename, lowercased and reduced to
+// filename-safe characters. It is the recognizable half of workspaceSlug, used
+// on its own where a name a human reads and types matters more than uniqueness —
+// a log file you tail by hand.
+func WorkspaceName(workspace string) string {
+	abs, err := filepath.Abs(workspace)
+	if err != nil {
+		abs = workspace
+	}
 	var b strings.Builder
-	for _, r := range base {
+	for _, r := range filepath.Base(abs) {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
 			b.WriteRune(r)
@@ -430,7 +441,7 @@ func workspaceSlug(workspace string) string {
 	if name == "" {
 		name = "workspace"
 	}
-	return fmt.Sprintf("%s-%x", name, sum[:4])
+	return name
 }
 
 // LegacyStateDir is the in-workspace directory state USED to live in. Read once
@@ -466,9 +477,29 @@ func DefaultSkillsPath() string { return filepath.Join(configHome(), "skills") }
 // SnippetsPath is the global prompt-snippets store (/snip save+recall).
 func SnippetsPath() string { return filepath.Join(configHome(), "snippets.json") }
 
-// LogPath is where logs go while the TUI owns the screen (writing them to stderr
-// would corrupt the alt-screen). Tail it to watch retries/warnings live.
-func LogPath() string { return filepath.Join(configHome(), "agent.log") }
+// LogPathFor is where a run's logs go while the TUI owns the screen (writing
+// them to stderr would corrupt the alt-screen). Tail it to watch retries and
+// warnings live.
+//
+// Both parts of the name matter, and neither used to be there. The WORKSPACE,
+// because a single agent.log served every checkout on the machine: two runs
+// pointed at different directories — which is exactly what a pair of test
+// scripts does — interleaved into one file line by line, and with IPS_LOG=debug
+// neither was readable. The SESSION, because two named sessions on ONE checkout
+// have the same problem.
+//
+// Named by the workspace's basename alone, no path digest: this is a file you
+// tail by hand, so "agent-test.log" beats "agent-test-137747f9.log". Two
+// checkouts sharing a basename (~/gh/romashka and ~/work/romashka) therefore
+// share a log — a deliberate trade, unlike StateDir, where a collision would mix
+// two projects' memory rather than two logs.
+func LogPathFor(workspace, session string) string {
+	name := "agent-" + WorkspaceName(workspace)
+	if session != "" {
+		name += "-" + session
+	}
+	return filepath.Join(configHome(), name+".log")
+}
 
 // SystemPromptPath is the optional global system-prompt override file; if it (or
 // a workspace .agent/system.md) exists, it replaces the built-in base prompt.

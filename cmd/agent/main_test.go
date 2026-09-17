@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -8992,5 +8993,47 @@ func TestTwoRunsDoNotClobberEachOthersPromptHistory(t *testing.T) {
 	joined := strings.Join(onDisk, " | ")
 	if !strings.Contains(joined, "ship the parser") || !strings.Contains(joined, "run the tests") {
 		t.Errorf("history = %s, want both runs' lines", joined)
+	}
+}
+
+// A flag written after the task text is not parsed as a flag — Go's flag package
+// stops at the first non-flag argument — it is joined into the task and sent to
+// the model. Reported live: "-override provider=openai" at the end of the line
+// looked exactly like the override not working, because the run went ahead on the
+// default model with nothing on screen to say the flag had been swallowed.
+func TestMisplacedFlags(t *testing.T) {
+	// The same shapes main registers: one string flag that takes a value, one
+	// repeatable string flag, and two booleans that take none.
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	var ov overrideFlags
+	fs.Var(&ov, "override", "")
+	fs.String("session", "", "")
+	fs.Bool("new", false, "")
+	fs.Bool("show-thinking", false, "")
+
+	for _, tc := range []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{name: "override with its value", args: []string{"do the thing", "-override", "provider=openai"},
+			want: []string{"-override", "provider=openai"}},
+		{name: "bool flag takes no value", args: []string{"do the thing", "-show-thinking"},
+			want: []string{"-show-thinking"}},
+		{name: "several", args: []string{"do it", "-session", "cloud", "-new"},
+			want: []string{"-session", "cloud", "-new"}},
+		{name: "inline value", args: []string{"do it", "-session=cloud"},
+			want: []string{"-session=cloud"}},
+		// A task word that merely starts with a dash names no flag of ours, and
+		// must not be mistaken for one.
+		{name: "task words with a dash", args: []string{"fix", "the", "-v", "flag"}},
+		{name: "a plain task", args: []string{"do the thing"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := misplacedFlags(tc.args, fs.Lookup)
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Errorf("misplacedFlags(%q) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
 	}
 }

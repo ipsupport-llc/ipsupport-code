@@ -318,14 +318,15 @@ func TestRedirectLogToFile(t *testing.T) {
 	prev := slog.Default()
 	defer slog.SetDefault(prev)
 
-	closeLog := redirectLogToFile()
+	ws := t.TempDir()
+	closeLog := redirectLogToFile(ws, "")
 	if closeLog == nil {
 		t.Fatal("redirectLogToFile returned nil (couldn't open the log file)")
 	}
 	slog.Warn("retry test", "attempt", 1)
 	closeLog()
 
-	data, err := os.ReadFile(config.LogPath())
+	data, err := os.ReadFile(config.LogPathFor(ws, ""))
 	if err != nil {
 		t.Fatalf("log file not written: %v", err)
 	}
@@ -8823,5 +8824,173 @@ func TestUnstageableConfigRowsStillWaitForTheTask(t *testing.T) {
 	}
 	if m.state != stConfig {
 		t.Errorf("state = %v, want stConfig — an unstageable row must not leave the panel mid-task", m.state)
+	}
+}
+
+// A named session is an explicit choice, so a collision is an error rather than
+// a decision made silently: the same command must not sometimes continue a
+// thread you forgot about and sometimes throw it away.
+func TestCheckSessionStart(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		exists          bool
+		session         string
+		resume, fresh   bool
+		wantErrContains string
+	}{
+		{name: "resume and new are opposites", session: "cloud", resume: true, fresh: true, wantErrContains: "opposites"},
+		{name: "resume an existing session", session: "cloud", exists: true, resume: true},
+		{name: "resume nothing", session: "cloud", resume: true, wantErrContains: `no saved session named "cloud"`},
+		{name: "new overwrites", session: "cloud", exists: true, fresh: true},
+		{name: "collision without a flag", session: "cloud", exists: true, wantErrContains: "already exists"},
+		{name: "fresh named session", session: "cloud"},
+		// The default thread predates named sessions; a hard error there would
+		// break every plain launch.
+		{name: "default session with history is fine", exists: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkSessionStart(tc.exists, tc.session, tc.resume, tc.fresh)
+			switch {
+			case tc.wantErrContains == "" && err != nil:
+				t.Errorf("unexpected error: %v", err)
+			case tc.wantErrContains != "" && err == nil:
+				t.Errorf("want an error containing %q, got none", tc.wantErrContains)
+			case tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains):
+				t.Errorf("error = %q, want it to contain %q", err, tc.wantErrContains)
+			}
+		})
+	}
+}
+
+// Two sessions on one checkout is the point of -session. They must not share the
+// goal (the second's would overwrite the first's, after which the first
+// session's judge accepts its work against the other's acceptance text), the
+// input history, or the log file.
+func TestANamedSessionGetsItsOwnGoalHistoryAndLog(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	def := &app{cfg: cfg, workspace: ws}
+
+	namedCfg := config.Default()
+	namedCfg.Workspace, namedCfg.Name = ws, "cloud" // what -session cloud does
+	named := &app{cfg: namedCfg, workspace: ws}
+
+	if def.goalPath() == named.goalPath() {
+		t.Errorf("both sessions share a goal file: %s", def.goalPath())
+	}
+	if def.promptHistPath() == named.promptHistPath() {
+		t.Errorf("both sessions share an input history: %s", def.promptHistPath())
+	}
+	if config.LogPathFor(ws, def.sessionSlug()) == config.LogPathFor(ws, named.sessionSlug()) {
+		t.Errorf("both sessions write to one log: %s", config.LogPathFor(ws, def.sessionSlug()))
+	}
+	if !strings.Contains(config.LogPathFor(ws, named.sessionSlug()), "cloud") {
+		t.Errorf("the named session's log should be findable by name: %s", config.LogPathFor(ws, named.sessionSlug()))
+	}
+	// …and two WORKSPACES don't share one either, which is the case a pair of
+	// test scripts hits: different -C, no -session at all.
+	if config.LogPathFor("/tmp/oduvanchik", "") == config.LogPathFor("/tmp/romashka", "") {
+		t.Error("two checkouts write to one log — the case two test scripts hit")
+	}
+	if got := filepath.Base(config.LogPathFor("/tmp/oduvanchik", "")); got != "agent-oduvanchik.log" {
+		t.Errorf("log = %q, want agent-oduvanchik.log — a name you can tail without looking up a hash", got)
+	}
+
+	// …and the default session's paths are exactly what they were, so nothing
+	// moves for anyone who never passes -session.
+	if got, want := filepath.Base(def.goalPath()), "goal.json"; got != want {
+		t.Errorf("default goal file = %q, want %q", got, want)
+	}
+	if got, want := filepath.Base(def.promptHistPath()), "history"; got != want {
+		t.Errorf("default history file = %q, want %q", got, want)
+	}
+
+	// Facts and lessons stay shared on purpose: they describe the project, and
+	// both sessions should benefit from what either one learns.
+	if def.factsPath() != named.factsPath() {
+		t.Errorf("facts were split per session: %s vs %s", def.factsPath(), named.factsPath())
+	}
+}
+
+// Two sessions on one checkout share the facts store on purpose — facts describe
+// the project. Sharing only works if a save MERGES: each process holds its own
+// list, so writing that list back is how the later save silently erases
+// everything the other learned since it started.
+func TestTwoSessionsDoNotClobberEachOthersFacts(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	open := func(session string) *app {
+		t.Helper()
+		a, cleanup, err := build(ws, session, nil, bufio.NewReader(strings.NewReader("")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(cleanup)
+		if err := a.wire(); err != nil {
+			t.Fatal(err)
+		}
+		return a
+	}
+	// Both open BEFORE either writes — the shape of two terminals started
+	// together, and the shape the old code lost data in.
+	local, cloud := open(""), open("cloud")
+
+	local.addFacts([]string{"the build runs with make"})
+	cloud.addFacts([]string{"the tests need a local server"})
+
+	var onDisk []string
+	data, err := os.ReadFile(local.factsPath())
+	if err != nil {
+		t.Fatalf("facts file: %v", err)
+	}
+	if err := json.Unmarshal(data, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(onDisk, " | ")
+	if !strings.Contains(joined, "make") {
+		t.Errorf("the first session's fact was erased by the second's save: %s", joined)
+	}
+	if !strings.Contains(joined, "local server") {
+		t.Errorf("the second session's fact never landed: %s", joined)
+	}
+	// The saving process also adopts what it merged with, so its own prompt is
+	// built from the store as it now actually is.
+	if !strings.Contains(strings.Join(cloud.factsSnapshot(), " | "), "make") {
+		t.Errorf("the saving session didn't pick up the other's fact: %v", cloud.factsSnapshot())
+	}
+}
+
+// The same guarantee for input history: the default session has no name to
+// collide on, so one workspace open twice is a normal thing to happen.
+func TestTwoRunsDoNotClobberEachOthersPromptHistory(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	open := func() *app {
+		t.Helper()
+		a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(cleanup)
+		return a
+	}
+	first, second := open(), open()
+
+	first.addPromptHist("/goal ship the parser")
+	second.addPromptHist("run the tests")
+
+	var onDisk []string
+	data, err := os.ReadFile(first.promptHistPath())
+	if err != nil {
+		t.Fatalf("history file: %v", err)
+	}
+	if err := json.Unmarshal(data, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(onDisk, " | ")
+	if !strings.Contains(joined, "ship the parser") || !strings.Contains(joined, "run the tests") {
+		t.Errorf("history = %s, want both runs' lines", joined)
 	}
 }

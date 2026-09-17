@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,13 @@ func (s *sessionArchiver) Archive(goal, entry string) {
 	defer s.mu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
 		return
+	}
+	// s.mu only orders the goroutines inside THIS process. An archive record is
+	// a whole turn's text and routinely exceeds the size an O_APPEND write is
+	// atomic at, so a second process appending at the same moment can interleave
+	// halfway through a line and leave neither record parseable.
+	if unlock, err := filelock.Lock(s.path); err == nil {
+		defer unlock()
 	}
 	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {

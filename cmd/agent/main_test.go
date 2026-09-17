@@ -318,7 +318,7 @@ func TestRedirectLogToFile(t *testing.T) {
 	prev := slog.Default()
 	defer slog.SetDefault(prev)
 
-	closeLog := redirectLogToFile()
+	closeLog := redirectLogToFile("")
 	if closeLog == nil {
 		t.Fatal("redirectLogToFile returned nil (couldn't open the log file)")
 	}
@@ -8823,5 +8823,86 @@ func TestUnstageableConfigRowsStillWaitForTheTask(t *testing.T) {
 	}
 	if m.state != stConfig {
 		t.Errorf("state = %v, want stConfig — an unstageable row must not leave the panel mid-task", m.state)
+	}
+}
+
+// A named session is an explicit choice, so a collision is an error rather than
+// a decision made silently: the same command must not sometimes continue a
+// thread you forgot about and sometimes throw it away.
+func TestCheckSessionStart(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		exists          bool
+		session         string
+		resume, fresh   bool
+		wantErrContains string
+	}{
+		{name: "resume and new are opposites", session: "cloud", resume: true, fresh: true, wantErrContains: "opposites"},
+		{name: "resume an existing session", session: "cloud", exists: true, resume: true},
+		{name: "resume nothing", session: "cloud", resume: true, wantErrContains: `no saved session named "cloud"`},
+		{name: "new overwrites", session: "cloud", exists: true, fresh: true},
+		{name: "collision without a flag", session: "cloud", exists: true, wantErrContains: "already exists"},
+		{name: "fresh named session", session: "cloud"},
+		// The default thread predates named sessions; a hard error there would
+		// break every plain launch.
+		{name: "default session with history is fine", exists: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkSessionStart(tc.exists, tc.session, tc.resume, tc.fresh)
+			switch {
+			case tc.wantErrContains == "" && err != nil:
+				t.Errorf("unexpected error: %v", err)
+			case tc.wantErrContains != "" && err == nil:
+				t.Errorf("want an error containing %q, got none", tc.wantErrContains)
+			case tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains):
+				t.Errorf("error = %q, want it to contain %q", err, tc.wantErrContains)
+			}
+		})
+	}
+}
+
+// Two sessions on one checkout is the point of -session. They must not share the
+// goal (the second's would overwrite the first's, after which the first
+// session's judge accepts its work against the other's acceptance text), the
+// input history, or the log file.
+func TestANamedSessionGetsItsOwnGoalHistoryAndLog(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	def := &app{cfg: cfg, workspace: ws}
+
+	namedCfg := config.Default()
+	namedCfg.Workspace, namedCfg.Name = ws, "cloud" // what -session cloud does
+	named := &app{cfg: namedCfg, workspace: ws}
+
+	if def.goalPath() == named.goalPath() {
+		t.Errorf("both sessions share a goal file: %s", def.goalPath())
+	}
+	if def.promptHistPath() == named.promptHistPath() {
+		t.Errorf("both sessions share an input history: %s", def.promptHistPath())
+	}
+	if config.LogPathFor(def.sessionSlug()) == config.LogPathFor(named.sessionSlug()) {
+		t.Errorf("both sessions write to one log: %s", config.LogPathFor(def.sessionSlug()))
+	}
+	if !strings.Contains(config.LogPathFor(named.sessionSlug()), "cloud") {
+		t.Errorf("the named session's log should be findable by name: %s", config.LogPathFor(named.sessionSlug()))
+	}
+
+	// …and the default session's paths are exactly what they were, so nothing
+	// moves for anyone who never passes -session.
+	if got, want := filepath.Base(def.goalPath()), "goal.json"; got != want {
+		t.Errorf("default goal file = %q, want %q", got, want)
+	}
+	if got, want := filepath.Base(def.promptHistPath()), "history"; got != want {
+		t.Errorf("default history file = %q, want %q", got, want)
+	}
+	if got, want := filepath.Base(config.LogPathFor(def.sessionSlug())), "agent.log"; got != want {
+		t.Errorf("default log = %q, want %q", got, want)
+	}
+	// Facts and lessons stay shared on purpose: they describe the project, and
+	// both sessions should benefit from what either one learns.
+	if def.factsPath() != named.factsPath() {
+		t.Errorf("facts were split per session: %s vs %s", def.factsPath(), named.factsPath())
 	}
 }

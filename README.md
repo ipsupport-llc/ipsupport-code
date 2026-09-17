@@ -282,8 +282,25 @@ from the CLI:
 
 ```sh
 ./ipsupport-code -new "fresh task"              # ignore the saved session
-./ipsupport-code -session review "look at X"    # a separate named thread (review.json)
+./ipsupport-code -session review "look at X"    # start a named thread
+./ipsupport-code -session review -resume        # continue it
+./ipsupport-code -session review -new           # start it over (overwrites)
 ```
+
+A **named** session is an explicit choice, so relaunching one without saying
+which you meant is an error rather than a silent guess:
+
+```
+$ ./ipsupport-code -session review
+error: session "review" already exists — -resume to continue it, or -new to start over (overwrites it)
+```
+
+Each named session keeps its own saved thread, its own **standing goal**, its own
+input history and its own **log file** (`~/.config/ipsupport-code/agent-<name>.log`),
+so two of them can work the same checkout at once — a local model in one
+terminal, a cloud model in another — without interleaving their logs or stealing
+each other's goal. Learned **facts and lessons stay shared**: those describe the
+project, and both sessions should benefit from what either one learns.
 
 In the TUI, `/sessions` lists/switches/deletes threads, `/new <name>` starts a
 fresh named thread (the old one stays in `/sessions`), and `/new` clears the

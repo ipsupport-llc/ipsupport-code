@@ -74,6 +74,7 @@ func main() {
 		dumpPrompt      bool
 		newSession      bool
 		sessionName     string
+		resumeSession   bool
 		skipPermissions bool
 		overrides       overrideFlags
 		clearOnStart    bool
@@ -85,7 +86,8 @@ func main() {
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.BoolVar(&dumpPrompt, "dump-prompt", false, "print the built-in system prompt and exit (e.g. > .agent/system.md to start editing)")
 	flag.BoolVar(&newSession, "new", false, "start a fresh session (don't restore the saved one)")
-	flag.StringVar(&sessionName, "session", "", "use a named session (a separate saved thread)")
+	flag.StringVar(&sessionName, "session", "", "use a named session (a separate saved thread, its own log and goal)")
+	flag.BoolVar(&resumeSession, "resume", false, "continue a saved session instead of starting a new one (with -session <name>, that named thread)")
 	flag.BoolVar(&skipPermissions, "skip-permissions", false, "don't ask before file writes or shell commands this run (equivalent to -override run.default=allow -override file.default=allow); not persisted")
 	flag.Var(&overrides, "override", "override a config key for this run only, key=value (repeatable, e.g. -override llm.temperature=0.7); same dotted keys as `config set`, never persisted")
 	flag.BoolVar(&clearOnStart, "clear", false, "wipe this thread's history, learned facts and lessons, and session permissions before starting (like /clear, but at launch)")
@@ -158,6 +160,21 @@ func main() {
 	}
 	app.startupShowThinking = showThinking
 
+	// A NAMED session is an explicit choice, so a collision is an error rather
+	// than a decision made silently on the user's behalf. -session is how you run
+	// a second thread against one checkout — a cloud model beside the local one —
+	// and "reuse whatever is there" meant the same command either continued a
+	// thread you had forgotten about or, with -new, threw it away, with nothing
+	// at launch to tell the two apart.
+	if err := checkSessionStart(app.existingSessionPath() != "", sessionName, resumeSession, newSession); err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		cleanup() // os.Exit skips defers
+		os.Exit(1)
+	}
+	if resumeSession {
+		newSession = false // -resume is the opposite of -new; the table above already rejected both
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
@@ -178,15 +195,18 @@ func main() {
 	case isTTY():
 		// The TUI owns the alt-screen — routing logs to stderr would bleed raw
 		// "level=WARN …" lines over the interface (retries are shown in-UI anyway).
-		if closeLog := redirectLogToFile(); closeLog != nil {
+		if closeLog := redirectLogToFile(app.sessionSlug()); closeLog != nil {
 			defer closeLog()
 		}
 		// -it with a task: skip the chooser too (same as -new would), so an
 		// explicit "run this now" launch isn't gated behind a "resume a
 		// session?" prompt — an EXPLICIT -session restore below still wins,
 		// this only affects the ambiguous chooser case.
-		app.startNew = newSession || taskText != ""
-		if sessionName != "" && !newSession { // -session: go straight to that named thread
+		app.startNew = newSession || (taskText != "" && !resumeSession)
+		// -session <name> or -resume: go straight to that thread, no chooser. A
+		// named session that does NOT exist yet falls through as a fresh one —
+		// checkSessionStart has already rejected the ambiguous combinations.
+		if (sessionName != "" || resumeSession) && !newSession {
 			app.loadSession()
 			app.sessionRestored = app.ag.SessionLen() > 0
 		}
@@ -203,6 +223,36 @@ func main() {
 		}
 		app.repl(ctx)
 	}
+}
+
+// checkSessionStart applies the launch rules for a NAMED session and returns the
+// error the user should see instead of a silent choice:
+//
+//	-resume -new            contradictory
+//	-resume, exists         continue it
+//	-resume, does not exist error — starting fresh here loses the thread you
+//	                        asked for, and nothing on screen would say so
+//	-new                    start over, overwriting
+//	neither, exists         error — say which flag you meant
+//	neither, does not exist start fresh
+//
+// Without -session the default thread keeps its old behaviour (the chooser, or a
+// silent continue when piped): that path predates named sessions and a hard
+// error there would break every plain launch.
+func checkSessionStart(exists bool, name string, resume, fresh bool) error {
+	if resume && fresh {
+		return errors.New("-resume and -new are opposites — pass one")
+	}
+	if name == "" {
+		return nil
+	}
+	switch {
+	case resume && !exists:
+		return fmt.Errorf("no saved session named %q — drop -resume to start it", name)
+	case !resume && !fresh && exists:
+		return fmt.Errorf("session %q already exists — -resume to continue it, or -new to start over (overwrites it)", name)
+	}
+	return nil
 }
 
 // runUpdate downloads and installs a newer binary from GitHub Releases for the
@@ -1311,7 +1361,40 @@ func (a *app) migrateLegacyState() {
 	}
 }
 
-func (a *app) goalPath() string { return a.statePath("goal.json") }
+// defaultSessionSlug is what slugName yields for an unnamed session (and for the
+// default display name). That session's state files keep their original,
+// unsuffixed paths, so nothing moves for anyone who never passes -session.
+const defaultSessionSlug = "ipsupport-code"
+
+// sessionSlug is "" for the default session and the session's slug for a named
+// one (-session, or a /rename).
+func (a *app) sessionSlug() string {
+	if s := slugName(a.cfg.Name); s != defaultSessionSlug {
+		return s
+	}
+	return ""
+}
+
+// scopedStatePath is a state file belonging to ONE session rather than to the
+// workspace: goal.json for the default session, goal-<slug>.json for a named one.
+//
+// The saved conversation was already per-session (sessionPath); the goal and the
+// input history were not, and that made two sessions on one checkout silently
+// wrong rather than merely untidy. The second session's goal overwrote the
+// first's, and from that moment the first session's judge was accepting its work
+// against the OTHER session's acceptance text — the one thing the goal loop is
+// built to get right.
+//
+// Deliberately NOT applied to facts.json or lessons.json: those describe the
+// project, and both sessions should benefit from what either one learns.
+func (a *app) scopedStatePath(base, ext string) string {
+	if slug := a.sessionSlug(); slug != "" {
+		return a.statePath(base + "-" + slug + ext)
+	}
+	return a.statePath(base + ext)
+}
+
+func (a *app) goalPath() string { return a.scopedStatePath("goal", ".json") }
 
 // loadGoal reads the persisted goal (best-effort; a missing/garbled file = none).
 func (a *app) loadGoal() {
@@ -1588,7 +1671,7 @@ func (a *app) goalLoopBudget() int {
 
 const maxPromptHist = 200
 
-func (a *app) promptHistPath() string { return a.statePath("history") }
+func (a *app) promptHistPath() string { return a.scopedStatePath("history", "") }
 
 // loadPromptHist reads the persisted input history (best-effort).
 func (a *app) loadPromptHist() {
@@ -5696,15 +5779,18 @@ func setupLogging() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel()})))
 }
 
-// redirectLogToFile points the logger at config.LogPath() instead of stderr, so
-// TUI runs don't corrupt the alt-screen with raw log lines. Returns a closer, or
-// nil (leaving stderr logging) if the file can't be opened. Tail the file to
+// redirectLogToFile points the logger at this session's log file instead of
+// stderr, so TUI runs don't corrupt the alt-screen with raw log lines. A named
+// session gets its own file (see config.LogPathFor) — two sessions sharing one
+// agent.log interleave line by line and neither can be read. Returns a closer,
+// or nil (leaving stderr logging) if the file can't be opened. Tail the file to
 // watch warnings/retries live.
-func redirectLogToFile() func() {
-	_ = os.MkdirAll(filepath.Dir(config.LogPath()), 0o755) // config dir may not exist on first run
-	f, err := os.OpenFile(config.LogPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+func redirectLogToFile(slug string) func() {
+	path := config.LogPathFor(slug)
+	_ = os.MkdirAll(filepath.Dir(path), 0o755) // config dir may not exist on first run
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
-		slog.Warn("could not open log file — logging to stderr", "path", config.LogPath(), "err", err)
+		slog.Warn("could not open log file — logging to stderr", "path", path, "err", err)
 		return nil
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: logLevel()})))

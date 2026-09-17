@@ -470,6 +470,19 @@ func SnippetsPath() string { return filepath.Join(configHome(), "snippets.json")
 // would corrupt the alt-screen). Tail it to watch retries/warnings live.
 func LogPath() string { return filepath.Join(configHome(), "agent.log") }
 
+// LogPathFor is the log file for one named session. Running two sessions against
+// the same checkout is the point of -session — the local model in one terminal,
+// a cloud model in another — and a single shared agent.log interleaves both
+// processes line by line, which makes it useless exactly when there is something
+// to diagnose. slug "" is the default session and keeps the original path, so
+// nothing moves for anyone who never passes -session.
+func LogPathFor(slug string) string {
+	if slug == "" {
+		return LogPath()
+	}
+	return filepath.Join(configHome(), "agent-"+slug+".log")
+}
+
 // SystemPromptPath is the optional global system-prompt override file; if it (or
 // a workspace .agent/system.md) exists, it replaces the built-in base prompt.
 func SystemPromptPath() string { return filepath.Join(configHome(), "system.md") }

@@ -120,6 +120,21 @@ func main() {
 			return
 		}
 	}
+	// A flag written AFTER the task is silently swallowed into it. Go's flag
+	// package stops parsing at the first non-flag argument, so
+	//
+	//     ipsupport-code -C test "do the thing" -override provider=openai
+	//
+	// asks the model to do "do the thing -override provider=openai" — on the
+	// default model, with nothing on screen saying the flag was ignored.
+	// Reported live: it looked exactly like -override not working.
+	if bad := misplacedFlags(flag.Args(), flag.Lookup); len(bad) > 0 {
+		fmt.Fprintf(os.Stderr, "error: %s must come BEFORE the task text — written there it was read as part of the task, not as a flag\n",
+			strings.Join(bad, " "))
+		fmt.Fprintf(os.Stderr, "  try: ipsupport-code %s \"your task\"\n", strings.Join(bad, " "))
+		os.Exit(1)
+	}
+
 	setupLogging()
 
 	reader := bufio.NewReader(os.Stdin)
@@ -252,6 +267,39 @@ func checkSessionStart(exists bool, name string, resume, fresh bool) error {
 		return fmt.Errorf("session %q already exists — -resume to continue it, or -new to start over (overwrites it)", name)
 	}
 	return nil
+}
+
+// misplacedFlags returns the leftover arguments that name a real flag of this
+// program. They can only get here by sitting after the task text, where
+// flag.Parse has already stopped looking — so they are not task words that
+// happen to start with a dash, they are flags the user meant to pass.
+//
+// lookup is flag.Lookup in main; taking it as a parameter is what makes this
+// testable, since the flags are registered inside main() and a test binary's
+// flag.CommandLine therefore knows none of them.
+func misplacedFlags(args []string, lookup func(string) *flag.Flag) []string {
+	var out []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			continue
+		}
+		name, _, hasValue := strings.Cut(strings.TrimLeft(a, "-"), "=")
+		f := lookup(name)
+		if name == "" || f == nil {
+			continue
+		}
+		out = append(out, a)
+		// Take the value along, so the suggested command is one you can paste:
+		// "-override provider=openai" is two shell words, and reporting only
+		// "-override" would hand back a command that fails differently.
+		if bv, ok := f.Value.(interface{ IsBoolFlag() bool }); (!ok || !bv.IsBoolFlag()) && !hasValue &&
+			i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			out = append(out, args[i+1])
+			i++
+		}
+	}
+	return out
 }
 
 // runUpdate downloads and installs a newer binary from GitHub Releases for the

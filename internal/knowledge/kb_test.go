@@ -489,6 +489,17 @@ func TestIsProjectSpecific(t *testing.T) {
 		`Provide proper path parameter: {"path": "nemotron-extreme-quant/PLAN.md", "content": "..."}`,
 		"edit cmd/agent/main.go instead",
 		"the config lives at .agent/config.json",
+		// A path with an extension was the ONLY shape caught until these were
+		// added — everything below sailed through into the store and back out
+		// into a later run's hints.
+		"cd ../sipmesh && make",
+		"use the API key from ~/.config/creds",
+		"the server is at http://192.168.1.50:1234/v1",
+		"point it at localhost:1234 first",
+		"the endpoint is api.example.com:8443",
+		"export TOKEN=ghp_abcdefghijklmnop before pushing",
+		"set OPENAI_API_KEY=sk-abcdefghijklmnop",
+		"the password: hunter2000 is already set",
 	}
 	for _, s := range poisoned {
 		if !IsProjectSpecific(s) {
@@ -503,6 +514,16 @@ func TestIsProjectSpecific(t *testing.T) {
 		"go.mod already exists — skip init",
 		"pass --prefix=/usr/local to configure",
 		"use sudo",
+		// These must survive: a repo-relative path is the same in every checkout,
+		// and a bare directory or a plain number is not a leaked value.
+		"run ./configure before make",
+		"raise the timeout to 300 seconds",
+		"the helpers live in internal/knowledge",
+	}
+	for _, s := range general {
+		if HasCredential(s) {
+			t.Errorf("HasCredential(%q) = true, want false", s)
+		}
 	}
 	for _, s := range general {
 		if IsProjectSpecific(s) {
@@ -642,5 +663,28 @@ func TestAProvenFixSupersedesAnEarlierDeadEnd(t *testing.T) {
 		Context: "file: write", ProvenFix: "give up again"})
 	if got := kb.All()[0]; got.Kind == KindAvoid || got.ProvenFix != "send params as a real JSON object" {
 		t.Errorf("a proven fix was overwritten by a later dead end: %+v", got)
+	}
+}
+
+// A rejected lesson is logged so a silent drop isn't mistaken for reflection
+// finding nothing — but the string that got it rejected may be the secret
+// itself, and agent.log is a file. HasCredential is what lets the caller tell
+// the two rejection reasons apart.
+func TestHasCredentialSpotsWhatMustNotBeLogged(t *testing.T) {
+	secret := []string{
+		"export TOKEN=ghp_abcdefghijklmnop",
+		"OPENAI_API_KEY=sk-abcdefghijklmnop",
+		"api_key: abcdefghijklmnop",
+		"the password = hunter2000",
+		"SLACK=xoxb-1234567890-abcdef",
+		"AWS key AKIAIOSFODNN7EXAMPLE",
+	}
+	for _, s := range secret {
+		if !HasCredential(s) {
+			t.Errorf("HasCredential(%q) = false, want true", s)
+		}
+		if !IsProjectSpecific(s) {
+			t.Errorf("IsProjectSpecific(%q) = false — a secret is a value from one run and must never be stored", s)
+		}
 	}
 }

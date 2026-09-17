@@ -5158,7 +5158,12 @@ func (a *app) dropFact(fact string) bool {
 // itself instead of waiting for the entries to age out of retention.
 func (a *app) dropPoisonedLessons() {
 	n := a.kb.DropWhere(func(p knowledge.Pitfall) bool {
-		return knowledge.IsProjectSpecific(p.ErrorPattern) || knowledge.IsProjectSpecific(p.ProvenFix)
+		// Context included, and on the same rule the write path enforces: a store
+		// written before the rule widened heals on the next start rather than
+		// keeping entries that would now be refused.
+		return knowledge.IsProjectSpecific(p.ErrorPattern) ||
+			knowledge.IsProjectSpecific(p.ProvenFix) ||
+			knowledge.IsProjectSpecific(p.Context)
 	})
 	if n == 0 {
 		return

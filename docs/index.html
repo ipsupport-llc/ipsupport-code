@@ -3,11 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ipsupport-code — a self-learning local coding agent for LM Studio</title>
-<meta name="description" content="A small self-learning local coding agent for LM Studio, in a single static binary. Drives your own local model through a reason → act → observe loop, learns from past runs, and runs under a permission policy you control.">
+<title>ipsupport-code — a self-learning coding agent for any OpenAI-compatible model</title>
+<meta name="description" content="A self-learning coding agent in a single static binary. Drives your own model — any OpenAI-compatible server, local (LLMTray, LM Studio, Ollama, vLLM) or cloud (OpenAI, Anthropic, Grok, Groq, OpenRouter, Z.ai) — through a reason → act → observe loop, learns from past runs, and runs under a permission policy you control.">
 <meta name="google-site-verification" content="vPSnv-ACweVU7zedD6wmncgyS5txK4xSHu5ZJ_OzHII" />
-<meta property="og:title" content="ipsupport-code">
-<meta property="og:description" content="A self-learning local coding agent for LM Studio — single static binary, your model, your machine.">
+<meta property="og:title" content="ipsupport-code — a self-learning coding agent for any OpenAI-compatible model">
+<meta property="og:description" content="A self-learning coding agent for your own model — any OpenAI-compatible server, local or cloud. Single static binary, your machine, your keys.">
+<meta property="og:site_name" content="ipsupport-code">
+<meta property="og:locale" content="en_US">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="ipsupport-code — a self-learning coding agent for any OpenAI-compatible model">
+<meta name="twitter:description" content="Drives your own model — local (LLMTray, LM Studio, Ollama, vLLM) or cloud — through a reason → act → observe loop, and learns from past runs.">
+<meta name="theme-color" content="#0c0c11">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://ipsupport-llc.github.io/ipsupport-code/">
 <link rel="canonical" href="https://ipsupport-llc.github.io/ipsupport-code/">
@@ -17,13 +23,15 @@
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
   "name": "ipsupport-code",
-  "description": "A small self-learning local coding agent for LM Studio, in a single static binary. Drives your own local model through a reason → act → observe loop, learns from past runs, and runs under a permission policy you control.",
+  "description": "A self-learning coding agent in a single static binary. Drives your own model — any OpenAI-compatible server, local or cloud — through a reason → act → observe loop, learns from past runs, and runs under a permission policy you control.",
   "url": "https://ipsupport-llc.github.io/ipsupport-code/",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "Linux, macOS, Windows",
   "codeRepository": "https://github.com/ipsupport-llc/ipsupport-code",
   "downloadUrl": "https://github.com/ipsupport-llc/ipsupport-code/releases/latest",
   "license": "https://opensource.org/licenses/MIT",
+  "isAccessibleForFree": true,
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
   "author": { "@type": "Organization", "name": "ipsupport-llc" }
 }
 </script>
@@ -119,7 +127,9 @@
   ol.steps code,p code,li code{font-family:var(--mono);background:var(--bg-soft);border:1px solid var(--rule);
               border-radius:5px;padding:1px 6px;font-size:13px;color:var(--fg)}
 
-  .providers{display:flex;gap:10px;flex-wrap:wrap}
+  .providers{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:22px}
+  .chip-head{font-family:var(--mono);font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+             color:var(--dim);font-weight:600;margin:0 0 10px}
   .chip{font-family:var(--mono);font-size:13.5px;background:var(--bg-elev);border:1px solid var(--rule);
         border-radius:8px;padding:8px 13px}
   .chip b{color:var(--accent)}
@@ -136,13 +146,16 @@
   <header>
     <div class="mark">single static binary · zero dependencies · local-first</div>
     <h1><span class="star">✦</span> ipsupport-code</h1>
-    <p class="tagline">A <b>self-learning</b> local coding agent for
-       <a href="https://lmstudio.ai">LM Studio</a> — in a single static binary.</p>
-    <p class="sub">It drives your own local model through a reason → act → observe loop over a
-       handful of fat tools, recovers from errors using lessons it learned on past runs, and gets
-       better over time. Local by default — but the same loop runs any OpenAI-compatible provider
-       (OpenAI, Anthropic, Grok, Groq, OpenRouter, Z.ai), and it can <b>delegate a task to a sub-agent on
-       a different model</b>. Your machine, your keys, under a permission policy you control.</p>
+    <p class="tagline">A <b>self-learning</b> coding agent that drives <b>your own model</b> —
+       any OpenAI-compatible server, local or cloud, in a single static binary.</p>
+    <p class="sub">It runs a reason → act → observe loop over a handful of fat tools, recovers from
+       errors using lessons it learned on past runs, and gets better over time. Local-first —
+       <a href="https://github.com/ipsupport-llc/llmtray">LLMTray</a> (our pick on a Mac),
+       <a href="https://lmstudio.ai">LM Studio</a>, Ollama, vLLM, or anything else serving
+       <span class="mono">/v1/chat/completions</span> — and the same loop runs the cloud providers
+       (OpenAI, Anthropic, Grok, Groq, OpenRouter, Z.ai) when you want one. It can also
+       <b>delegate a task to a sub-agent on a different model</b>. Your machine, your keys, under a
+       permission policy you control.</p>
 
     <div class="badges">
       <a href="https://github.com/ipsupport-llc/ipsupport-code/actions/workflows/ci.yml"><img alt="ci" src="https://github.com/ipsupport-llc/ipsupport-code/actions/workflows/ci.yml/badge.svg"></a>
@@ -201,7 +214,7 @@ cwd    ~/myproject</span>
       <div class="card"><h3><span class="i">▪</span>Single static binary</h3><p>One executable, <span class="mono">CGO_ENABLED=0</span> — no Python, no Node, no runtime, no virtualenv to rot. Download, run, done. It updates itself in place.</p></div>
       <div class="card"><h3><span class="i">✦</span>Self-learning</h3><p>After each task it reflects and writes durable lessons and project facts to disk, then folds them into the next run. Tool errors are met with fixes it found before.</p></div>
       <div class="card"><h3><span class="i">⚙</span>Fat tools</h3><p>One tool per domain — <span class="mono">file · run · git · web · calc</span> — so the catalog stays tiny and small models route well. Native tool-calls only.</p></div>
-      <div class="card"><h3><span class="i">∙</span>Your model, your machine</h3><p>LM Studio by default over its OpenAI-compatible server. Nothing leaves your box unless you point it at a cloud provider.</p></div>
+      <div class="card"><h3><span class="i">∙</span>Your model, your machine</h3><p>Any local server speaking OpenAI's API — <a href="https://github.com/ipsupport-llc/llmtray">LLMTray</a> on a Mac, LM Studio, Ollama, vLLM. Nothing leaves your box unless you point it at a cloud provider.</p></div>
       <div class="card"><h3><span class="i">⇄</span>Multi-provider</h3><p>One <span class="mono">/ai key</span> away from OpenAI, Anthropic, Grok, Groq, OpenRouter, or Z.ai — switch models live with <span class="mono">/model</span> (search its 300+).</p></div>
       <div class="card"><h3><span class="i">⇉</span>Sub-agents</h3><p>Delegate a task to a sub-agent on <em>another</em> model — run locally, then have a frontier model review the diff, or compare a review across 2–3 models. Paid spawns ask first.</p></div>
       <div class="card"><h3><span class="i">⌥</span>Sessions &amp; usage</h3><p>Per-name sessions with restore-on-startup, plus a token ledger with day/week/month rollups and estimated <span class="mono">$</span> cost by model.</p></div>
@@ -219,8 +232,11 @@ cwd    ~/myproject</span>
       <li><b>Install</b> — run the one-liner above (or grab an archive from
           <a href="https://github.com/ipsupport-llc/ipsupport-code/releases/latest">releases</a>).
           It lands in <code>~/.local/bin</code>.</li>
-      <li><b>Point it at a model</b> — start <a href="https://lmstudio.ai">LM Studio</a>, load a model,
-          and start its local server. Prefer the cloud? <code>ipsupport-code</code> then
+      <li><b>Point it at a model</b> — start any local server that speaks the OpenAI API.
+          On a Mac we recommend <a href="https://github.com/ipsupport-llc/llmtray">LLMTray</a>: a menu-bar
+          app that runs <a href="https://github.com/ml-explore/mlx-lm">mlx-lm</a> natively on Apple
+          Silicon. Elsewhere, <a href="https://lmstudio.ai">LM Studio</a>, Ollama or vLLM do the same job.
+          Prefer the cloud? <code>ipsupport-code</code> then
           <code>/ai key openrouter sk-…</code> and <code>/ai openrouter</code>.</li>
       <li><b>Run it</b> — <code>cd your-project &amp;&amp; ipsupport-code</code>, then type a task.
           It edits files, runs commands, and reports real output — under your permission policy.</li>
@@ -259,15 +275,27 @@ cwd    ~/myproject</span>
 
   <section id="providers">
     <h2><span class="h">#</span> works with</h2>
-    <p class="lead">OpenAI-compatible at the core, so the agent is model-agnostic — local first, cloud when you want it.</p>
+    <p class="lead">OpenAI-compatible at the core, so the agent is model-agnostic — local first, cloud when you want it.
+       Anything serving <span class="mono">/v1/chat/completions</span> works, including keyless local servers.</p>
+    <h3 class="chip-head">Local</h3>
     <div class="providers">
-      <span class="chip"><b>LM Studio</b> — local, default</span>
+      <span class="chip"><b>LLMTray</b> <span class="dim">— macOS, Apple Silicon</span></span>
+      <span class="chip">LM Studio</span>
+      <span class="chip">Ollama</span>
+      <span class="chip">vLLM</span>
+      <span class="chip">any OpenAI-compatible server</span>
+    </div>
+    <h3 class="chip-head">Cloud</h3>
+    <div class="providers">
       <span class="chip">OpenAI</span>
       <span class="chip">Anthropic</span>
       <span class="chip">Grok <span class="dim">(xAI)</span></span>
       <span class="chip">Groq</span>
       <span class="chip">OpenRouter</span>
       <span class="chip">Z.ai <span class="dim">(GLM)</span></span>
+    </div>
+    <h3 class="chip-head">External agents</h3>
+    <div class="providers">
       <span class="chip">codex / claude / aider <span class="dim">(as sub-agents)</span></span>
     </div>
   </section>

@@ -7,9 +7,9 @@
 
 **Website: [ipsupport-llc.github.io/ipsupport-code](https://ipsupport-llc.github.io/ipsupport-code/)**
 
-A small **self-learning local coding agent** for [LM Studio](https://lmstudio.ai),
-in a single static binary. It drives a local model through a reason → act →
-observe loop over a handful of fat tools (`file`, `run`, `git`, `web`, `calc`),
+A small **self-learning coding agent** for your own model — any OpenAI-compatible
+server, local or cloud — in a single static binary. It drives that model through a
+reason → act → observe loop over a handful of fat tools (`file`, `run`, `git`, `web`, `calc`),
 recovers from tool errors using lessons it learned on past runs, and — after each
 task — reflects and writes new lessons to disk so it actually gets better over
 time.
@@ -37,7 +37,7 @@ machine, with your own model, under a permission policy you control.
 - 🧰 Fat tools — `file` · `run` · `git` · `web` · `calc`, behind a permission policy + workspace jail
 - 🧠 Self-learning — distils lessons from each run and recovers from repeat mistakes
 - 🎯 Goals — `/goal` pursues a multi-turn objective; a judge re-feeds it until it's actually met
-- 🌐 Any model — local LM Studio by default, or any OpenAI-compatible provider (incl. keyless local ones)
+- 🌐 Any model — local first ([LLMTray](https://github.com/ipsupport-llc/llmtray) on a Mac, LM Studio, Ollama, vLLM — keyless local servers included), or any OpenAI-compatible provider
 - 🤝 Sub-agents — delegate/fan-out across other models **or local CLI agents** (codex/claude/…) and merge the results
 - 🛎️ Steer live — `/steer <note>` nudges a running task mid-flight (and `/btw <question>` asks a quick side question), without stopping it (esc still cancels)
 - 💰 Guardrails — `/budget` spend cap per run · `/diff` to review what the agent changed
@@ -248,14 +248,17 @@ repeating it. It stays inside the workspace jail.
 **Offline?** `/offline on` cuts the agent's OWN internet use — the web tool
 refuses with a clear "no internet" message and the startup update check is
 skipped. Your configured model connection is untouched either way — if it's
-LM Studio on localhost that needs no network anyway; if you pointed it at a
+a local server on localhost it needs no network anyway; if you pointed it at a
 remote endpoint, that traffic still goes out. `/offline off` re-enables it.
 
 ## Quick start
 
-1. In LM Studio, load a **tool-calling** model (e.g. `qwen2.5-7b-instruct`) and
-   start the local server on port `1234`. **No local model?** Skip this — the
-   next step asks.
+1. Start a local server with a **tool-calling** model loaded (e.g.
+   `qwen2.5-7b-instruct`) on port `1234`. On a Mac we recommend
+   [LLMTray](https://github.com/ipsupport-llc/llmtray) — a menu-bar app running
+   [mlx-lm](https://github.com/ml-explore/mlx-lm) natively on Apple Silicon;
+   [LM Studio](https://lmstudio.ai), Ollama and vLLM do the same job anywhere.
+   **No local model?** Skip this — the next step asks.
 2. First interactive run asks whether you have a local model server running. If
    yes, it walks you through the server URL, API key (blank for LM Studio), and
    model, and confirms the connection. If no, it asks for a provider name — a

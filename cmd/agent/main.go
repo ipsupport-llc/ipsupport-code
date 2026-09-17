@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -2037,7 +2038,7 @@ func (a *app) reasoningCommand(arg string) []string {
 	scope, provider, model := "", a.providerName(), a.activeLLM().Model
 	if rest, ok := strings.CutPrefix(arg, "reflect"); ok && (rest == "" || rest[0] == ' ') {
 		scope, arg = "reflect:", strings.TrimSpace(rest)
-		_, _, _, provider, model = a.reflectTarget()
+		_, _, provider, model = a.reflectTarget()
 	} else if rest, ok := strings.CutPrefix(arg, "judge"); ok && (rest == "" || rest[0] == ' ') {
 		// The goal judge answers one question — met or not — and a reasoning
 		// model that thinks as hard about that as about the task itself can
@@ -3517,10 +3518,10 @@ func today() string { return time.Now().Format("2006-01-02") }
 
 // reflectTarget picks the model for the reflection pass: a configured profile
 // (reflect_profile) on a capable model, else the current model. Returns the
-// client, whether to use the lite (local) prompt, whether it's a separate client
-// (so its token spend must be recorded), and its provider/model for the ledger.
-func (a *app) reflectTarget() (client *llm.OpenAIClient, lite, separate bool, provider, model string) {
-	prov, cfg, usingProfile := a.providerName(), a.activeLLM(), false
+// client, whether to use the lite (local) prompt, and its provider/model for the
+// ledger.
+func (a *app) reflectTarget() (client *llm.OpenAIClient, lite bool, provider, model string) {
+	prov, cfg := a.providerName(), a.activeLLM()
 	if name := strings.TrimSpace(a.cfg.ReflectProfile); name != "" {
 		if p, ok := a.cfg.Agents[name]; ok {
 			pp := p.Provider
@@ -3539,59 +3540,106 @@ func (a *app) reflectTarget() (client *llm.OpenAIClient, lite, separate bool, pr
 				if p.Model != "" {
 					c.Model = p.Model
 				}
-				prov, cfg, usingProfile = pp, c, true
+				prov, cfg = pp, c
 			}
 		}
 	}
 	model, lite = cfg.Model, prov == "local"
-	// reflect-scope reasoning lets the learning pass differ from the main run.
-	_, ovM := a.cfg.Reasoning["reflect:"+prov+"/"+model]
-	_, ovP := a.cfg.Reasoning["reflect:"+prov]
-	if !usingProfile && !ovM && !ovP { // same model, no reflect override → reuse main client
-		return a.client, lite, false, prov, model
-	}
+	// Always its OWN connection, never a.client — even for the same model with no
+	// reflect override, which used to be reused here. Reflection now runs off the
+	// task's goroutine (see startReflect), and a shared client means shared
+	// Usage()/Context() counters: the learning pass would clobber the very numbers
+	// the context meter shows and recordUsage bills the NEXT task by. The judge
+	// already has its own for the same reason (see wireJudge).
+	//
+	// reflect-scope reasoning lets the learning pass differ from the main run;
+	// reasoningParams falls back to the task model's own keys, so an unscoped
+	// reflection keeps exactly the reasoning it had while it shared the client.
 	cfg.Extra = a.reasoningParams(prov, model, "reflect")
-	return llm.NewOpenAIClient(cfg), lite, true, prov, model
+	return llm.NewOpenAIClient(cfg), lite, prov, model
 }
 
-// reflectAndStore runs the post-task reflection and persists new lessons,
-// emitting a "lesson" event for each. Returns how many were new.
-func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
+// reflectJob is a reflection pass resolved on the goroutine that owns a.cfg and
+// then handed to one that doesn't. reflectTarget reads a.cfg.Agents and
+// a.cfg.Reasoning — Go maps, which /config can be writing — so picking the target
+// and making the call have to sit on opposite sides of that handoff.
+type reflectJob struct {
+	client   *llm.OpenAIClient
+	lite     bool
+	provider string
+	model    string
+}
+
+// reflectResult is everything one pass produced: what it learned, what it cost,
+// and how it went. It shares nothing with the app, so it can cross a goroutine
+// boundary and be applied later by whoever owns the stores (see applyLessons).
+type reflectResult struct {
+	job     *reflectJob
+	lessons reflect.Lessons
+	prompt  int
+	compl   int
+	dur     time.Duration
+	err     error
+}
+
+// prepareReflect resolves the reflection client, or nil when /reflect is off —
+// the single place that decision is made, for every caller.
+func (a *app) prepareReflect() *reflectJob {
 	if a.cfg.ReflectDisabled { // /reflect off — skip the lesson-distillation pass
-		return 0
+		return nil
 	}
-	client, lite, separate, provider, model := a.reflectTarget()
+	client, lite, provider, model := a.reflectTarget()
+	return &reflectJob{client: client, lite: lite, provider: provider, model: model}
+}
+
+// runReflect performs the pass and NOTHING else: LLM calls only, no writes to the
+// knowledge store, the facts list, the usage ledger or the agent. That is what
+// makes it safe to run off the UI goroutine while the user types the next task.
+func (a *app) runReflect(ctx context.Context, j *reflectJob, tr agent.Transcript) reflectResult {
 	// Signal the learning phase: the task is already DONE; anything slow/looping
 	// from here is the reflection pass, not the task (so it's clear where a hang is).
-	a.emit("reflecting", map[string]any{"model": model})
-	refl := reflect.New(client)
-	refl.Lite = lite // facts-only, terse — for a small local model that loops
+	a.emit("reflecting", map[string]any{"model": j.model})
+	refl := reflect.New(j.client)
+	refl.Lite = j.lite // facts-only, terse — for a small local model that loops
 	start := time.Now()
 	lessons, err := refl.Reflect(ctx, tr)
-	dur := time.Since(start)
-	if separate && a.usage != nil { // a dedicated reflect model's spend isn't in the main client —
-		// recorded even on a failed call below: tokens already streamed/billed
-		// before the error still cost real money and must not vanish from the
-		// ledger/budget guard just because the call ultimately errored.
-		if p, c := client.Usage(); p > 0 || c > 0 {
-			a.usage.Add(today(), provider, model, p, c, dur)
-			a.addSessionCost(model, p, c, a.priceOverrides()) // for the budget guard
-			_ = a.usage.Save()
-		}
+	res := reflectResult{job: j, lessons: lessons, dur: time.Since(start), err: err}
+	// Read even when the call failed: tokens already streamed/billed before the
+	// error still cost real money and must not vanish from the ledger/budget
+	// guard just because the call ultimately errored.
+	res.prompt, res.compl = j.client.Usage()
+	return res
+}
+
+// applyLessons persists what a pass learned and bills what it cost. Every line
+// here writes state the main goroutine owns — a.kb, the facts list, the usage
+// ledger, the agent's system prompt — so it must run THERE, never on the
+// goroutine that made the call. Returns how many lessons were new.
+func (a *app) applyLessons(res reflectResult) int {
+	if a.usage != nil && (res.prompt > 0 || res.compl > 0) {
+		a.usage.Add(today(), res.job.provider, res.job.model, res.prompt, res.compl, res.dur)
+		a.addSessionCost(res.job.model, res.prompt, res.compl, a.priceOverrides()) // for the budget guard
+		_ = a.usage.Save()
 	}
-	if err != nil {
-		slog.Warn("reflection failed", "err", err)
+	if res.err != nil {
+		if errors.Is(res.err, context.Canceled) {
+			// Not a failure: a new task took the model back (see stopReflect).
+			slog.Debug("reflection cancelled", "model", res.job.model, "dur", res.dur)
+		} else {
+			slog.Warn("reflection failed", "err", res.err)
+		}
 		return 0
 	}
+	lessons := res.lessons
 	// One line per pass, whatever the outcome. Reported live: a run with three
 	// failing turns produced no lessons at all, and the log could not say
 	// whether reflection had run and found nothing, had been handed something it
 	// could not read, or had never happened — every one of those was silence.
 	// "parsed" is the distinction that matters: a model saying "nothing to learn
 	// here" and a model whose answer we could not decode need opposite fixes.
-	slog.Debug("reflect done", "model", model, "lite", lite,
+	slog.Debug("reflect done", "model", res.job.model, "lite", res.job.lite,
 		"facts", len(lessons.Facts), "pitfalls", len(lessons.Pitfalls),
-		"parsed", lessons.Parsed, "reply", lessons.Reply, "dur", dur)
+		"parsed", lessons.Parsed, "reply", lessons.Reply, "dur", res.dur)
 	learned := 0
 	for _, p := range lessons.Pitfalls {
 		if a.kb.Add(p) {
@@ -3621,6 +3669,19 @@ func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
 		a.emit("reflected", map[string]any{"parsed": lessons.Parsed, "reply": lessons.Reply})
 	}
 	return learned
+}
+
+// reflectAndStore runs the pass and applies it inline, for the callers with
+// nothing to unblock: one-shot mode (the process is about to exit) and /loop (the
+// UI stays busy across iterations anyway). The TUI splits the two halves across a
+// goroutine instead, so the prompt comes back the moment the task is done — see
+// startReflect. Returns how many lessons were new.
+func (a *app) reflectAndStore(ctx context.Context, tr agent.Transcript) int {
+	j := a.prepareReflect()
+	if j == nil {
+		return 0
+	}
+	return a.applyLessons(a.runReflect(ctx, j, tr))
 }
 
 // runOne is the plain (printing) path used in one-shot and piped modes. It
@@ -3694,11 +3755,15 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 }
 
 // runTaskStreaming is the TUI path: no printing — progress reaches the screen via
-// the UI tracer. Errors surface as an "error" event.
-func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
+// the UI tracer. Errors surface as an "error" event. It returns the finished
+// transcript and whether it is worth reflecting on; it does NOT reflect itself,
+// because that call is what used to keep the prompt locked for a minute after the
+// answer was already on screen. The caller decides where the pass runs: /loop
+// inline (the UI stays busy anyway), the TUI on its own goroutine.
+func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) (agent.Transcript, bool) {
 	if a.budgetExceeded() {
 		a.emit("error", map[string]any{"text": a.budgetMsg()})
-		return
+		return agent.Transcript{}, false
 	}
 	// maybeRewireHistoryTool is NOT called here: runTaskStreaming runs on the
 	// tea.Cmd's own goroutine, and wire() (which it can trigger) reassigns
@@ -3718,31 +3783,25 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) {
 	tr, err := a.ag.Run(ctx, goal)
 	dur := a.runDuration(start, waitSnapshot)
 	if a.taskEpoch.Load() != epoch {
-		return // force-detached mid-run — its results belong to a run the UI abandoned
+		return agent.Transcript{}, false // force-detached mid-run — its results belong to a run the UI abandoned
 	}
 	if err != nil {
 		a.recordUsage(dur) // the failed attempt may have burned real tokens — don't drop them
 		a.emit("error", map[string]any{"text": err.Error()})
-		return
+		return agent.Transcript{}, false
 	}
-	a.lastRealContext = tr.PromptTokens // snapshot the real fullness before reflectAndStore (below) can clobber the shared client's own Context()
+	a.lastRealContext = tr.PromptTokens // the real fullness of the task's own client, before anything else touches it
 	a.recordRun(tr)
 	a.finishGoal(tr)
 	a.recordUsage(dur)
 	a.saveSession() // the conversation is decided now — save it before the slower,
-	// best-effort reflection below. That matters because /exit quits immediately even
-	// while state is still "busy" (reflecting) rather than making the user wait for it
-	// (see commandWhileBusy) — saving here first means the just-finished exchange (the
+	// best-effort reflection the caller runs next. That matters because /exit quits
+	// immediately rather than making the user wait for that pass (see
+	// commandWhileBusy) — saving here first means the just-finished exchange (the
 	// part the user actually sees and cares about) reaches disk before that race even
 	// becomes possible, instead of depending on reflection finishing first.
-	if !tr.Cancelled { // see the same gate in runOne — a stopped run still teaches
-		reflStart := time.Now()
-		a.reflectAndStore(ctx, tr)
-		// Flush reflection's own tokens now — same reasoning as runOne's matching
-		// flush (see there): a next task's recordUsage delta may never come (the
-		// process could exit right after), so this can't wait for that.
-		a.recordUsage(time.Since(reflStart))
-	}
+	return tr, !tr.Cancelled // see the same gate in runOne — a stopped run still teaches,
+	// cancellation doesn't: esc means the user wants control back, not two more model calls.
 }
 
 func (a *app) repl(ctx context.Context) {

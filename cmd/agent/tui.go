@@ -25,6 +25,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/selfupdate"
@@ -94,6 +95,9 @@ type tuiModel struct {
 	chooseRows    []sessionMeta // saved sessions offered by the startup chooser (stChooseSession)
 	chooseCursor  int           // selected row (0..len = the "new session" row)
 	cancel        context.CancelFunc
+	reflectCancel context.CancelFunc // in-flight learning pass; a new task cancels it (see startTask)
+	learning      bool               // a learning pass is running in the background — shown in the status line
+	heldLessons   *reflectResult     // a pass that landed while a task was running; applied when that task ends
 	taskStart     time.Time
 	startTok      int
 	retry         *retryInfo
@@ -146,7 +150,20 @@ type retryInfo struct {
 // Bubble Tea messages.
 type eventMsg uiEvent
 type approvalMsg approvalReq
-type taskDoneMsg struct{ epoch int64 } // which run finished — a force-detached run's is stale
+
+// taskDoneMsg says which run finished (a force-detached run's is stale) and
+// carries its transcript, so the UI can start the learning pass itself instead of
+// the task goroutine blocking on it — see startReflect.
+type taskDoneMsg struct {
+	epoch   int64
+	tr      agent.Transcript
+	reflect bool // worth a learning pass (not cancelled, ran at all)
+}
+
+// reflectDoneMsg is a finished learning pass on its way back to the goroutine
+// that owns the stores. Nothing in it has been applied yet. It needs no epoch
+// guard: a force-detached run reports nothing to reflect on in the first place.
+type reflectDoneMsg struct{ res reflectResult }
 type compactDoneMsg struct {
 	n     int
 	err   error
@@ -593,7 +610,13 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case e.kind == "subagent_done": // finished — close the line, log the outcome
 			m.push(m.subDone(e)...)
 		case e.kind == "reflecting": // task is done; now distilling lessons
-			m.busyMsg = "distilling lessons from this task"
+			if m.state == stRunning {
+				// Only /loop still reflects inline, where the UI genuinely is busy.
+				// After a normal task the pass runs in the background and the prompt
+				// is already back, so labelling the UI "busy" would be a lie — the
+				// status line says "learning…" next to "ready" instead.
+				m.busyMsg = "distilling lessons from this task"
+			}
 		case e.fields["agent"] != nil: // a sub-agent's own step — update its line only
 			m.subUpdate(e)
 		default:
@@ -643,7 +666,16 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.steer = nil                 // steering notes belonged to the run that just ended
 		m.applyPendingMode()          // a shift+tab during the task takes effect now, before the next one
 		detect := m.detectWindowCmd() // model is loaded now — confirm the real window
-		if m.state != stRunning {     // a modal panel is open over the finished task — keep it; finalize on close
+		if held := m.heldLessons; held != nil {
+			// A pass from the PREVIOUS task finished under this one — apply it now
+			// that nothing is reading the stores (see the reflectDoneMsg handler).
+			m.heldLessons = nil
+			m.app.applyLessons(*held)
+		}
+		// The task is over and its answer is on screen: everything below returns to
+		// the user, and the learning pass runs behind it instead of in front of it.
+		detect = tea.Batch(detect, m.startReflect(msg))
+		if m.state != stRunning { // a modal panel is open over the finished task — keep it; finalize on close
 			m.taskDoneAway = true
 			return m, detect
 		}
@@ -664,6 +696,18 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return model, tea.Batch(detect, cmd)
 		}
 		return m, tea.Batch(detect, m.input.Focus())
+
+	case reflectDoneMsg:
+		m.learning, m.reflectCancel = false, nil
+		if m.cancel != nil {
+			// A task started while the pass was finishing. Applying now would write
+			// a.kb, the facts list and the agent's system prompt underneath a run
+			// that is reading them — hold it until that run ends (see taskDoneMsg).
+			m.heldLessons = &msg.res
+			return m, nil
+		}
+		m.app.applyLessons(msg.res)
+		return m, nil
 
 	case compactDoneMsg:
 		if msg.epoch != m.epoch {
@@ -1817,6 +1861,12 @@ func (m *tuiModel) startCompact(auto bool, focus string) tea.Cmd {
 // startTask flips to running state with a fresh cancelable context and abort
 // signal, returning both so the caller's goroutine can defer the cancel.
 func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
+	// A learning pass still running belongs to the task before this one, and on a
+	// local model it is competing for the same GPU: the new task would wait behind
+	// it with nothing on screen to say why. Lessons are best-effort and the task
+	// is not, so the task wins. (Anything it already spent is still billed — see
+	// runReflect.)
+	m.stopReflect()
 	m.state = stRunning
 	m.taskStart = time.Now()
 	m.busyMsg = "" // a real model task → "thinking", not a labelled chore
@@ -1867,9 +1917,43 @@ func (m *tuiModel) runTask(goal string) tea.Cmd {
 	ep := m.epoch                  // captured synchronously so a later force-detach can't shift it
 	return func() tea.Msg {
 		defer cancel()
-		m.app.runTaskStreaming(tctx, goal, ep)
-		return taskDoneMsg{epoch: ep}
+		tr, learn := m.app.runTaskStreaming(tctx, goal, ep)
+		return taskDoneMsg{epoch: ep, tr: tr, reflect: learn}
 	}
+}
+
+// startReflect runs the post-task learning pass on its own goroutine and brings
+// the result back as a reflectDoneMsg for the UI to apply. Splitting it this way
+// is the whole point: the pass is two more model calls on a local box — a minute
+// and a half was normal — and it used to sit between the finished answer and the
+// prompt coming back. The LLM half runs here; every write it implies happens on
+// the UI goroutine, which owns those stores.
+func (m *tuiModel) startReflect(done taskDoneMsg) tea.Cmd {
+	if !done.reflect {
+		return nil
+	}
+	job := m.app.prepareReflect() // resolved HERE: it reads a.cfg maps the panel writes
+	if job == nil {               // /reflect off
+		return nil
+	}
+	// Deliberately rooted at m.ctx, not the task's context: the task's is already
+	// cancelled by the time this runs (runTask defers cancel()).
+	ctx, cancel := context.WithCancel(m.ctx)
+	m.reflectCancel, m.learning = cancel, true
+	tr := done.tr
+	return func() tea.Msg {
+		defer cancel()
+		return reflectDoneMsg{res: m.app.runReflect(ctx, job, tr)}
+	}
+}
+
+// stopReflect cancels an in-flight learning pass and forgets it.
+func (m *tuiModel) stopReflect() {
+	if m.reflectCancel != nil {
+		m.reflectCancel()
+		m.reflectCancel = nil
+	}
+	m.learning = false
 }
 
 // runLoop re-runs a goal on an interval: it runs once, waits interval, runs
@@ -1892,7 +1976,13 @@ func (m *tuiModel) runLoop(interval time.Duration, max int, goal string) tea.Cmd
 				break
 			}
 			m.bridge.Emit("loop", map[string]any{"i": i + 1, "max": max, "every": interval.String()})
-			m.app.runTaskStreaming(tctx, goal, ep)
+			// Inline here, unlike runTask: a loop holds the UI busy across every
+			// iteration regardless, so there is no prompt to hand back early, and
+			// each iteration's lessons should reach the store before the next one
+			// builds its prompt.
+			if tr, learn := m.app.runTaskStreaming(tctx, goal, ep); learn {
+				m.app.reflectAndStore(tctx, tr)
+			}
 			// runLoop emits taskDoneMsg only once, after every iteration — the
 			// per-task auto-compact check in the taskDoneMsg handler never fires
 			// mid-loop, so check inline here instead, exactly like runOne does
@@ -2004,8 +2094,12 @@ func (m *tuiModel) View() string {
 		if s := m.ctxMeter(); s != "" {
 			meter = cDim.Render(" · ") + s
 		}
+		ready := "ready"
+		if m.learning { // the task is done and the prompt is yours — this is the pass behind it
+			ready = "ready · ✦ learning…"
+		}
 		status = cDim.Render(fmt.Sprintf("%s · %s · ctx %s", m.app.providerModel(), filepath.Base(m.app.effectiveDir()), ctxStr)) +
-			meter + m.goalBadge() + cDim.Render(fmt.Sprintf(" · ↑%s · ready", humanK(c)))
+			meter + m.goalBadge() + cDim.Render(fmt.Sprintf(" · ↑%s · %s", humanK(c), ready))
 	}
 
 	bottom := m.modeLine()

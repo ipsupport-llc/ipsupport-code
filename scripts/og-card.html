@@ -1,0 +1,60 @@
+<!doctype html><html><head><meta charset="utf-8">
+<!--
+  Source for docs/og.png — the 1200x630 card link previews show.
+
+  Regenerate after changing the copy, the palette, or the provider list:
+
+    google-chrome --headless --disable-gpu --hide-scrollbars \
+      --window-size=1200,630 --screenshot=card.png scripts/og-card.html
+    magick card.png -strip -colors 128 -define png:compression-level=9 docs/og.png
+
+  The palette-reduction step is not cosmetic: it takes the file from 201KB to
+  52KB with no visible banding, and this is the repository's only binary.
+  Keep the two og:image:width/height tags in docs/*.html in step with the size.
+--><style>
+  @page{size:1200px 630px;margin:0}
+  *{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --bg:#0c0c11; --bg-elev:#15151d; --fg:#e7e7f0; --dim:#8b8b9c; --rule:#2a2a37;
+    --accent:#e879f9; --accent2:#22d3ee;
+    --mono:"DejaVu Sans Mono",ui-monospace,monospace;
+    --sans:"DejaVu Sans",system-ui,sans-serif;
+  }
+  body{width:1200px;height:630px;background:var(--bg);color:var(--fg);font-family:var(--sans);
+       overflow:hidden;position:relative}
+  .glow{position:absolute;width:900px;height:900px;left:-240px;top:-420px;border-radius:50%;
+        background:radial-gradient(circle,rgba(232,121,249,.16),rgba(232,121,249,0) 62%)}
+  .glow2{position:absolute;width:760px;height:760px;right:-230px;bottom:-400px;border-radius:50%;
+         background:radial-gradient(circle,rgba(34,211,238,.13),rgba(34,211,238,0) 62%)}
+  .pad{position:relative;padding:68px 76px;height:100%;display:flex;flex-direction:column}
+  .mark{font-family:var(--mono);font-size:19px;letter-spacing:.2em;text-transform:uppercase;color:var(--dim)}
+  h1{font-family:var(--mono);font-size:86px;font-weight:700;letter-spacing:-.02em;margin:26px 0 0;line-height:1}
+  h1 .star{color:var(--accent)}
+  .tag{font-size:37px;line-height:1.3;margin-top:26px;max-width:940px}
+  .tag b{color:var(--accent)}
+  .sub{font-family:var(--mono);font-size:22px;color:var(--dim);margin-top:18px}
+  .spacer{flex:1}
+  .chips{display:flex;gap:11px;flex-wrap:wrap;align-items:center}
+  .chip{font-family:var(--mono);font-size:19px;background:var(--bg-elev);border:1px solid var(--rule);
+        border-radius:999px;padding:9px 17px;color:var(--fg)}
+  .chip.hot{border-color:var(--accent);color:#fff}
+  .foot{display:flex;justify-content:space-between;align-items:flex-end;margin-top:30px}
+  .url{font-family:var(--mono);font-size:21px;color:var(--accent2)}
+  .rule{height:1px;background:var(--rule);margin:0 0 26px}
+</style></head><body>
+  <div class="glow"></div><div class="glow2"></div>
+  <div class="pad">
+    <div class="mark">single static binary · zero dependencies · local-first</div>
+    <h1><span class="star">✦</span> ipsupport-code</h1>
+    <div class="tag">A <b>self-learning</b> coding agent that drives <b>your own model</b></div>
+    <div class="sub">any OpenAI-compatible server — local or cloud</div>
+    <div class="spacer"></div>
+    <div class="rule"></div>
+    <div class="chips">
+      <span class="chip hot">LLMTray</span><span class="chip">LM Studio</span><span class="chip">Ollama</span>
+      <span class="chip">vLLM</span><span class="chip">OpenAI</span><span class="chip">Anthropic</span>
+      <span class="chip">Groq</span><span class="chip">OpenRouter</span>
+    </div>
+    <div class="foot"><span class="url">ipsupport-llc.github.io/ipsupport-code</span></div>
+  </div>
+</body></html>

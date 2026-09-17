@@ -29,7 +29,6 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
-	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
@@ -195,7 +194,7 @@ func main() {
 	case isTTY():
 		// The TUI owns the alt-screen — routing logs to stderr would bleed raw
 		// "level=WARN …" lines over the interface (retries are shown in-UI anyway).
-		if closeLog := redirectLogToFile(app.sessionSlug()); closeLog != nil {
+		if closeLog := redirectLogToFile(app.workspace, app.sessionSlug()); closeLog != nil {
 			defer closeLog()
 		}
 		// -it with a task: skip the chooser too (same as -new would), so an
@@ -1420,7 +1419,7 @@ func (a *app) goalSnapshot() goalState {
 
 func (a *app) saveGoal() error {
 	data, _ := json.MarshalIndent(a.goalSnapshot(), "", "  ")
-	return atomicfile.Write(a.goalPath(), data, 0o644)
+	return writeShared(a.goalPath(), data, 0o644)
 }
 
 // launchGoalText reports the goal to set-and-pursue, or ("", false) when the
@@ -1695,14 +1694,20 @@ func (a *app) addPromptHist(line string) {
 	if n := len(a.promptHist); n > 0 && a.promptHist[n-1] == line {
 		return
 	}
-	a.promptHist = append(a.promptHist, line)
-	if len(a.promptHist) > maxPromptHist {
-		a.promptHist = a.promptHist[len(a.promptHist)-maxPromptHist:]
-	}
-	data, _ := json.Marshal(a.promptHist)
-	if err := atomicfile.Write(a.promptHistPath(), data, 0o644); err != nil {
-		slog.Warn("prompt history not saved", "err", err)
-	}
+	// Appended to what is on disk NOW, not to the copy this process read at
+	// startup: the same workspace can be open twice (the default session has no
+	// name to collide on), and writing our own copy would drop every line the
+	// other one typed since.
+	a.promptHist = updateSharedStrings(a.promptHistPath(), 0o644, func(onDisk []string) ([]string, bool) {
+		if n := len(onDisk); n > 0 && onDisk[n-1] == line {
+			return onDisk, false
+		}
+		out := append(append([]string(nil), onDisk...), line)
+		if len(out) > maxPromptHist {
+			out = out[len(out)-maxPromptHist:]
+		}
+		return out, true
+	})
 }
 
 // redactSecrets masks a raw credential out of a line before it's persisted to
@@ -2987,7 +2992,7 @@ func humanizeAgo(t time.Time) string {
 func (a *app) saveSession() {
 	sf := sessionFile{History: a.ag.History(), Workdir: a.workdirRel()}
 	if data, err := json.Marshal(sf); err == nil {
-		_ = atomicfile.Write(a.sessionPath(), data, 0o644)
+		_ = writeShared(a.sessionPath(), data, 0o644)
 	}
 }
 
@@ -3242,12 +3247,42 @@ func (a *app) clearFacts() {
 func (a *app) addFacts(facts []string) (added []string, promptChanged bool) {
 	a.statusMu.Lock()
 	before := injectedFacts(a.facts)
+	a.statusMu.Unlock()
+
+	// The merge runs against what is ON DISK, under the store's lock — not
+	// against the list this process loaded at startup. Facts are shared by every
+	// session on the checkout on purpose (they describe the project), and this is
+	// what makes that sharing work in both directions instead of whichever
+	// process saved last silently erasing the other's.
+	merged := updateSharedStrings(a.factsPath(), 0o644, func(onDisk []string) ([]string, bool) {
+		out, newly, confirmed := mergeFacts(onDisk, facts)
+		added = newly
+		return out, len(newly) > 0 || len(confirmed) > 0
+	})
+
+	a.statusMu.Lock()
+	a.facts = merged
+	// Only what the model will actually SEE counts as a prompt change. A
+	// re-derived fact that was already inside the injected window moves within
+	// the store but changes nothing in the prompt — and rebuilding the system
+	// prompt on every task would invalidate the provider's cached prefix for no
+	// benefit, which on a local server is the difference between a warm and a
+	// cold request.
+	promptChanged = !sameStrings(before, injectedFacts(a.facts))
+	a.statusMu.Unlock()
+	return added, promptChanged
+}
+
+// mergeFacts applies incoming facts to a list and reports what was genuinely new
+// and what was re-confirmed. Pure, because it has to give the same answer
+// applied to the list in memory and to the list on disk.
+func mergeFacts(list, incoming []string) (out, added, confirmed []string) {
+	out = append([]string(nil), list...)
 	seen := map[string]bool{}
-	for _, f := range a.facts {
+	for _, f := range out {
 		seen[strings.ToLower(f)] = true
 	}
-	var confirmed []string
-	for _, f := range facts {
+	for _, f := range incoming {
 		f = strings.TrimSpace(f)
 		if f == "" {
 			continue
@@ -3268,33 +3303,16 @@ func (a *app) addFacts(facts []string) (added []string, promptChanged bool) {
 			continue
 		}
 		seen[strings.ToLower(f)] = true
-		a.facts = append(a.facts, f)
+		out = append(out, f)
 		added = append(added, f)
 	}
 	if len(confirmed) > 0 {
-		a.facts = moveToEnd(a.facts, confirmed)
+		out = moveToEnd(out, confirmed)
 	}
-	if len(a.facts) > maxFacts {
-		a.facts = append([]string(nil), a.facts[len(a.facts)-maxFacts:]...)
+	if len(out) > maxFacts {
+		out = append([]string(nil), out[len(out)-maxFacts:]...)
 	}
-	// Only what the model will actually SEE counts as a prompt change. A
-	// re-derived fact that was already inside the injected window moves within
-	// the store but changes nothing in the prompt — and rebuilding the system
-	// prompt on every task would invalidate the provider's cached prefix for no
-	// benefit, which on a local server is the difference between a warm and a
-	// cold request.
-	promptChanged = !sameStrings(before, injectedFacts(a.facts))
-	var snapshot []string
-	if len(added) > 0 || len(confirmed) > 0 {
-		snapshot = append([]string(nil), a.facts...)
-	}
-	a.statusMu.Unlock()
-	if snapshot != nil {
-		if data, err := json.Marshal(snapshot); err == nil {
-			_ = atomicfile.Write(a.factsPath(), data, 0o644)
-		}
-	}
-	return added, promptChanged
+	return out, added, confirmed
 }
 
 // injectedFacts is the tail of the store that systemPrompt actually shows —
@@ -5207,27 +5225,31 @@ func (a *app) knowledgeDrop(arg string) []string {
 func (a *app) dropFact(fact string) bool {
 	a.statusMu.Lock()
 	before := injectedFacts(a.facts)
-	kept := make([]string, 0, len(a.facts))
-	removed := false
-	for _, f := range a.facts {
-		if !removed && f == fact {
-			removed = true
-			continue
-		}
-		kept = append(kept, f)
-	}
-	if !removed {
-		a.statusMu.Unlock()
-		return false
-	}
-	a.facts = kept
-	changed := !sameStrings(before, injectedFacts(a.facts))
-	snapshot := append([]string(nil), a.facts...)
 	a.statusMu.Unlock()
 
-	if data, err := json.Marshal(snapshot); err == nil {
-		_ = atomicfile.Write(a.factsPath(), data, 0o644)
+	// Removed from the list on disk under the lock, for the same reason addFacts
+	// merges there: dropping one fact must not also roll back everything another
+	// session has learned since this one started.
+	removed := false
+	merged := updateSharedStrings(a.factsPath(), 0o644, func(onDisk []string) ([]string, bool) {
+		kept := make([]string, 0, len(onDisk))
+		for _, f := range onDisk {
+			if !removed && f == fact {
+				removed = true
+				continue
+			}
+			kept = append(kept, f)
+		}
+		return kept, removed
+	})
+	if !removed {
+		return false
 	}
+
+	a.statusMu.Lock()
+	a.facts = merged
+	changed := !sameStrings(before, injectedFacts(a.facts))
+	a.statusMu.Unlock()
 	if changed && a.ag != nil {
 		a.ag.SetSystem(a.systemPrompt())
 	}
@@ -5779,14 +5801,12 @@ func setupLogging() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel()})))
 }
 
-// redirectLogToFile points the logger at this session's log file instead of
-// stderr, so TUI runs don't corrupt the alt-screen with raw log lines. A named
-// session gets its own file (see config.LogPathFor) — two sessions sharing one
-// agent.log interleave line by line and neither can be read. Returns a closer,
-// or nil (leaving stderr logging) if the file can't be opened. Tail the file to
-// watch warnings/retries live.
-func redirectLogToFile(slug string) func() {
-	path := config.LogPathFor(slug)
+// redirectLogToFile points the logger at this run's own log file instead of
+// stderr, so TUI runs don't corrupt the alt-screen with raw log lines. The file
+// is per workspace AND per session — see config.LogPathFor. Returns a closer, or
+// nil (leaving stderr logging) if the file can't be opened.
+func redirectLogToFile(workspace, session string) func() {
+	path := config.LogPathFor(workspace, session)
 	_ = os.MkdirAll(filepath.Dir(path), 0o755) // config dir may not exist on first run
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {

@@ -136,30 +136,3 @@ hints are injected, which changes the prompt on successful turns — the one pla
 the current design is careful to stay out of. Both reviews flagged the shape as
 limiting; neither proposed a mechanism that pays for itself. It is here so it is
 not rediscovered as new.
-
----
-
-## 5. Two sessions in one workspace can clobber each other's facts
-
-**What is wrong.** `facts.json` is per workspace and written with a plain
-`atomicfile.Write` — no lock, no re-read. With two sessions running against the
-same checkout (which `-session` now makes a supported thing to do), each holds
-its own in-memory list and writes the whole thing: whoever saves last silently
-drops whatever the other learned since it started.
-
-**How found.** Auditing what collides between parallel sessions while adding the
-per-session log/goal/history split. The other two shared stores are already safe
-— `lessons.json` and `usage.json` both take a `filelock` and merge under it.
-
-**The fix.** The shape is already in the codebase: `knowledge.KB.Save` locks,
-re-reads what is on disk, merges its own *pending* entries into that, and writes.
-Facts need the same — track which facts this process added since its last save,
-and apply only those to the on-disk list under the lock.
-
-**What it breaks.** `addFacts` currently decides ordering (`moveToEnd`) and the
-`maxFacts` cap against the in-memory list; doing it against a freshly-read disk
-list means a fact this session pushed to the end can be pushed back by the other
-session's save, so "most recent last" becomes "most recently *saved* last". That
-is arguably more correct and definitely different, and `injectedFacts` picks the
-last 15 — so which facts reach the prompt can change without the session that
-learned them doing anything.

@@ -295,12 +295,29 @@ $ ./ipsupport-code -session review
 error: session "review" already exists — -resume to continue it, or -new to start over (overwrites it)
 ```
 
-Each named session keeps its own saved thread, its own **standing goal**, its own
-input history and its own **log file** (`~/.config/ipsupport-code/agent-<name>.log`),
-so two of them can work the same checkout at once — a local model in one
-terminal, a cloud model in another — without interleaving their logs or stealing
-each other's goal. Learned **facts and lessons stay shared**: those describe the
-project, and both sessions should benefit from what either one learns.
+Each named session keeps its own saved thread, its own **standing goal** and its
+own input history, so two of them can work the same checkout at once — a local
+model in one terminal, a cloud model in another — without stealing each other's
+goal. Learned **facts and lessons stay shared**: those describe the project, and
+both sessions benefit from what either one learns.
+
+Logs are per **workspace** and per session:
+
+```
+~/.config/ipsupport-code/agent-test.log          # -C test
+~/.config/ipsupport-code/agent-test-remote.log   # -C test-remote
+~/.config/ipsupport-code/agent-test-cloud.log    # -C test -session cloud
+```
+
+Named by the directory's basename, so you can tail one without looking up a
+hash. (Two checkouts with the same basename share a log — unlike the state
+directory, where a collision would mix two projects' memory rather than two
+logs.)
+
+Every shared state file is written under a cross-process lock, and the ones both
+runs add to — learned facts, lessons, the usage ledger, input history — are
+**merged** under it rather than overwritten, so a second run never erases what
+the first learned.
 
 In the TUI, `/sessions` lists/switches/deletes threads, `/new <name>` starts a
 fresh named thread (the old one stays in `/sessions`), and `/new` clears the

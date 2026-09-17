@@ -25,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
+	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
 )
 
@@ -185,7 +186,7 @@ func (s *Store) saveSeeded(m map[string]string) error {
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(s.seededPath(), data, 0o644)
+	return writeLocked(s.seededPath(), data, 0o644)
 }
 
 func (s *Store) statePath() string { return filepath.Join(s.dir, "state.json") }
@@ -200,7 +201,7 @@ func (s *Store) saveState() error {
 	if err != nil {
 		return err
 	}
-	return atomicfile.Write(s.statePath(), data, 0o644)
+	return writeLocked(s.statePath(), data, 0o644)
 }
 
 // List returns every installed skill (enabled and disabled), sorted by name. A
@@ -509,3 +510,14 @@ func parse(fallbackName, text string) Skill {
 }
 
 func oneLine(s string) string { return textutil.OneLine(s, 200) }
+
+// writeLocked writes one of the store's shared files under a cross-process lock.
+// The skills directory is global — every run on the machine reads and writes the
+// same state.json — and s.mu only orders the goroutines inside one process. A
+// lock we cannot take is no reason to lose the write.
+func writeLocked(path string, data []byte, perm os.FileMode) error {
+	if unlock, err := filelock.Lock(path); err == nil {
+		defer unlock()
+	}
+	return atomicfile.Write(path, data, perm)
+}

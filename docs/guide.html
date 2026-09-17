@@ -4,11 +4,17 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ipsupport-code — how to use it</title>
-<meta name="description" content="Install ipsupport-code, connect it to LM Studio, Ollama, or a cloud API, get a model to write and run Hello World, then a fast tour of /goal, /reasoning, /cd, and the other essentials.">
+<meta name="description" content="Install ipsupport-code, point it at a local model (LLMTray on a Mac, LM Studio, Ollama, vLLM) or a cloud API, get it to write and run Hello World, then a fast tour of /goal, /reasoning, /cd, and the other essentials.">
 <meta property="og:title" content="ipsupport-code — how to use it">
 <meta property="og:description" content="From install to your first task in under two minutes — local model, cloud model, or both.">
 <meta property="og:type" content="article">
 <meta property="og:url" content="https://ipsupport-llc.github.io/ipsupport-code/guide.html">
+<meta property="og:site_name" content="ipsupport-code">
+<meta property="og:locale" content="en_US">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="ipsupport-code — how to use it">
+<meta name="twitter:description" content="From install to your first task in under two minutes — local model, cloud model, or both.">
+<meta name="theme-color" content="#0c0c11">
 <link rel="canonical" href="https://ipsupport-llc.github.io/ipsupport-code/guide.html">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>✦</text></svg>">
 <style>
@@ -131,13 +137,19 @@
 
     <div class="path">
       <div class="row">
-        <h4>Local — LM Studio (the default)</h4>
-        <p>Open LM Studio, download a model, load it, and start its local server (the "Developer" tab
-           → <b>Start Server</b>). That's it — <code>ipsupport-code</code> talks to
-           <code>localhost:1234</code> out of the box, nothing to configure.</p>
+        <h4>Local — any OpenAI-compatible server</h4>
+        <p>Anything serving <code>/v1/chat/completions</code> works. <b>On a Mac we recommend
+           <a href="https://github.com/ipsupport-llc/llmtray">LLMTray</a></b> — a menu-bar app that runs
+           <a href="https://github.com/ml-explore/mlx-lm">mlx-lm</a> natively on Apple Silicon: pick a model,
+           hit start, and it serves the OpenAI API locally. Elsewhere (or on a Mac, if you prefer it)
+           <a href="https://lmstudio.ai">LM Studio</a> does the same job — download a model, load it, and
+           start its local server (the "Developer" tab → <b>Start Server</b>); Ollama and vLLM work too.</p>
+        <p><code>ipsupport-code</code> talks to <code>localhost:1234</code> out of the box, which is
+           LM Studio's default port — point it elsewhere with <code>/ai</code> or
+           <code>ipsupport-code config set llm.base_url http://localhost:PORT/v1</code>.</p>
         <div class="term">
           <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>pick which loaded model to use</span></div>
-          <pre><span class="p">❯</span> /model              <span class="d"># lists what's loaded in LM Studio</span>
+          <pre><span class="p">❯</span> /model              <span class="d"># lists what the server has loaded</span>
 <span class="p">❯</span> /model nemotron     <span class="d"># switches to it (a substring is enough)</span></pre>
         </div>
         <div class="reco">
@@ -145,7 +157,7 @@
           <p>For the best tool-calling reliability, use a model fine-tuned specifically for this agent:
              <a href="https://huggingface.co/roman220220/Nemotron-3.5-Lightning-30B-A3B-JANG-GPTQ-ipsupport-code-lora">Nemotron-3.5-Lightning-30B-A3B — ipsupport-code LoRA</a>.
              <span class="dim">Trained on ipsupport-code's own tool-call schema, so it emits the exact <code>{"action","params"}</code>
-             shape reliably instead of garbling it. Any instruct model in LM Studio's catalog works, though — this one is just tuned for less friction.</span></p>
+             shape reliably instead of garbling it. Any instruct model works, though — this one is just tuned for less friction.</span></p>
         </div>
       </div>
 
@@ -189,7 +201,7 @@
     <p class="lead">The whole loop, start to finish.</p>
     <ol class="steps">
       <li><b>Install:</b> run the curl one-liner above in Terminal.</li>
-      <li><b>Start a model:</b> open LM Studio, load any instruct model (the recommended one above, or
+      <li><b>Start a model:</b> start your local server (LLMTray on a Mac, LM Studio, Ollama, vLLM) and load any instruct model (the recommended one above, or
           whatever's already downloaded), hit <b>Start Server</b> on the Developer tab.</li>
       <li><b>Run it:</b> <code>mkdir ~/hello &amp;&amp; cd ~/hello &amp;&amp; ipsupport-code</code></li>
       <li><b>Ask it something:</b> type <code>write hello world in Go and run it</code> and press Enter.</li>
@@ -219,7 +231,7 @@
   <section id="offline">
     <h2><span class="h">✈</span> works with zero signal</h2>
     <p class="lead">On a plane, out of coverage, on a train through a tunnel — none of that matters
-       when the model lives on your own machine. LM Studio, the model, and the agent are all local;
+       when the model lives on your own machine. The server, the model, and the agent are all local;
        there's no cloud round-trip to lose.</p>
     <div class="term">
       <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>no wifi, no problem</span></div>
@@ -231,7 +243,7 @@
     </div>
     <p style="margin:0" class="dim"><code>/offline</code> only stops the agent from reaching <em>out</em>
        (the <code>web</code> tool, update checks) — it doesn't touch your model connection. Pair it
-       with a local LM Studio setup and the whole loop — read, edit, run, test — needs no
+       with a local model server and the whole loop — read, edit, run, test — needs no
        connectivity at all.</p>
   </section>
 

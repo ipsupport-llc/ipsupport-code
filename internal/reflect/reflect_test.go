@@ -1,8 +1,10 @@
 package reflect
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -515,5 +517,53 @@ func TestReflectSkipsAStoppedRunWithNothingRepeated(t *testing.T) {
 	}
 	if len(p2.systems) != 1 {
 		t.Errorf("made %d call(s) on a repeated failure, want 1", len(p2.systems))
+	}
+}
+
+// context is rendered straight into the hint the model sees ("when you saw X
+// while <context>, this worked: …"), and it was the one field never checked —
+// so a path or a host that landed there reached a later run past every guard.
+func TestReflectDropsLessonsLeakingThroughContext(t *testing.T) {
+	reply := `{"pitfalls":[` +
+		`{"domain":"file","error_pattern":"you gave {}","context":"file: write to nemotron-extreme-quant/PLAN.md","proven_fix":"send params as a real JSON object"},` +
+		`{"domain":"web","error_pattern":"connection refused","context":"web: fetch from http://192.168.1.50:1234/v1","proven_fix":"start the server first"},` +
+		`{"domain":"file","error_pattern":"missing required param(s): path","context":"file: write","proven_fix":"send params as a real JSON object, not a JSON-encoded string"}` +
+		`],"facts":[]}`
+	l, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if len(l.Pitfalls) != 1 {
+		t.Fatalf("pitfalls = %+v, want only the one whose context is just an action", l.Pitfalls)
+	}
+	if got := l.Pitfalls[0].Context; got != "file: write" {
+		t.Errorf("kept context %q — a context carrying a value from this run must reject the lesson", got)
+	}
+}
+
+// A rejected lesson is logged so a silent drop can't be mistaken for reflection
+// finding nothing. When what got it rejected IS a secret, that log line would
+// write the secret to agent.log — the exact thing the rejection is preventing.
+func TestARejectedCredentialIsNotWrittenToTheLog(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	reply := `{"pitfalls":[` +
+		`{"domain":"run","error_pattern":"authentication failed","context":"run: shell","proven_fix":"export TOKEN=ghp_abcdefghijklmnop first"}` +
+		`],"facts":[]}`
+	l, err := New(fixedLLM{reply: reply}).Reflect(context.Background(), sampleTranscript())
+	if err != nil {
+		t.Fatalf("Reflect: %v", err)
+	}
+	if len(l.Pitfalls) != 0 {
+		t.Fatalf("pitfalls = %+v, want the credential-bearing lesson dropped", l.Pitfalls)
+	}
+	if out := buf.String(); strings.Contains(out, "ghp_abcdefghijklmnop") {
+		t.Errorf("the rejected secret was written to the log:\n%s", out)
+	}
+	if !strings.Contains(buf.String(), "credential") {
+		t.Errorf("the drop must still be visible in the log, just without the secret:\n%s", buf.String())
 	}
 }

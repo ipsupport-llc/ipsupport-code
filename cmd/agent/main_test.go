@@ -8630,30 +8630,32 @@ func TestTypingWithNoGoalStillQueues(t *testing.T) {
 	}
 }
 
-// Starting a task cancels a learning pass still running behind the last one.
-// They compete for the same local model: without this the new task would queue
-// behind two calls it never asked for, with nothing on screen to explain the
-// wait. Lessons are best-effort; the task the user just typed is not.
-func TestANewTaskCancelsTheLearningPass(t *testing.T) {
-	in := textarea.New()
-	in.SetWidth(76)
+// Starting a task must NOT cancel a learning pass still running behind the last
+// one. They do compete for the same local model, so the task waits — but a
+// cancelled pass is a task's lessons lost for good, which is the worse trade.
+// What the UI owes the user instead is an explanation for the wait.
+func TestANewTaskLetsTheLearningPassFinish(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
-	a := &app{cfg: cfg, workspace: cfg.Workspace, client: llm.NewOpenAIClient(cfg.LLM)}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
 	m := &tuiModel{app: a, ctx: context.Background(), bridge: newBridge(),
-		width: 80, height: 24, ready: true, input: in, inputLines: 1}
-
-	cancelled := false
-	m.reflectCancel, m.learning = func() { cancelled = true }, true
+		state: stIdle, input: textarea.New(), spin: spinner.New()}
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = model.(*tuiModel)
+	m.learning = true
 
 	_, cancel := m.startTask()
 	defer cancel()
 
-	if !cancelled {
-		t.Error("starting a task left the previous task's learning pass running — it competes with the new task for the model")
+	if !m.learning {
+		t.Error("starting a task killed the previous task's learning pass — its lessons are lost for good")
 	}
-	if m.learning || m.reflectCancel != nil {
-		t.Errorf("learning=%v reflectCancel!=nil=%v, want both cleared", m.learning, m.reflectCancel != nil)
+	if !strings.Contains(m.View(), "learning") {
+		t.Errorf("the status line doesn't say the task is queued behind a learning pass:\n%s", m.View())
 	}
 }
 

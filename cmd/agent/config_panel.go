@@ -425,13 +425,58 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 	return key, "", ""
 }
 
-// configActivate handles Enter on the selected row.
+// cfgLiveRows are the rows that do something NOW even while a task runs: they
+// only print, so there is nothing to defer and nothing to race.
+var cfgLiveRows = map[string]bool{"judge_criteria": true, "knowledge": true}
+
+// cfgUnstageableRows are the rows that cannot be staged because activating them
+// needs the user right there: they open a form, or leave the panel with the input
+// prefilled, or need a list fetched from the server. Replaying one later would
+// pop a form out of nowhere after the task ended.
+var cfgUnstageableRows = map[string]bool{
+	"addprovider": true, "model": true, "apikey": true,
+	"budget": true, "name": true, "agents": true,
+}
+
+// configActivate handles Enter on the selected row. While a task is running,
+// applying the change here would re-wire the agent underneath it, so the
+// activation is STAGED instead of refused: the same keystroke is replayed when
+// the task ends (see applyPendingConfig). Every stageable row is a deterministic
+// toggle or cycle, so pressing enter three times stages three cycles and lands
+// where pressing it three times live would have.
 func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
-	if m.cancel != nil { // a task is running behind this panel — changing a setting would re-wire it live
-		m.push(cDim.Render("  settings are view-only while a task runs — esc to return, then change them"))
+	key := m.configKey()
+	if m.cancel != nil && !cfgLiveRows[key] {
+		if cfgUnstageableRows[key] {
+			m.push(cDim.Render("  " + key + " needs you at the keyboard — it waits until the task ends"))
+			return m, nil
+		}
+		m.cfgPending = append(m.cfgPending, key)
+		m.push(cDim.Render("  staged — " + key + " applies when the task finishes"))
 		return m, nil
 	}
-	switch m.configKey() {
+	return m.activateConfigRow(key)
+}
+
+// applyPendingConfig replays the row activations staged while a task was running,
+// in the order they were pressed. Called once the task is over, from the one
+// goroutine allowed to re-wire the agent.
+func (m *tuiModel) applyPendingConfig() {
+	if len(m.cfgPending) == 0 {
+		return
+	}
+	pending := m.cfgPending
+	m.cfgPending = nil
+	for _, key := range pending {
+		m.activateConfigRow(key)
+	}
+	m.push(cDim.Render(fmt.Sprintf("  applied %d staged setting change(s) from /config", len(pending))))
+}
+
+// activateConfigRow performs a row's action for real. It assumes no task is
+// running: several branches re-wire the agent or leave the panel.
+func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
+	switch key {
 	case "provider":
 		m.cycleProvider()
 	case "mode":
@@ -829,6 +874,17 @@ func (m *tuiModel) toggleChannel() {
 	_ = config.SaveChannel(next)
 }
 
+// cfgPendingCount is how many times this row was activated while the task ran.
+func (m *tuiModel) cfgPendingCount(key string) int {
+	n := 0
+	for _, k := range m.cfgPending {
+		if k == key {
+			n++
+		}
+	}
+	return n
+}
+
 // renderConfigPanel draws the boxed, sectioned settings screen.
 func (m *tuiModel) renderConfigPanel() string {
 	accent := lipgloss.NewStyle().Foreground(m.accent)
@@ -855,6 +911,15 @@ func (m *tuiModel) renderConfigPanel() string {
 			continue
 		}
 		label, value, hint := m.configRowView(r.key)
+		if n := m.cfgPendingCount(r.key); n > 0 {
+			// Say the change was taken and where it went — the value column still
+			// shows the LIVE setting, because that is what the running task is using.
+			hint = "staged"
+			if n > 1 {
+				hint = fmt.Sprintf("staged ×%d", n)
+			}
+			hint += " — applies when the task ends"
+		}
 		// Pad by DISPLAY width (values carry wide/ambiguous glyphs like ⏵⏵ / ● / ▮),
 		// so the hint column lines up cleanly instead of ragged.
 		labelCol := padVis(label, 15)
@@ -870,7 +935,7 @@ func (m *tuiModel) renderConfigPanel() string {
 	}
 	footer := "  ↑↓ move · enter change · esc close"
 	if m.cancel != nil {
-		footer = "  ↑↓ move · view-only while a task runs · esc back to it"
+		footer = "  ↑↓ move · enter stages a change (applies when the task ends) · esc back to it"
 	}
 	lines = append(lines, "", cDim.Render(footer))
 	lines = append(lines, cDim.Render("  saved to ~/.config/ipsupport-code/config.json (kept private)"))

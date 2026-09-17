@@ -90,6 +90,7 @@ type tuiModel struct {
 	preApprove    uiState       // state being interrupted when stApprove was entered — stRunning normally, or stIdle when a background job's approval is answered via ↑ while idle; restored when the approval is resolved
 	approveChoice bool          // selected Yes(true)/No(false) while answering an approval
 	cfgCursor     int           // selected row in the /config panel (stConfig)
+	cfgPending    []string      // rows activated in /config while a task ran; replayed when it ends
 	cfgPhase      int           // stConfig sub-flow: cfgPhaseList, or an add-provider form field
 	cfgDraft      providerDraft // the provider being added in the panel form
 	chooseRows    []sessionMeta // saved sessions offered by the startup chooser (stChooseSession)
@@ -666,6 +667,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.steer = nil                 // steering notes belonged to the run that just ended
 		m.applyPendingMode()          // a shift+tab during the task takes effect now, before the next one
 		detect := m.detectWindowCmd() // model is loaded now — confirm the real window
+		m.applyPendingConfig()        // settings staged in /config while this task was running
 		if held := m.heldLessons; held != nil {
 			// A pass from the PREVIOUS task finished under this one — apply it now
 			// that nothing is reading the stores (see the reflectDoneMsg handler).
@@ -1742,10 +1744,10 @@ func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "/config":
-		// Open the settings panel OVER the running task to view it; changing a
-		// value stays blocked while the task runs (re-wiring the agent it's using
-		// would race), the panel stays put when the task ends, and it finalizes
-		// (queue drain) on close.
+		// Open the settings panel OVER the running task. Changes are STAGED rather
+		// than refused — applying one now would re-wire the agent the task is using
+		// — and replay when the task ends (see configActivate). The panel stays put
+		// when the task ends, and it finalizes (queue drain) on close.
 		m.openConfig()
 		return m, nil
 	case "/usage", "/sessions", "/agents", "/agent", "/skills", "/permissions",
@@ -1905,6 +1907,7 @@ func (m *tuiModel) forceDetach() (tea.Model, tea.Cmd) {
 	m.steer = nil
 	m.busyMsg = ""
 	m.taskCancelled = false
+	m.applyPendingConfig() // a detached run emits no taskDoneMsg — don't strand staged settings
 	m.push(cErr.Render("  ⚠ force-detached") + cDim.Render(" — abandoned the stuck request; you're clear to work."))
 	return m.drainQueue() // run anything queued, on the fresh agent
 }

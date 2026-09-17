@@ -9037,3 +9037,49 @@ func TestMisplacedFlags(t *testing.T) {
 		})
 	}
 }
+
+// A provider that cannot be resolved must stop the run, not quietly become the
+// LOCAL connection. Reported live: a one-letter typo in -override
+// provider=openrouter dialled localhost for the whole run while the status line
+// read "openroute · n30" — the name taken from the request, the model from the
+// fallback, so the one place you look to confirm an override took effect
+// confirmed a thing that was not happening.
+func TestUnresolvableProviderIsRefusedNotSilentlyLocal(t *testing.T) {
+	base := config.Default()
+	base.LLM.Model = "n30" // the local model the old fallback silently used
+	withProvider := func(name string, p config.LLM) config.Config {
+		c := base
+		c.Provider = name
+		if p.BaseURL != "" || p.APIKey != "" || p.Model != "" {
+			c.Providers = map[string]config.LLM{name: p}
+		}
+		return c
+	}
+	for _, tc := range []struct {
+		name            string
+		cfg             config.Config
+		wantErrContains string
+	}{
+		{name: "typo in a built-in name", cfg: withProvider("openroute", config.LLM{}),
+			wantErrContains: `unknown provider "openroute"`},
+		{name: "built-in with no key", cfg: withProvider("openrouter", config.LLM{}),
+			wantErrContains: "needs an API key"},
+		{name: "custom with no base_url", cfg: withProvider("mygw", config.LLM{APIKey: "k"}),
+			wantErrContains: "has no base_url"},
+		{name: "custom, configured", cfg: withProvider("mygw", config.LLM{BaseURL: "http://x/v1", Model: "m"})},
+		{name: "built-in with a key", cfg: withProvider("openrouter", config.LLM{APIKey: "sk-x"})},
+		{name: "local is always fine", cfg: base},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkActiveProvider(tc.cfg)
+			switch {
+			case tc.wantErrContains == "" && err != nil:
+				t.Errorf("unexpected error: %v", err)
+			case tc.wantErrContains != "" && err == nil:
+				t.Errorf("want an error containing %q, got none — the run would have fallen back to the local model", tc.wantErrContains)
+			case tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains):
+				t.Errorf("error = %q, want it to contain %q", err, tc.wantErrContains)
+			}
+		})
+	}
+}

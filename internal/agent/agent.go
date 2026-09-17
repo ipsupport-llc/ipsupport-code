@@ -2400,7 +2400,29 @@ func parseArgs(raw string) (action string, params map[string]any, warn string) {
 		}
 		return action, p, ""
 	case string: // params double-encoded as a JSON string — decode it
-		if inner := decodeObj(p); inner == nil {
+		inner := decodeObj(p)
+		if inner == nil {
+			// The CLOSING half of a leaked "<parameter=NAME>value</parameter>" tag,
+			// landing in params with its opening half stripped:
+			//
+			//	"params": "command>\ngit clone https://github.com/..."
+			//	"params": "path>\n/Users/roman220/test-remote/coding-agent-test"
+			//
+			// There is no JSON in there for decodeObj or recoverActionTag to find —
+			// the value is a bare string — so both gave up and the model was told
+			// its JSON was malformed, which it was not. Measured in one real run:
+			// 11 of 84 turns went to this, the model re-deriving the right shape
+			// over three turns and relapsing a turn later, every time.
+			//
+			// The fourth salvage of this class in this file (recoverActionTag,
+			// unwrapEnvelope, recoverTextToolCall) — a model whose chat template
+			// and tool-calling format disagree is a normal thing to meet locally.
+			if name, val, ok := splitParamTag(p); ok {
+				slog.Debug("recovered params from a chat-template fragment", "param", name, "raw", clip(p, 120))
+				inner = map[string]any{name: val}
+			}
+		}
+		if inner == nil {
 			// Reported live, ten turns in a row: a model sent params as a JSON
 			// *string* whose inner JSON didn't parse (a long file body cut off
 			// mid-document), so decodeObj failed and the call fell through to the
@@ -2412,23 +2434,23 @@ func parseArgs(raw string) (action string, params map[string]any, warn string) {
 			// The error wasn't wrong about what arrived — it just described the
 			// wreckage instead of the crash. Say what actually happened.
 			warn = fmt.Sprintf("note: \"params\" arrived as a JSON string rather than an object, and that string is not valid JSON (truncated or mis-escaped) — nothing could be read out of it, which is why the call below saw no params at all. Send params as a real JSON object, e.g. {\"action\": \"write\", \"params\": {\"path\": \"x.md\", \"content\": \"...\"}}. What arrived was: %s", clip(p, 200))
-		} else {
-			if a, ok := inner["action"].(string); ok && action == "" {
-				action = a
-			}
-			delete(inner, "action")
-			// Fold in top-level siblings too (e.g. a top-level "path" beside a
-			// stringified params), matching the map case — else they're lost.
-			for k, v := range m {
-				if k == "action" || k == "params" {
-					continue
-				}
-				if _, exists := inner[k]; !exists {
-					inner[k] = v
-				}
-			}
-			return action, inner, ""
+			break
 		}
+		if a, ok := inner["action"].(string); ok && action == "" {
+			action = a
+		}
+		delete(inner, "action")
+		// Fold in top-level siblings too (e.g. a top-level "path" beside a
+		// stringified params), matching the map case — else they're lost.
+		for k, v := range m {
+			if k == "action" || k == "params" {
+				continue
+			}
+			if _, exists := inner[k]; !exists {
+				inner[k] = v
+			}
+		}
+		return action, inner, ""
 	}
 
 	// Flattened: everything except action/params is a param.
@@ -2517,6 +2539,27 @@ func decodeObjStrict(s string) map[string]any {
 		return nil
 	}
 	return m
+}
+
+// strayParamTagRe matches what is left of a "<parameter=NAME>" tag when only
+// its opening half was stripped: "NAME>" in front of the bare value. paramTagRe
+// (below) handles the intact tag; this is the mangled sibling, and it needs its
+// own pattern because there is no "<parameter=" prefix left to key on.
+//
+// The name must start with a LETTER, so a value that happens to lead with a
+// shell redirect ("2>&1 …") is not read as a parameter called "2".
+var strayParamTagRe = regexp.MustCompile(`(?s)^\s*([A-Za-z][A-Za-z0-9_.-]*)>\s*(.*)$`)
+
+// splitParamTag pulls (name, value) out of that fragment. Only ever consulted
+// for a params string that already failed to parse as JSON, so it cannot
+// reinterpret a call that was going to work.
+func splitParamTag(s string) (name, value string, ok bool) {
+	m := strayParamTagRe.FindStringSubmatch(s)
+	if m == nil {
+		return "", "", false
+	}
+	v := strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m[2]), "</parameter>"))
+	return m[1], v, v != ""
 }
 
 // textToolCallRe matches a whole tool call a model wrote as TEXT instead of

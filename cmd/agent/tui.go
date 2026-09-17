@@ -1083,6 +1083,18 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if isCommandLine(line) {
 				return m.commandWhileBusy(line)
 			}
+			// While a GOAL is standing, plain text steers the live task instead of
+			// queueing behind it. A queued message can't be a new task in that
+			// state — the goal re-feeds and overrides it — so what you are almost
+			// always doing is correcting course, and making that wait for the
+			// goal to finish is the opposite of what you meant. Without a goal,
+			// queueing is right: the task will end and yours is next.
+			if m.app.goalSnapshot().Text != "" {
+				m.addSteer(line)
+				m.push(cYou.Render("❯ ") + line)
+				m.push(cDim.Render("  ↪ steering the running task — it lands on its next turn (/goal off to queue instead)"))
+				return m, nil
+			}
 			m.queued = append(m.queued, line) // type-ahead: run after the task
 			m.syncViewport()                  // show it pinned above the input
 			return m, nil

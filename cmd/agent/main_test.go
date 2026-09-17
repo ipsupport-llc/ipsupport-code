@@ -8504,3 +8504,54 @@ func TestCtrlGRedrawsWithoutLosingTheLog(t *testing.T) {
 		t.Errorf("ctrl+l left %d lines, want it to clear", len(m.history))
 	}
 }
+
+// While a GOAL is standing, plain text typed during a run steers the live task
+// instead of queueing behind it. A queued message cannot be a new task in that
+// state — the goal re-feeds and overrides it — so what you are almost always
+// doing is correcting course, and making that wait for the goal to finish is the
+// opposite of what you meant.
+func TestTypingDuringAGoalSteersInsteadOfQueueing(t *testing.T) {
+	in := textarea.New()
+	in.SetWidth(76)
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	m := &tuiModel{app: &app{cfg: cfg, workspace: cfg.Workspace},
+		width: 80, height: 24, ready: true, input: in, inputLines: 1, state: stRunning}
+	m.vp = viewport.New(80, 10)
+	m.app.goal = goalState{Text: "ship the parser", Status: "active"}
+
+	m.input.SetValue("no, use the existing lexer")
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if len(m.queued) != 0 {
+		t.Errorf("queued %d message(s) while a goal stands, want 0 — it should steer", len(m.queued))
+	}
+	if len(m.steer) != 1 || !strings.Contains(m.steer[0], "existing lexer") {
+		t.Errorf("steer = %v, want the typed line", m.steer)
+	}
+	// And it says so, so the user isn't left wondering where it went.
+	if !strings.Contains(strings.Join(m.history, "\n"), "steering") {
+		t.Errorf("nothing told the user it was steered:\n%s", strings.Join(m.history, "\n"))
+	}
+}
+
+// With no goal, queueing is right: the task will end and yours is next.
+func TestTypingWithNoGoalStillQueues(t *testing.T) {
+	in := textarea.New()
+	in.SetWidth(76)
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	m := &tuiModel{app: &app{cfg: cfg, workspace: cfg.Workspace},
+		width: 80, height: 24, ready: true, input: in, inputLines: 1, state: stRunning}
+	m.vp = viewport.New(80, 10)
+
+	m.input.SetValue("then run the tests")
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if len(m.queued) != 1 {
+		t.Errorf("queued %d, want 1 — with no goal a typed line is the next task", len(m.queued))
+	}
+	if len(m.steer) != 0 {
+		t.Errorf("steer = %v, want none without a goal", m.steer)
+	}
+}

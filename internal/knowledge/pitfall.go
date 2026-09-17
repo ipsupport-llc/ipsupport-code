@@ -59,6 +59,36 @@ func IsGenericErrorPattern(pattern string) bool {
 // bare "main.go" (no directory) are all left alone.
 var projectPath = regexp.MustCompile(`(?:[\w.-]+/[\w.-]*\.\w+|\b[\w-]+\.(?:go|py|js|ts|tsx|jsx|rs|rb|java|c|h|cpp|md|json|yaml|yml|toml|txt|sh|sql|html|css)\b)`)
 
+// runValuePatterns are the rest of what carries a value from ONE run. Measured,
+// not guessed: projectPath catches a path with an extension and NOTHING else, so
+// "run from the nemotron-extreme-quant directory", "the server is at
+// http://192.168.1.50:1234/v1" and "export TOKEN=… before pushing" all passed as
+// general lessons — into a store that re-injects them on the next similar error.
+var runValuePatterns = []*regexp.Regexp{
+	// A path leaving the workspace, or into a home directory: by construction it
+	// describes THAT machine's layout. "./" is deliberately absent — a
+	// repo-relative path is the same in every checkout ("go test ./...").
+	regexp.MustCompile(`(?:^|[\s"'(=])(?:\.\./|~/)`),
+	regexp.MustCompile(`\b[a-z][a-z0-9+.-]*://\S+`),                     // any URL
+	regexp.MustCompile(`\b\d{1,3}(?:\.\d{1,3}){3}\b`),                   // an IPv4 address
+	regexp.MustCompile(`\b(?:localhost|[\w-]+(?:\.[\w-]+)+):\d{2,5}\b`), // host:port
+}
+
+// credential matches what must never reach the lesson store OR the debug log: a
+// secret-looking assignment, or a token with a well-known issuer prefix. It is a
+// subset of "carries a value from one run", but named separately because the
+// caller needs to know when it is unsafe to print the string it just rejected.
+var credential = regexp.MustCompile(`(?i)\b\w*(?:token|secret|passwo?r?d|api[_-]?key|credential)\w*\s*[=:]\s*\S+` +
+	`|\b(?:ghp|gho|ghs|ghu|ghr)_[A-Za-z0-9]{8,}` +
+	`|\bsk-[A-Za-z0-9_-]{8,}` +
+	`|\bxox[baprs]-[A-Za-z0-9-]{8,}` +
+	`|\bAKIA[A-Z0-9]{8,}`)
+
+// HasCredential reports whether s contains something that looks like a secret.
+// Used to decide whether a rejected lesson can be logged at all: a store that
+// refuses to keep a token is no use if the rejection writes it to agent.log.
+func HasCredential(s string) bool { return credential.MatchString(s) }
+
 // conventionalFile is the set of filenames that are the SAME in every project of
 // their ecosystem. A lesson naming one of these carries no run-specific value —
 // "package.json must exist before npm install" is as true in the next project as
@@ -71,7 +101,17 @@ var conventionalFile = map[string]bool{
 }
 
 // IsProjectSpecific reports whether s carries a value from the run it was
-// learned in rather than a general lesson. Reported live, from a real debug
+// learned in rather than a general lesson: a file path, a path out of the
+// workspace or into $HOME, a URL, an IP, a host:port, or anything that looks
+// like a credential.
+//
+// What it deliberately does NOT catch: a bare directory or branch or model name
+// ("run from the nemotron-extreme-quant directory", "checkout feature/x").
+// Catching those needs a rule like "word/word" or "an unusual noun", which eats
+// "go test ./...", "internal/knowledge" and most real advice with it. The
+// backstop for those is that the store is PER WORKSPACE (see
+// config.DefaultKBPath), so such a lesson can only mislead the project it came
+// from. Reported live, from a real debug
 // log: a stored lesson read "Provide proper path parameter: {"path":
 // "nemotron-extreme-quant/PLAN.md", "content": "..."}" and surfaced — in a
 // DIFFERENT project — on a failure whose real cause was the encoding of the
@@ -80,6 +120,14 @@ var conventionalFile = map[string]bool{
 // says to exclude anything project-specific; a model that ignores it must not
 // be able to poison the store anyway, so this is enforced on the way in.
 func IsProjectSpecific(s string) bool {
+	if credential.MatchString(s) { // a secret is a value from one run by definition
+		return true
+	}
+	for _, re := range runValuePatterns {
+		if re.MatchString(s) {
+			return true
+		}
+	}
 	// A bare filename counts too. The pattern used to demand BOTH a separator
 	// and an extension, so "edit: 'find' text not present in main.go" passed as
 	// general — and most file-tool errors carry a filename, which made the

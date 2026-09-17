@@ -65,7 +65,7 @@ const reflectPrompt = `You review a finished run by a tool-using agent and extra
   "error_pattern" — copy a substring out of the error text itself, long enough that only this KIND of failure contains it. Never a generic wrapper like an exit code alone ("exit 1"), which every failed command has regardless of cause.
   "context" — the tool action it happened during, e.g. "file: write".
 
-  HARD RULE for "error_pattern" and "proven_fix": no value taken from this run — no file path, filename, directory, project name, URL, or command argument. A lesson keyed on those never matches again, and one quoting them actively misleads a future run in a different project. Write the SHAPE of the problem, not this instance of it.
+  HARD RULE for "error_pattern", "context" AND "proven_fix": no value taken from this run — no file path, filename, directory, project name, URL, host, port, command argument, or anything resembling a key, token or password. A lesson keyed on those never matches again, one quoting them actively misleads a future run, and a secret written into a lesson is stored on disk and replayed to a model later. Write the SHAPE of the problem, not this instance of it.
 
   Emit a pitfall only for a genuine tool-usage failure. Use [] if none qualifies.
 
@@ -91,7 +91,7 @@ const reflectPitfallsLite = `The agent run below may have hit tool errors. Repor
 "kind" is "avoid" if the same thing was tried again and kept failing — "proven_fix" is what to do INSTEAD. Never repeat the failing approach as the advice.
 "error_pattern" is a few words copied from the error text itself.
 "context" is the action it happened during, like "file: write".
-Never put a file path, filename, directory or project name in "error_pattern" or "proven_fix" — describe the shape of the problem, not this one case.
+Never put anything from this run — a file path, filename, directory, project name, URL, host, port, key, token or password — in "error_pattern", "context" or "proven_fix". Describe the shape of the problem, not this one case.
 
 Use {"pitfalls": []} if the run hit no tool errors. Do not explain.`
 
@@ -119,7 +119,7 @@ Report at most ONE lesson, about a tool call that visibly failed more than once 
 "error_pattern" is a few words copied from the error text itself.
 "context" is the action it happened during, like "file: write".
 "proven_fix" is what to do DIFFERENTLY. Never repeat the failing approach as the advice.
-Never put a file path, filename, directory or project name in "error_pattern" or "proven_fix".
+Never put anything from this run — a file path, directory, project name, URL, host, port, key or token — in "error_pattern", "context" or "proven_fix".
 
 Only report what the transcript SHOWS failing repeatedly. If nothing failed more than once, or you cannot tell why it failed, reply {"pitfalls": []} — a confident guess about a failure you did not diagnose is worse than no lesson. Do not explain.`
 
@@ -382,9 +382,19 @@ func parseLessons(content string) Lessons {
 			// knowledge.IsProjectSpecific). Enforce it here rather than trusting
 			// the instruction, and say what was dropped: a silently rejected
 			// lesson is indistinguishable from reflection never producing one.
-			if knowledge.IsProjectSpecific(pattern) || knowledge.IsProjectSpecific(p.ProvenFix) {
-				slog.Debug("lesson rejected", "reason", "project-specific", "domain", domain,
-					"error_pattern", pattern, "proven_fix", p.ProvenFix)
+			// Context is checked too. It was not, and it is rendered straight into
+			// the hint the model sees ("when you saw X while <context>, …"), so a
+			// path or host that landed there reached a later run past every other
+			// check.
+			if knowledge.IsProjectSpecific(pattern) || knowledge.IsProjectSpecific(p.ProvenFix) || knowledge.IsProjectSpecific(p.Context) {
+				if knowledge.HasCredential(pattern) || knowledge.HasCredential(p.ProvenFix) || knowledge.HasCredential(p.Context) {
+					// Refusing to STORE a secret is pointless if rejecting it writes
+					// the secret to agent.log instead.
+					slog.Debug("lesson rejected", "reason", "credential", "domain", domain)
+				} else {
+					slog.Debug("lesson rejected", "reason", "project-specific", "domain", domain,
+						"error_pattern", pattern, "context", p.Context, "proven_fix", p.ProvenFix)
+				}
 				continue
 			}
 			out.Pitfalls = append(out.Pitfalls, knowledge.Pitfall{

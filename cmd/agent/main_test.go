@@ -3001,20 +3001,26 @@ func TestExternalResult(t *testing.T) {
 	}
 }
 
-// While a task runs behind the /config panel, changing a value must be refused
-// (applying would re-wire the agent the task is using).
-func TestConfigViewOnlyWhileBusy(t *testing.T) {
+// While a task runs behind the /config panel, NOTHING may actually change:
+// applying would re-wire the agent the task is using. The keystroke is staged
+// instead of refused (see TestConfigEditsStageWhileATaskRunsAndApplyWhenItEnds);
+// what this pins is that staging really is inert until the task is over.
+func TestConfigChangesNothingWhileBusy(t *testing.T) {
 	m := &tuiModel{state: stConfig, width: 80, input: textarea.New(),
 		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
 	m.cancel = func() {} // a live task
-	m.cfgCursor = 1      // any actionable row
 	before := m.app.cfg
-	m.configActivate()
-	if !strings.Contains(strings.Join(m.history, "\n"), "view-only") {
-		t.Error("expected the view-only notice")
+	for _, key := range cfgKeys() {
+		cfgCursorTo(t, m, key)
+		m.configActivate()
 	}
-	if m.app.cfg.Provider != before.Provider || m.app.cfg.File.Default != before.File.Default {
-		t.Error("a setting changed while a task was running")
+	if m.app.cfg.Provider != before.Provider || m.app.cfg.File.Default != before.File.Default ||
+		m.app.cfg.GoalMaxReturns != before.GoalMaxReturns || m.app.cfg.GoalNudge != before.GoalNudge ||
+		m.app.cfg.Memory != before.Memory || m.app.cfg.Offline != before.Offline {
+		t.Error("a setting changed while a task was running — staged edits must stay inert until it ends")
+	}
+	if m.state != stConfig {
+		t.Errorf("state = %v, want stConfig — no row may drop out of the panel mid-task", m.state)
 	}
 }
 
@@ -8694,5 +8700,126 @@ func TestLessonsLandingUnderARunningTaskAreHeldUntilItEnds(t *testing.T) {
 	}
 	if n := a.factsCount(); n != 1 {
 		t.Errorf("facts = %d, want 1 — the held pass must be applied once the run is over, not dropped", n)
+	}
+}
+
+// cfgCursorTo puts the /config cursor on a row by key.
+func cfgCursorTo(t *testing.T, m *tuiModel, key string) {
+	t.Helper()
+	for i, k := range cfgKeys() {
+		if k == key {
+			m.cfgCursor = i
+			return
+		}
+	}
+	t.Fatalf("no /config row %q", key)
+}
+
+// /config used to be view-only while a task ran, because applying a change calls
+// wire() and rebuilds the agent the task is holding. Refusing the keystroke is
+// not the only way to avoid that: stage it, and replay it when the task ends.
+func TestConfigEditsStageWhileATaskRunsAndApplyWhenItEnds(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	in := textarea.New()
+	in.SetWidth(76)
+	m := &tuiModel{app: a, ctx: context.Background(), bridge: newBridge(),
+		width: 80, height: 24, ready: true, input: in, inputLines: 1, state: stConfig}
+	m.vp = viewport.New(80, 10)
+	_, taskCancel := context.WithCancel(context.Background())
+	m.cancel, m.epoch = taskCancel, a.taskEpoch.Load() // a task is running behind the panel
+
+	before := a.cfg.GoalNudge
+	cfgCursorTo(t, m, "goal_nudge")
+	m.configActivate()
+
+	if len(m.cfgPending) != 1 || m.cfgPending[0] != "goal_nudge" {
+		t.Fatalf("cfgPending = %v, want [goal_nudge] — the keystroke must be taken, not refused", m.cfgPending)
+	}
+	if a.cfg.GoalNudge != before {
+		t.Fatal("the setting changed while the task was still running — that re-wires the agent underneath it")
+	}
+	// And the panel says where the keystroke went.
+	if !strings.Contains(m.renderConfigPanel(), "staged") {
+		t.Error("the panel doesn't show the row as staged")
+	}
+
+	m.cancel = nil
+	m.Update(taskDoneMsg{epoch: m.epoch})
+
+	if len(m.cfgPending) != 0 {
+		t.Errorf("cfgPending = %v after the task ended, want empty", m.cfgPending)
+	}
+	if a.cfg.GoalNudge == before {
+		t.Errorf("goal_nudge = %v, still the old value — a staged change must actually apply when the task ends", a.cfg.GoalNudge)
+	}
+}
+
+// Pressing enter twice stages two cycles: replaying the activation is only
+// honest if repeats land where pressing it twice live would have.
+func TestStagedConfigEditsReplayInOrder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	in := textarea.New()
+	in.SetWidth(76)
+	m := &tuiModel{app: a, ctx: context.Background(), bridge: newBridge(),
+		width: 80, height: 24, ready: true, input: in, inputLines: 1, state: stConfig}
+	m.vp = viewport.New(80, 10)
+	_, taskCancel := context.WithCancel(context.Background())
+	m.cancel, m.epoch = taskCancel, a.taskEpoch.Load()
+
+	// goal_ttl cycles through seven values, so "two steps along" is a distinct
+	// place — unlike a boolean, where a missed replay looks identical to two.
+	want := nextInt(nextInt(a.cfg.GoalMaxReturns, goalTTLCycle), goalTTLCycle)
+	cfgCursorTo(t, m, "goal_ttl")
+	m.configActivate()
+	m.configActivate()
+
+	if n := len(m.cfgPending); n != 2 {
+		t.Fatalf("staged %d activations, want 2", n)
+	}
+	m.cancel = nil
+	m.applyPendingConfig()
+
+	if a.cfg.GoalMaxReturns != want {
+		t.Errorf("goal TTL = %d, want %d — two staged presses must land where two live ones would", a.cfg.GoalMaxReturns, want)
+	}
+}
+
+// Rows that open a form or leave the panel with the input prefilled can't be
+// staged: replaying one would pop a form out of nowhere after the task ended.
+func TestUnstageableConfigRowsStillWaitForTheTask(t *testing.T) {
+	in := textarea.New()
+	in.SetWidth(76)
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	m := &tuiModel{app: &app{cfg: cfg, workspace: cfg.Workspace}, ctx: context.Background(),
+		width: 80, height: 24, ready: true, input: in, inputLines: 1, state: stConfig}
+	m.vp = viewport.New(80, 10)
+	_, taskCancel := context.WithCancel(context.Background())
+	m.cancel = taskCancel
+
+	cfgCursorTo(t, m, "model")
+	m.configActivate()
+
+	if len(m.cfgPending) != 0 {
+		t.Errorf("cfgPending = %v, want empty — /model needs the live model list and the user at the keyboard", m.cfgPending)
+	}
+	if m.state != stConfig {
+		t.Errorf("state = %v, want stConfig — an unstageable row must not leave the panel mid-task", m.state)
 	}
 }

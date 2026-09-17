@@ -96,9 +96,8 @@ type tuiModel struct {
 	chooseRows    []sessionMeta // saved sessions offered by the startup chooser (stChooseSession)
 	chooseCursor  int           // selected row (0..len = the "new session" row)
 	cancel        context.CancelFunc
-	reflectCancel context.CancelFunc // in-flight learning pass; a new task cancels it (see startTask)
-	learning      bool               // a learning pass is running in the background — shown in the status line
-	heldLessons   *reflectResult     // a pass that landed while a task was running; applied when that task ends
+	learning      bool           // a learning pass is running in the background — shown in the status line
+	heldLessons   *reflectResult // a pass that landed while a task was running; applied when that task ends
 	taskStart     time.Time
 	startTok      int
 	retry         *retryInfo
@@ -700,7 +699,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(detect, m.input.Focus())
 
 	case reflectDoneMsg:
-		m.learning, m.reflectCancel = false, nil
+		m.learning = false
 		if m.cancel != nil {
 			// A task started while the pass was finishing. Applying now would write
 			// a.kb, the facts list and the agent's system prompt underneath a run
@@ -1863,12 +1862,12 @@ func (m *tuiModel) startCompact(auto bool, focus string) tea.Cmd {
 // startTask flips to running state with a fresh cancelable context and abort
 // signal, returning both so the caller's goroutine can defer the cancel.
 func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
-	// A learning pass still running belongs to the task before this one, and on a
-	// local model it is competing for the same GPU: the new task would wait behind
-	// it with nothing on screen to say why. Lessons are best-effort and the task
-	// is not, so the task wins. (Anything it already spent is still billed — see
-	// runReflect.)
-	m.stopReflect()
+	// A learning pass still running is deliberately LEFT running. It competes with
+	// this task for the same local model, so the task does wait behind it — but a
+	// cancelled pass is a task's lessons lost for good, and that is the worse
+	// trade. The status line says "✦ learning" while both are in flight so the
+	// wait is explained rather than mysterious, and the result is held until this
+	// task ends (see the reflectDoneMsg handler).
 	m.state = stRunning
 	m.taskStart = time.Now()
 	m.busyMsg = "" // a real model task → "thinking", not a labelled chore
@@ -1939,24 +1938,14 @@ func (m *tuiModel) startReflect(done taskDoneMsg) tea.Cmd {
 	if job == nil {               // /reflect off
 		return nil
 	}
-	// Deliberately rooted at m.ctx, not the task's context: the task's is already
-	// cancelled by the time this runs (runTask defers cancel()).
-	ctx, cancel := context.WithCancel(m.ctx)
-	m.reflectCancel, m.learning = cancel, true
-	tr := done.tr
+	// Rooted at m.ctx, not the task's context, and nothing else cancels it: the
+	// task's context is already cancelled by the time this runs (runTask defers
+	// cancel()), and a pass that outlives its task is meant to finish.
+	m.learning = true
+	ctx, tr := m.ctx, done.tr
 	return func() tea.Msg {
-		defer cancel()
 		return reflectDoneMsg{res: m.app.runReflect(ctx, job, tr)}
 	}
-}
-
-// stopReflect cancels an in-flight learning pass and forgets it.
-func (m *tuiModel) stopReflect() {
-	if m.reflectCancel != nil {
-		m.reflectCancel()
-		m.reflectCancel = nil
-	}
-	m.learning = false
 }
 
 // runLoop re-runs a goal on an interval: it runs once, waits interval, runs
@@ -2083,6 +2072,12 @@ func (m *tuiModel) View() string {
 			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" %s · thinking… (%s)", m.app.providerModel(), detail))
 			if meter := m.ctxMeter(); meter != "" { // watch the window fill during a long task
 				status += cDim.Render(" · ") + meter
+			}
+			if m.learning {
+				// The previous task's pass is still on the model. This task is
+				// genuinely queued behind it — say so, rather than letting it look
+				// like the model simply got slow.
+				status += cDim.Render(" · ✦ learning")
 			}
 		}
 	default:

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
@@ -122,6 +123,41 @@ Never put a file path, filename, directory or project name in "error_pattern" or
 
 Only report what the transcript SHOWS failing repeatedly. If nothing failed more than once, or you cannot tell why it failed, reply {"pitfalls": []} — a confident guess about a failure you did not diagnose is worse than no lesson. Do not explain.`
 
+// ask makes one reflection call and records what came back.
+//
+// Every reflection path logs through here. The judge got finish_reason and its
+// completion size when it went quiet; reflection never did, so an 85-second pass
+// that returned an empty reply could not be told from a model that looked and
+// found nothing — the same question the judge's logging already answers, left
+// open on the pass that costs the most wall-clock.
+func (r *Reflector) ask(ctx context.Context, half, system, summary string) (llm.Message, error) {
+	start := time.Now()
+	reply, err := r.LLM.Chat(ctx, []llm.Message{llm.System(system), llm.User(summary)}, nil)
+	if err != nil {
+		slog.Debug("reflect call failed", "half", half, "dur", time.Since(start), "err", err)
+		return reply, err
+	}
+	p, c := reflectSpend(r.LLM)
+	slog.Debug("reflect call", "half", half,
+		"finish_reason", reply.FinishReason,
+		"content_bytes", len(strings.TrimSpace(reply.Content)),
+		"reasoning_bytes", len(strings.TrimSpace(reply.Reasoning)),
+		"prompt_tokens", p, "completion_tokens", c,
+		"summary_bytes", len(summary), "dur", time.Since(start))
+	return reply, nil
+}
+
+// reflectSpend reads the connection's cumulative counters when it exposes them.
+// Cumulative, not a delta: the caller logs one line per call and the shape of
+// the growth is what matters — whether a call generated 20 tokens or 4000 is the
+// difference between "nothing to say" and "cut off mid-thought".
+func reflectSpend(c llm.Chatter) (prompt, completion int) {
+	if u, ok := c.(interface{ Usage() (int, int) }); ok {
+		return u.Usage()
+	}
+	return 0, 0
+}
+
 // Reflect distills lessons from t. A turn with no tool use (a plain chat) has
 // nothing to learn, so it skips the model call — no point making a small model
 // reason over an empty run.
@@ -152,10 +188,7 @@ func (r *Reflector) Reflect(ctx context.Context, t agent.Transcript) (Lessons, e
 				"steps", t.Steps, "failed_results", failedToolResults(t))
 			return Lessons{Parsed: true}, nil
 		}
-		reply, err := r.LLM.Chat(ctx, []llm.Message{
-			llm.System(reflectStuckPrompt),
-			llm.User(summary),
-		}, nil)
+		reply, err := r.ask(ctx, "stuck", reflectStuckPrompt, summary)
 		if err != nil {
 			return Lessons{}, &ReflectionError{Err: err}
 		}
@@ -174,10 +207,7 @@ func (r *Reflector) Reflect(ctx context.Context, t agent.Transcript) (Lessons, e
 	if r.Lite {
 		return r.reflectLite(ctx, summary)
 	}
-	reply, err := r.LLM.Chat(ctx, []llm.Message{
-		llm.System(reflectPrompt),
-		llm.User(summary),
-	}, nil)
+	reply, err := r.ask(ctx, "full", reflectPrompt, summary)
 	if err != nil {
 		return Lessons{}, &ReflectionError{Err: err}
 	}
@@ -189,18 +219,12 @@ func (r *Reflector) Reflect(ctx context.Context, t agent.Transcript) (Lessons, e
 // shouldn't throw away the other half that parsed fine.
 func (r *Reflector) reflectLite(ctx context.Context, summary string) (Lessons, error) {
 	var out Lessons
-	factsReply, factsErr := r.LLM.Chat(ctx, []llm.Message{
-		llm.System(reflectFactsLite),
-		llm.User(summary),
-	}, nil)
+	factsReply, factsErr := r.ask(ctx, "facts", reflectFactsLite, summary)
 	if factsErr == nil {
 		l := parseLessons(factsReply.Content)
 		out.Facts, out.Parsed, out.Reply = l.Facts, l.Parsed, l.Reply
 	}
-	pitReply, pitErr := r.LLM.Chat(ctx, []llm.Message{
-		llm.System(reflectPitfallsLite),
-		llm.User(summary),
-	}, nil)
+	pitReply, pitErr := r.ask(ctx, "pitfalls", reflectPitfallsLite, summary)
 	if pitErr == nil {
 		l := parseLessons(pitReply.Content)
 		out.Pitfalls = l.Pitfalls

@@ -37,6 +37,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	kbreflect "github.com/ipsupport-llc/ipsupport-code/internal/reflect"
+	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
 	"github.com/ipsupport-llc/ipsupport-code/internal/sandbox"
 	"github.com/ipsupport-llc/ipsupport-code/internal/skill"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
@@ -9081,5 +9082,73 @@ func TestUnresolvableProviderIsRefusedNotSilentlyLocal(t *testing.T) {
 				t.Errorf("error = %q, want it to contain %q", err, tc.wantErrContains)
 			}
 		})
+	}
+}
+
+// The shadow log's disagreement column is only worth reading if the policy
+// verdict beside the score is the real one. Where this cannot know — the tool
+// itself is the authority on its own gating — it must say "unknown" rather than
+// guess, because a disagreement count built on a guess is worse than a smaller
+// one built on facts.
+func TestPolicyVerdictMirrorsTheEngineOrSaysUnknown(t *testing.T) {
+	ws := t.TempDir()
+	c := config.Default()
+	c.Workspace = ws
+	c.Run = config.RunPolicy{Default: "ask", Allow: []string{"go test*", "ls*"}}
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	pol, err := policy.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name         string
+		tool, action string
+		params       map[string]any
+		want         risk.PolicyVerdict
+	}{
+		{"an allow-listed command", "run", "shell", map[string]any{"command": "go test ./..."}, risk.VerdictAllow},
+		{"anything else asks", "run", "shell", map[string]any{"command": "curl https://example.com"}, risk.VerdictAsk},
+		// Not "ask": the engine's safety floor refuses this outright, whatever the
+		// allow-list says. Worth pinning here — it is the clearest case of the
+		// policy already knowing something, and the risk score having nothing to add.
+		{"the safety floor denies outright", "run", "shell", map[string]any{"command": "rm -rf /"}, risk.VerdictDeny},
+		{"a write inside the jail", "file", "write", map[string]any{"path": "notes.md"}, risk.VerdictAllow},
+		{"a write outside the jail", "file", "write", map[string]any{"path": "../escape.md"}, risk.VerdictDeny},
+		{"reading a secret", "file", "read", map[string]any{"path": ".env"}, risk.VerdictDeny},
+		{"reading source", "file", "read", map[string]any{"path": "main.go"}, risk.VerdictAllow},
+		// The tool decides these, not the policy engine — so say so.
+		{"git", "git", "push", map[string]any{"remote": "origin"}, risk.VerdictUnknown},
+		{"web", "web", "fetch", map[string]any{"url": "https://example.com"}, risk.VerdictUnknown},
+		{"a run call with no command", "run", "shell", map[string]any{}, risk.VerdictUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := policyVerdict(pol, tc.tool, tc.action, tc.params); got != tc.want {
+				t.Errorf("policyVerdict = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// And with no engine at all it claims nothing.
+	if got := policyVerdict(nil, "run", "shell", map[string]any{"command": "rm -rf /"}); got != risk.VerdictUnknown {
+		t.Errorf("policyVerdict(nil) = %v, want unknown", got)
+	}
+}
+
+// Shadow scoring is on by default — an opt-in signal collects no evidence — and
+// IPS_RISK=off is the way out.
+func TestRiskShadowCanBeTurnedOff(t *testing.T) {
+	a := &app{cfg: config.Default(), workspace: t.TempDir()}
+	pol, err := policy.New(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.riskObserver(pol) == nil {
+		t.Error("no observer by default — shadow mode should be on, since it blocks nothing")
+	}
+	t.Setenv(EnvRiskOff, "off")
+	a2 := &app{cfg: config.Default(), workspace: t.TempDir()}
+	if a2.riskObserver(pol) != nil {
+		t.Errorf("%s=off still installed an observer", EnvRiskOff)
 	}
 }

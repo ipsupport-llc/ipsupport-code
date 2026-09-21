@@ -393,6 +393,40 @@ default**, and on a platform/kernel without a supported sandbox commands run
 unconfined as before. External CLI agents are **not** sandboxed (they run
 outside it, as documented above).
 
+## Risk scoring (shadow mode)
+
+A small local classifier scores every tool call for how dangerous it looks, and
+**logs what it thought next to what the permission policy actually did**. It
+blocks nothing. The point of the first mode is to find out whether the signal is
+worth anything before it is allowed to matter:
+
+```
+msg="risk shadow" tool=run action=shell risk=1.00 top=credential_access
+  labels="credential_access=1.00 sandbox_escape=1.00" policy=allow
+  disagreement=allowed-but-flagged call="run shell command=cat ~/.ssh/id_rsa"
+msg="risk shadow: scored 1 call(s), 1 over 0.50, 1 disagreed with the policy"
+```
+
+The `disagreement` column is the whole product. **allowed-but-flagged** is what
+a risk gate could add; **gated-but-unremarkable** is the friction it would cost.
+Tail them with `IPS_LOG=debug`, and turn the whole thing off with `IPS_RISK=off`.
+
+It is a hashed-feature linear model — `sigmoid(Wx+b)` over word and character
+n-grams, six labels (`destructive`, `sandbox_escape`, `credential_access`,
+`network`, `external_side_effect`, `safe`). Inference is pure Go with no
+dependency of any kind: 768KB of `float32` embedded in the binary, ~28µs per
+call. Training is offline and separate (`scripts/train_risk.py`, stdlib only);
+its only output is the weights file.
+
+Swap the model without rebuilding: `IPS_RISK_MODEL=/path/to/model.bin`. The file
+carries its own feature config and label names, so a model with a different
+feature space or a different set of labels loads unchanged.
+
+**What it is not.** It does not replace the permission policy or the sandbox,
+and on held-out examples it is precise but incomplete — when it fires it is
+usually right, and it misses plenty. See `scripts/risk_dataset.jsonl` for what
+it was taught.
+
 ## Skills
 
 On-demand instruction packs — the user-extensible version of guides-on-demand.

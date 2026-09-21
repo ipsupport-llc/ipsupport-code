@@ -422,10 +422,33 @@ Swap the model without rebuilding: `IPS_RISK_MODEL=/path/to/model.bin`. The file
 carries its own feature config and label names, so a model with a different
 feature space or a different set of labels loads unchanged.
 
-**What it is not.** It does not replace the permission policy or the sandbox,
-and on held-out examples it is precise but incomplete — when it fires it is
-usually right, and it misses plenty. See `scripts/risk_dataset.jsonl` for what
-it was taught.
+On held-out **paths** — a fifth of every path class, never seen under any verb:
+
+| label | precision | recall |
+|---|---|---|
+| destructive | 0.94 | 0.93 |
+| sandbox_escape | 0.99 | 0.90 |
+| credential_access | 0.99 | 0.86 |
+| network | 1.00 | 0.99 |
+| external_side_effect | 1.00 | 0.96 |
+| safe | 0.86 | 0.86 |
+
+The dataset is built **compositionally** — every verb crossed with every class of
+argument — so the verb carries almost no information and the argument carries all
+of it. `cat README.md` scores 0.00 and `cat ~/.ssh/id_ecdsa` scores 1.00; so do
+`less`, `wc -l`, `xxd` and `od -c` on the same two files. That took three
+attempts to get right (see the comment at the top of
+`scripts/gen_risk_dataset.py`), and it is the whole difference between a risk
+signal and a list of scary words.
+
+`network` is **informational**: reaching the internet is a property, not a
+danger, so it is reported but excluded from the headline number — otherwise
+fetching a documentation page scores 1.00. Which labels are informational is
+declared in the model file, so a replacement model decides for its own.
+
+**What it is not.** It does not replace the permission policy or the sandbox.
+The policy is still better at the extremes — it denies `rm -rf /` outright,
+whatever the allow-list says.
 
 ## Skills
 

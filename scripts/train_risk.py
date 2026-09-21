@@ -30,9 +30,15 @@ CHAR_MIN, CHAR_MAX = 3, 5
 LOWERCASE  = True
 LABELS     = ["destructive", "sandbox_escape", "credential_access",
               "network", "external_side_effect", "safe"]
+# Labels that describe the call without being a reason for concern. "network" is
+# the case: reaching the internet is a property, not a risk — the risky half of
+# it is external_side_effect. Left in the headline number, every `curl` to a
+# documentation page scored 1.00, which is how a risk signal becomes noise.
+# Written into the model file, so a replacement model declares its own.
+INFORMATIONAL = {"network"}
 
 # ── training ────────────────────────────────────────────────────────────────
-EPOCHS, LR, L2 = 400, 0.25, 1e-6
+EPOCHS, LR, L2 = 200, 0.25, 1e-6
 
 # Produced by the Go implementation (internal/risk, TestHashVectors).
 HASH_VECTORS = {
@@ -153,20 +159,30 @@ def main():
         y = [1.0 if l in r["labels"] else 0.0 for l in LABELS]
         data.append((x, y))
 
-    # Hold out a fifth, deterministically. Reporting the fit on the data the
-    # model just memorised says nothing about whether the score is worth
-    # logging, and with 32768 features and a few hundred examples it will always
-    # look perfect. The training set is still what gets shipped — the holdout
-    # exists to tell you whether to ship it at all.
-    rng0 = random.Random(SEED)
-    idx = list(range(len(data)))
-    rng0.shuffle(idx)
-    cut = len(idx) // 5
-    hold = [data[i] for i in idx[:cut]]
-    train = [data[i] for i in idx[cut:]]
-    print(f"split: {len(train)} train, {len(hold)} held out")
+    # The split comes from the dataset, which holds out PATHS rather than rows:
+    # a fifth of every path class never appears in training under any verb.
+    # Splitting rows at random would leave "~/.ssh/id_rsa" in both halves and
+    # measure memorisation; holding out the path asks whether an unseen secret is
+    # recognized as one, which is the only question worth answering.
+    train = [d for d, r in zip(data, rows) if r.get("split") != "holdout"]
+    hold = [d for d, r in zip(data, rows) if r.get("split") == "holdout"]
+    print(f"split: {len(train)} train, {len(hold)} held out (by path, not by row)")
 
     data = train
+    # Positive-class weighting, per label. The dataset is imbalanced on purpose —
+    # most real tool calls are ordinary, and a training set that pretended
+    # otherwise would teach the model the wrong prior. But an unweighted fit on
+    # it drifts toward "everything is safe": adding thirty ordinary build
+    # directories once dropped credential_access recall from 0.91 to 0.63 without
+    # touching a single credential example. Weighting each label's positives by
+    # how rare they are keeps the data honest and the gradient balanced.
+    pos_w = []
+    for li in range(len(LABELS)):
+        pos = sum(1 for _, y in data if y[li] >= 0.5) or 1
+        neg = len(data) - pos
+        pos_w.append(min(20.0, max(1.0, neg / pos)))
+    print("positive-class weights: " + "  ".join(f"{l}={w:.1f}" for l, w in zip(LABELS, pos_w)))
+
     W = [[0.0] * DIM for _ in LABELS]
     b = [0.0] * len(LABELS)
     rng = random.Random(SEED)
@@ -181,6 +197,8 @@ def main():
                 z = b[li] + sum(row[j] * v for j, v in x.items())
                 p = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
                 g = (p - y[li]) * lr
+                if y[li] >= 0.5:
+                    g *= pos_w[li]
                 if g == 0.0:
                     continue
                 b[li] -= g
@@ -188,6 +206,24 @@ def main():
                     row[j] -= g * v + L2 * row[j]
 
     report("held out", hold, W, b)
+    # Name the misses. A precision number says how often it cries wolf; the
+    # actual wolves are what tells you whether the dataset or the model is wrong.
+    holdrows = [r for r in rows if r.get("split") == "holdout"]
+    print("\nworst holdout mistakes (up to 4 per label):")
+    for li, lab in enumerate(LABELS):
+        wrong = []
+        for (x, y), r in zip(hold, holdrows):
+            z = b[li] + sum(W[li][j] * v for j, v in x.items())
+            pr = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
+            if (pr >= 0.5) != (y[li] >= 0.5):
+                kind = "false alarm" if pr >= 0.5 else "missed"
+                wrong.append((abs(pr - 0.5), kind, pr, call_text(r["tool"], r.get("action", ""), r.get("params", {}))))
+        if not wrong:
+            continue
+        wrong.sort(reverse=True)
+        print(f"  {lab}:")
+        for _, kind, pr, text in wrong[:4]:
+            print(f"    {kind:11} {pr:.2f}  {text[:78]}")
     report("training data (memorised — for contrast only)", data, W, b)
 
     out = here.parent / "internal" / "risk" / "model.bin"
@@ -201,6 +237,7 @@ def main():
         for l in LABELS:
             e = l.encode("utf-8")
             f.write(struct.pack("<H", len(e))); f.write(e)
+            f.write(struct.pack("<B", 1 if l in INFORMATIONAL else 0))
         for v in b:
             f.write(struct.pack("<f", v))
         for row in W:

@@ -81,7 +81,7 @@ func (m *Model) Assess(tool, action string, params map[string]any) Assessment {
 	a := Assessment{Scores: make(map[string]float32, len(scores))}
 	for i, l := range m.Labels {
 		a.Scores[l] = scores[i]
-		if l == LabelSafe {
+		if l == LabelSafe || m.informational(i) {
 			continue
 		}
 		if scores[i] > a.Risk {
@@ -91,8 +91,25 @@ func (m *Model) Assess(tool, action string, params map[string]any) Assessment {
 	return a
 }
 
+func (m *Model) informational(i int) bool {
+	return i < len(m.Informational) && m.Informational[i]
+}
+
+// IsInformational reports whether a label describes the call rather than
+// warning about it — reported in the log, excluded from the headline risk.
+func (m *Model) IsInformational(label string) bool {
+	for i, l := range m.Labels {
+		if l == label {
+			return m.informational(i)
+		}
+	}
+	return false
+}
+
 // Above reports the labels at or over t, strongest first — what a log line
-// wants to name when a call scores high.
+// wants to name when a call scores high. Informational labels are included:
+// "this reached the network" is worth reading next to the score even though it
+// is not part of it.
 func (a Assessment) Above(t float32) []string {
 	type kv struct {
 		k string

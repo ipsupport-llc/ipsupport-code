@@ -26,6 +26,14 @@ type Model struct {
 	Cfg    FeatureConfig
 	Labels []string
 	Bias   []float32
+	// Informational marks a label that describes the call without being a reason
+	// for concern, and so does not contribute to the headline risk number.
+	// "network" is the case this exists for: reaching the internet is a property,
+	// not a danger — the risky half of it is external_side_effect. Counted as
+	// risk, every fetch of a documentation page scored 1.00, which is how a
+	// signal becomes noise. Declared per label IN THE FILE so a replacement model
+	// decides for its own label set.
+	Informational []bool
 	// W is row-major, len(Labels) rows of Cfg.Dim. One flat slice rather than a
 	// [][]float32: it is the difference between one allocation and one per label,
 	// and the row stride is the only thing a reader needs to know.
@@ -64,8 +72,10 @@ func Load(data []byte) (*Model, error) {
 		return nil, fmt.Errorf("risk: model too large (%d labels x %d features)", n, mo.Cfg.Dim)
 	}
 	mo.Labels = make([]string, n)
+	mo.Informational = make([]bool, n)
 	for i := range mo.Labels {
 		mo.Labels[i] = r.str()
+		mo.Informational[i] = r.u8()&1 == 1
 	}
 	mo.Bias = make([]float32, n)
 	for i := range mo.Bias {
@@ -99,9 +109,14 @@ func (m *Model) Write(w io.Writer) error {
 	}
 	buf = append(buf, flags)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(m.Labels)))
-	for _, l := range m.Labels {
+	for i, l := range m.Labels {
 		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(l)))
 		buf = append(buf, l...)
+		var f uint8
+		if i < len(m.Informational) && m.Informational[i] {
+			f = 1
+		}
+		buf = append(buf, f)
 	}
 	for _, b := range m.Bias {
 		buf = binary.LittleEndian.AppendUint32(buf, math.Float32bits(b))

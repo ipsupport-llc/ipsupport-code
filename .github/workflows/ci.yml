@@ -27,6 +27,24 @@ jobs:
         run: make vet
       - name: tests (race)
         run: make race
+      # The risk dataset is a committed artifact generated from a committed
+      # vocabulary, so it can go stale silently: edit the generator, forget to
+      # regenerate, and the model ships trained on something nobody can
+      # reproduce. Regenerating and diffing costs under a second and needs no
+      # network — the vocabulary is vendored, which is the point.
+      #
+      # Retraining is NOT checked here: it takes minutes, and it belongs to the
+      # monthly refresh (risk-vocab.yml), not to every push.
+      - name: risk dataset is in step with its generator
+        run: |
+          cp scripts/risk_dataset.jsonl /tmp/committed.jsonl
+          python3 scripts/gen_risk_dataset.py >/dev/null
+          if ! diff -q /tmp/committed.jsonl scripts/risk_dataset.jsonl >/dev/null; then
+            echo "::error::scripts/risk_dataset.jsonl is stale — run: python3 scripts/gen_risk_dataset.py && python3 scripts/train_risk.py"
+            diff /tmp/committed.jsonl scripts/risk_dataset.jsonl | head -20
+            exit 1
+          fi
+          echo "dataset matches its generator"
       # Almost all code is pure, cross-platform Go, so a host build proves it
       # compiles everywhere. The few GOOS-specific files (procgroup_*, sandbox
       # wrap_*) are cross-compiled below; the full release matrix is built on

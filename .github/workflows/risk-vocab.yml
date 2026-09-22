@@ -1,0 +1,121 @@
+name: risk-vocab
+
+# The risk classifier's vocabulary is vendored (scripts/risk_vocab.json) so that
+# generating the dataset, training, and building the agent all stay offline and
+# deterministic: `git clone && make build` needs no network, and two people on
+# one commit get the same binary. The cost of vendoring is that the vocabulary
+# goes stale. This is what refreshes it.
+#
+# It opens a PULL REQUEST; it never commits to main. An automated retrain that
+# can merge itself will, one day, quietly ship a worse model because something
+# changed in a repository we do not control. So this job's output is a proposal
+# carrying its own numbers, and a human decides.
+on:
+  schedule:
+    - cron: '0 7 1 * *' # 07:00 UTC on the 1st — monthly. See the note on history size below.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: risk-vocab
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          # Pinned, because the claim "two training runs produce a byte-identical
+          # model.bin" is only meaningful against a fixed interpreter.
+          python-version: '3.12'
+
+      - name: fetch the vocabulary
+        run: python3 scripts/fetch_risk_vocab.py
+
+      # model.bin is 768KB and changes wholesale on every retrain, so a run that
+      # changed nothing upstream must not add a megabyte to the history for it.
+      # If the vocabulary is identical, nothing downstream can differ.
+      - name: stop if nothing changed upstream
+        id: changed
+        run: |
+          if git diff --quiet -- scripts/risk_vocab.json; then
+            echo "vocabulary unchanged — nothing to propose"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --stat -- scripts/risk_vocab.json
+          fi
+
+      - name: record the current model's numbers
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          # Trained from the CURRENT dataset, so "before" and "after" are measured
+          # the same way rather than one being read off a stale commit message.
+          python3 scripts/train_risk.py 2>&1 | tee /tmp/before.txt
+          git checkout -- internal/risk/model.bin
+
+      - name: regenerate and retrain
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          python3 scripts/gen_risk_dataset.py
+          python3 scripts/train_risk.py 2>&1 | tee /tmp/after.txt
+
+      - name: refuse a worse model
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          python3 - <<'PY'
+          import re, sys
+          def metrics(path):
+              body = open(path).read()
+              # the holdout block only — the training-set block is memorisation
+              block = body.split("held out")[1].split("training data")[0]
+              return {m[1]: (float(m[2]), float(m[3])) for m in
+                      re.finditer(r"^\s+(\S+)\s+precision (\d\.\d+)\s+recall (\d\.\d+)", block, re.M)}
+          before, after = metrics("/tmp/before.txt"), metrics("/tmp/after.txt")
+          worse = []
+          for label, (p0, r0) in before.items():
+              p1, r1 = after.get(label, (0.0, 0.0))
+              # 0.05 is noise on a holdout this size; more than that is a regression
+              # worth a human looking before it ships.
+              if p1 < p0 - 0.05 or r1 < r0 - 0.05:
+                  worse.append(f"{label}: precision {p0:.2f}->{p1:.2f}  recall {r0:.2f}->{r1:.2f}")
+          print("\n".join(f"  {l}: precision {p:.2f} recall {r:.2f}" for l, (p, r) in sorted(after.items())))
+          if worse:
+              sys.exit("the refreshed vocabulary made the model worse:\n  " + "\n  ".join(worse))
+          PY
+
+      - name: open the pull request
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="risk-vocab/$(date -u +%Y-%m-%d)"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add scripts/risk_vocab.json scripts/risk_dataset.jsonl internal/risk/model.bin
+          git commit -m "Refresh the risk vocabulary from upstream
+
+          scripts/fetch_risk_vocab.py re-fetched github/gitignore and the
+          gitleaks rules; the dataset was regenerated and the model retrained
+          from it. Held-out numbers are in the pull request body — they did not
+          regress, or this commit would not exist."
+          git push -u origin "$branch"
+          {
+            echo "Monthly refresh of the vendored vocabulary. **Read the numbers before merging.**"
+            echo
+            echo '### Held out, after'
+            echo '```'; sed -n '/held out/,/training data/p' /tmp/after.txt | head -12; echo '```'
+            echo '### Held out, before'
+            echo '```'; sed -n '/held out/,/training data/p' /tmp/before.txt | head -12; echo '```'
+            echo
+            echo 'The job refuses to open a PR at all if precision or recall dropped by more'
+            echo 'than 0.05 on any label, so this is a proposal that already cleared that bar —'
+            echo 'not a guarantee that the model got better.'
+          } > /tmp/body.md
+          gh pr create --title "Refresh the risk vocabulary from upstream" --body-file /tmp/body.md

@@ -37,6 +37,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	kbreflect "github.com/ipsupport-llc/ipsupport-code/internal/reflect"
+	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
 	"github.com/ipsupport-llc/ipsupport-code/internal/sandbox"
 	"github.com/ipsupport-llc/ipsupport-code/internal/skill"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
@@ -9081,5 +9082,179 @@ func TestUnresolvableProviderIsRefusedNotSilentlyLocal(t *testing.T) {
 				t.Errorf("error = %q, want it to contain %q", err, tc.wantErrContains)
 			}
 		})
+	}
+}
+
+// The shadow log's disagreement column is only worth reading if the policy
+// verdict beside the score is the real one. Where this cannot know — the tool
+// itself is the authority on its own gating — it must say "unknown" rather than
+// guess, because a disagreement count built on a guess is worse than a smaller
+// one built on facts.
+func TestPolicyVerdictMirrorsTheEngineOrSaysUnknown(t *testing.T) {
+	ws := t.TempDir()
+	c := config.Default()
+	c.Workspace = ws
+	c.Run = config.RunPolicy{Default: "ask", Allow: []string{"go test*", "ls*"}}
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	pol, err := policy.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name         string
+		tool, action string
+		params       map[string]any
+		want         risk.PolicyVerdict
+	}{
+		{"an allow-listed command", "run", "shell", map[string]any{"command": "go test ./..."}, risk.VerdictAllow},
+		{"anything else asks", "run", "shell", map[string]any{"command": "curl https://example.com"}, risk.VerdictAsk},
+		// Not "ask": the engine's safety floor refuses this outright, whatever the
+		// allow-list says. Worth pinning here — it is the clearest case of the
+		// policy already knowing something, and the risk score having nothing to add.
+		{"the safety floor denies outright", "run", "shell", map[string]any{"command": "rm -rf /"}, risk.VerdictDeny},
+		{"a write inside the jail", "file", "write", map[string]any{"path": "notes.md"}, risk.VerdictAllow},
+		{"a write outside the jail", "file", "write", map[string]any{"path": "../escape.md"}, risk.VerdictDeny},
+		{"reading a secret", "file", "read", map[string]any{"path": ".env"}, risk.VerdictDeny},
+		{"reading source", "file", "read", map[string]any{"path": "main.go"}, risk.VerdictAllow},
+		// The tool decides these, not the policy engine — so say so.
+		{"git", "git", "push", map[string]any{"remote": "origin"}, risk.VerdictUnknown},
+		{"web", "web", "fetch", map[string]any{"url": "https://example.com"}, risk.VerdictUnknown},
+		{"a run call with no command", "run", "shell", map[string]any{}, risk.VerdictUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := policyVerdict(pol, tc.tool, tc.action, tc.params); got != tc.want {
+				t.Errorf("policyVerdict = %v, want %v", got, tc.want)
+			}
+		})
+	}
+
+	// And with no engine at all it claims nothing.
+	if got := policyVerdict(nil, "run", "shell", map[string]any{"command": "rm -rf /"}); got != risk.VerdictUnknown {
+		t.Errorf("policyVerdict(nil) = %v, want unknown", got)
+	}
+}
+
+// Shadow scoring is on by default — an opt-in signal collects no evidence — and
+// IPS_RISK=off is the way out.
+func TestRiskShadowCanBeTurnedOff(t *testing.T) {
+	a := &app{cfg: config.Default(), workspace: t.TempDir()}
+	pol, err := policy.New(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.riskObserver(pol) == nil {
+		t.Error("no observer by default — shadow mode should be on, since it blocks nothing")
+	}
+	t.Setenv(EnvRiskOff, "off")
+	a2 := &app{cfg: config.Default(), workspace: t.TempDir()}
+	if a2.riskObserver(pol) != nil {
+		t.Errorf("%s=off still installed an observer", EnvRiskOff)
+	}
+}
+
+// The approval prompt is the only ground truth the agent gets for free, so the
+// path from "a human answered" to "the model moved" has to actually connect.
+// This drives it the way a real run does: score a call, then answer for it.
+func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if a.shadow == nil {
+		t.Fatal("no shadow scorer after wire()")
+	}
+
+	// A call the model flags, approved by a human: a false alarm.
+	params := map[string]any{"command": "truncate -s 0 install_manifest.txt"}
+	as := a.shadow.Model().Assess("run", "shell", params)
+	if as.Risk < risk.Threshold {
+		t.Skipf("the shipped model no longer flags %v (%.2f) — pick another false alarm", params, as.Risk)
+	}
+	ctx := risk.WithAssessment(context.Background(), "run", "shell", params, as)
+
+	a.learnFromApproval(ctx, true)
+
+	if got := a.shadow.Model().Adjustments(); got == 0 {
+		t.Error("the answer taught nothing — no local adjustments were stored")
+	}
+	if a.shadow.Learned() != 1 {
+		t.Errorf("learned = %d, want 1", a.shadow.Learned())
+	}
+	// The score itself is checked in internal/risk, where a correction can be
+	// applied repeatedly: one answer against a logit-40 call moves the logit but
+	// not the probability, which saturates. What this path has to prove is that
+	// the answer reached the model at all.
+
+	// The correction is on disk twice: as weights for this workspace, and as an
+	// example in the dataset's own shape, so the base can be fine-tuned on it.
+	if _, err := os.Stat(a.riskDeltaPath()); err != nil {
+		t.Errorf("no delta file: %v", err)
+	}
+	fb, err := os.ReadFile(a.riskFeedbackPath())
+	if err != nil {
+		t.Fatalf("no feedback log: %v", err)
+	}
+	if !strings.Contains(string(fb), `"command":"truncate -s 0 install_manifest.txt"`) || !strings.Contains(string(fb), `"labels":["safe"]`) {
+		t.Errorf("feedback line is not a usable training example:\n%s", fb)
+	}
+
+	// An agreement teaches nothing: the model and the human both said fine.
+	quiet := map[string]any{"command": "go test ./..."}
+	qa := a.shadow.Model().Assess("run", "shell", quiet)
+	a.learnFromApproval(risk.WithAssessment(context.Background(), "run", "shell", quiet, qa), true)
+	if a.shadow.Learned() != 1 {
+		t.Errorf("learned = %d after an agreement, want it unchanged at 1", a.shadow.Learned())
+	}
+}
+
+// /risk reports what happened and resets what was learned. The reset is the
+// escape hatch for a refusal that meant "not now" rather than "that is
+// dangerous".
+func TestRiskCommandReportsAndResets(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	params := map[string]any{"command": "truncate -s 0 install_manifest.txt"}
+	as := a.shadow.Model().Assess("run", "shell", params)
+	a.learnFromApproval(risk.WithAssessment(context.Background(), "run", "shell", params, as), true)
+
+	status := strings.Join(a.riskCommand(""), "\n")
+	for _, want := range []string{"shadow mode", "correction(s)", "adjustment(s)", "informational"} {
+		if !strings.Contains(status, want) {
+			t.Errorf("/risk status is missing %q:\n%s", want, status)
+		}
+	}
+	if !strings.Contains(status, "train_risk.py --from") {
+		t.Errorf("/risk should say how to fine-tune the base on what it collected:\n%s", status)
+	}
+
+	out := strings.Join(a.riskCommand("reset"), "\n")
+	if !strings.Contains(out, "cleared") {
+		t.Errorf("/risk reset said %q", out)
+	}
+	if _, err := os.Stat(a.riskDeltaPath()); !os.IsNotExist(err) {
+		t.Errorf("the delta file survived a reset: %v", err)
+	}
+	if n := a.shadow.Model().Adjustments(); n != 0 {
+		t.Errorf("%d adjustment(s) survived a reset in memory", n)
+	}
+	// The record of WHAT taught them is deliberately kept — resetting the weights
+	// should not throw away the examples they came from.
+	if _, err := os.Stat(a.riskFeedbackPath()); err != nil {
+		t.Errorf("reset also deleted the collected examples: %v", err)
 	}
 }

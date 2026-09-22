@@ -230,6 +230,21 @@ func (t *Tuned) labelIndex(label string) int {
 	return -1
 }
 
+// ResetDelta drops every local correction, in place. In place because the
+// scorer is shared: other goroutines may be scoring a call right now, and
+// swapping the whole thing out from under them is a data race.
+func (t *Tuned) ResetDelta() {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for i := range t.d.Rows {
+		t.d.Rows[i] = nil
+	}
+	t.changed = false
+}
+
 // Adjustments is how many weights the local delta currently holds, for /risk.
 func (t *Tuned) Adjustments() int {
 	if t == nil {

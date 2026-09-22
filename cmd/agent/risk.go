@@ -43,11 +43,19 @@ func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, a
 	} else if !os.IsNotExist(err) {
 		slog.Warn("local risk corrections unusable — starting from the base model", "err", err)
 	}
-	sh := risk.NewShadow(risk.NewTuned(base, d))
+	// Created ONCE and never reassigned. wire() runs again on every /config
+	// change and every model switch, and a background sub-agent answers its own
+	// approvals on its own goroutine — reassigning a.shadow there is a data race
+	// on the pointer, which is what CI caught. Reusing it also keeps what the
+	// session has learned: rebuilding would drop the in-memory corrections on the
+	// floor every time a setting changed.
+	if a.shadow == nil {
+		a.shadow = risk.NewShadow(risk.NewTuned(base, d))
+	}
+	sh := a.shadow
 	if sh == nil {
 		return nil
 	}
-	a.shadow = sh
 	return func(ctx context.Context, tool, action string, params map[string]any) context.Context {
 		as := sh.Observe(tool, action, params, policyVerdict(pol, tool, action, params))
 		// Hand the score down to the approval prompt, which is where a human
@@ -172,9 +180,9 @@ func (a *app) riskCommand(rest string) []string {
 		if err := os.Remove(a.riskDeltaPath()); err != nil && !os.IsNotExist(err) {
 			return []string{"error: " + err.Error()}
 		}
-		if err := a.wire(); err != nil { // reload the scorer without the delta
-			return []string{"error: " + err.Error()}
-		}
+		// Cleared in place rather than by rebuilding through wire(): the scorer is
+		// created once and shared with whatever goroutines are mid-call.
+		a.shadow.Model().ResetDelta()
 		return []string{"local risk corrections cleared — back to the shipped model",
 			"  the record of what taught them is kept: " + a.riskFeedbackPath()}
 	case "", "status":

@@ -19,7 +19,7 @@ so it is guarded: HASH_VECTORS below is asserted on every run against values
 produced by the Go implementation, and internal/risk/features_test.go pins the
 same ones. If either side is edited alone, both fail.
 """
-import json, math, pathlib, random, struct, sys, unicodedata
+import argparse, json, math, pathlib, random, struct, sys, unicodedata
 from collections import Counter
 
 # ── feature config (written into the model file, read back by Go) ────────────
@@ -147,11 +147,75 @@ def report(title, rows, W, b):
         print(f"  {lab:22} precision {prec:.2f}  recall {rec:.2f}  (tp={tp} fp={fp} fn={fn})")
 
 
+def read_model(path):
+    """Read a model file back, so training can CONTINUE from it instead of
+    starting at zero. Mirrors Model.Write / Load (internal/risk/model.go).
+
+    Starting from the shipped weights is what makes this fine-tuning rather than
+    retraining: the base took the whole synthetic dataset to learn what a
+    credential path looks like, and a handful of corrections collected from real
+    approvals cannot rediscover that from scratch. It refuses a file whose
+    feature config or label set differs — the weights would mean something else.
+    """
+    b = path.read_bytes()
+    o = 0
+    def take(n):
+        nonlocal o
+        s_ = b[o:o + n]; o += n
+        if len(s_) != n:
+            sys.exit(f"{path}: truncated")
+        return s_
+    if take(8) != b"IPSRISK\x01":
+        sys.exit(f"{path}: not a model file")
+    (ver,) = struct.unpack("<H", take(2))
+    if ver != 1:
+        sys.exit(f"{path}: format v{ver}, this script writes v1")
+    dim, seed = struct.unpack("<II", take(8))
+    wmin, wmax, cmin, cmax = struct.unpack("<BBBB", take(4))
+    (flags,) = struct.unpack("<B", take(1))
+    (nlab,) = struct.unpack("<H", take(2))
+    labels, info = [], []
+    for _ in range(nlab):
+        (ln,) = struct.unpack("<H", take(2))
+        labels.append(take(ln).decode("utf-8"))
+        info.append(struct.unpack("<B", take(1))[0] & 1 == 1)
+    got = (dim, seed, wmin, wmax, cmin, cmax, bool(flags & 1), labels)
+    want = (DIM, SEED, WORD_MIN, WORD_MAX, CHAR_MIN, CHAR_MAX, LOWERCASE, LABELS)
+    if got != want:
+        sys.exit(f"{path} was built with a different feature config or label set — "
+                 f"its weights index a different feature space, so continuing from it "
+                 f"would be meaningless.\n  file:   {got}\n  script: {want}")
+    bias = list(struct.unpack(f"<{nlab}f", take(4 * nlab)))
+    W = [list(struct.unpack(f"<{dim}f", take(4 * dim))) for _ in range(nlab)]
+    if o != len(b):
+        sys.exit(f"{path}: {len(b) - o} trailing bytes")
+    return W, bias
+
+
 def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--from", dest="start", metavar="model.bin",
+                    help="continue training from these weights instead of from zero")
+    ap.add_argument("--epochs", type=int, default=EPOCHS)
+    ap.add_argument("extra", nargs="*", metavar="dataset.jsonl",
+                    help="extra datasets to train on, e.g. a workspace's "
+                         "risk-feedback.jsonl — the corrections real approvals collected")
+    args = ap.parse_args()
+
     check_vectors()
     here = pathlib.Path(__file__).parent
     rows = [json.loads(l) for l in (here / "risk_dataset.jsonl").read_text().splitlines() if l.strip()]
-    print(f"dataset: {len(rows)} examples, {DIM} features, {len(LABELS)} labels")
+    base = len(rows)
+    for extra in args.extra:
+        add = [json.loads(l) for l in pathlib.Path(extra).read_text().splitlines() if l.strip()]
+        # Corrections from real use are the point of collecting them, so they are
+        # never held out: there are few, they are in-domain, and measuring on
+        # them would measure the wrong thing.
+        for r in add:
+            r["split"] = "train"
+        rows += add
+        print(f"+ {len(add)} examples from {extra}")
+    print(f"dataset: {len(rows)} examples ({base} synthetic), {DIM} features, {len(LABELS)} labels")
 
     data = []
     for r in rows:
@@ -183,13 +247,17 @@ def main():
         pos_w.append(min(20.0, max(1.0, neg / pos)))
     print("positive-class weights: " + "  ".join(f"{l}={w:.1f}" for l, w in zip(LABELS, pos_w)))
 
-    W = [[0.0] * DIM for _ in LABELS]
-    b = [0.0] * len(LABELS)
+    if args.start:
+        W, b = read_model(pathlib.Path(args.start))
+        print(f"continuing from {args.start} (fine-tuning, not retraining)")
+    else:
+        W = [[0.0] * DIM for _ in LABELS]
+        b = [0.0] * len(LABELS)
     rng = random.Random(SEED)
     order = list(range(len(data)))
-    for epoch in range(EPOCHS):
+    for epoch in range(args.epochs):
         rng.shuffle(order)
-        lr = LR * (1.0 - epoch / EPOCHS)          # linear decay
+        lr = LR * (1.0 - epoch / args.epochs)          # linear decay
         for i in order:
             x, y = data[i]
             for li in range(len(LABELS)):
@@ -204,6 +272,38 @@ def main():
                 b[li] -= g
                 for j, v in x.items():
                     row[j] -= g * v + L2 * row[j]
+
+    # The headline number, which is what the log actually shows and a gate would
+    # actually use: "any risky label at or over 0.5". Per-label precision does
+    # not answer "how often does this cry wolf on ordinary work" — a call can be
+    # a false positive for one label and correct overall.
+    RISKY = [i for i, l in enumerate(LABELS) if l != "safe" and l not in INFORMATIONAL]
+    holdrows_ = [r for r in rows if r.get("split") == "holdout"]
+    alarm_on_safe, safe_total, missed_risky, risky_total = [], 0, [], 0
+    for (x, y), r in zip(hold, holdrows_):
+        top = 0.0
+        for li in RISKY:
+            z = b[li] + sum(W[li][j] * v for j, v in x.items())
+            top = max(top, 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z)))))
+        truly_risky = any(y[li] >= 0.5 for li in RISKY)
+        text = call_text(r["tool"], r.get("action", ""), r.get("params", {}))
+        if truly_risky:
+            risky_total += 1
+            if top < 0.5:
+                missed_risky.append((top, text))
+        else:
+            safe_total += 1
+            if top >= 0.5:
+                alarm_on_safe.append((top, text))
+    print(f"\nheadline score on the holdout (max risky label, threshold 0.50):")
+    print(f"  false alarms   {len(alarm_on_safe):3}/{safe_total:<4} ordinary calls  ({100*len(alarm_on_safe)/max(1,safe_total):.1f}%)")
+    print(f"  missed         {len(missed_risky):3}/{risky_total:<4} risky calls     ({100*len(missed_risky)/max(1,risky_total):.1f}%)")
+    for title, items in (("every false alarm", alarm_on_safe), ("worst misses", sorted(missed_risky, reverse=True)[:8])):
+        if not items:
+            continue
+        print(f"  {title}:")
+        for sc, text in sorted(items, reverse=True)[:14]:
+            print(f"    {sc:.2f}  {text[:76]}")
 
     report("held out", hold, W, b)
     # Name the misses. A precision number says how often it cries wolf; the

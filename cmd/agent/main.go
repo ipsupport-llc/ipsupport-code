@@ -4121,6 +4121,8 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		printLines(a.rewindCommand(rest))
 	case "/reflect":
 		printLines(a.reflectCommand(rest))
+	case "/risk":
+		printLines(a.riskCommand(rest))
 	case "/goal":
 		if text, ok := a.launchGoalText(rest); ok {
 			a.setGoal(text)
@@ -5729,6 +5731,11 @@ func (a *app) approveGated(ctx context.Context, kind, detail string) bool {
 	start := time.Now()
 	ok := a.approver.Approve(ctx, kind, detail)
 	a.approvalWaitNS.Add(int64(time.Since(start)))
+	// A human just labelled this call. It is the only ground truth the agent
+	// gets for free, and the only place the risk model can learn from something
+	// other than a synthetic dataset. Deliberately AFTER the session-allow
+	// short-circuit above: that path never asked anyone.
+	a.learnFromApproval(ctx, ok)
 	return ok
 }
 

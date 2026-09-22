@@ -3869,8 +3869,9 @@ func TestRiskObserverSeesEveryCallAndChangesNothing(t *testing.T) {
 	reg := tool.NewRegistry(tool.NewCalc())
 	fake := &scriptLLM{replies: []llm.Message{calcCall(), {Role: "assistant", Content: "two"}}}
 	a := New(fake, reg, nil, nil, "", 5)
-	a.SetRiskObserver(func(tool, action string, params map[string]any) {
+	a.SetRiskObserver(func(ctx context.Context, tool, action string, params map[string]any) context.Context {
 		got = append(got, seen{tool, action, params})
+		return ctx
 	})
 
 	tr, err := a.Run(context.Background(), "add one and one")

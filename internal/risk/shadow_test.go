@@ -29,7 +29,7 @@ func TestDisagreementIsClassifiedBothWays(t *testing.T) {
 		{"routine call the policy denied", routine, VerdictDeny, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := NewShadow(m)
+			s := NewShadow(NewTuned(m, nil))
 			s.Observe("run", "shell", tc.params, tc.verdict)
 			if _, _, d := s.Stats(); d != tc.wantDisagreed {
 				t.Errorf("disagreed = %d, want %d", d, tc.wantDisagreed)
@@ -43,7 +43,7 @@ func TestShadowCountsAndSummarises(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := NewShadow(m)
+	s := NewShadow(NewTuned(m, nil))
 	s.Observe("run", "shell", map[string]any{"command": "go build ./..."}, VerdictAllow)
 	s.Observe("run", "shell", map[string]any{"command": "rm -rf /opt/data"}, VerdictAllow)
 	c, f, d := s.Stats()
@@ -62,7 +62,7 @@ func TestObserveReturnsAScoreAndNothingElse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := NewShadow(m).Observe("run", "shell", map[string]any{"command": "rm -rf /"}, VerdictAllow)
+	a := NewShadow(NewTuned(m, nil)).Observe("run", "shell", map[string]any{"command": "rm -rf /"}, VerdictAllow)
 	if a.Risk < Threshold {
 		t.Errorf("risk = %.2f for `rm -rf /`, want >= %.2f", a.Risk, Threshold)
 	}

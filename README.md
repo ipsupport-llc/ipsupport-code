@@ -446,9 +446,47 @@ danger, so it is reported but excluded from the headline number — otherwise
 fetching a documentation page scores 1.00. Which labels are informational is
 declared in the model file, so a replacement model decides for its own.
 
+### It learns from your approvals
+
+The base weights are trained on synthetic data and never change. What a run
+learns goes beside them, per workspace — and it learns from the only ground
+truth the agent gets for free: **you answering an approval prompt**. Two answers
+carry information, and they are exactly the two the shadow log already counts as
+disagreements:
+
+| | |
+|---|---|
+| it flagged the call and you **approved** | a false alarm — the labels that fired come down |
+| it stayed quiet and you **refused** | a miss — its own strongest label goes up |
+
+An approval of something it also thought was fine teaches nothing; that would be
+learning from its own output.
+
+A refusal can mean "not now" or "I'll do it myself" as easily as "that is
+dangerous", so **one answer never flips the model**. A borderline score settles
+on the first correction; a confident wrong one takes five or six consistent
+answers. Corrections that stop being repeated decay away, and `/risk reset`
+drops them all.
+
+`/risk` shows what happened and what was learned. Nothing about this is a
+dataset you have to assemble or hand over: every correction is also appended to
+`risk-feedback.jsonl` in the workspace's state directory, in the **same shape**
+`scripts/risk_dataset.jsonl` uses — so it concatenates straight onto the
+synthetic set and fine-tunes the base, starting from the existing weights rather
+than from zero:
+
+```sh
+python3 scripts/train_risk.py --from internal/risk/model.bin   ~/.config/ipsupport-code/state/<workspace>/risk-feedback.jsonl
+```
+
+Two runs of the trainer on the committed dataset produce a byte-identical
+`model.bin`, so the shipped model is reproducible from the files in this repo.
+
 **What it is not.** It does not replace the permission policy or the sandbox.
 The policy is still better at the extremes — it denies `rm -rf /` outright,
-whatever the allow-list says.
+whatever the allow-list says. And learning needs the prompt: with
+`-skip-permissions` nobody is asked, so nothing is labelled and nothing is
+learned.
 
 ## Skills
 

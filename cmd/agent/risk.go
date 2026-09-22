@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -21,18 +23,74 @@ const EnvRiskOff = "IPS_RISK"
 // compared against lives here rather than in internal/risk or internal/agent:
 // this is the one place that holds the model, the permission policy and the
 // tool registry at once.
-func (a *app) riskObserver(pol *policy.Engine) func(tool, action string, params map[string]any) {
+func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, action string, params map[string]any) context.Context {
 	if strings.EqualFold(os.Getenv(EnvRiskOff), "off") {
 		return nil
 	}
-	sh := risk.NewShadow(risk.DefaultOrNil())
+	base := risk.DefaultOrNil()
+	if base == nil {
+		return nil
+	}
+	// The local corrections live beside the rest of this workspace's state, not
+	// in the binary: they are what THIS project's approvals taught, and a
+	// checkout with different norms should not inherit them. A delta that no
+	// longer matches the base model's labels is dropped with a line in the log —
+	// its rows are positional, so applying it to a retrained model would adjust
+	// the wrong things.
+	var d *risk.Delta
+	if loaded, err := risk.LoadDelta(a.riskDeltaPath(), base); err == nil {
+		d = loaded
+	} else if !os.IsNotExist(err) {
+		slog.Warn("local risk corrections unusable — starting from the base model", "err", err)
+	}
+	sh := risk.NewShadow(risk.NewTuned(base, d))
 	if sh == nil {
 		return nil
 	}
 	a.shadow = sh
-	return func(tool, action string, params map[string]any) {
-		sh.Observe(tool, action, params, policyVerdict(pol, tool, action, params))
+	return func(ctx context.Context, tool, action string, params map[string]any) context.Context {
+		as := sh.Observe(tool, action, params, policyVerdict(pol, tool, action, params))
+		// Hand the score down to the approval prompt, which is where a human
+		// answers for this call and so the only place ground truth appears.
+		return risk.WithAssessment(ctx, tool, action, params, as)
 	}
+}
+
+// riskDeltaPath is where this workspace's learned corrections live, and
+// riskFeedbackPath is the append-only record of what taught them — in the same
+// JSONL shape scripts/risk_dataset.jsonl uses, so the examples a run collects
+// concatenate straight onto the synthetic dataset and retrain the BASE model
+// offline, starting from the existing weights rather than from zero.
+func (a *app) riskDeltaPath() string    { return a.statePath("risk-delta.bin") }
+func (a *app) riskFeedbackPath() string { return a.statePath("risk-feedback.jsonl") }
+
+// learnFromApproval is called with a human's answer to an approval prompt. It
+// teaches the model only on a DISAGREEMENT — a flagged call approved, or an
+// unflagged one refused — because anything else would be learning from the
+// model's own output. See risk.CorrectionFrom.
+//
+// A refusal can mean "not now" as easily as "that is dangerous", so one
+// correction deliberately moves the score only a little (see risk.learnRate) and
+// the delta's total influence is capped. A pattern moves the model; a one-off
+// does not.
+func (a *app) learnFromApproval(ctx context.Context, approved bool) {
+	if a.shadow == nil {
+		return
+	}
+	c, ok := risk.CorrectionFrom(ctx, approved)
+	if !ok {
+		return
+	}
+	n := a.shadow.Model().Learn(c)
+	a.shadow.NoteLearned()
+	if err := risk.AppendFeedback(a.riskFeedbackPath(), c); err != nil {
+		slog.Warn("risk feedback not recorded", "err", err)
+	}
+	if err := a.shadow.Model().SaveDelta(a.riskDeltaPath()); err != nil {
+		slog.Warn("local risk corrections not saved", "err", err)
+	}
+	slog.Debug("risk learned", "tool", c.Tool, "action", c.Action, "risky", c.Risky,
+		"labels", c.Labels, "adjustments", n)
 }
 
 // policyVerdict reports what the permission policy would say about a call — and
@@ -99,4 +157,69 @@ func (a *app) logRiskSummary() {
 	if s := a.shadow.Summary(); s != "" {
 		slog.Debug(s)
 	}
+}
+
+// riskCommand backs /risk: what the scorer has done this run, and what it has
+// learned locally. Read-only except for "reset", which drops the corrections —
+// the escape hatch for a model that learned the wrong lesson from a refusal
+// that meant "not now".
+func (a *app) riskCommand(rest string) []string {
+	if a.shadow == nil {
+		return []string{"risk scoring is off (" + EnvRiskOff + "=off, or the model could not load)"}
+	}
+	switch strings.ToLower(strings.TrimSpace(rest)) {
+	case "reset":
+		if err := os.Remove(a.riskDeltaPath()); err != nil && !os.IsNotExist(err) {
+			return []string{"error: " + err.Error()}
+		}
+		if err := a.wire(); err != nil { // reload the scorer without the delta
+			return []string{"error: " + err.Error()}
+		}
+		return []string{"local risk corrections cleared — back to the shipped model",
+			"  the record of what taught them is kept: " + a.riskFeedbackPath()}
+	case "", "status":
+		m := a.shadow.Model()
+		calls, flagged, disagreed := a.shadow.Stats()
+		out := []string{
+			fmt.Sprintf("risk scoring: shadow mode — logs, blocks nothing (threshold %.2f)", risk.Threshold),
+			fmt.Sprintf("  this run    %d call(s) scored · %d over the threshold · %d disagreed with the policy", calls, flagged, disagreed),
+			fmt.Sprintf("  learned     %d correction(s) this run · %d local adjustment(s) in total", a.shadow.Learned(), m.Adjustments()),
+			"  labels      " + strings.Join(labelSummary(m.Base()), " · "),
+		}
+		if n := feedbackCount(a.riskFeedbackPath()); n > 0 {
+			out = append(out, fmt.Sprintf("  collected   %d example(s) in %s", n, a.riskFeedbackPath()),
+				"              retrain the base on them: python3 scripts/train_risk.py --from internal/risk/model.bin "+a.riskFeedbackPath())
+		}
+		return append(out, "  /risk reset  drops what this workspace learned")
+	}
+	return []string{"usage: /risk [status] · /risk reset"}
+}
+
+// labelSummary names the model's labels, marking the informational ones — the
+// ones reported beside the score without counting toward it.
+func labelSummary(m *risk.Model) []string {
+	out := make([]string, 0, len(m.Labels))
+	for _, l := range m.Labels {
+		if m.IsInformational(l) {
+			l += " (informational)"
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+// feedbackCount counts the collected corrections; 0 on any problem, since this
+// is a status line and not a place to fail.
+func feedbackCount(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, l := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(l) != "" {
+			n++
+		}
+	}
+	return n
 }

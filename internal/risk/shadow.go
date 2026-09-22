@@ -43,20 +43,43 @@ const Threshold float32 = 0.5
 // caller is expected to act on: the point of the first mode is to find out
 // whether the model's opinion is worth anything before it is allowed to matter.
 type Shadow struct {
-	model *Model
+	model *Tuned
 	// calls/flagged/disagreed are the run's counters, read by Stats for a single
 	// end-of-session line. Atomic because tool calls can be dispatched from a
 	// sub-agent's goroutine while the main run is dispatching its own.
-	calls, flagged, disagreed atomic.Int64
+	calls, flagged, disagreed, learned atomic.Int64
 }
 
 // NewShadow returns a shadow scorer, or nil if there is no usable model — a nil
 // *Shadow is safe to call, so the hot path never needs a check.
-func NewShadow(m *Model) *Shadow {
+func NewShadow(m *Tuned) *Shadow {
 	if m == nil {
 		return nil
 	}
 	return &Shadow{model: m}
+}
+
+// Model is the scorer this shadow uses, for the callers that need to teach it.
+func (s *Shadow) Model() *Tuned {
+	if s == nil {
+		return nil
+	}
+	return s.model
+}
+
+// Learned counts the corrections this run applied, for the summary line.
+func (s *Shadow) Learned() int64 {
+	if s == nil {
+		return 0
+	}
+	return s.learned.Load()
+}
+
+// NoteLearned records that a correction was applied.
+func (s *Shadow) NoteLearned() {
+	if s != nil {
+		s.learned.Add(1)
+	}
 }
 
 // Observe scores one tool call and logs it beside the policy's own verdict.
@@ -116,7 +139,11 @@ func (s *Shadow) Summary() string {
 	if c == 0 {
 		return ""
 	}
-	return fmt.Sprintf("risk shadow: scored %d call(s), %d over %.2f, %d disagreed with the policy", c, f, Threshold, d)
+	out := fmt.Sprintf("risk shadow: scored %d call(s), %d over %.2f, %d disagreed with the policy", c, f, Threshold, d)
+	if l := s.Learned(); l > 0 {
+		out += fmt.Sprintf("; learned from %d correction(s), %d local adjustment(s)", l, s.model.Adjustments())
+	}
+	return out
 }
 
 func round2(f float32) float32 { return float32(int(f*100+0.5)) / 100 }

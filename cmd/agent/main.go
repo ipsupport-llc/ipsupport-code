@@ -36,6 +36,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/procgroup"
 	"github.com/ipsupport-llc/ipsupport-code/internal/reflect"
+	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
 	"github.com/ipsupport-llc/ipsupport-code/internal/sandbox"
 	"github.com/ipsupport-llc/ipsupport-code/internal/selfupdate"
 	"github.com/ipsupport-llc/ipsupport-code/internal/skill"
@@ -487,6 +488,10 @@ type app struct {
 	// shared client's own Context() reading with their own (much shorter) Chat
 	// calls. shouldAutoCompact reads this instead of a.client.Context() fresh.
 	lastRealContext int
+
+	// shadow is the risk classifier's shadow-mode scorer for this run (nil when
+	// scoring is off or the model could not load). It only ever logs.
+	shadow *risk.Shadow
 }
 
 func build(workspace, sessionName string, overrides []string, reader *bufio.Reader) (*app, func(), error) {
@@ -2796,6 +2801,7 @@ func (a *app) wire() error {
 	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
 	a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
+	a.ag.SetRiskObserver(a.riskObserver(pol))          // shadow-mode risk scoring: logs, blocks nothing
 	a.ag.SetContextWindow(a.activeLLM().ContextWindow) // so a single long task can watch its OWN growing trail mid-run
 	a.wireJudge()                                      // its own connection only when /reasoning judge was set
 	a.ag.SetMaxStuckTurns(a.cfg.MaxStuckTurns)         // 0 = internal/agent's own default
@@ -3930,6 +3936,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 		// returns anywhere a next task (which may never come — one-shot mode, or
 		// /exit right after) would otherwise be the only thing left to pick them up.
 		a.recordUsage(time.Since(reflStart))
+		a.logRiskSummary()
 		if learned > 0 {
 			fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
 		}
@@ -3993,6 +4000,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) (a
 	// commandWhileBusy) — saving here first means the just-finished exchange (the
 	// part the user actually sees and cares about) reaches disk before that race even
 	// becomes possible, instead of depending on reflection finishing first.
+	a.logRiskSummary()
 	return tr, !tr.Cancelled // see the same gate in runOne — a stopped run still teaches,
 	// cancellation doesn't: esc means the user wants control back, not two more model calls.
 }
@@ -4113,6 +4121,8 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		printLines(a.rewindCommand(rest))
 	case "/reflect":
 		printLines(a.reflectCommand(rest))
+	case "/risk":
+		printLines(a.riskCommand(rest))
 	case "/goal":
 		if text, ok := a.launchGoalText(rest); ok {
 			a.setGoal(text)
@@ -5721,6 +5731,11 @@ func (a *app) approveGated(ctx context.Context, kind, detail string) bool {
 	start := time.Now()
 	ok := a.approver.Approve(ctx, kind, detail)
 	a.approvalWaitNS.Add(int64(time.Since(start)))
+	// A human just labelled this call. It is the only ground truth the agent
+	// gets for free, and the only place the risk model can learn from something
+	// other than a synthetic dataset. Deliberately AFTER the session-allow
+	// short-circuit above: that path never asked anyone.
+	a.learnFromApproval(ctx, ok)
 	return ok
 }
 

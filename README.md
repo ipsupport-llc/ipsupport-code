@@ -393,6 +393,122 @@ default**, and on a platform/kernel without a supported sandbox commands run
 unconfined as before. External CLI agents are **not** sandboxed (they run
 outside it, as documented above).
 
+## Risk scoring (shadow mode)
+
+A small local classifier scores every tool call for how dangerous it looks, and
+**logs what it thought next to what the permission policy actually did**. It
+blocks nothing. The point of the first mode is to find out whether the signal is
+worth anything before it is allowed to matter:
+
+```
+msg="risk shadow" tool=run action=shell risk=1.00 top=credential_access
+  labels="credential_access=1.00 sandbox_escape=1.00" policy=allow
+  disagreement=allowed-but-flagged call="run shell command=cat ~/.ssh/id_rsa"
+msg="risk shadow: scored 1 call(s), 1 over 0.50, 1 disagreed with the policy"
+```
+
+The `disagreement` column is the whole product. **allowed-but-flagged** is what
+a risk gate could add; **gated-but-unremarkable** is the friction it would cost.
+Tail them with `IPS_LOG=debug`, and turn the whole thing off with `IPS_RISK=off`.
+
+It is a hashed-feature linear model — `sigmoid(Wx+b)` over word and character
+n-grams, six labels (`destructive`, `sandbox_escape`, `credential_access`,
+`network`, `external_side_effect`, `safe`). Inference is pure Go with no
+dependency of any kind: 768KB of `float32` embedded in the binary, ~28µs per
+call. Training is offline and separate (`scripts/train_risk.py`, stdlib only);
+its only output is the weights file.
+
+Swap the model without rebuilding: `IPS_RISK_MODEL=/path/to/model.bin`. The file
+carries its own feature config and label names, so a model with a different
+feature space or a different set of labels loads unchanged.
+
+On held-out **paths** — a fifth of every path class, never seen under any verb:
+
+| label | precision | recall |
+|---|---|---|
+| destructive | 0.90 | 0.98 |
+| sandbox_escape | 1.00 | 0.94 |
+| credential_access | 0.98 | 0.99 |
+| network | 0.88 | 0.97 |
+| external_side_effect | 0.98 | 0.96 |
+| safe | 0.89 | 0.91 |
+
+On the headline score — what the log shows and a gate would use — that is **5.9%
+false alarms on ordinary calls and 2.2% missed risky ones**. The trainer prints
+both, and names every false alarm.
+
+The **vocabulary is vendored from upstream**, not invented: build-output names
+come from [github/gitignore](https://github.com/github/gitignore)'s 309
+templates (CC0), and the words that mark a secret — `token`, `api`, `key`,
+`secret`, plus ~130 vendor names — from [gitleaks](https://github.com/gitleaks/gitleaks)'
+222 rules (MIT). `scripts/fetch_risk_vocab.py` is the only script that touches
+the network; its output is committed, so generating the dataset, training, and
+`make build` all stay offline and deterministic.
+
+Upstream needs judgement applied, and the judgement is recorded in
+`scripts/risk_vocab.json` rather than hidden: "do not commit this" is not "safe
+to delete", so `Makefile`, `README.txt` and `app/config/parameters.yml` are
+vetoed out of the safe half, along with names that are generated in one
+ecosystem and hand-written in another (`docs`, `public`, `lib`). The two failure
+modes are not symmetric — missing a build directory costs one score that reads
+high; calling `docs` build output teaches the model that `rm -rf docs` is
+routine.
+
+The dataset is built **compositionally** — every verb crossed with every class of
+argument — so the verb carries almost no information and the argument carries all
+of it. `cat README.md` scores 0.00 and `cat ~/.ssh/id_ecdsa` scores 1.00; so do
+`less`, `wc -l`, `xxd` and `od -c` on the same two files. That took three
+attempts to get right (see the comment at the top of
+`scripts/gen_risk_dataset.py`), and it is the whole difference between a risk
+signal and a list of scary words.
+
+`network` is **informational**: reaching the internet is a property, not a
+danger, so it is reported but excluded from the headline number — otherwise
+fetching a documentation page scores 1.00. Which labels are informational is
+declared in the model file, so a replacement model decides for its own.
+
+### It learns from your approvals
+
+The base weights are trained on synthetic data and never change. What a run
+learns goes beside them, per workspace — and it learns from the only ground
+truth the agent gets for free: **you answering an approval prompt**. Two answers
+carry information, and they are exactly the two the shadow log already counts as
+disagreements:
+
+| | |
+|---|---|
+| it flagged the call and you **approved** | a false alarm — the labels that fired come down |
+| it stayed quiet and you **refused** | a miss — its own strongest label goes up |
+
+An approval of something it also thought was fine teaches nothing; that would be
+learning from its own output.
+
+A refusal can mean "not now" or "I'll do it myself" as easily as "that is
+dangerous", so **one answer never flips the model**. A borderline score settles
+on the first correction; a confident wrong one takes five or six consistent
+answers. Corrections that stop being repeated decay away, and `/risk reset`
+drops them all.
+
+`/risk` shows what happened and what was learned. Nothing about this is a
+dataset you have to assemble or hand over: every correction is also appended to
+`risk-feedback.jsonl` in the workspace's state directory, in the **same shape**
+`scripts/risk_dataset.jsonl` uses — so it concatenates straight onto the
+synthetic set and fine-tunes the base, starting from the existing weights rather
+than from zero:
+
+```sh
+python3 scripts/train_risk.py --from internal/risk/model.bin   ~/.config/ipsupport-code/state/<workspace>/risk-feedback.jsonl
+```
+
+Two runs of the trainer on the committed dataset produce a byte-identical
+`model.bin`, so the shipped model is reproducible from the files in this repo.
+
+**What it is not.** It does not replace the permission policy or the sandbox.
+The policy is still better at the extremes — it denies `rm -rf /` outright,
+whatever the allow-list says. And learning needs the prompt: with
+`-skip-permissions` nobody is asked, so nothing is labelled and nothing is
+learned.
+
 ## Skills
 
 On-demand instruction packs — the user-extensible version of guides-on-demand.

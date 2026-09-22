@@ -85,7 +85,10 @@ type Agent struct {
 	history    []llm.Message
 	maxHistory int
 	planMode   bool
-	label      string // non-empty for a sub-agent; tags its events so the UI can group them
+	// riskObserver is the optional shadow-mode hook (see SetRiskObserver). nil
+	// in every path that does not wire one, which is every test in this package.
+	riskObserver func(ctx context.Context, tool, action string, params map[string]any) context.Context
+	label        string // non-empty for a sub-agent; tags its events so the UI can group them
 
 	// beforeTurn, if set, is called at the top of every loop iteration and its
 	// messages are folded into the working set before the next model call. It's
@@ -337,6 +340,23 @@ func (a *Agent) askAside(ctx context.Context, base []llm.Message, question strin
 // caller's single synchronous snapshot keeps the pair consistent.
 func (a *Agent) AnswerAside(ctx context.Context, base []llm.Message, question string) string {
 	return a.askAside(ctx, base, question)
+}
+
+// SetRiskObserver installs a hook called just before every tool call is
+// dispatched, with the call already parsed. It exists for shadow-mode risk
+// scoring: the observer scores the call and logs what it thought, and whatever
+// it concludes changes nothing here.
+//
+// It returns the context the tool call then runs under: the observer attaches
+// what it scored, so the approval prompt further down the same call can read it
+// back and learn from the human's answer.
+//
+// A plain func of primitives rather than an interface over the risk package: an
+// agent that imported the classifier (or the permission policy the classifier
+// is compared against) would drag both into every test that builds one, to
+// support a feature that is by construction allowed to have no effect.
+func (a *Agent) SetRiskObserver(f func(ctx context.Context, tool, action string, params map[string]any) context.Context) {
+	a.riskObserver = f
 }
 
 // SetPlanMode toggles plan mode. In plan mode the agent investigates with
@@ -2164,6 +2184,19 @@ func (a *Agent) anyMutating(calls []llm.ToolCall) bool {
 func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool) {
 	action, params, argWarn := parseArgs(c.Arguments)
 	a.emit("tool_call", map[string]any{"tool": c.Name, "action": action, "params": params})
+
+	// Shadow-mode risk scoring, if anything is listening. Called with the parsed
+	// call and nothing else: the observer decides what to score and what to
+	// compare it against, so this package stays free of both the classifier and
+	// the permission policy. It cannot influence what happens next — the return
+	// value is discarded and the call proceeds exactly as it would have.
+	if f := a.riskObserver; f != nil {
+		// The observer returns the context the tool will run under, so it can
+		// attach what it scored — the approval prompt fires further down this same
+		// call, on this same goroutine, and that is where a human answers for it.
+		// See internal/risk's context carrier for why a field would be wrong.
+		ctx = f(ctx, c.Name, action, params)
+	}
 
 	// Plan mode backstop: refuse mutating calls even if the model ignores the
 	// directive, so a weak model can't change anything while planning.

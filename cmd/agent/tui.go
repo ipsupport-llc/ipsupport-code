@@ -1552,6 +1552,9 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/reflect":
 		m.pushLines(m.app.reflectCommand(rest))
 		return m, nil
+	case "/risk":
+		m.pushLines(m.app.riskCommand(rest))
+		return m, nil
 	case "/goal":
 		if text, ok := m.app.launchGoalText(rest); ok {
 			m.app.setGoal(text)
@@ -1751,7 +1754,7 @@ func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/usage", "/sessions", "/agents", "/agent", "/skills", "/permissions",
 		"/budget", "/reasoning", "/goal", "/ai", "/knowledge", "/kb", "/mcp",
-		"/offline", "/cd", "/reflect":
+		"/offline", "/cd", "/reflect", "/risk":
 		// The bare form is a read-only report/listing; a subcommand may mutate or
 		// re-wire the running stack, so defer those until the task finishes.
 		if strings.TrimSpace(rest) == "" {
@@ -2454,6 +2457,7 @@ var commandList = []cmdInfo{
 	{"/mcp", "list configured MCP servers and their tools"},
 	{"/rewind", "pick a step to roll back to (restores files + trims the chat)"},
 	{"/reflect", "on|off|<profile> — post-task learning; run it on a stronger model"},
+	{"/risk", "what the risk scorer did and learned this run (reset — drop the local corrections)"},
 	{"/goal", "<text> — set & pursue a multi-turn goal; a judge re-feeds it until met (go · clear · ttl <n>)"},
 	{"/reasoning", "off|minimal|low|medium|high (or reflect:) — trim a thinking model's reasoning"},
 	{"/shell", "drop to a shell (or !cmd for one command); exit to return"},

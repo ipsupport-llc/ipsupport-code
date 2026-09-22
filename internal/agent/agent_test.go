@@ -3855,3 +3855,46 @@ func TestColonSalvageRequiresWhitespaceAfterTheSeparator(t *testing.T) {
 		t.Error(`splitParamTag("path") invented a value`)
 	}
 }
+
+// The risk observer has to actually be called, with the call already parsed —
+// a scorer nobody invokes is an embedded model and a benchmark and no signal.
+// It also has to be unable to change anything: the tool runs either way.
+func TestRiskObserverSeesEveryCallAndChangesNothing(t *testing.T) {
+	type seen struct {
+		tool, action string
+		params       map[string]any
+	}
+	var got []seen
+
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{calcCall(), {Role: "assistant", Content: "two"}}}
+	a := New(fake, reg, nil, nil, "", 5)
+	a.SetRiskObserver(func(ctx context.Context, tool, action string, params map[string]any) context.Context {
+		got = append(got, seen{tool, action, params})
+		return ctx
+	})
+
+	tr, err := a.Run(context.Background(), "add one and one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("observer saw %d call(s), want 1", len(got))
+	}
+	if got[0].tool != "calc" || got[0].action != "calculate" {
+		t.Errorf("observer saw %s.%s, want calc.calculate", got[0].tool, got[0].action)
+	}
+	if len(got[0].params) == 0 {
+		t.Errorf("observer saw no params — it must get the call already parsed, not the raw arguments")
+	}
+	// And the call still ran: shadow mode observes, it does not gate.
+	var ran bool
+	for _, m := range tr.Messages {
+		if m.Role == "tool" && strings.Contains(m.Content, "2") { // calcCall computes 1+1
+			ran = true
+		}
+	}
+	if !ran {
+		t.Error("the tool did not run with an observer installed")
+	}
+}

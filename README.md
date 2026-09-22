@@ -407,6 +407,20 @@ msg="risk shadow" tool=run action=shell risk=1.00 top=credential_access
 msg="risk shadow: scored 1 call(s), 1 over 0.50, 1 disagreed with the policy"
 ```
 
+You see it where it matters, not only in the log. A call the scorer is unhappy
+about carries its verdict on its own line, and again at the approval prompt —
+which is the moment it is worth anything, since your answer there is the label
+it learns from:
+
+```
+  ⚙ run shell cat ~/.ssh/id_rsa   ⚠ 0.98 credential_access
+  ⚠ approve run: cat ~/.ssh/id_rsa   ⚠ 0.98 credential_access
+    y approve · n deny · a allow all shell commands this session
+```
+
+Nothing is shown for a call it had nothing to say about — a number on every
+routine line is how a risk signal gets tuned out.
+
 The `disagreement` column is the whole product. **allowed-but-flagged** is what
 a risk gate could add; **gated-but-unremarkable** is the friction it would cost.
 Tail them with `IPS_LOG=debug`, and turn the whole thing off with `IPS_RISK=off`.

@@ -23,7 +23,7 @@ const EnvRiskOff = "IPS_RISK"
 // compared against lives here rather than in internal/risk or internal/agent:
 // this is the one place that holds the model, the permission policy and the
 // tool registry at once.
-func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, action string, params map[string]any) context.Context {
+func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
 	if strings.EqualFold(os.Getenv(EnvRiskOff), "off") {
 		return nil
 	}
@@ -56,11 +56,12 @@ func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, a
 	if sh == nil {
 		return nil
 	}
-	return func(ctx context.Context, tool, action string, params map[string]any) context.Context {
+	return func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
 		as := sh.Observe(tool, action, params, policyVerdict(pol, tool, action, params))
 		// Hand the score down to the approval prompt, which is where a human
-		// answers for this call and so the only place ground truth appears.
-		return risk.WithAssessment(ctx, tool, action, params, as)
+		// answers for this call and so the only place ground truth appears — and
+		// back up as a note, so the call's own line can carry it.
+		return risk.WithAssessment(ctx, tool, action, params, as), as.Note()
 	}
 }
 

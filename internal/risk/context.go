@@ -1,6 +1,9 @@
 package risk
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // The assessment travels on the CONTEXT from the point a call is scored to the
 // point a human answers for it.
@@ -26,6 +29,27 @@ type scored struct {
 // WithAssessment attaches one call's score to the context handed to the tool.
 func WithAssessment(ctx context.Context, tool, action string, params map[string]any, a Assessment) context.Context {
 	return context.WithValue(ctx, assessKey{}, &scored{tool: tool, action: action, params: params, a: a})
+}
+
+// AssessmentFrom reads back the score attached to this call, for showing it to
+// the person about to answer for it.
+func AssessmentFrom(ctx context.Context) (Assessment, bool) {
+	s, _ := ctx.Value(assessKey{}).(*scored)
+	if s == nil {
+		return Assessment{}, false
+	}
+	return s.a, true
+}
+
+// Note renders the assessment as the one short line a prompt or a tool-call line
+// can carry: "0.98 credential_access". Empty when nothing fired, so a caller can
+// use it directly as "show this if non-empty" — a score on every routine call
+// would be noise, and noise is what makes a risk signal get ignored.
+func (a Assessment) Note() string {
+	if a.Risk < Threshold || a.Top == "" {
+		return ""
+	}
+	return fmt.Sprintf("%.2f %s", a.Risk, a.Top)
 }
 
 // CorrectionFrom reads back what was scored and reports the correction a human's

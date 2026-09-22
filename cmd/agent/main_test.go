@@ -9258,3 +9258,62 @@ func TestRiskCommandReportsAndResets(t *testing.T) {
 		t.Errorf("reset also deleted the collected examples: %v", err)
 	}
 }
+
+// The score has to be visible where it is worth something. It was only ever in
+// the debug log: a shadow signal nobody can see is a signal nobody can judge,
+// and the learning loop runs on the answers to these very prompts.
+func TestTheScoreReachesTheApprovalPromptAndTheCallLine(t *testing.T) {
+	in := textarea.New()
+	in.SetWidth(76)
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	m := &tuiModel{app: &app{cfg: cfg, workspace: cfg.Workspace}, ctx: context.Background(),
+		width: 100, height: 24, ready: true, input: in, inputLines: 1, spin: spinner.New()}
+	m.vp = viewport.New(100, 10)
+
+	// The prompt, while answering.
+	m.pending = &approvalReq{kind: "run", detail: "cat ~/.ssh/id_rsa", risk: "0.98 credential_access"}
+	if got := m.approvePrompt(); !strings.Contains(got, "0.98 credential_access") {
+		t.Errorf("the approval prompt hides the score:\n%s", got)
+	}
+	// …and a call the scorer said nothing about stays clean.
+	m.pending = &approvalReq{kind: "run", detail: "go test ./..."}
+	if got := m.approvePrompt(); strings.Contains(got, "⚠ 0.") {
+		t.Errorf("an unremarkable call got a score anyway:\n%s", got)
+	}
+
+	// The call's own line in the log.
+	flagged := m.renderEvent(uiEvent{kind: "tool_call", fields: map[string]any{
+		"tool": "run", "action": "shell", "params": map[string]any{"command": "cat ~/.ssh/id_rsa"},
+		"risk": "0.98 credential_access"}})
+	if !strings.Contains(strings.Join(flagged, "\n"), "0.98 credential_access") {
+		t.Errorf("the tool-call line hides the score:\n%s", strings.Join(flagged, "\n"))
+	}
+	quiet := m.renderEvent(uiEvent{kind: "tool_call", fields: map[string]any{
+		"tool": "run", "action": "shell", "params": map[string]any{"command": "go test ./..."},
+		"risk": ""}})
+	if strings.Contains(strings.Join(quiet, "\n"), "⚠") {
+		t.Errorf("a routine call was marked anyway — a number on every line is noise:\n%s", strings.Join(quiet, "\n"))
+	}
+}
+
+// Note() is what both of those render, so it has to stay quiet below the
+// threshold — that is the whole reason the callers can use it as "show if
+// non-empty".
+func TestRiskNoteIsEmptyBelowTheThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a    risk.Assessment
+		want string
+	}{
+		{"over", risk.Assessment{Risk: 0.98, Top: "credential_access"}, "0.98 credential_access"},
+		{"under", risk.Assessment{Risk: 0.12, Top: "destructive"}, ""},
+		{"nothing scored", risk.Assessment{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.a.Note(); got != tc.want {
+				t.Errorf("Note() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

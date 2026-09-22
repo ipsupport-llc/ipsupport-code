@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"sync"
+
+	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
 )
 
 // uiBridge is the seam between the agent (running in a background goroutine) and
@@ -25,7 +27,13 @@ type uiEvent struct {
 
 type approvalReq struct {
 	kind, detail string
-	reply        chan bool
+	// risk is what the classifier thought of this call, rendered short
+	// ("0.98 credential_access"), or "" when it thought nothing worth saying.
+	// Shown at the prompt because that is the moment it is worth anything: the
+	// answer is about to become the label it learns from, and a score nobody
+	// sees is a score nobody can judge.
+	risk  string
+	reply chan bool
 }
 
 func newBridge() *uiBridge {
@@ -55,7 +63,7 @@ func (b *uiBridge) Approve(ctx context.Context, kind, detail string) bool {
 
 	reply := make(chan bool, 1)
 	select {
-	case b.approvals <- approvalReq{kind: kind, detail: detail, reply: reply}:
+	case b.approvals <- approvalReq{kind: kind, detail: detail, risk: riskNote(ctx), reply: reply}:
 	case <-abort:
 		return false
 	case <-ctx.Done():
@@ -91,4 +99,16 @@ func (b *uiBridge) arm() {
 	b.mu.Lock()
 	b.abort = make(chan struct{})
 	b.mu.Unlock()
+}
+
+// riskNote is the classifier's opinion of the call being approved, if anything
+// was scored and it had anything to say. The score rides on the context from
+// where the call was scored down to here (see internal/risk), which is what
+// makes it available at the prompt at all.
+func riskNote(ctx context.Context) string {
+	a, ok := risk.AssessmentFrom(ctx)
+	if !ok {
+		return ""
+	}
+	return a.Note()
 }

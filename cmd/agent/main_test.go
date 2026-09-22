@@ -9172,12 +9172,11 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 	}
 
 	// A call the model flags, approved by a human: a false alarm.
-	params := map[string]any{"command": "rm -rf Debug"}
+	params := map[string]any{"command": "truncate -s 0 install_manifest.txt"}
 	as := a.shadow.Model().Assess("run", "shell", params)
 	if as.Risk < risk.Threshold {
-		t.Skipf("the base model no longer flags %v (%.2f)", params, as.Risk)
+		t.Skipf("the shipped model no longer flags %v (%.2f) — pick another false alarm", params, as.Risk)
 	}
-	before := as.Risk
 	ctx := risk.WithAssessment(context.Background(), "run", "shell", params, as)
 
 	a.learnFromApproval(ctx, true)
@@ -9188,9 +9187,10 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 	if a.shadow.Learned() != 1 {
 		t.Errorf("learned = %d, want 1", a.shadow.Learned())
 	}
-	if after := a.shadow.Model().Assess("run", "shell", params).Risk; after >= before {
-		t.Errorf("risk went %.2f -> %.2f; approving a flagged call should bring it down", before, after)
-	}
+	// The score itself is checked in internal/risk, where a correction can be
+	// applied repeatedly: one answer against a logit-40 call moves the logit but
+	// not the probability, which saturates. What this path has to prove is that
+	// the answer reached the model at all.
 
 	// The correction is on disk twice: as weights for this workspace, and as an
 	// example in the dataset's own shape, so the base can be fine-tuned on it.
@@ -9201,7 +9201,7 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no feedback log: %v", err)
 	}
-	if !strings.Contains(string(fb), `"command":"rm -rf Debug"`) || !strings.Contains(string(fb), `"labels":["safe"]`) {
+	if !strings.Contains(string(fb), `"command":"truncate -s 0 install_manifest.txt"`) || !strings.Contains(string(fb), `"labels":["safe"]`) {
 		t.Errorf("feedback line is not a usable training example:\n%s", fb)
 	}
 
@@ -9228,7 +9228,7 @@ func TestRiskCommandReportsAndResets(t *testing.T) {
 	if err := a.wire(); err != nil {
 		t.Fatal(err)
 	}
-	params := map[string]any{"command": "rm -rf Debug"}
+	params := map[string]any{"command": "truncate -s 0 install_manifest.txt"}
 	as := a.shadow.Model().Assess("run", "shell", params)
 	a.learnFromApproval(risk.WithAssessment(context.Background(), "run", "shell", params, as), true)
 

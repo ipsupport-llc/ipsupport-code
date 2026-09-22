@@ -37,22 +37,28 @@ import (
 // delta may ever make is hard-capped (maxShift). Several consistent corrections
 // move the score; one bad label is noise that decays.
 const (
-	// learnRate is how far one correction moves the logit. Measured against the
-	// shipped model: a borderline score settles on the first correction, and a
-	// saturated wrong one (the base puts "rm -rf Debug" at logit 15) takes five
-	// or six. That is the intended feel — responsive to a pattern, deaf to a
-	// one-off.
-	learnRate = 3.0
+	// learnRate is how far one correction moves the logit — exactly that, because
+	// the step is normalized by the call's feature count and the features are
+	// +-1, so the shift works out to learnRate * (p - target).
+	//
+	// Both constants here are derived from the shipped model rather than chosen:
+	// it is confident, putting a flagged call at logit 30 to 45 (class weighting
+	// drives the weights up; the probabilities saturate long before). Eight per
+	// correction means five or six consistent answers overturn one, which is the
+	// intended feel — responsive to a pattern, deaf to a one-off. Retrain the
+	// base into a differently-scaled model and these want re-measuring; the tests
+	// find a flagged call rather than naming one, for the same reason.
+	learnRate = 8.0
 	// decay shrinks every stored adjustment on each update, so corrections that
 	// stop being repeated fade instead of accumulating forever.
 	decay = 0.002
-	// maxShift is a runaway stop, not the safety mechanism. It has to be wide
-	// enough to cross any real decision — the base model reaches logit 15 on a
-	// confident call, so a cap of 6 would have made a confidently wrong score
-	// impossible to correct, which is exactly the case local learning exists
-	// for. What keeps the corrections honest is the slow rate above, the decay
+	// maxShift is a runaway stop, not the safety mechanism, and it has to clear
+	// the model's own confidence: at 25 it sat BELOW the logit 30-45 the shipped
+	// model reaches, so a confidently wrong score could not be corrected at all —
+	// which is exactly the case local learning exists for. Twice the observed
+	// maximum. What keeps the corrections honest is the rate above, the decay
 	// below, and /risk reset.
-	maxShift = 25.0
+	maxShift = 90.0
 	// pruneBelow drops adjustments too small to matter, keeping the file bounded.
 	pruneBelow = 1e-4
 )

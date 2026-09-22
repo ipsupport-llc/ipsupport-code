@@ -8,6 +8,25 @@ import (
 	"testing"
 )
 
+// aFlaggedCall finds a command the CURRENT shipped model flags, rather than
+// hardcoding one. Retraining moves individual scores — "rm -rf Debug" was a
+// false alarm until the build-output vocabulary started coming from
+// github/gitignore, which has Debug in it — and a fixture pinned to one string
+// turns every retrain into a test failure that says nothing.
+func aFlaggedCall(t *testing.T, tn *Tuned) string {
+	t.Helper()
+	for _, c := range []string{
+		"truncate -s 0 install_manifest.txt", "shred -u dkms.conf",
+		"rm -rf src/app.ts", "cat ~/.ssh/id_rsa", "cat /etc/shadow",
+	} {
+		if tn.Assess("run", "shell", map[string]any{"command": c}).Risk >= Threshold {
+			return c
+		}
+	}
+	t.Skip("the shipped model flags none of the candidates — pick new ones")
+	return ""
+}
+
 func tunedModel(t *testing.T) *Tuned {
 	t.Helper()
 	m, err := Default()
@@ -22,13 +41,10 @@ func tunedModel(t *testing.T) *Tuned {
 // trained on synthetic data and the way one particular project actually works.
 func TestACorrectionMovesOnlyWhatItWasAbout(t *testing.T) {
 	tn := tunedModel(t)
-	const target = "rm -rf Debug" // a held-out build directory: the base flags it
-	other := "cat ~/.ssh/id_rsa"  // must stay exactly as alarming as it was
+	target := aFlaggedCall(t, tn)
+	const other = "go test ./..." // must stay exactly as unremarkable as it was
 
 	before := tn.Assess("run", "shell", map[string]any{"command": target})
-	if before.Risk < Threshold {
-		t.Skipf("the base model no longer flags %q (risk %.2f) — pick another false alarm", target, before.Risk)
-	}
 	otherBefore := tn.Assess("run", "shell", map[string]any{"command": other}).Risk
 
 	// Six consistent corrections, the way a person who keeps approving the same
@@ -53,7 +69,7 @@ func TestACorrectionMovesOnlyWhatItWasAbout(t *testing.T) {
 	if after.Risk >= Threshold {
 		t.Errorf("risk is still %.2f after six corrections — learning is too slow to be useful", after.Risk)
 	}
-	if got := tn.Assess("run", "shell", map[string]any{"command": other}).Risk; got < otherBefore-0.05 {
+	if got := tn.Assess("run", "shell", map[string]any{"command": other}).Risk; got > otherBefore+0.05 {
 		t.Errorf("an unrelated call moved %.2f -> %.2f; corrections must be local to what they corrected", otherBefore, got)
 	}
 }
@@ -84,7 +100,7 @@ func TestOneCorrectionNudgesRatherThanFlips(t *testing.T) {
 // would be learning from the model's own output.
 func TestOnlyDisagreementsTeach(t *testing.T) {
 	tn := tunedModel(t)
-	risky := tn.Assess("run", "shell", map[string]any{"command": "cat ~/.ssh/id_rsa"})
+	risky := tn.Assess("run", "shell", map[string]any{"command": aFlaggedCall(t, tn)})
 	safe := tn.Assess("run", "shell", map[string]any{"command": "go test ./..."})
 	if risky.Risk < Threshold || safe.Risk >= Threshold {
 		t.Fatalf("the fixtures no longer hold: risky=%.2f safe=%.2f", risky.Risk, safe.Risk)
@@ -115,7 +131,7 @@ func TestOnlyDisagreementsTeach(t *testing.T) {
 
 func TestDeltaSurvivesARoundTrip(t *testing.T) {
 	tn := tunedModel(t)
-	const target = "rm -rf Debug"
+	target := aFlaggedCall(t, tn)
 	for i := 0; i < 3; i++ {
 		c, _ := CorrectionFrom(WithAssessment(context.Background(), "run", "shell",
 			map[string]any{"command": target}, tn.Assess("run", "shell", map[string]any{"command": target})), true)
@@ -145,8 +161,9 @@ func TestDeltaSurvivesARoundTrip(t *testing.T) {
 // differ would adjust the wrong things. It must be refused, not applied.
 func TestDeltaRefusesAMismatchedModel(t *testing.T) {
 	tn := tunedModel(t)
+	target := aFlaggedCall(t, tn)
 	c, _ := CorrectionFrom(WithAssessment(context.Background(), "run", "shell",
-		map[string]any{"command": "rm -rf Debug"}, tn.Assess("run", "shell", map[string]any{"command": "rm -rf Debug"})), true)
+		map[string]any{"command": target}, tn.Assess("run", "shell", map[string]any{"command": target})), true)
 	tn.Learn(c)
 	path := filepath.Join(t.TempDir(), "d.bin")
 	if err := tn.SaveDelta(path); err != nil {
@@ -206,8 +223,9 @@ func TestFeedbackIsWrittenInTheDatasetsOwnShape(t *testing.T) {
 // things. Silent, and only visible as a model that got quietly worse.
 func TestDeltaRefusesADifferentFeatureSpace(t *testing.T) {
 	tn := tunedModel(t)
+	target := aFlaggedCall(t, tn)
 	c, _ := CorrectionFrom(WithAssessment(context.Background(), "run", "shell",
-		map[string]any{"command": "rm -rf Debug"}, tn.Assess("run", "shell", map[string]any{"command": "rm -rf Debug"})), true)
+		map[string]any{"command": target}, tn.Assess("run", "shell", map[string]any{"command": target})), true)
 	tn.Learn(c)
 	path := filepath.Join(t.TempDir(), "d.bin")
 	if err := tn.SaveDelta(path); err != nil {

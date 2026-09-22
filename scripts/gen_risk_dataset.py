@@ -21,8 +21,20 @@ leave "~/.ssh/id_rsa" in both halves and measure memorisation; holding out the
 path measures whether an unseen secret is recognized as one, which is the only
 question that matters.
 """
-import json, pathlib, random
+import json, pathlib, random, sys
 
+# Where the vocabulary comes from, and where it does not:
+#
+#   build output   github/gitignore, vetoed  (scripts/risk_vocab.json)
+#   secret names   the specific well-known ones are curated; the rest are built
+#                  from gitleaks' vendor and secret-type words
+#   system paths   still curated by hand. Neither source has a list of "paths
+#                  outside a workspace", and inventing one is what this file is
+#                  trying to stop doing — so this is the class to be most
+#                  sceptical of, and the one the feedback loop will correct first.
+#   project files  curated: what a checkout looks like is not something upstream
+#                  publishes, and these are the safe half, where being wrong is
+#                  a false alarm rather than a miss.
 D, S, C, N, X = "destructive", "sandbox_escape", "credential_access", "network", "external_side_effect"
 rng = random.Random(20260921)
 rows = []
@@ -48,23 +60,22 @@ PROJECT = [
     "config/webpack.config.js", "internal/config/config.go", "src/config/index.ts",
 ]
 # Build output: regenerable, so deleting it is routine.
-BUILD = [
-    "build", "dist", "node_modules", "target", "out", ".pytest_cache", "__pycache__",
-    "coverage.out", "vendor", ".next", "tmp", "./tmp", "./build", "bin/app",
-    "*.o", ".cache", "obj", "Debug", "cmake-build-debug", "site-packages",
+VOCAB_PATH = pathlib.Path(__file__).with_name("risk_vocab.json")
+if not VOCAB_PATH.exists():
+    sys.exit(f"{VOCAB_PATH} is missing — run scripts/fetch_risk_vocab.py first")
+VOCAB = json.loads(VOCAB_PATH.read_text())
+
+# Build output: the names people actually ignore, from github/gitignore, vetoed
+# down to the ones that are unambiguously generated (see fetch_risk_vocab.py).
+# These used to be forty names I invented.
+BUILD = list(VOCAB["build_output"]) + [
     # "./"-prefixed forms of the same thing. Without them "rm -rf ./dist" scored
     # 0.97 while "rm -rf node_modules" scored 0.00: the only "./" the model had
     # ever seen led "../", so the prefix itself read as an escape.
     "./dist", "./node_modules", "./target", "./out", "./coverage", "./vendor",
     "./.cache", "./bin", "./obj", "./__pycache__",
-    # A handful of the most common, and no more. Thirty extra build directories
-    # were tried here to push one borderline case ("rm -rf node_modules" at 0.57)
-    # under the threshold, and cost credential_access 0.28 of recall for it: the
-    # class is ~25 rows per path, so padding the safe side quietly re-weights the
-    # whole model. The imbalance is handled in the trainer instead, where it
-    # belongs.
-    ".gradle", ".terraform", ".venv", ".mypy_cache", "htmlcov",
 ]
+
 # Outside the workspace: reading is an escape, deleting is destruction.
 # Same reasoning: the marker is the LEADING shape ("/etc/", "/var/", "/proc/",
 # "../"), so each prefix appears under several different tails.
@@ -117,6 +128,16 @@ CRED = [
     ".htpasswd", "shadow.bak", "database_password.txt", "smtp_password.conf",
     "config/secrets.yml", "config/master.key", "terraform.tfstate",
 ]
+# …plus names built from the vocabulary gitleaks actually tracks: 129 vendors and
+# the nine words that describe what kind of secret it is. The crossing is ours;
+# the words are not invented. A deterministic sample, because 129 x 9 x 5 would
+# bury every other class in the dataset.
+_vendors = list(VOCAB["secret_vendors"])
+_kinds = list(VOCAB["secret_kinds"])
+random.Random(1).shuffle(_vendors)
+for _i, _v in enumerate(_vendors[:30]):
+    _k = _kinds[_i % len(_kinds)]  # indexed, not hashed: hash() is salted per process
+    CRED += [f"{_v}_{_k}.json", f".{_v}-{_k}"]
 
 
 def outside(p):

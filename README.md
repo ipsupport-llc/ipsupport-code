@@ -426,12 +426,33 @@ On held-out **paths** — a fifth of every path class, never seen under any verb
 
 | label | precision | recall |
 |---|---|---|
-| destructive | 0.94 | 0.93 |
-| sandbox_escape | 0.99 | 0.90 |
-| credential_access | 0.99 | 0.86 |
-| network | 1.00 | 0.99 |
-| external_side_effect | 1.00 | 0.96 |
-| safe | 0.86 | 0.86 |
+| destructive | 0.90 | 0.98 |
+| sandbox_escape | 1.00 | 0.94 |
+| credential_access | 0.98 | 0.99 |
+| network | 0.88 | 0.97 |
+| external_side_effect | 0.98 | 0.96 |
+| safe | 0.89 | 0.91 |
+
+On the headline score — what the log shows and a gate would use — that is **5.9%
+false alarms on ordinary calls and 2.2% missed risky ones**. The trainer prints
+both, and names every false alarm.
+
+The **vocabulary is vendored from upstream**, not invented: build-output names
+come from [github/gitignore](https://github.com/github/gitignore)'s 309
+templates (CC0), and the words that mark a secret — `token`, `api`, `key`,
+`secret`, plus ~130 vendor names — from [gitleaks](https://github.com/gitleaks/gitleaks)'
+222 rules (MIT). `scripts/fetch_risk_vocab.py` is the only script that touches
+the network; its output is committed, so generating the dataset, training, and
+`make build` all stay offline and deterministic.
+
+Upstream needs judgement applied, and the judgement is recorded in
+`scripts/risk_vocab.json` rather than hidden: "do not commit this" is not "safe
+to delete", so `Makefile`, `README.txt` and `app/config/parameters.yml` are
+vetoed out of the safe half, along with names that are generated in one
+ecosystem and hand-written in another (`docs`, `public`, `lib`). The two failure
+modes are not symmetric — missing a build directory costs one score that reads
+high; calling `docs` build output teaches the model that `rm -rf docs` is
+routine.
 
 The dataset is built **compositionally** — every verb crossed with every class of
 argument — so the verb carries almost no information and the argument carries all

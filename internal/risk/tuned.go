@@ -59,8 +59,21 @@ const (
 
 // Delta is the sparse, per-label weight adjustment learned locally. Row i lines
 // up with the base model's Labels[i].
+// A delta is only meaningful against the exact model it was learned from: the
+// row order is the base model's label order, and the indices within a row are
+// positions in its FEATURE SPACE. Both are checked on load, and the second is
+// the one that fails silently if it is not — retrain with a different hash seed
+// or feature count and every stored index means a different feature, so the
+// corrections still apply, still look plausible in /risk, and adjust entirely
+// the wrong things.
+//
+// A rejected delta is not a loss. It is a cache; the durable record of what
+// taught it is risk-feedback.jsonl, which is raw (tool, action, params, labels)
+// and independent of the model, the feature space and the label set. Whatever
+// changes, the corrections refit from that.
 type Delta struct {
-	Labels []string // the base model's labels, to refuse a mismatched pairing
+	Cfg    FeatureConfig // the feature space these indices are positions in
+	Labels []string      // the base model's labels, in order
 	Rows   []map[uint32]float32
 }
 
@@ -242,6 +255,15 @@ func (t *Tuned) SaveDelta(path string) error {
 	}
 	var buf []byte
 	buf = append(buf, deltaMagic[:]...)
+	c := t.base.Cfg
+	buf = binary.LittleEndian.AppendUint32(buf, c.Dim)
+	buf = binary.LittleEndian.AppendUint32(buf, c.Seed)
+	buf = append(buf, c.WordMin, c.WordMax, c.CharMin, c.CharMax)
+	var fl uint8
+	if c.Lowercase {
+		fl = 1
+	}
+	buf = append(buf, fl)
 	buf = binary.LittleEndian.AppendUint16(buf, uint16(len(t.base.Labels)))
 	for _, l := range t.base.Labels {
 		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(l)))
@@ -280,11 +302,22 @@ func LoadDelta(path string, base *Model) (*Delta, error) {
 	if r.err == nil && m != deltaMagic {
 		return nil, fmt.Errorf("risk: %s is not a delta file", path)
 	}
+	var cfg FeatureConfig
+	cfg.Dim = r.u32()
+	cfg.Seed = r.u32()
+	cfg.WordMin, cfg.WordMax = r.u8(), r.u8()
+	cfg.CharMin, cfg.CharMax = r.u8(), r.u8()
+	cfg.Lowercase = r.u8()&1 == 1
 	n := int(r.u16())
 	if r.err != nil {
 		return nil, r.err
 	}
-	d := &Delta{Labels: make([]string, n), Rows: make([]map[uint32]float32, n)}
+	// The feature space first: this is the mismatch that would otherwise pass
+	// unnoticed — same labels, same row count, indices meaning something else.
+	if cfg != base.Cfg {
+		return nil, fmt.Errorf("risk: delta was learned against a different feature space (%+v, model has %+v) — dropping the local corrections; they refit from the feedback log", cfg, base.Cfg)
+	}
+	d := &Delta{Cfg: cfg, Labels: make([]string, n), Rows: make([]map[uint32]float32, n)}
 	for i := range d.Labels {
 		d.Labels[i] = r.str()
 	}

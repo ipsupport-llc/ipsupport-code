@@ -198,3 +198,44 @@ func TestFeedbackIsWrittenInTheDatasetsOwnShape(t *testing.T) {
 		}
 	}
 }
+
+// The label check is the obvious one. The FEATURE SPACE check is the one that
+// matters: same labels, same row count, but a different hash seed or feature
+// count means every stored index points at a different feature — so the
+// corrections would still load, still look plausible, and adjust the wrong
+// things. Silent, and only visible as a model that got quietly worse.
+func TestDeltaRefusesADifferentFeatureSpace(t *testing.T) {
+	tn := tunedModel(t)
+	c, _ := CorrectionFrom(WithAssessment(context.Background(), "run", "shell",
+		map[string]any{"command": "rm -rf Debug"}, tn.Assess("run", "shell", map[string]any{"command": "rm -rf Debug"})), true)
+	tn.Learn(c)
+	path := filepath.Join(t.TempDir(), "d.bin")
+	if err := tn.SaveDelta(path); err != nil {
+		t.Fatal(err)
+	}
+
+	base := tn.Base()
+	for _, tc := range []struct {
+		name string
+		mut  func(*Model)
+	}{
+		{"a different hash seed", func(m *Model) { m.Cfg.Seed++ }},
+		{"a different feature count", func(m *Model) { m.Cfg.Dim /= 2 }},
+		{"a different n-gram range", func(m *Model) { m.Cfg.CharMax++ }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			other := &Model{Cfg: base.Cfg, Labels: base.Labels, Bias: base.Bias,
+				Informational: base.Informational, W: base.W}
+			tc.mut(other)
+			if _, err := LoadDelta(path, other); err == nil {
+				t.Error("loaded a delta learned against a different feature space")
+			} else if !strings.Contains(err.Error(), "feature space") {
+				t.Errorf("error = %q, want it to name the feature space", err)
+			}
+		})
+	}
+	// …and it still loads against the model it was actually learned from.
+	if _, err := LoadDelta(path, base); err != nil {
+		t.Errorf("refused its own model: %v", err)
+	}
+}

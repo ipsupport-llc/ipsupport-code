@@ -90,16 +90,41 @@ func (a *app) learnFromApproval(ctx context.Context, approved bool) {
 	if !ok {
 		return
 	}
+	// In memory, here: it is microseconds, it must be visible to the very next
+	// call, and Learn takes the model's own lock.
 	n := a.shadow.Model().Learn(c)
 	a.shadow.NoteLearned()
+	slog.Debug("risk learned", "tool", c.Tool, "action", c.Action, "risky", c.Risky,
+		"labels", c.Labels, "adjustments", n)
+
+	// On disk, NOT here. This runs between the human pressing y and the tool
+	// actually running, and persisting means two blocking file locks and an
+	// fsync — a second session on the same workspace holding either one would
+	// hang the approval. Shadow mode is not allowed to affect execution, and
+	// that includes making the user wait for it.
+	a.riskSaves.Add(1)
+	go a.persistRiskLearning(c)
+}
+
+// waitRiskSaves blocks until every deferred write has finished. Called on the
+// way out: a correction that was learned but never reached disk because the
+// process exited a moment later is the one case where moving the write off the
+// approval path would have cost something.
+func (a *app) waitRiskSaves() { a.riskSaves.Wait() }
+
+// persistRiskLearning writes the correction and the delta off the approval path.
+// Losing a correction to a crash between the answer and the write costs one
+// training example; blocking the answer on a disk costs the user.
+func (a *app) persistRiskLearning(c risk.Correction) {
+	defer a.riskSaves.Done()
+	a.riskSaveMu.Lock() // one writer at a time: several sub-agents can be answering at once
+	defer a.riskSaveMu.Unlock()
 	if err := risk.AppendFeedback(a.riskFeedbackPath(), c); err != nil {
 		slog.Warn("risk feedback not recorded", "err", err)
 	}
 	if err := a.shadow.Model().SaveDelta(a.riskDeltaPath()); err != nil {
 		slog.Warn("local risk corrections not saved", "err", err)
 	}
-	slog.Debug("risk learned", "tool", c.Tool, "action", c.Action, "risky", c.Risky,
-		"labels", c.Labels, "adjustments", n)
 }
 
 // policyVerdict reports what the permission policy would say about a call — and

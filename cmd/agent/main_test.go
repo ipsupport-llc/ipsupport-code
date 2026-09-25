@@ -32,6 +32,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
@@ -9180,6 +9181,7 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 	ctx := risk.WithAssessment(context.Background(), "run", "shell", params, as)
 
 	a.learnFromApproval(ctx, true)
+	a.waitRiskSaves() // the write is deferred off the approval path
 
 	if got := a.shadow.Model().Adjustments(); got == 0 {
 		t.Error("the answer taught nothing — no local adjustments were stored")
@@ -9231,6 +9233,7 @@ func TestRiskCommandReportsAndResets(t *testing.T) {
 	params := map[string]any{"command": "truncate -s 0 install_manifest.txt"}
 	as := a.shadow.Model().Assess("run", "shell", params)
 	a.learnFromApproval(risk.WithAssessment(context.Background(), "run", "shell", params, as), true)
+	a.waitRiskSaves()
 
 	status := strings.Join(a.riskCommand(""), "\n")
 	for _, want := range []string{"shadow mode", "correction(s)", "adjustment(s)", "informational"} {
@@ -9315,5 +9318,53 @@ func TestRiskNoteIsEmptyBelowTheThreshold(t *testing.T) {
 				t.Errorf("Note() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// Learning happens between the human pressing y and the tool running, so it
+// must not wait on a disk. It used to: two blocking file locks and an fsync,
+// inline. A second session on the same workspace holding either lock would hang
+// the approval — shadow mode affecting execution, which is the one thing it is
+// not allowed to do.
+func TestLearningDoesNotBlockTheApproval(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if a.shadow == nil {
+		t.Skip("no scorer")
+	}
+
+	// Another process is holding the delta's lock and not letting go.
+	_ = os.MkdirAll(filepath.Dir(a.riskDeltaPath()), 0o755)
+	unlock, err := filelock.Lock(a.riskDeltaPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	params := map[string]any{"command": "truncate -s 0 install_manifest.txt"}
+	as := a.shadow.Model().Assess("run", "shell", params)
+	if as.Risk < risk.Threshold {
+		t.Skipf("the shipped model no longer flags %v (%.2f)", params, as.Risk)
+	}
+	ctx := risk.WithAssessment(context.Background(), "run", "shell", params, as)
+
+	done := make(chan struct{})
+	go func() { a.learnFromApproval(ctx, true); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("answering an approval blocked on the risk store's file lock")
+	}
+	// …and it still learned, in memory, immediately — that part is not deferred.
+	if a.shadow.Model().Adjustments() == 0 {
+		t.Error("the correction was not applied in memory")
 	}
 }

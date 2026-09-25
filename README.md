@@ -440,16 +440,22 @@ On held-out **paths** — a fifth of every path class, never seen under any verb
 
 | label | precision | recall |
 |---|---|---|
-| destructive | 0.90 | 0.98 |
-| sandbox_escape | 1.00 | 0.94 |
-| credential_access | 0.98 | 0.99 |
-| network | 0.88 | 0.97 |
-| external_side_effect | 0.98 | 0.96 |
-| safe | 0.89 | 0.91 |
+| destructive | 0.91 | 0.97 |
+| sandbox_escape | 1.00 | 0.90 |
+| credential_access | 0.96 | 0.98 |
+| network | 0.99 | 0.95 |
+| external_side_effect | 1.00 | 0.94 |
+| safe | 0.96 | 0.88 |
 
-On the headline score — what the log shows and a gate would use — that is **5.9%
-false alarms on ordinary calls and 2.2% missed risky ones**. The trainer prints
+On the headline score — what the log shows and a gate would use — that is **7.0%
+false alarms on ordinary calls and 3.4% missed risky ones**. The trainer prints
 both, and names every false alarm.
+
+The feature vector is **L2-normalized**, which is what makes a score mean the
+same thing for a long call as a short one. Without it a repeated feature
+accumulates: the same command with a 380-character path had `Sum(v²) = 426490`
+against 104, and a logit of 1523 against 14.5 — putting it beyond the reach of
+the cap on local corrections, so it could never be corrected at all.
 
 The **vocabulary is vendored from upstream**, not invented: build-output names
 come from [github/gitignore](https://github.com/github/gitignore)'s 309

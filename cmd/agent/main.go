@@ -492,6 +492,13 @@ type app struct {
 	// shadow is the risk classifier's shadow-mode scorer for this run (nil when
 	// scoring is off or the model could not load). It only ever logs.
 	shadow *risk.Shadow
+	// riskSaveMu serializes the off-path persistence of what the scorer learned,
+	// so several sub-agents answering approvals at once don't write over each
+	// other. The learning itself is already guarded inside the model.
+	riskSaveMu sync.Mutex
+	// riskSaves counts the deferred writes still in flight, so the process can
+	// wait for them on the way out (see waitRiskSaves).
+	riskSaves sync.WaitGroup
 }
 
 func build(workspace, sessionName string, overrides []string, reader *bufio.Reader) (*app, func(), error) {
@@ -543,17 +550,21 @@ func build(workspace, sessionName string, overrides []string, reader *bufio.Read
 	}
 
 	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader}
-	a.stdin = newStdinOwner(reader)                      // sole reader of `reader`'s actual bytes from here on (see stdinOwner)
-	a.approver = &stdinApprover{stdin: a.stdin, app: a}  // set after: it references the app for session-allow
-	cleanup := func() { a.shutdownJobs(); a.closeMCP() } // cancel background jobs (killing external-agent subprocesses too) and shut down any launched MCP servers on exit
-	a.applyUsageRetention()                              // honor usage_retention_days on startup
-	a.applyKnowledgeRetention()                          // honor knowledge_retention_days on startup
-	a.dropPoisonedLessons()                              // retire lessons quoting a path from the run that taught them
+	a.stdin = newStdinOwner(reader)                     // sole reader of `reader`'s actual bytes from here on (see stdinOwner)
+	a.approver = &stdinApprover{stdin: a.stdin, app: a} // set after: it references the app for session-allow
+	// Cancel background jobs (killing external-agent subprocesses too), shut down
+	// any launched MCP servers, and let the risk scorer's deferred writes finish —
+	// they were moved off the approval path so a slow disk can't stall a tool, and
+	// this is where that debt is settled.
+	cleanup := func() { a.shutdownJobs(); a.closeMCP(); a.waitRiskSaves() }
+	a.applyUsageRetention()     // honor usage_retention_days on startup
+	a.applyKnowledgeRetention() // honor knowledge_retention_days on startup
+	a.dropPoisonedLessons()     // retire lessons quoting a path from the run that taught them
 	if ft, err := trace.NewFileTracer(cfg.TracePath, newRunID()); err != nil {
 		slog.Warn("trace disabled", "err", err)
 	} else {
 		a.fileTracer = ft
-		cleanup = func() { a.shutdownJobs(); a.closeMCP(); _ = ft.Close() }
+		cleanup = func() { a.shutdownJobs(); a.closeMCP(); a.waitRiskSaves(); _ = ft.Close() }
 	}
 	a.migrateLegacyState() // move an older install's state out of the workspace, once
 	a.loadFacts()          // learned project facts → folded into the prompt by wire()

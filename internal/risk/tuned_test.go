@@ -47,28 +47,40 @@ func TestACorrectionMovesOnlyWhatItWasAbout(t *testing.T) {
 	before := tn.Assess("run", "shell", map[string]any{"command": target})
 	otherBefore := tn.Assess("run", "shell", map[string]any{"command": other}).Risk
 
-	// Six consistent corrections, the way a person who keeps approving the same
-	// call would produce them. The base puts this one at logit 15 — a confident
-	// wrong score is meant to take persistence to overturn, and a single answer
-	// is meant not to (see TestOneCorrectionNudgesRatherThanFlips).
-	for i := 0; i < 6; i++ {
+	// Keep answering the same way, as a person who keeps approving the same call
+	// would, and count how many it takes. The property is the point, not a
+	// number: one answer must not overturn a confident score (that is
+	// TestOneCorrectionNudgesRatherThanFlips), and a handful must.
+	const limit = 12
+	n := 0
+	for ; n < limit; n++ {
+		cur := tn.Assess("run", "shell", map[string]any{"command": target})
+		if cur.Risk < Threshold {
+			break
+		}
 		c, ok := CorrectionFrom(WithAssessment(context.Background(), "run", "shell",
-			map[string]any{"command": target}, tn.Assess("run", "shell", map[string]any{"command": target})), true)
+			map[string]any{"command": target}, cur), true)
 		if !ok {
-			t.Fatalf("iteration %d: a flagged call approved by a human should be a correction", i)
+			t.Fatalf("iteration %d: a flagged call approved by a human should be a correction", n)
 		}
 		if tn.Learn(c) == 0 {
-			t.Fatalf("iteration %d: the correction stored no adjustments", i)
+			t.Fatalf("iteration %d: the correction stored no adjustments", n)
 		}
 	}
 
 	after := tn.Assess("run", "shell", map[string]any{"command": target})
+	if after.Risk >= Threshold {
+		t.Errorf("risk is still %.2f after %d corrections — learning is too slow to be useful", after.Risk, limit)
+	}
 	if after.Risk >= before.Risk {
 		t.Errorf("risk went %.2f -> %.2f; repeated corrections should bring a false alarm down", before.Risk, after.Risk)
 	}
-	if after.Risk >= Threshold {
-		t.Errorf("risk is still %.2f after six corrections — learning is too slow to be useful", after.Risk)
+	if n < 2 {
+		t.Errorf("one answer overturned a confident score (%.2f -> %.2f); a refusal can mean "+
+			"\"not now\", so a single one must only nudge", before.Risk, after.Risk)
 	}
+	t.Logf("%d consistent answers took it from %.2f to %.2f", n, before.Risk, after.Risk)
+
 	if got := tn.Assess("run", "shell", map[string]any{"command": other}).Risk; got > otherBefore+0.05 {
 		t.Errorf("an unrelated call moved %.2f -> %.2f; corrections must be local to what they corrected", otherBefore, got)
 	}
@@ -148,9 +160,12 @@ func TestDeltaSurvivesARoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Not exact equality: the dot product sums a map, so Go's randomized
+	// iteration order changes the float32 rounding between two runs of the same
+	// arithmetic. What has to survive the round trip is the value, not the bits.
 	got := NewTuned(base, d).Assess("run", "shell", map[string]any{"command": target}).Risk
-	if got != want {
-		t.Errorf("risk %.4f after a round trip, want %.4f", got, want)
+	if diff := got - want; diff > 1e-4 || diff < -1e-4 {
+		t.Errorf("risk %.6f after a round trip, want %.6f", got, want)
 	}
 	if n := NewTuned(base, d).Adjustments(); n == 0 {
 		t.Error("the reloaded delta holds no adjustments")

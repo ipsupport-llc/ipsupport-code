@@ -711,6 +711,7 @@ func TestArchiverReceivesEveryRememberedTurn(t *testing.T) {
 
 type recTracer struct {
 	kinds           []string
+	toolCallRisk    string // the risk note carried on the last tool_call event
 	finalSuggest    string
 	sawJudge        bool
 	judgeDone       bool
@@ -720,6 +721,9 @@ type recTracer struct {
 
 func (r *recTracer) Emit(kind string, f map[string]any) {
 	r.kinds = append(r.kinds, kind)
+	if kind == "tool_call" {
+		r.toolCallRisk, _ = f["risk"].(string)
+	}
 	if kind == "final" {
 		r.finalSuggest, _ = f["suggest"].(string)
 	}
@@ -3868,10 +3872,11 @@ func TestRiskObserverSeesEveryCallAndChangesNothing(t *testing.T) {
 
 	reg := tool.NewRegistry(tool.NewCalc())
 	fake := &scriptLLM{replies: []llm.Message{calcCall(), {Role: "assistant", Content: "two"}}}
-	a := New(fake, reg, nil, nil, "", 5)
-	a.SetRiskObserver(func(ctx context.Context, tool, action string, params map[string]any) context.Context {
+	tr8 := &recTracer{}
+	a := New(fake, reg, nil, tr8, "", 5)
+	a.SetRiskObserver(func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
 		got = append(got, seen{tool, action, params})
-		return ctx
+		return ctx, "0.99 destructive"
 	})
 
 	tr, err := a.Run(context.Background(), "add one and one")
@@ -3896,5 +3901,10 @@ func TestRiskObserverSeesEveryCallAndChangesNothing(t *testing.T) {
 	}
 	if !ran {
 		t.Error("the tool did not run with an observer installed")
+	}
+	// The note the observer handed back rides on the call's own event, so the UI
+	// can mark it — this package forwards it without knowing what it means.
+	if tr8.toolCallRisk != "0.99 destructive" {
+		t.Errorf("tool_call carried risk %q, want the observer's note — the UI has no other way to mark the call", tr8.toolCallRisk)
 	}
 }

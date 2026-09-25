@@ -639,7 +639,11 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// task of a sub-agent/external launch) pushed raw so they soft-wrap, and
 		// the keys on their own line — nothing is truncated out of sight.
 		lines := strings.Split(req.detail, "\n")
-		m.push(cToolCall.Render("  ⚠ approve "+req.kind+": ") + lines[0])
+		head := cToolCall.Render("  ⚠ approve "+req.kind+": ") + lines[0]
+		if req.risk != "" {
+			head += cErr.Render("   ⚠ " + req.risk)
+		}
+		m.push(head)
 		m.pushLines(lines[1:])
 		m.push(cDim.Render("    y approve · n deny · a allow all " + categoryLabel(approvalCategory(req.kind)) + " this session · ↑ Yes/No · or keep typing"))
 		// Go modal by default: a bare y/n/a/enter answers it, and nothing else
@@ -2148,6 +2152,9 @@ func (m *tuiModel) approvePrompt() string {
 		// One status line — clip; the full request (incl. a long task) is already
 		// in the log from the approvalMsg push.
 		detail = m.pending.kind + " " + oneLine(m.pending.detail, 70)
+		if m.pending.risk != "" {
+			detail += cErr.Render("  ⚠ " + m.pending.risk)
+		}
 	}
 	yes, no := cDim.Render("  Yes  "), cDim.Render("  No  ")
 	if m.approveChoice {
@@ -2904,7 +2911,13 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 				detail = p
 			}
 		}
-		return []string{cToolCall.Render("  ⚙ "+t+" "+a) + cDim.Render(" "+detail)}
+		line := cToolCall.Render("  ⚙ "+t+" "+a) + cDim.Render(" "+detail)
+		// Only when the scorer had something to say. A number on every routine
+		// call is noise, and noise is how a risk signal gets tuned out.
+		if r, _ := e.fields["risk"].(string); r != "" {
+			line += cErr.Render("  ⚠ " + r)
+		}
+		return []string{line}
 	case "observation":
 		isErr, _ := e.fields["is_error"].(bool)
 		c, _ := e.fields["content"].(string)

@@ -17,7 +17,11 @@ var magic = [8]byte{'I', 'P', 'S', 'R', 'I', 'S', 'K', 0x01}
 // FormatVersion is the layout below. A reader refuses anything else rather than
 // guessing: silently mis-reading float32 weights produces a model that scores,
 // and scores wrongly, which is worse than not loading.
-const FormatVersion uint16 = 1
+// Bumped to 2 when Featurize started L2-normalizing: weights trained against
+// un-normalized features mean something else entirely applied to normalized
+// ones, and the file carries no other way to tell the two apart. A v1 file is
+// refused rather than silently scored with.
+const FormatVersion uint16 = 2
 
 // Model is a multi-label linear classifier: one weight row and one bias per
 // label, scored as sigmoid(Wx + b). Immutable once loaded, so a single instance

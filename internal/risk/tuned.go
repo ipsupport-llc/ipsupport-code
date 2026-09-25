@@ -37,28 +37,31 @@ import (
 // delta may ever make is hard-capped (maxShift). Several consistent corrections
 // move the score; one bad label is noise that decays.
 const (
-	// learnRate is how far one correction moves the logit — exactly that, because
-	// the step is normalized by the call's feature count and the features are
-	// +-1, so the shift works out to learnRate * (p - target).
+	// learnRate is how far one correction moves the logit — exactly that, now
+	// that Featurize returns a unit-length vector: the update's shift works out
+	// to learnRate * (p - target) * Sum(v^2), and Sum(v^2) is 1.
 	//
-	// Both constants here are derived from the shipped model rather than chosen:
-	// it is confident, putting a flagged call at logit 30 to 45 (class weighting
-	// drives the weights up; the probabilities saturate long before). Eight per
-	// correction means five or six consistent answers overturn one, which is the
-	// intended feel — responsive to a pattern, deaf to a one-off. Retrain the
-	// base into a differently-scaled model and these want re-measuring; the tests
-	// find a flagged call rather than naming one, for the same reason.
-	learnRate = 8.0
+	// Both constants are measured against the shipped model, not chosen. It puts
+	// a confident flagged call between logit 4 and 9. 1.5 per correction means
+	// one answer visibly moves a borderline score and four to six consistent ones
+	// overturn a confident wrong one — responsive to a pattern, deaf to a
+	// one-off.
+	//
+	// They were 8.0 and 90 against the previous model, whose logits ran to 45
+	// because the features were un-normalized. Retraining into a differently
+	// scaled model wants these re-measured again; the tests find a flagged call
+	// rather than naming one, for the same reason.
+	learnRate = 1.5
 	// decay shrinks every stored adjustment on each update, so corrections that
 	// stop being repeated fade instead of accumulating forever.
 	decay = 0.002
 	// maxShift is a runaway stop, not the safety mechanism, and it has to clear
-	// the model's own confidence: at 25 it sat BELOW the logit 30-45 the shipped
-	// model reaches, so a confidently wrong score could not be corrected at all —
-	// which is exactly the case local learning exists for. Twice the observed
-	// maximum. What keeps the corrections honest is the rate above, the decay
-	// below, and /risk reset.
-	maxShift = 90.0
+	// the model's own confidence — an earlier value sat BELOW it and made a
+	// confidently wrong score impossible to correct, which is exactly the case
+	// local learning exists for. Roughly three times the observed maximum of 9.
+	// What keeps the corrections honest is the rate above, the decay below, and
+	// /risk reset.
+	maxShift = 30.0
 	// pruneBelow drops adjustments too small to matter, keeping the file bounded.
 	pruneBelow = 1e-4
 )
@@ -178,10 +181,16 @@ func (t *Tuned) Learn(c Correction) int {
 	if c.Risky {
 		target = 1
 	}
-	// Normalized by the number of active features, so one correction moves the
-	// logit by about learnRate however long the command is — otherwise a
-	// hundred-character command would learn fifty times faster than a short one.
-	scale := float32(learnRate) / float32(len(vec))
+	// No further normalization: Featurize already returns a unit-length vector,
+	// so the shift this update produces is exactly
+	//
+	//	(p - target) * learnRate * Sum(v^2)  ==  (p - target) * learnRate
+	//
+	// Dividing by len(vec) here used to be what counteracted un-normalized
+	// features accumulating counts. With the vector normalized it is no longer a
+	// correction but a bug: it made the step a hundredth of what the constant
+	// says, and six consistent answers moved a confident score by 0.09.
+	scale := float32(learnRate)
 
 	t.mu.Lock()
 	defer t.mu.Unlock()

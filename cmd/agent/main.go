@@ -492,6 +492,13 @@ type app struct {
 	// shadow is the risk classifier's shadow-mode scorer for this run (nil when
 	// scoring is off or the model could not load). It only ever logs.
 	shadow *risk.Shadow
+	// riskSaveMu serializes the off-path persistence of what the scorer learned,
+	// so several sub-agents answering approvals at once don't write over each
+	// other. The learning itself is already guarded inside the model.
+	riskSaveMu sync.Mutex
+	// riskSaves counts the deferred writes still in flight, so the process can
+	// wait for them on the way out (see waitRiskSaves).
+	riskSaves sync.WaitGroup
 }
 
 func build(workspace, sessionName string, overrides []string, reader *bufio.Reader) (*app, func(), error) {
@@ -543,17 +550,21 @@ func build(workspace, sessionName string, overrides []string, reader *bufio.Read
 	}
 
 	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader}
-	a.stdin = newStdinOwner(reader)                      // sole reader of `reader`'s actual bytes from here on (see stdinOwner)
-	a.approver = &stdinApprover{stdin: a.stdin, app: a}  // set after: it references the app for session-allow
-	cleanup := func() { a.shutdownJobs(); a.closeMCP() } // cancel background jobs (killing external-agent subprocesses too) and shut down any launched MCP servers on exit
-	a.applyUsageRetention()                              // honor usage_retention_days on startup
-	a.applyKnowledgeRetention()                          // honor knowledge_retention_days on startup
-	a.dropPoisonedLessons()                              // retire lessons quoting a path from the run that taught them
+	a.stdin = newStdinOwner(reader)                     // sole reader of `reader`'s actual bytes from here on (see stdinOwner)
+	a.approver = &stdinApprover{stdin: a.stdin, app: a} // set after: it references the app for session-allow
+	// Cancel background jobs (killing external-agent subprocesses too), shut down
+	// any launched MCP servers, and let the risk scorer's deferred writes finish —
+	// they were moved off the approval path so a slow disk can't stall a tool, and
+	// this is where that debt is settled.
+	cleanup := func() { a.shutdownJobs(); a.closeMCP(); a.waitRiskSaves() }
+	a.applyUsageRetention()     // honor usage_retention_days on startup
+	a.applyKnowledgeRetention() // honor knowledge_retention_days on startup
+	a.dropPoisonedLessons()     // retire lessons quoting a path from the run that taught them
 	if ft, err := trace.NewFileTracer(cfg.TracePath, newRunID()); err != nil {
 		slog.Warn("trace disabled", "err", err)
 	} else {
 		a.fileTracer = ft
-		cleanup = func() { a.shutdownJobs(); a.closeMCP(); _ = ft.Close() }
+		cleanup = func() { a.shutdownJobs(); a.closeMCP(); a.waitRiskSaves(); _ = ft.Close() }
 	}
 	a.migrateLegacyState() // move an older install's state out of the workspace, once
 	a.loadFacts()          // learned project facts → folded into the prompt by wire()
@@ -672,12 +683,28 @@ type spawnPlan struct {
 	llmCfg         config.LLM
 	rolePrompt     string
 	subReg         *tool.Registry
+	subPol         *policy.Engine // the sub-agent's OWN engine, for its own risk observer
 	subWorkspace   string
 	planMode       bool
 	spawnDefault   string
 	tracer         trace.Tracer
 	priceOverrides map[string]usage.Price
 	goalMaxSteps   int
+}
+
+// newSubAgent builds the delegate. Extracted so the wiring is assertable: a
+// sub-agent without its own risk observer inherits the assessment already on
+// the parent's context — the spawn's — and then a refusal of the sub-agent's
+// own tool call is recorded against the spawn, with the spawn's parameters.
+func (a *app) newSubAgent(plan spawnPlan, client *llm.OpenAIClient, id string) *agent.Agent {
+	sub := agent.New(client, plan.subReg, a.kb, plan.tracer,
+		a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt),
+		resolveStepBudget(plan.goalMaxSteps, plan.llmCfg))
+	sub.SetPlanMode(plan.planMode)
+	sub.SetLabel(id)
+	sub.SetRiskObserver(a.riskObserver(plan.subPol)) // its own, against its own policy
+	sub.SetContextWindow(plan.llmCfg.ContextWindow)
+	return sub
 }
 
 // resolveSpawn resolves profile/dir into a spawnPlan (or, for an external CLI
@@ -769,6 +796,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	// the sub-agent gets its OWN jail rooted there, so it still can't escape it.
 	subWorkspace := a.pol.Workdir()
 	var subReg *tool.Registry
+	var planPol *policy.Engine // set alongside subReg below
 	if d := strings.TrimSpace(dir); d != "" {
 		root, err := a.resolveSpawnDir(d)
 		if err != nil {
@@ -784,7 +812,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 		if pErr != nil {
 			return spawnPlan{}, false, p, pErr
 		}
-		subReg, subWorkspace = a.buildSubReg(subPol, root), root
+		subReg, subWorkspace, planPol = a.buildSubReg(subPol, root), root, subPol
 	} else {
 		// No explicit dir: still give the sub-agent its OWN *policy.Engine, not
 		// a.pol. a.pol.workdir has no lock and /cd mutates it live — sharing the
@@ -799,11 +827,11 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 		if _, err := subPol.SetWorkdir(subWorkspace); err != nil {
 			return spawnPlan{}, false, p, err
 		}
-		subReg = a.buildSubReg(subPol, a.hostSandboxRoot())
+		subReg, planPol = a.buildSubReg(subPol, a.hostSandboxRoot()), subPol
 	}
 	return spawnPlan{
 		profile: profile, provider: provider, llmCfg: llmCfg, rolePrompt: p.Prompt,
-		subReg: subReg, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default,
+		subReg: subReg, subPol: planPol, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default,
 		tracer: tracer, priceOverrides: priceOverrides, goalMaxSteps: a.cfg.GoalMaxSteps,
 	}, false, p, nil
 }
@@ -836,10 +864,7 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 
 	id := fmt.Sprintf("sub%d", a.spawnSeq.Add(1)) // groups this sub-agent's UI events
 	client := llm.NewOpenAIClient(plan.llmCfg)    // reasoning params already resolved in resolveSpawn
-	sub := agent.New(client, plan.subReg, a.kb, plan.tracer, a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt), resolveStepBudget(plan.goalMaxSteps, plan.llmCfg))
-	sub.SetPlanMode(plan.planMode)
-	sub.SetLabel(id)
-	sub.SetContextWindow(plan.llmCfg.ContextWindow)
+	sub := a.newSubAgent(plan, client, id)
 	if plan.tracer != nil {
 		plan.tracer.Emit("subagent", map[string]any{"agent": id, "profile": plan.profile, "provider": plan.provider, "model": plan.llmCfg.Model, "dir": plan.subWorkspace, "task": oneLine(task, 80)})
 	}
@@ -2801,6 +2826,7 @@ func (a *app) wire() error {
 	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
 	a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
+	a.ensureShadow()                                   // once per process, here on the wiring goroutine
 	a.ag.SetRiskObserver(a.riskObserver(pol))          // shadow-mode risk scoring: logs, blocks nothing
 	a.ag.SetContextWindow(a.activeLLM().ContextWindow) // so a single long task can watch its OWN growing trail mid-run
 	a.wireJudge()                                      // its own connection only when /reasoning judge was set
@@ -5729,14 +5755,32 @@ func (a *app) approveGated(ctx context.Context, kind, detail string) bool {
 		return true
 	}
 	start := time.Now()
-	ok := a.approver.Approve(ctx, kind, detail)
+	ok, answered := a.ask(ctx, kind, detail)
 	a.approvalWaitNS.Add(int64(time.Since(start)))
-	// A human just labelled this call. It is the only ground truth the agent
-	// gets for free, and the only place the risk model can learn from something
-	// other than a synthetic dataset. Deliberately AFTER the session-allow
-	// short-circuit above: that path never asked anyone.
-	a.learnFromApproval(ctx, ok)
+	// A human just labelled this call — but ONLY if one actually answered.
+	// Approve returns false for esc, a killed job and a closed stdin just as it
+	// does for a refusal, and treating those as "a person judged this dangerous"
+	// wrote invented corrections into the feedback log. Deliberately also after
+	// the session-allow short-circuit above: that path never asked anyone either.
+	if answered {
+		a.learnFromApproval(ctx, ok)
+	}
 	return ok
+}
+
+// answeringApprover is an Approver that can also say whether the answer came
+// from a person. Optional, because tool.Approver is implemented in tests and by
+// wrappers that have no such notion — and when it cannot be known, nothing is
+// learned, which is the safe direction.
+type answeringApprover interface {
+	ApproveAnswered(ctx context.Context, kind, detail string) (ok, answered bool)
+}
+
+func (a *app) ask(ctx context.Context, kind, detail string) (ok, answered bool) {
+	if aa, isAA := a.approver.(answeringApprover); isAA {
+		return aa.ApproveAnswered(ctx, kind, detail)
+	}
+	return a.approver.Approve(ctx, kind, detail), false
 }
 
 // gatedApprover adapts approveGated to the tool.Approver interface.
@@ -5771,6 +5815,14 @@ type stdinApprover struct {
 // exiting shortly anyway (SIGINT), and forcibly closing stdin here would break
 // the REPL's own later reads.
 func (s *stdinApprover) Approve(ctx context.Context, kind, detail string) bool {
+	ok, _ := s.ApproveAnswered(ctx, kind, detail)
+	return ok
+}
+
+// ApproveAnswered is Approve plus whether the operator actually answered — a
+// cancelled context or a closed stdin is not a refusal, and the risk model must
+// not learn from one. See answeringApprover.
+func (s *stdinApprover) ApproveAnswered(ctx context.Context, kind, detail string) (ok, answered bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	fmt.Fprintf(os.Stderr, "\n[approve %s] %s\n  allow? [y/N/a=all %s this session] ", kind, detail, categoryLabel(approvalCategory(kind)))
@@ -5785,21 +5837,21 @@ func (s *stdinApprover) Approve(ctx context.Context, kind, detail string) bool {
 	select {
 	case res = <-result:
 	case <-ctx.Done():
-		return false
+		return false, false
 	}
 	if res.err != nil {
-		return false
+		return false, false
 	}
 	switch strings.TrimSpace(strings.ToLower(res.line)) {
 	case "y", "yes":
-		return true
+		return true, true
 	case "a", "all", "always":
 		if s.app != nil {
 			s.app.allowSession(kind)
 		}
-		return true
+		return true, true
 	}
-	return false
+	return false, true
 }
 
 // stdinOwner is the ONLY goroutine ever allowed to call ReadString on the

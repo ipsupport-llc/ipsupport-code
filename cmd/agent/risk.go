@@ -23,13 +23,17 @@ const EnvRiskOff = "IPS_RISK"
 // compared against lives here rather than in internal/risk or internal/agent:
 // this is the one place that holds the model, the permission policy and the
 // tool registry at once.
-func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, action string, params map[string]any) context.Context {
-	if strings.EqualFold(os.Getenv(EnvRiskOff), "off") {
-		return nil
+// ensureShadow creates the process-wide scorer, once, on the goroutine that
+// calls wire(). Separated from riskObserver because sub-agents ask for an
+// observer of their own from their own goroutine, and that must never be the
+// call that constructs the shared scorer.
+func (a *app) ensureShadow() {
+	if a.shadow != nil || strings.EqualFold(os.Getenv(EnvRiskOff), "off") {
+		return
 	}
 	base := risk.DefaultOrNil()
 	if base == nil {
-		return nil
+		return
 	}
 	// The local corrections live beside the rest of this workspace's state, not
 	// in the binary: they are what THIS project's approvals taught, and a
@@ -49,18 +53,28 @@ func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, a
 	// on the pointer, which is what CI caught. Reusing it also keeps what the
 	// session has learned: rebuilding would drop the in-memory corrections on the
 	// floor every time a setting changed.
-	if a.shadow == nil {
-		a.shadow = risk.NewShadow(risk.NewTuned(base, d))
-	}
+	a.shadow = risk.NewShadow(risk.NewTuned(base, d))
+}
+
+// riskObserver returns the shadow-mode hook for an agent, scoring against the
+// policy engine THAT agent runs under. Every agent gets its own: a sub-agent
+// has its own workspace and its own policy, and — the part that was actually
+// broken — without one of these its tool calls inherit whatever assessment is
+// already on the context. That is the PARENT's `agent.spawn`, so refusing a
+// sub-agent's file write recorded a correction about the spawn, with the
+// spawn's parameters. Wrong call, wrong label, written to the feedback log that
+// later fine-tunes the base.
+func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
 	sh := a.shadow
 	if sh == nil {
 		return nil
 	}
-	return func(ctx context.Context, tool, action string, params map[string]any) context.Context {
+	return func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
 		as := sh.Observe(tool, action, params, policyVerdict(pol, tool, action, params))
 		// Hand the score down to the approval prompt, which is where a human
-		// answers for this call and so the only place ground truth appears.
-		return risk.WithAssessment(ctx, tool, action, params, as)
+		// answers for this call and so the only place ground truth appears — and
+		// back up as a note, so the call's own line can carry it.
+		return risk.WithAssessment(ctx, tool, action, params, as), as.Note()
 	}
 }
 
@@ -89,16 +103,41 @@ func (a *app) learnFromApproval(ctx context.Context, approved bool) {
 	if !ok {
 		return
 	}
+	// In memory, here: it is microseconds, it must be visible to the very next
+	// call, and Learn takes the model's own lock.
 	n := a.shadow.Model().Learn(c)
 	a.shadow.NoteLearned()
+	slog.Debug("risk learned", "tool", c.Tool, "action", c.Action, "risky", c.Risky,
+		"labels", c.Labels, "adjustments", n)
+
+	// On disk, NOT here. This runs between the human pressing y and the tool
+	// actually running, and persisting means two blocking file locks and an
+	// fsync — a second session on the same workspace holding either one would
+	// hang the approval. Shadow mode is not allowed to affect execution, and
+	// that includes making the user wait for it.
+	a.riskSaves.Add(1)
+	go a.persistRiskLearning(c)
+}
+
+// waitRiskSaves blocks until every deferred write has finished. Called on the
+// way out: a correction that was learned but never reached disk because the
+// process exited a moment later is the one case where moving the write off the
+// approval path would have cost something.
+func (a *app) waitRiskSaves() { a.riskSaves.Wait() }
+
+// persistRiskLearning writes the correction and the delta off the approval path.
+// Losing a correction to a crash between the answer and the write costs one
+// training example; blocking the answer on a disk costs the user.
+func (a *app) persistRiskLearning(c risk.Correction) {
+	defer a.riskSaves.Done()
+	a.riskSaveMu.Lock() // one writer at a time: several sub-agents can be answering at once
+	defer a.riskSaveMu.Unlock()
 	if err := risk.AppendFeedback(a.riskFeedbackPath(), c); err != nil {
 		slog.Warn("risk feedback not recorded", "err", err)
 	}
 	if err := a.shadow.Model().SaveDelta(a.riskDeltaPath()); err != nil {
 		slog.Warn("local risk corrections not saved", "err", err)
 	}
-	slog.Debug("risk learned", "tool", c.Tool, "action", c.Action, "risky", c.Risky,
-		"labels", c.Labels, "adjustments", n)
 }
 
 // policyVerdict reports what the permission policy would say about a call — and

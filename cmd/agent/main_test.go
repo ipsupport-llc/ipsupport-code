@@ -9144,11 +9144,16 @@ func TestRiskShadowCanBeTurnedOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	a.ensureShadow() // what wire() does, on the wiring goroutine
 	if a.riskObserver(pol) == nil {
 		t.Error("no observer by default — shadow mode should be on, since it blocks nothing")
 	}
 	t.Setenv(EnvRiskOff, "off")
 	a2 := &app{cfg: config.Default(), workspace: t.TempDir()}
+	a2.ensureShadow()
+	if a2.shadow != nil {
+		t.Errorf("%s=off still built a scorer", EnvRiskOff)
+	}
 	if a2.riskObserver(pol) != nil {
 		t.Errorf("%s=off still installed an observer", EnvRiskOff)
 	}
@@ -9366,5 +9371,99 @@ func TestLearningDoesNotBlockTheApproval(t *testing.T) {
 	// …and it still learned, in memory, immediately — that part is not deferred.
 	if a.shadow.Model().Adjustments() == 0 {
 		t.Error("the correction was not applied in memory")
+	}
+}
+
+// Approve returns false for esc, a killed job and a closed stdin exactly as it
+// does for a refusal. Treating those as "a person judged this call dangerous"
+// wrote invented corrections into the feedback log — the durable file that
+// later fine-tunes the base model.
+func TestOnlyARealAnswerTeaches(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		cancelled    bool
+		wantAnswered bool
+	}{
+		{name: "the human answered", wantAnswered: true},
+		{name: "cancelled before anyone answered", cancelled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBridge()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelled {
+				cancel()
+			} else {
+				go func() { // stand in for the UI answering the prompt
+					req := <-b.approvals
+					req.reply <- false // refused, explicitly
+				}()
+			}
+			ok, answered := b.ApproveAnswered(ctx, "run", "rm -rf /")
+			if ok {
+				t.Error("approved a call nobody approved")
+			}
+			if answered != tc.wantAnswered {
+				t.Errorf("answered = %v, want %v — a cancelled prompt is not a refusal", answered, tc.wantAnswered)
+			}
+		})
+	}
+}
+
+// Every agent scores its own calls against its own policy. Without an observer
+// of its own, a sub-agent's tool calls kept the assessment already on the
+// context — the parent's `agent.spawn` — so refusing the sub-agent's file write
+// recorded a correction about the spawn, with the spawn's parameters.
+func TestASubAgentGetsItsOwnRiskObserver(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if a.shadow == nil {
+		t.Skip("no scorer")
+	}
+	pol, err := policy.New(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The parent scored a spawn, and that assessment is on the context a
+	// foreground sub-agent inherits.
+	spawnParams := map[string]any{"profile": "reviewer", "task": "look at the diff"}
+	parent := risk.WithAssessment(context.Background(), "agent", "spawn", spawnParams,
+		risk.Assessment{Risk: 0.99, Top: "destructive", Scores: map[string]float32{"destructive": 0.99}})
+
+	// The real wiring: a sub-agent built the way runSpawnPlan builds one.
+	plan := spawnPlan{subReg: a.subReg, subPol: pol, subWorkspace: ws, llmCfg: a.cfg.LLM}
+	sub := a.newSubAgent(plan, llm.NewOpenAIClient(a.cfg.LLM), "sub1")
+	if !sub.HasRiskObserver() {
+		t.Fatal("a sub-agent was built without a risk observer — its calls inherit the parent spawn's assessment")
+	}
+
+	obs := a.riskObserver(pol)
+	if obs == nil {
+		t.Fatal("no observer for a sub-agent")
+	}
+	// The sub-agent's own call replaces it.
+	subParams := map[string]any{"path": "notes.md", "content": "hello"}
+	ctx, _ := obs(parent, "file", "write", subParams)
+	c, ok := risk.CorrectionFrom(ctx, false) // the human refuses THIS call
+	if ok && c.Tool != "file" {
+		t.Errorf("a refusal of the sub-agent's call was attributed to %s.%s with params %v",
+			c.Tool, c.Action, c.Params)
+	}
+	// And the inherited one is gone: what the context carries is this call.
+	got, present := risk.AssessmentFrom(ctx)
+	if !present {
+		t.Fatal("the observer attached nothing")
+	}
+	if got.Risk == 0.99 && got.Top == "destructive" {
+		t.Error("the sub-agent's call still carries the parent spawn's assessment")
 	}
 }

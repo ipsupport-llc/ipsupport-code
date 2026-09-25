@@ -361,6 +361,11 @@ func (a *Agent) SetRiskObserver(f func(ctx context.Context, tool, action string,
 	a.riskObserver = f
 }
 
+// HasRiskObserver reports whether a shadow-mode observer is installed. For the
+// wiring to be assertable: an agent built without one silently inherits
+// whatever assessment its caller's context already carried.
+func (a *Agent) HasRiskObserver() bool { return a.riskObserver != nil }
+
 // SetPlanMode toggles plan mode. In plan mode the agent investigates with
 // read-only tools and proposes a plan; mutating tool calls are refused, so it
 // can't change anything until switched back to auto.

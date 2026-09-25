@@ -23,13 +23,17 @@ const EnvRiskOff = "IPS_RISK"
 // compared against lives here rather than in internal/risk or internal/agent:
 // this is the one place that holds the model, the permission policy and the
 // tool registry at once.
-func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
-	if strings.EqualFold(os.Getenv(EnvRiskOff), "off") {
-		return nil
+// ensureShadow creates the process-wide scorer, once, on the goroutine that
+// calls wire(). Separated from riskObserver because sub-agents ask for an
+// observer of their own from their own goroutine, and that must never be the
+// call that constructs the shared scorer.
+func (a *app) ensureShadow() {
+	if a.shadow != nil || strings.EqualFold(os.Getenv(EnvRiskOff), "off") {
+		return
 	}
 	base := risk.DefaultOrNil()
 	if base == nil {
-		return nil
+		return
 	}
 	// The local corrections live beside the rest of this workspace's state, not
 	// in the binary: they are what THIS project's approvals taught, and a
@@ -49,9 +53,18 @@ func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, a
 	// on the pointer, which is what CI caught. Reusing it also keeps what the
 	// session has learned: rebuilding would drop the in-memory corrections on the
 	// floor every time a setting changed.
-	if a.shadow == nil {
-		a.shadow = risk.NewShadow(risk.NewTuned(base, d))
-	}
+	a.shadow = risk.NewShadow(risk.NewTuned(base, d))
+}
+
+// riskObserver returns the shadow-mode hook for an agent, scoring against the
+// policy engine THAT agent runs under. Every agent gets its own: a sub-agent
+// has its own workspace and its own policy, and — the part that was actually
+// broken — without one of these its tool calls inherit whatever assessment is
+// already on the context. That is the PARENT's `agent.spawn`, so refusing a
+// sub-agent's file write recorded a correction about the spawn, with the
+// spawn's parameters. Wrong call, wrong label, written to the feedback log that
+// later fine-tunes the base.
+func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
 	sh := a.shadow
 	if sh == nil {
 		return nil

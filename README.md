@@ -501,7 +501,14 @@ disagreements:
 | it stayed quiet and you **refused** | a miss — its own strongest label goes up |
 
 An approval of something it also thought was fine teaches nothing; that would be
-learning from its own output.
+learning from its own output. Neither does anything that isn't an answer — esc,
+a killed background job, a closed stdin all deny the call, and none of them is a
+person judging it.
+
+Every agent scores its own calls against its own policy, sub-agents included. A
+delegate without its own scorer inherits whatever assessment is on the context
+it was handed — the parent's `agent.spawn` — and then a refusal of the
+delegate's own file write gets recorded against the spawn.
 
 A refusal can mean "not now" or "I'll do it myself" as easily as "that is
 dangerous", so **one answer never flips the model**. A borderline score settles

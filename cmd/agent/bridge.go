@@ -57,6 +57,15 @@ func (b *uiBridge) Emit(kind string, fields map[string]any) {
 // is otherwise invisible to this single bridge-wide abort, so killing a
 // specific job stuck on its own approval wouldn't unblock it.
 func (b *uiBridge) Approve(ctx context.Context, kind, detail string) bool {
+	ok, _ := b.ApproveAnswered(ctx, kind, detail)
+	return ok
+}
+
+// ApproveAnswered is Approve plus whether a HUMAN actually answered. Every other
+// way out of this function also returns false — esc, a cancelled job, a task
+// abort — and the risk model must not read those as "a person judged this call
+// dangerous". Nobody judged anything; the prompt may not even have been drawn.
+func (b *uiBridge) ApproveAnswered(ctx context.Context, kind, detail string) (ok, answered bool) {
 	b.mu.Lock()
 	abort := b.abort
 	b.mu.Unlock()
@@ -65,17 +74,17 @@ func (b *uiBridge) Approve(ctx context.Context, kind, detail string) bool {
 	select {
 	case b.approvals <- approvalReq{kind: kind, detail: detail, risk: riskNote(ctx), reply: reply}:
 	case <-abort:
-		return false
+		return false, false
 	case <-ctx.Done():
-		return false
+		return false, false
 	}
 	select {
 	case ok := <-reply:
-		return ok
+		return ok, true
 	case <-abort:
-		return false
+		return false, false
 	case <-ctx.Done():
-		return false
+		return false, false
 	}
 }
 

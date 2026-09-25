@@ -11,6 +11,7 @@
 package risk
 
 import (
+	"math"
 	"strings"
 	"unicode"
 )
@@ -121,6 +122,35 @@ func Featurize(cfg FeatureConfig, text string) map[uint32]float32 {
 				add("c" + string(rune('0'+n)) + ":" + string(r[i:i+n]))
 			}
 		}
+	}
+	return l2(vec)
+}
+
+// l2 scales the vector to unit length, which is the difference between a score
+// that means something and one that depends on how long the command was.
+//
+// Without it a repeated feature accumulates: "rm -rf /opt/<380 chars>" produced
+// a vector with Sum(v^2) = 426490 against 104 for the same command with a short
+// path, and the dot product grew with it — logit 1523 against 14.5. Every
+// scale-dependent constant then stops meaning what it says: the 0.50 threshold
+// sits at a different confidence for a long call than a short one, and the cap
+// on local corrections (maxShift) went from 619% of the logit to 5.9%, which
+// made a long call impossible to correct at all.
+//
+// Normalized, Sum(v^2) is 1 by construction: logits are comparable across
+// inputs, one correction moves the logit by exactly learnRate, and the cap is
+// a real bound again.
+func l2(vec map[uint32]float32) map[uint32]float32 {
+	var sq float64
+	for _, v := range vec {
+		sq += float64(v) * float64(v)
+	}
+	if sq == 0 {
+		return vec
+	}
+	inv := float32(1 / math.Sqrt(sq))
+	for i, v := range vec {
+		vec[i] = v * inv
 	}
 	return vec
 }

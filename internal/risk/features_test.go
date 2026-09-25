@@ -2,6 +2,7 @@ package risk
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -90,4 +91,32 @@ func contains(s, sub string) bool {
 		}
 		return false
 	})()
+}
+
+// Without normalization a repeated feature accumulates, and everything measured
+// in logits stops meaning the same thing for a long call as for a short one.
+// Measured before the fix: "rm -rf /opt/<380 chars>" had Sum(v^2) = 426490 and
+// a logit of 1523, against 104 and 14.5 for the same command with a short path
+// — which put it beyond the reach of maxShift and made it impossible to correct.
+func TestFeatureVectorIsUnitLength(t *testing.T) {
+	for _, text := range []string{
+		"run shell command=go test ./...",
+		"run shell command=rm -rf /opt/data",
+		"run shell command=rm -rf /opt/" + strings.Repeat("a", 380),
+		"file write path=x.md content=" + strings.Repeat("lorem ipsum ", 30),
+	} {
+		vec := Featurize(testCfg, text)
+		var sq float64
+		for _, v := range vec {
+			sq += float64(v) * float64(v)
+		}
+		if sq < 0.999 || sq > 1.001 {
+			t.Errorf("Sum(v^2) = %.4f for %.40q, want 1 — an unnormalized vector makes the "+
+				"threshold and the correction cap mean different things per input", sq, text)
+		}
+	}
+	// An empty vector stays empty rather than dividing by zero.
+	if v := Featurize(testCfg, ""); len(v) != 0 {
+		t.Errorf("empty text produced %d features", len(v))
+	}
 }

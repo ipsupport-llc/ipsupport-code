@@ -97,6 +97,15 @@ def featurize(text: str):
     for n in range(CHAR_MIN, CHAR_MAX + 1):
         for i in range(0, len(t) - n + 1):
             add("c" + chr(ord("0") + n) + ":" + t[i:i + n])
+    # L2-normalize, mirroring l2() in features.go. See its comment: without this
+    # a repeated feature accumulates and the logit grows with the length of the
+    # command, which makes the threshold and the correction cap mean different
+    # things for different inputs.
+    sq = sum(v * v for v in vec.values())
+    if sq:
+        inv = 1.0 / math.sqrt(sq)
+        for k in vec:
+            vec[k] *= inv
     return vec
 
 
@@ -168,8 +177,8 @@ def read_model(path):
     if take(8) != b"IPSRISK\x01":
         sys.exit(f"{path}: not a model file")
     (ver,) = struct.unpack("<H", take(2))
-    if ver != 1:
-        sys.exit(f"{path}: format v{ver}, this script writes v1")
+    if ver != 2:
+        sys.exit(f"{path}: format v{ver}, this script writes v2")
     dim, seed = struct.unpack("<II", take(8))
     wmin, wmax, cmin, cmax = struct.unpack("<BBBB", take(4))
     (flags,) = struct.unpack("<B", take(1))
@@ -329,7 +338,7 @@ def main():
     out = here.parent / "internal" / "risk" / "model.bin"
     with out.open("wb") as f:
         f.write(b"IPSRISK\x01")
-        f.write(struct.pack("<H", 1))                       # format version
+        f.write(struct.pack("<H", 2))                       # format version (2: L2-normalized features)
         f.write(struct.pack("<II", DIM, SEED))
         f.write(struct.pack("<BBBB", WORD_MIN, WORD_MAX, CHAR_MIN, CHAR_MAX))
         f.write(struct.pack("<B", 1 if LOWERCASE else 0))

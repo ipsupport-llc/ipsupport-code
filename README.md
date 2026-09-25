@@ -407,6 +407,20 @@ msg="risk shadow" tool=run action=shell risk=1.00 top=credential_access
 msg="risk shadow: scored 1 call(s), 1 over 0.50, 1 disagreed with the policy"
 ```
 
+You see it where it matters, not only in the log. A call the scorer is unhappy
+about carries its verdict on its own line, and again at the approval prompt —
+which is the moment it is worth anything, since your answer there is the label
+it learns from:
+
+```
+  ⚙ run shell cat ~/.ssh/id_rsa   ⚠ 0.98 credential_access
+  ⚠ approve run: cat ~/.ssh/id_rsa   ⚠ 0.98 credential_access
+    y approve · n deny · a allow all shell commands this session
+```
+
+Nothing is shown for a call it had nothing to say about — a number on every
+routine line is how a risk signal gets tuned out.
+
 The `disagreement` column is the whole product. **allowed-but-flagged** is what
 a risk gate could add; **gated-but-unremarkable** is the friction it would cost.
 Tail them with `IPS_LOG=debug`, and turn the whole thing off with `IPS_RISK=off`.
@@ -426,16 +440,22 @@ On held-out **paths** — a fifth of every path class, never seen under any verb
 
 | label | precision | recall |
 |---|---|---|
-| destructive | 0.90 | 0.98 |
-| sandbox_escape | 1.00 | 0.94 |
-| credential_access | 0.98 | 0.99 |
-| network | 0.88 | 0.97 |
-| external_side_effect | 0.98 | 0.96 |
-| safe | 0.89 | 0.91 |
+| destructive | 0.91 | 0.97 |
+| sandbox_escape | 1.00 | 0.90 |
+| credential_access | 0.96 | 0.98 |
+| network | 0.99 | 0.95 |
+| external_side_effect | 1.00 | 0.94 |
+| safe | 0.96 | 0.88 |
 
-On the headline score — what the log shows and a gate would use — that is **5.9%
-false alarms on ordinary calls and 2.2% missed risky ones**. The trainer prints
+On the headline score — what the log shows and a gate would use — that is **7.0%
+false alarms on ordinary calls and 3.4% missed risky ones**. The trainer prints
 both, and names every false alarm.
+
+The feature vector is **L2-normalized**, which is what makes a score mean the
+same thing for a long call as a short one. Without it a repeated feature
+accumulates: the same command with a 380-character path had `Sum(v²) = 426490`
+against 104, and a logit of 1523 against 14.5 — putting it beyond the reach of
+the cap on local corrections, so it could never be corrected at all.
 
 The **vocabulary is vendored from upstream**, not invented: build-output names
 come from [github/gitignore](https://github.com/github/gitignore)'s 309
@@ -481,7 +501,14 @@ disagreements:
 | it stayed quiet and you **refused** | a miss — its own strongest label goes up |
 
 An approval of something it also thought was fine teaches nothing; that would be
-learning from its own output.
+learning from its own output. Neither does anything that isn't an answer — esc,
+a killed background job, a closed stdin all deny the call, and none of them is a
+person judging it.
+
+Every agent scores its own calls against its own policy, sub-agents included. A
+delegate without its own scorer inherits whatever assessment is on the context
+it was handed — the parent's `agent.spawn` — and then a refusal of the
+delegate's own file write gets recorded against the spawn.
 
 A refusal can mean "not now" or "I'll do it myself" as easily as "that is
 dangerous", so **one answer never flips the model**. A borderline score settles

@@ -32,6 +32,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
@@ -9143,11 +9144,16 @@ func TestRiskShadowCanBeTurnedOff(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	a.ensureShadow() // what wire() does, on the wiring goroutine
 	if a.riskObserver(pol) == nil {
 		t.Error("no observer by default — shadow mode should be on, since it blocks nothing")
 	}
 	t.Setenv(EnvRiskOff, "off")
 	a2 := &app{cfg: config.Default(), workspace: t.TempDir()}
+	a2.ensureShadow()
+	if a2.shadow != nil {
+		t.Errorf("%s=off still built a scorer", EnvRiskOff)
+	}
 	if a2.riskObserver(pol) != nil {
 		t.Errorf("%s=off still installed an observer", EnvRiskOff)
 	}
@@ -9180,6 +9186,7 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 	ctx := risk.WithAssessment(context.Background(), "run", "shell", params, as)
 
 	a.learnFromApproval(ctx, true)
+	a.waitRiskSaves() // the write is deferred off the approval path
 
 	if got := a.shadow.Model().Adjustments(); got == 0 {
 		t.Error("the answer taught nothing — no local adjustments were stored")
@@ -9231,6 +9238,7 @@ func TestRiskCommandReportsAndResets(t *testing.T) {
 	params := map[string]any{"command": "truncate -s 0 install_manifest.txt"}
 	as := a.shadow.Model().Assess("run", "shell", params)
 	a.learnFromApproval(risk.WithAssessment(context.Background(), "run", "shell", params, as), true)
+	a.waitRiskSaves()
 
 	status := strings.Join(a.riskCommand(""), "\n")
 	for _, want := range []string{"shadow mode", "correction(s)", "adjustment(s)", "informational"} {
@@ -9256,5 +9264,206 @@ func TestRiskCommandReportsAndResets(t *testing.T) {
 	// should not throw away the examples they came from.
 	if _, err := os.Stat(a.riskFeedbackPath()); err != nil {
 		t.Errorf("reset also deleted the collected examples: %v", err)
+	}
+}
+
+// The score has to be visible where it is worth something. It was only ever in
+// the debug log: a shadow signal nobody can see is a signal nobody can judge,
+// and the learning loop runs on the answers to these very prompts.
+func TestTheScoreReachesTheApprovalPromptAndTheCallLine(t *testing.T) {
+	in := textarea.New()
+	in.SetWidth(76)
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	m := &tuiModel{app: &app{cfg: cfg, workspace: cfg.Workspace}, ctx: context.Background(),
+		width: 100, height: 24, ready: true, input: in, inputLines: 1, spin: spinner.New()}
+	m.vp = viewport.New(100, 10)
+
+	// The prompt, while answering.
+	m.pending = &approvalReq{kind: "run", detail: "cat ~/.ssh/id_rsa", risk: "0.98 credential_access"}
+	if got := m.approvePrompt(); !strings.Contains(got, "0.98 credential_access") {
+		t.Errorf("the approval prompt hides the score:\n%s", got)
+	}
+	// …and a call the scorer said nothing about stays clean.
+	m.pending = &approvalReq{kind: "run", detail: "go test ./..."}
+	if got := m.approvePrompt(); strings.Contains(got, "⚠ 0.") {
+		t.Errorf("an unremarkable call got a score anyway:\n%s", got)
+	}
+
+	// The call's own line in the log.
+	flagged := m.renderEvent(uiEvent{kind: "tool_call", fields: map[string]any{
+		"tool": "run", "action": "shell", "params": map[string]any{"command": "cat ~/.ssh/id_rsa"},
+		"risk": "0.98 credential_access"}})
+	if !strings.Contains(strings.Join(flagged, "\n"), "0.98 credential_access") {
+		t.Errorf("the tool-call line hides the score:\n%s", strings.Join(flagged, "\n"))
+	}
+	quiet := m.renderEvent(uiEvent{kind: "tool_call", fields: map[string]any{
+		"tool": "run", "action": "shell", "params": map[string]any{"command": "go test ./..."},
+		"risk": ""}})
+	if strings.Contains(strings.Join(quiet, "\n"), "⚠") {
+		t.Errorf("a routine call was marked anyway — a number on every line is noise:\n%s", strings.Join(quiet, "\n"))
+	}
+}
+
+// Note() is what both of those render, so it has to stay quiet below the
+// threshold — that is the whole reason the callers can use it as "show if
+// non-empty".
+func TestRiskNoteIsEmptyBelowTheThreshold(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		a    risk.Assessment
+		want string
+	}{
+		{"over", risk.Assessment{Risk: 0.98, Top: "credential_access"}, "0.98 credential_access"},
+		{"under", risk.Assessment{Risk: 0.12, Top: "destructive"}, ""},
+		{"nothing scored", risk.Assessment{}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.a.Note(); got != tc.want {
+				t.Errorf("Note() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// Learning happens between the human pressing y and the tool running, so it
+// must not wait on a disk. It used to: two blocking file locks and an fsync,
+// inline. A second session on the same workspace holding either lock would hang
+// the approval — shadow mode affecting execution, which is the one thing it is
+// not allowed to do.
+func TestLearningDoesNotBlockTheApproval(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if a.shadow == nil {
+		t.Skip("no scorer")
+	}
+
+	// Another process is holding the delta's lock and not letting go.
+	_ = os.MkdirAll(filepath.Dir(a.riskDeltaPath()), 0o755)
+	unlock, err := filelock.Lock(a.riskDeltaPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unlock()
+
+	params := map[string]any{"command": "truncate -s 0 install_manifest.txt"}
+	as := a.shadow.Model().Assess("run", "shell", params)
+	if as.Risk < risk.Threshold {
+		t.Skipf("the shipped model no longer flags %v (%.2f)", params, as.Risk)
+	}
+	ctx := risk.WithAssessment(context.Background(), "run", "shell", params, as)
+
+	done := make(chan struct{})
+	go func() { a.learnFromApproval(ctx, true); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("answering an approval blocked on the risk store's file lock")
+	}
+	// …and it still learned, in memory, immediately — that part is not deferred.
+	if a.shadow.Model().Adjustments() == 0 {
+		t.Error("the correction was not applied in memory")
+	}
+}
+
+// Approve returns false for esc, a killed job and a closed stdin exactly as it
+// does for a refusal. Treating those as "a person judged this call dangerous"
+// wrote invented corrections into the feedback log — the durable file that
+// later fine-tunes the base model.
+func TestOnlyARealAnswerTeaches(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		cancelled    bool
+		wantAnswered bool
+	}{
+		{name: "the human answered", wantAnswered: true},
+		{name: "cancelled before anyone answered", cancelled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newBridge()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelled {
+				cancel()
+			} else {
+				go func() { // stand in for the UI answering the prompt
+					req := <-b.approvals
+					req.reply <- false // refused, explicitly
+				}()
+			}
+			ok, answered := b.ApproveAnswered(ctx, "run", "rm -rf /")
+			if ok {
+				t.Error("approved a call nobody approved")
+			}
+			if answered != tc.wantAnswered {
+				t.Errorf("answered = %v, want %v — a cancelled prompt is not a refusal", answered, tc.wantAnswered)
+			}
+		})
+	}
+}
+
+// Every agent scores its own calls against its own policy. Without an observer
+// of its own, a sub-agent's tool calls kept the assessment already on the
+// context — the parent's `agent.spawn` — so refusing the sub-agent's file write
+// recorded a correction about the spawn, with the spawn's parameters.
+func TestASubAgentGetsItsOwnRiskObserver(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if a.shadow == nil {
+		t.Skip("no scorer")
+	}
+	pol, err := policy.New(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The parent scored a spawn, and that assessment is on the context a
+	// foreground sub-agent inherits.
+	spawnParams := map[string]any{"profile": "reviewer", "task": "look at the diff"}
+	parent := risk.WithAssessment(context.Background(), "agent", "spawn", spawnParams,
+		risk.Assessment{Risk: 0.99, Top: "destructive", Scores: map[string]float32{"destructive": 0.99}})
+
+	// The real wiring: a sub-agent built the way runSpawnPlan builds one.
+	plan := spawnPlan{subReg: a.subReg, subPol: pol, subWorkspace: ws, llmCfg: a.cfg.LLM}
+	sub := a.newSubAgent(plan, llm.NewOpenAIClient(a.cfg.LLM), "sub1")
+	if !sub.HasRiskObserver() {
+		t.Fatal("a sub-agent was built without a risk observer — its calls inherit the parent spawn's assessment")
+	}
+
+	obs := a.riskObserver(pol)
+	if obs == nil {
+		t.Fatal("no observer for a sub-agent")
+	}
+	// The sub-agent's own call replaces it.
+	subParams := map[string]any{"path": "notes.md", "content": "hello"}
+	ctx, _ := obs(parent, "file", "write", subParams)
+	c, ok := risk.CorrectionFrom(ctx, false) // the human refuses THIS call
+	if ok && c.Tool != "file" {
+		t.Errorf("a refusal of the sub-agent's call was attributed to %s.%s with params %v",
+			c.Tool, c.Action, c.Params)
+	}
+	// And the inherited one is gone: what the context carries is this call.
+	got, present := risk.AssessmentFrom(ctx)
+	if !present {
+		t.Fatal("the observer attached nothing")
+	}
+	if got.Risk == 0.99 && got.Top == "destructive" {
+		t.Error("the sub-agent's call still carries the parent spawn's assessment")
 	}
 }

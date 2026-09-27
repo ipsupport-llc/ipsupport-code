@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ipsupport-code — how to use it</title>
-<meta name="description" content="Install ipsupport-code, point it at a local model (LLMTray on a Mac, LM Studio, Ollama, vLLM) or a cloud API, get it to write and run Hello World, then a fast tour of /goal, /reasoning, /cd, and the other essentials.">
+<meta name="description" content="Install ipsupport-code, point it at a local model (LLMTray on a Mac, Ollama, vLLM) or a cloud API, get it to write and run Hello World, then a fast tour of /goal, /reasoning, /cd, and the other essentials.">
 <meta property="og:title" content="ipsupport-code — how to use it">
 <meta property="og:description" content="From install to your first task in under two minutes — local model, cloud model, or both.">
 <meta property="og:type" content="article">
@@ -146,12 +146,15 @@
         <p>Anything serving <code>/v1/chat/completions</code> works. <b>On a Mac we recommend
            <a href="https://github.com/ipsupport-llc/llmtray">LLMTray</a></b> — a menu-bar app that runs
            <a href="https://github.com/ml-explore/mlx-lm">mlx-lm</a> natively on Apple Silicon: pick a model,
-           hit start, and it serves the OpenAI API locally. Elsewhere (or on a Mac, if you prefer it)
-           <a href="https://lmstudio.ai">LM Studio</a> does the same job — download a model, load it, and
-           start its local server (the "Developer" tab → <b>Start Server</b>); Ollama and vLLM work too.</p>
-        <p><code>ipsupport-code</code> talks to <code>localhost:1234</code> out of the box, which is
-           LM Studio's default port — point it elsewhere with <code>/ai</code> or
-           <code>ipsupport-code config set llm.base_url http://localhost:PORT/v1</code>.</p>
+           hit start, and it serves the OpenAI API on <code>localhost:8765</code>. Elsewhere, Ollama, vLLM or any
+           other OpenAI-compatible server works the same way.</p>
+        <p>Tell <code>ipsupport-code</code> where the server is — at first-run setup, or any time after:</p>
+        <div class="term">
+          <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>point it at LLMTray</span></div>
+          <pre><span class="p">$</span> ipsupport-code config set llm.base_url http://localhost:8765/v1</pre>
+        </div>
+        <p class="dim">Out of the box it looks at <code>localhost:1234</code>; for another server, swap in
+           its port.</p>
         <div class="term">
           <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>pick which loaded model to use</span></div>
           <pre><span class="p">❯</span> /model              <span class="d"># lists what the server has loaded</span>
@@ -206,8 +209,10 @@
     <p class="lead">The whole loop, start to finish.</p>
     <ol class="steps">
       <li><b>Install:</b> run the curl one-liner above in Terminal.</li>
-      <li><b>Start a model:</b> start your local server (LLMTray on a Mac, LM Studio, Ollama, vLLM) and load any instruct model (the recommended one above, or
-          whatever's already downloaded), hit <b>Start Server</b> on the Developer tab.</li>
+      <li><b>Start a model:</b> install <a href="https://github.com/ipsupport-llc/llmtray">LLMTray</a>, click its menu-bar icon and pick any instruct model
+          (the recommended one above, or download one from its built-in Hugging Face browser) — the
+          server starts on its own.</li>
+      <li><b>Point the agent at it:</b> <code>ipsupport-code config set llm.base_url http://localhost:8765/v1</code></li>
       <li><b>Run it:</b> <code>mkdir ~/hello &amp;&amp; cd ~/hello &amp;&amp; ipsupport-code</code></li>
       <li><b>Ask it something:</b> type <code>write hello world in Go and run it</code> and press Enter.</li>
     </ol>

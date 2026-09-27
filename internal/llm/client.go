@@ -1,7 +1,7 @@
 // Package llm is the model boundary. Everything that reasons or reflects depends
-// only on the Chatter interface, so the concrete backend — LM Studio, OpenAI, a
-// LiteLLM proxy (all OpenAI-compatible, swapped by base_url/api_key), or an
-// Anthropic adapter — is interchangeable.
+// only on the Chatter interface, so the concrete backend — LLMTray, LM Studio,
+// Ollama, a LiteLLM proxy or a cloud provider, all OpenAI-compatible and swapped by
+// base_url/api_key — is interchangeable.
 package llm
 
 import (

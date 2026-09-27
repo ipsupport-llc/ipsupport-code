@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ipsupport-code — a self-learning coding agent for any OpenAI-compatible model</title>
-<meta name="description" content="A self-learning coding agent in a single static binary. Drives your own model — any OpenAI-compatible server, local (LLMTray, LM Studio, Ollama, vLLM) or cloud (OpenAI, Anthropic, Grok, Groq, OpenRouter, Z.ai) — through a reason → act → observe loop, learns from past runs, and runs under a permission policy you control.">
+<meta name="description" content="A self-learning coding agent in a single static binary. Drives your own model — any OpenAI-compatible server, local (LLMTray on a Mac, Ollama, vLLM) or cloud (OpenAI, Anthropic, Grok, Groq, OpenRouter, Z.ai) — through a reason → act → observe loop, learns from past runs, and runs under a permission policy you control.">
 <meta name="google-site-verification" content="vPSnv-ACweVU7zedD6wmncgyS5txK4xSHu5ZJ_OzHII" />
 <meta property="og:title" content="ipsupport-code — a self-learning coding agent for any OpenAI-compatible model">
 <meta property="og:description" content="A self-learning coding agent for your own model — any OpenAI-compatible server, local or cloud. Single static binary, your machine, your keys.">
@@ -17,7 +17,7 @@
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:image" content="https://ipsupport-llc.github.io/ipsupport-code/og.png">
 <meta name="twitter:title" content="ipsupport-code — a self-learning coding agent for any OpenAI-compatible model">
-<meta name="twitter:description" content="Drives your own model — local (LLMTray, LM Studio, Ollama, vLLM) or cloud — through a reason → act → observe loop, and learns from past runs.">
+<meta name="twitter:description" content="Drives your own model — local (LLMTray on a Mac, Ollama, vLLM) or cloud — through a reason → act → observe loop, and learns from past runs.">
 <meta name="theme-color" content="#0c0c11">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://ipsupport-llc.github.io/ipsupport-code/">
@@ -91,6 +91,11 @@
   .btn.ghost{color:var(--fg)}
   .btn.ghost:hover{border-color:var(--accent2);text-decoration:none}
 
+  /* hero shot */
+  .shot{margin:40px auto 4px;max-width:920px}
+  .shot img{display:block;width:100%;height:auto;border:1px solid var(--rule);border-radius:14px;
+            box-shadow:0 18px 60px rgba(0,0,0,.55)}
+
   /* terminal */
   .term{max-width:760px;margin:44px auto;background:#0a0a0e;border:1px solid var(--rule);
         border-radius:12px;box-shadow:0 24px 60px -24px rgba(0,0,0,.8);overflow:hidden}
@@ -156,8 +161,8 @@
        any OpenAI-compatible server, local or cloud, in a single static binary.</p>
     <p class="sub">It runs a reason → act → observe loop over a handful of fat tools, recovers from
        errors using lessons it learned on past runs, and gets better over time. Local-first —
-       <a href="https://github.com/ipsupport-llc/llmtray">LLMTray</a> (our pick on a Mac),
-       <a href="https://lmstudio.ai">LM Studio</a>, Ollama, vLLM, or anything else serving
+       <a href="https://github.com/ipsupport-llc/llmtray">LLMTray</a> on a Mac (ours — native mlx-lm in the menu bar),
+       Ollama, vLLM, or anything else serving
        <span class="mono">/v1/chat/completions</span> — and the same loop runs the cloud providers
        (OpenAI, Anthropic, Grok, Groq, OpenRouter, Z.ai) when you want one. It can also
        <b>delegate a task to a sub-agent on a different model</b>. Your machine, your keys, under a
@@ -186,6 +191,11 @@
       <a class="btn ghost" href="https://github.com/ipsupport-llc/ipsupport-code/releases/latest">Download a release</a>
     </div>
   </header>
+
+  <figure class="shot">
+    <img src="hero.webp" width="1600" height="900" fetchpriority="high" decoding="async"
+         alt="ipsupport-code at work: a diff of a Go file on the left, the task prompt in the middle, and the report the agent wrote on the right — analyze, fix, test, report.">
+  </figure>
 
   <div class="term" aria-label="example session">
     <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>ipsupport-code</span></div>
@@ -220,11 +230,14 @@ cwd    ~/myproject</span>
       <div class="card"><h3><span class="i">▪</span>Single static binary</h3><p>One executable, <span class="mono">CGO_ENABLED=0</span> — no Python, no Node, no runtime, no virtualenv to rot. Download, run, done. It updates itself in place.</p></div>
       <div class="card"><h3><span class="i">✦</span>Self-learning</h3><p>After each task it reflects and writes durable lessons and project facts to disk, then folds them into the next run. Tool errors are met with fixes it found before.</p></div>
       <div class="card"><h3><span class="i">⚙</span>Fat tools</h3><p>One tool per domain — <span class="mono">file · run · git · web · calc</span> — so the catalog stays tiny and small models route well. Native tool-calls only.</p></div>
-      <div class="card"><h3><span class="i">∙</span>Your model, your machine</h3><p>Any local server speaking OpenAI's API — <a href="https://github.com/ipsupport-llc/llmtray">LLMTray</a> on a Mac, LM Studio, Ollama, vLLM. Nothing leaves your box unless you point it at a cloud provider.</p></div>
+      <div class="card"><h3><span class="i">∙</span>Your model, your machine</h3><p><a href="https://github.com/ipsupport-llc/llmtray">LLMTray</a> on a Mac — our menu-bar app running mlx-lm natively on Apple Silicon — or any local server speaking OpenAI's API: Ollama, vLLM, and the rest. Nothing leaves your box unless you point it at a cloud provider.</p></div>
       <div class="card"><h3><span class="i">⇄</span>Multi-provider</h3><p>One <span class="mono">/ai key</span> away from OpenAI, Anthropic, Grok, Groq, OpenRouter, or Z.ai — switch models live with <span class="mono">/model</span> (search its 300+).</p></div>
       <div class="card"><h3><span class="i">⇉</span>Sub-agents</h3><p>Delegate a task to a sub-agent on <em>another</em> model — run locally, then have a frontier model review the diff, or compare a review across 2–3 models. Paid spawns ask first.</p></div>
-      <div class="card"><h3><span class="i">⌥</span>Sessions &amp; usage</h3><p>Per-name sessions with restore-on-startup, plus a token ledger with day/week/month rollups and estimated <span class="mono">$</span> cost by model.</p></div>
-      <div class="card"><h3><span class="i">▮</span>Permission policy</h3><p>Allow/deny globs, a workspace jail, and a non-overridable safety floor. A <span class="mono">plan</span> / <span class="mono">auto</span> toggle and non-stealing approval prompts.</p></div>
+      <div class="card"><h3><span class="i">⌥</span>Sessions &amp; usage</h3><p>Per-name sessions with restore-on-startup — <span class="mono">-session &lt;name&gt;</span> gives a thread its own log and goal, so several can run side by side — plus a token ledger with day/week/month rollups and estimated <span class="mono">$</span> cost by model.</p></div>
+      <div class="card"><h3><span class="i">▮</span>Permission policy</h3><p>Allow/deny globs, a workspace jail, and a non-overridable safety floor. A <span class="mono">plan</span> / <span class="mono">auto</span> toggle and non-stealing approval prompts. Opt-in OS sandbox for shell commands — Seatbelt on macOS, Landlock on Linux.</p></div>
+      <div class="card"><h3><span class="i">◎</span>Goals with a judge</h3><p><span class="mono">/goal</span> sets a multi-turn objective. When the agent thinks it's done, a separate judge decides — and re-feeds the gap until the goal is actually met.</p></div>
+      <div class="card"><h3><span class="i">↪</span>Steer it live</h3><p><span class="mono">/steer</span> folds a note into a running task without stopping it; <span class="mono">/btw</span> asks a quick side question while the task keeps going.</p></div>
+      <div class="card"><h3><span class="i">⚠</span>Risk score, in shadow mode</h3><p>A small local model scores every tool call — pure Go, weights in the binary, ~28µs a call. It blocks nothing yet: it shows its verdict at the approval prompt and learns from your answers.</p></div>
       <div class="card"><h3><span class="i">◆</span>Skills</h3><p>Downloadable, toggleable instruction packs — load extra know-how only when the topic fits, so the prompt stays lean.</p></div>
       <div class="card"><h3><span class="i">⌘</span>Interactive /config &amp; /usage</h3><p>A settings panel you navigate with the arrow keys, plus a local token ledger broken down by day and provider/model.</p></div>
       <div class="card"><h3><span class="i">▷</span>A real TUI</h3><p>Live-streamed tool calls, markdown answers, syntax-highlighted diffs, multi-line paste, and a status bar with model · context · tokens.</p></div>
@@ -241,7 +254,9 @@ cwd    ~/myproject</span>
       <li><b>Point it at a model</b> — start any local server that speaks the OpenAI API.
           On a Mac we recommend <a href="https://github.com/ipsupport-llc/llmtray">LLMTray</a>: a menu-bar
           app that runs <a href="https://github.com/ml-explore/mlx-lm">mlx-lm</a> natively on Apple
-          Silicon. Elsewhere, <a href="https://lmstudio.ai">LM Studio</a>, Ollama or vLLM do the same job.
+          Silicon — download the DMG and pick a model; first-run setup finds it on
+          <code>localhost:8765</code> by itself. Elsewhere, Ollama, vLLM or any other
+          OpenAI-compatible server does the same job.
           Prefer the cloud? <code>ipsupport-code</code> then
           <code>/ai key openrouter sk-…</code> and <code>/ai openrouter</code>.</li>
       <li><b>Run it</b> — <code>cd your-project &amp;&amp; ipsupport-code</code>, then type a task.
@@ -257,6 +272,7 @@ cwd    ~/myproject</span>
         <code>/help</code> · <code>/status</code> · <code>/usage</code> · <code>/budget</code> · <code>/config</code><br>
         <code>/ai</code> &amp; <code>/ai key</code> · <code>/model</code> · <code>/reasoning</code> · <code>/agents</code> · <code>/jobs</code><br>
         <code>/goal</code> · <code>/diff</code> · <code>/rewind</code> · <code>/history</code> · <code>/knowledge</code><br>
+        <code>/steer</code> · <code>/btw</code> · <code>/snip</code> · <code>/risk</code> · <code>/login</code> · <code>/shell</code><br>
         <code>/skills</code> · <code>/permissions</code> · <code>/sessions</code> · <code>/cd</code> · <code>/mcp</code><br>
         <code>/new</code> · <code>/clear</code> · <code>/compact</code> · <code>/plan</code>·<code>/auto</code> · <code>/reflect</code><br>
         <code>/loop</code> · <code>/update</code> · <code>/offline</code> · <code>/rename</code> · <code>/color</code>
@@ -273,7 +289,7 @@ cwd    ~/myproject</span>
         Define <b>profiles</b> in <code>/config → Sub-agents</code> (provider → model → name).
         Then ask, e.g. <em>"review internal/tool across grok and claude, then merge."</em>
         They run in <b>parallel</b>, each jailed to its own directory. Manage with
-        <code>/agents add|add-tool|rm|exec</code> — <code>add-tool</code> plugs in local CLI agents (codex, claude, aider…); relax the per-spawn prompt with <code>/permissions agents on</code>.
+        <code>/agents add|add-tool|rm|exec</code> — <code>add-tool</code> plugs in local CLI agents (codex, claude, muse, aider…); relax the per-spawn prompt with <code>/permissions agents on</code>.
         Or fire one in the <b>background</b> and keep working — its result folds into the next turn; watch them with <code>/jobs</code>.
       </p></div>
     </div>
@@ -302,7 +318,7 @@ cwd    ~/myproject</span>
     </div>
     <h3 class="chip-head">External agents</h3>
     <div class="providers">
-      <span class="chip">codex / claude / aider <span class="dim">(as sub-agents)</span></span>
+      <span class="chip">codex / claude / muse / aider <span class="dim">(as sub-agents)</span></span>
     </div>
   </section>
 

@@ -44,6 +44,18 @@ $rel = Invoke-RestMethod -Headers $ua -Uri $api
 $zip = $rel.assets | Where-Object { $_.name -like "*_windows-$arch.zip" } | Select-Object -First 1
 $sum = $rel.assets | Where-Object { $_.name -eq 'checksums.txt' } | Select-Object -First 1
 if (-not $zip) { throw "no windows-$arch asset in the '$Tag' release" }
+# A release can carry more than one build for a platform (the rolling nightly
+# does while a run swaps its assets). checksums.txt names the current build, so
+# install that one rather than whichever the API happens to list first.
+if ($sum) {
+  $sumsText = (Invoke-WebRequest -UseBasicParsing -Headers $ua -Uri $sum.browser_download_url).Content
+  if ($sumsText -is [byte[]]) { $sumsText = [Text.Encoding]::UTF8.GetString($sumsText) }
+  $want = ($sumsText -split "`n" | ForEach-Object { ($_.Trim() -split '\s+')[-1] } |
+           Where-Object { $_ -like "*_windows-$arch.zip" } | Select-Object -First 1)
+  if (-not $want) { throw "checksums.txt in the '$Tag' release lists no windows-$arch build" }
+  $zip = $rel.assets | Where-Object { $_.name -eq $want } | Select-Object -First 1
+  if (-not $zip) { throw "the '$Tag' release has no asset $want" }
+}
 
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ipscode-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null

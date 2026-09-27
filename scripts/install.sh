@@ -56,13 +56,24 @@ sums=$(printf '%s' "$json" | grep -o "https://[^\"]*checksums\.txt" | head -n1)
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+
+# A release can carry more than one build for a platform — the rolling nightly
+# does while a run swaps its assets, and did for days when stale ones were left
+# behind. checksums.txt names the current build, so install that one rather
+# than whichever the API happens to list first.
+if [ -n "$sums" ]; then
+  curl -fsSL "$sums" -o "$tmp/checksums.txt"
+  want=$(awk -v s="_${os}-${arch}.tar.gz" 'length($2) > length(s) && substr($2, length($2) - length(s) + 1) == s { print $2; exit }' "$tmp/checksums.txt")
+  [ -n "$want" ] || { echo "checksums.txt in the $TAG release lists no ${os}-${arch} build" >&2; exit 1; }
+  url=$(printf '%s' "$json" | grep -o "https://[^\"]*/${want}" | head -n1)
+  [ -n "$url" ] || { echo "the $TAG release has no asset $want" >&2; exit 1; }
+fi
 file=$(basename "$url")
 
 echo "→ downloading $file"
 curl -fsSL "$url" -o "$tmp/$file"
 
 if [ -n "$sums" ]; then
-  curl -fsSL "$sums" -o "$tmp/checksums.txt"
   expected=$(grep " $file\$" "$tmp/checksums.txt" | awk '{print $1}')
   if command -v sha256sum >/dev/null 2>&1; then
     actual=$(sha256sum "$tmp/$file" | awk '{print $1}')

@@ -533,6 +533,90 @@ func TestInitLocalModelSwitchesActiveProvider(t *testing.T) {
 	}
 }
 
+// fakeLocalServer answers /v1/models like a local OpenAI-compatible server;
+// down returns the URL of one that is no longer listening.
+func fakeLocalServer(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"data":[{"id":"qwen-test"}]}`)
+	}))
+	t.Cleanup(srv.Close)
+	return srv.URL + "/v1"
+}
+
+func downLocalServer(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	srv.Close()
+	return srv.URL + "/v1"
+}
+
+func withLocalServers(t *testing.T, servers ...struct{ name, url string }) {
+	t.Helper()
+	saved := localServers
+	localServers = servers
+	t.Cleanup(func() { localServers = saved })
+}
+
+// Setup looks for a running local server itself — LLMTray first, since it is
+// ours and doesn't listen on the built-in default (LM Studio's :1234).
+func TestDetectLocalServerPrefersListOrder(t *testing.T) {
+	tray, studio, down := fakeLocalServer(t), fakeLocalServer(t), downLocalServer(t)
+	ctx := context.Background()
+
+	withLocalServers(t, struct{ name, url string }{"LLMTray", tray}, struct{ name, url string }{"LM Studio", studio})
+	if name, url, ok := detectLocalServer(ctx); !ok || name != "LLMTray" || url != tray {
+		t.Errorf("both up = %q %q %v, want LLMTray first", name, url, ok)
+	}
+
+	withLocalServers(t, struct{ name, url string }{"LLMTray", down}, struct{ name, url string }{"LM Studio", studio})
+	if name, _, ok := detectLocalServer(ctx); !ok || name != "LM Studio" {
+		t.Errorf("only LM Studio up = %q %v, want LM Studio", name, ok)
+	}
+
+	withLocalServers(t, struct{ name, url string }{"LLMTray", down})
+	if _, _, ok := detectLocalServer(ctx); ok {
+		t.Error("nothing up, yet a server was reported")
+	}
+}
+
+// A fresh install that presses Enter at "Server URL" gets the server that is
+// actually running — the case that failed for a Mac user with LLMTray.
+func TestInitLocalModelOffersDetectedServer(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tray := fakeLocalServer(t)
+	withLocalServers(t, struct{ name, url string }{"LLMTray", tray})
+
+	initLocalModel(bufio.NewReader(strings.NewReader("\n\nqwen-test\n")), config.Default())
+
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.BaseURL != tray {
+		t.Errorf("saved base_url = %q, want the detected %q", cfg.LLM.BaseURL, tray)
+	}
+}
+
+// A URL the user already configured is theirs: re-running setup offers it
+// again, even with another server up.
+func TestInitLocalModelKeepsConfiguredURL(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	withLocalServers(t, struct{ name, url string }{"LLMTray", fakeLocalServer(t)})
+	def := config.Default()
+	def.LLM.BaseURL = "http://gpu-box:9000/v1"
+
+	initLocalModel(bufio.NewReader(strings.NewReader("\n\nqwen-test\n")), def)
+
+	cfg, err := config.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.LLM.BaseURL != "http://gpu-box:9000/v1" {
+		t.Errorf("saved base_url = %q, want the configured one kept", cfg.LLM.BaseURL)
+	}
+}
+
 func TestParseLoop(t *testing.T) {
 	// interval + task, no count cap
 	if iv, max, g, ok := parseLoop("5m build it"); !ok || iv != 5*time.Minute || max != 0 || g != "build it" {
@@ -3590,10 +3674,15 @@ func TestAddToolCatalog(t *testing.T) {
 
 	// bare add-tool lists the catalog with install markers
 	list := strings.Join(a.agentsAddExternal(""), "\n")
-	for _, want := range []string{"codex", "claude", "aider", "add-tool <name> <command>"} {
+	for _, want := range []string{"codex", "claude", "aider", "muse", "add-tool <name> <command>"} {
 		if !strings.Contains(list, want) {
 			t.Errorf("catalog listing missing %q:\n%s", want, list)
 		}
+	}
+
+	// muse runs headless through `muse exec <prompt>` — the codex shape
+	if got := strings.Join(catalogArgs("muse"), " "); got != "exec {task}" {
+		t.Errorf("muse catalog args = %q, want %q", got, "exec {task}")
 	}
 
 	// one-word add of a known CLI: catalog flags; PATH check still applies

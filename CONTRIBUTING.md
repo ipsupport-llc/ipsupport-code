@@ -25,6 +25,9 @@ PR.
   bug, a test that reproduces it first.
 - **Keep it minimal.** Solve the task at hand; avoid speculative abstractions and
   flags nobody asked for. Match the surrounding style.
+- **Check the ADRs.** [`adr/`](adr/README.md) records the decisions the code
+  rests on. A change that goes against one says so in a new ADR that supersedes
+  it, in the same PR — never by quietly editing the old one.
 - **Mind the prompt budget.** The tool catalog and system prompt ship in every
   request to a small local model — `internal/tool` has a token-budget test guarding
   the catalog. Don't bloat them.

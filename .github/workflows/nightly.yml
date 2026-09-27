@@ -77,9 +77,14 @@ jobs:
           # see a mismatch and retry, which is far cheaper than a hard 404 on
           # the binary itself).
           gh release upload nightly dist/*.tar.gz dist/*.zip dist/checksums.txt --clobber
+          # Keep exactly what this run uploaded, by name. Matching on the commit
+          # SHA alone (as this used to) kept every earlier build of the same
+          # commit — and the daily cron rebuilds the same commit whenever main
+          # hasn't moved, under a new date: three days of darwin-arm64 archives
+          # sat side by side with one checksums.txt describing only the newest,
+          # and install.sh, taking the first, failed "checksum mismatch".
+          keep=$(cd dist && ls *.tar.gz *.zip checksums.txt)
           for a in $(gh release view nightly --json assets -q '.assets[].name'); do
-            case "$a" in
-              *"$(git rev-parse --short HEAD)"*|checksums.txt) continue ;; # keep today's
-            esac
+            printf '%s\n' "$keep" | grep -qxF "$a" && continue
             gh release delete-asset nightly "$a" --yes
           done

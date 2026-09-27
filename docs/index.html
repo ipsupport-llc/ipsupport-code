@@ -283,7 +283,7 @@ cwd    ~/myproject</span>
         Define <b>profiles</b> in <code>/config → Sub-agents</code> (provider → model → name).
         Then ask, e.g. <em>"review internal/tool across grok and claude, then merge."</em>
         They run in <b>parallel</b>, each jailed to its own directory. Manage with
-        <code>/agents add|add-tool|rm|exec</code> — <code>add-tool</code> plugs in local CLI agents (codex, claude, aider…); relax the per-spawn prompt with <code>/permissions agents on</code>.
+        <code>/agents add|add-tool|rm|exec</code> — <code>add-tool</code> plugs in local CLI agents (codex, claude, muse, aider…); relax the per-spawn prompt with <code>/permissions agents on</code>.
         Or fire one in the <b>background</b> and keep working — its result folds into the next turn; watch them with <code>/jobs</code>.
       </p></div>
     </div>
@@ -312,7 +312,7 @@ cwd    ~/myproject</span>
     </div>
     <h3 class="chip-head">External agents</h3>
     <div class="providers">
-      <span class="chip">codex / claude / aider <span class="dim">(as sub-agents)</span></span>
+      <span class="chip">codex / claude / muse / aider <span class="dim">(as sub-agents)</span></span>
     </div>
   </section>
 

@@ -170,7 +170,7 @@ too — registered as **external profiles**:
 
 ```text
 /agents add-tool                # scan PATH: which known CLI agents are installed
-/agents add-tool codex          # one word — codex/claude/gemini/qwen/aider/goose/opencode
+/agents add-tool codex          # one word — codex/claude/gemini/qwen/aider/goose/opencode/muse
 /agents add-tool mytool mytool --headless {task}   # any other tool ({task} = where the task goes)
 ```
 

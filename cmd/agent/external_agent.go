@@ -44,6 +44,7 @@ var externalCatalog = []struct {
 	{"aider", []string{"--yes", "--message", "{task}"}}, // aider (one-shot)
 	{"goose", []string{"run", "-t", "{task}"}},          // Goose
 	{"opencode", []string{"run", "{task}"}},             // OpenCode
+	{"muse", []string{"exec", "{task}"}},                // Muse Code (Meta), headless
 }
 
 // catalogArgs returns the known launch args for a catalog CLI (nil = unknown).

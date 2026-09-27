@@ -3590,10 +3590,15 @@ func TestAddToolCatalog(t *testing.T) {
 
 	// bare add-tool lists the catalog with install markers
 	list := strings.Join(a.agentsAddExternal(""), "\n")
-	for _, want := range []string{"codex", "claude", "aider", "add-tool <name> <command>"} {
+	for _, want := range []string{"codex", "claude", "aider", "muse", "add-tool <name> <command>"} {
 		if !strings.Contains(list, want) {
 			t.Errorf("catalog listing missing %q:\n%s", want, list)
 		}
+	}
+
+	// muse runs headless through `muse exec <prompt>` — the codex shape
+	if got := strings.Join(catalogArgs("muse"), " "); got != "exec {task}" {
+		t.Errorf("muse catalog args = %q, want %q", got, "exec {task}")
 	}
 
 	// one-word add of a known CLI: catalog flags; PATH check still applies

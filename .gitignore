@@ -1,4 +1,8 @@
 /dist/
+# `go build ./cmd/agent` from the repo root drops the binary here; one got
+# committed by accident once (#96). Release binaries go to GitHub Releases.
+/agent
+/agent.exe
 *.out
 .DS_Store
 

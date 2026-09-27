@@ -5,6 +5,8 @@
 [![license](https://img.shields.io/github/license/ipsupport-llc/ipsupport-code)](LICENSE)
 [![go](https://img.shields.io/github/go-mod/go-version/ipsupport-llc/ipsupport-code)](go.mod)
 
+[![ipsupport-code — analyze, fix, test, report](https://raw.githubusercontent.com/ipsupport-llc/ipsupport-code/main/docs/hero.webp)](https://ipsupport-llc.github.io/ipsupport-code/)
+
 **Website: [ipsupport-llc.github.io/ipsupport-code](https://ipsupport-llc.github.io/ipsupport-code/)**
 
 A small **self-learning coding agent** for your own model — any OpenAI-compatible

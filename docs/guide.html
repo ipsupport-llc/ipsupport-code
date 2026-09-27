@@ -148,13 +148,12 @@
            <a href="https://github.com/ml-explore/mlx-lm">mlx-lm</a> natively on Apple Silicon: pick a model,
            hit start, and it serves the OpenAI API on <code>localhost:8765</code>. Elsewhere, Ollama, vLLM or any
            other OpenAI-compatible server works the same way.</p>
-        <p>Tell <code>ipsupport-code</code> where the server is — at first-run setup, or any time after:</p>
+        <p>First-run setup looks for a running LLMTray (<code>:8765</code>) or LM Studio
+           (<code>:1234</code>) and offers the one it finds. To point it somewhere else later:</p>
         <div class="term">
-          <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>point it at LLMTray</span></div>
-          <pre><span class="p">$</span> ipsupport-code config set llm.base_url http://localhost:8765/v1</pre>
+          <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>point it at another server</span></div>
+          <pre><span class="p">$</span> ipsupport-code config set llm.base_url http://localhost:PORT/v1</pre>
         </div>
-        <p class="dim">Out of the box it looks at <code>localhost:1234</code>; for another server, swap in
-           its port.</p>
         <div class="term">
           <div class="bar"><i class="r"></i><i class="y"></i><i class="g"></i><span>pick which loaded model to use</span></div>
           <pre><span class="p">❯</span> /model              <span class="d"># lists what the server has loaded</span>
@@ -212,8 +211,8 @@
       <li><b>Start a model:</b> install <a href="https://github.com/ipsupport-llc/llmtray">LLMTray</a>, click its menu-bar icon and pick any instruct model
           (the recommended one above, or download one from its built-in Hugging Face browser) — the
           server starts on its own.</li>
-      <li><b>Point the agent at it:</b> <code>ipsupport-code config set llm.base_url http://localhost:8765/v1</code></li>
-      <li><b>Run it:</b> <code>mkdir ~/hello &amp;&amp; cd ~/hello &amp;&amp; ipsupport-code</code></li>
+      <li><b>Run it:</b> <code>mkdir ~/hello &amp;&amp; cd ~/hello &amp;&amp; ipsupport-code</code> — setup finds
+          LLMTray by itself; press Enter to accept it.</li>
       <li><b>Ask it something:</b> type <code>write hello world in Go and run it</code> and press Enter.</li>
     </ol>
     <div class="term">

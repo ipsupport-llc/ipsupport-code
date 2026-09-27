@@ -259,14 +259,15 @@ remote endpoint, that traffic still goes out. `/offline off` re-enables it.
 ## Quick start
 
 1. Start a local server with a **tool-calling** model loaded (e.g.
-   `qwen2.5-7b-instruct`) on port `1234`. On a Mac we recommend
+   `qwen2.5-7b-instruct`). On a Mac we recommend
    [LLMTray](https://github.com/ipsupport-llc/llmtray) — a menu-bar app running
    [mlx-lm](https://github.com/ml-explore/mlx-lm) natively on Apple Silicon;
    [LM Studio](https://lmstudio.ai), Ollama and vLLM do the same job anywhere.
    **No local model?** Skip this — the next step asks.
 2. First interactive run asks whether you have a local model server running. If
-   yes, it walks you through the server URL, API key (blank for LM Studio), and
-   model, and confirms the connection. If no, it asks for a provider name — a
+   yes, it looks for a running LLMTray (`:8765`) or LM Studio (`:1234`) and offers
+   the one it finds as the server URL, then asks for the API key (blank for a local
+   server) and model, and confirms the connection. If no, it asks for a provider name — a
    built-in (`openai`, `anthropic`, `grok`, `groq`, `openrouter`, `zai`) uses that
    vendor's real endpoint with just a key; **any other name** is treated as your
    own OpenAI-compatible endpoint (a self-hosted gateway, LiteLLM, a proxy…) and

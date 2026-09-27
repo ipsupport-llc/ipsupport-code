@@ -5519,7 +5519,7 @@ func (a *app) usageLedger() (days, models [][2]string) {
 	return days, models
 }
 
-// maybeInit runs the interactive first-time setup, writing the LM Studio
+// maybeInit runs the interactive first-time setup, writing the model
 // connection to the user config. It triggers when forced (-init / /login) or on a
 // real first run (no user config yet and an interactive terminal).
 func maybeInit(reader *bufio.Reader, force bool) {
@@ -5532,20 +5532,62 @@ func maybeInit(reader *bufio.Reader, force bool) {
 	}
 	fmt.Println("Setup — connect your model (press Enter to keep the current value).")
 	hasLocal := def.Provider == "" || def.Provider == "local" // an already-configured cloud provider flips the default
-	if askYN(reader, "Local model server running (LM Studio / Ollama / vLLM)?", hasLocal) {
+	if askYN(reader, "Local model server running (LLMTray / LM Studio / Ollama / vLLM)?", hasLocal) {
 		initLocalModel(reader, def)
 	} else {
 		initCloudProvider(reader, def)
 	}
 }
 
-// initLocalModel configures the built-in "local" provider — LM Studio by
-// default, but any OpenAI-compatible local server (Ollama, vLLM…) works the
-// same way by pointing the URL at it.
+// localServers are the local OpenAI-compatible servers setup looks for when no
+// URL has been configured yet, in the order it prefers them when more than one
+// is up. LLMTray comes first: it is ours, and it does NOT listen on the built-in
+// default (LM Studio's :1234), so without this a Mac user who followed the site
+// and installed it got "couldn't reach" at setup.
+var localServers = []struct{ name, url string }{
+	{"LLMTray", "http://localhost:8765/v1"},
+	{"LM Studio", "http://localhost:1234/v1"},
+}
+
+// detectLocalServer probes every entry in localServers at once and returns the
+// first one, in list order, that answers /models. ok is false when none does.
+func detectLocalServer(ctx context.Context) (name, url string, ok bool) {
+	up := make([]bool, len(localServers))
+	var wg sync.WaitGroup
+	for i, s := range localServers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := llm.ListModels(ctx, s.url, "", http.DefaultClient)
+			up[i] = err == nil
+		}()
+	}
+	wg.Wait()
+	for i, s := range localServers {
+		if up[i] {
+			return s.name, s.url, true
+		}
+	}
+	return "", "", false
+}
+
+// initLocalModel configures the built-in "local" provider — any OpenAI-compatible
+// local server (LLMTray, LM Studio, Ollama, vLLM…). With no URL configured yet it
+// looks for a running LLMTray or LM Studio and offers that one; a URL the user
+// already set is kept as the default, whatever is running.
 func initLocalModel(reader *bufio.Reader, def config.Config) {
-	fmt.Println("  In LM Studio: load a tool-calling model and start the local server (Developer tab).")
-	url := ask(reader, "Server URL", def.LLM.BaseURL)
-	key := ask(reader, "API key (blank for LM Studio)", def.LLM.APIKey)
+	fmt.Println("  LLMTray (Mac): pick a model from its menu-bar icon. LM Studio / Ollama / vLLM: start its local server.")
+	urlDef := def.LLM.BaseURL
+	if urlDef == config.Default().LLM.BaseURL {
+		ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+		if name, u, ok := detectLocalServer(ctx); ok {
+			fmt.Printf("  ✓ found %s at %s\n", name, u)
+			urlDef = u
+		}
+		cancel()
+	}
+	url := ask(reader, "Server URL", urlDef)
+	key := ask(reader, "API key (blank for a local server)", def.LLM.APIKey)
 
 	// Best-effort probe: show what's loaded there so the model name isn't a blind
 	// guess, and so we can confirm the connection at the end. (max_steps and the
@@ -5575,7 +5617,7 @@ func initLocalModel(reader *bufio.Reader, def config.Config) {
 	}
 	fmt.Printf("Saved to %s\n", config.GlobalPath())
 	if probeErr != nil {
-		fmt.Printf("  ⚠ couldn't reach %s yet — start LM Studio's local server (Developer tab); it'll connect on your first task.\n", url)
+		fmt.Printf("  ⚠ couldn't reach %s yet — start your local server (LLMTray: pick a model from its menu-bar icon); it'll connect on your first task.\n", url)
 	} else {
 		fmt.Printf("  ✓ connected — using %s\n", l.Model)
 	}

@@ -216,12 +216,13 @@ func (a *app) riskCommand(rest string) []string {
 	}
 	switch strings.ToLower(strings.TrimSpace(rest)) {
 	case "reset":
-		if err := os.Remove(a.riskDeltaPath()); err != nil && !os.IsNotExist(err) {
+		// Cleared in place rather than by rebuilding through wire(): the scorer is
+		// created once and shared with whatever goroutines are mid-call. Memory
+		// and file together, under the lock a deferred save writes under — see
+		// risk.Tuned.Reset.
+		if err := a.shadow.Model().Reset(a.riskDeltaPath()); err != nil {
 			return []string{"error: " + err.Error()}
 		}
-		// Cleared in place rather than by rebuilding through wire(): the scorer is
-		// created once and shared with whatever goroutines are mid-call.
-		a.shadow.Model().ResetDelta()
 		return []string{"local risk corrections cleared — back to the shipped model",
 			"  the record of what taught them is kept: " + a.riskFeedbackPath()}
 	case "", "status":

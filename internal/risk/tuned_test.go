@@ -2,6 +2,8 @@ package risk
 
 import (
 	"context"
+	"encoding/binary"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -270,5 +272,92 @@ func TestDeltaRefusesADifferentFeatureSpace(t *testing.T) {
 	// …and it still loads against the model it was actually learned from.
 	if _, err := LoadDelta(path, base); err != nil {
 		t.Errorf("refused its own model: %v", err)
+	}
+}
+
+// learnedDelta learns a few corrections and saves them, returning the file.
+func learnedDelta(t *testing.T) (*Tuned, string) {
+	t.Helper()
+	tn := tunedModel(t)
+	target := aFlaggedCall(t, tn)
+	for i := 0; i < 3; i++ {
+		c, _ := CorrectionFrom(WithAssessment(context.Background(), "run", "shell",
+			map[string]any{"command": target}, tn.Assess("run", "shell", map[string]any{"command": target})), true)
+		tn.Learn(c)
+	}
+	path := filepath.Join(t.TempDir(), "risk-delta.bin")
+	if err := tn.SaveDelta(path); err != nil {
+		t.Fatal(err)
+	}
+	return tn, path
+}
+
+// A retrained model can keep the labels and the feature space and still be a
+// different model. The corrections were sized against the OLD weights'
+// mistakes; on a base that has since learned the same lesson they push it twice.
+func TestDeltaRefusesDifferentWeights(t *testing.T) {
+	tn, path := learnedDelta(t)
+	b := tn.Base()
+	retrained := &Model{Cfg: b.Cfg, Labels: b.Labels, Informational: b.Informational,
+		Bias: append([]float32{}, b.Bias...), W: append([]float32{}, b.W...)}
+	retrained.W[12345] += 0.5 // one weight: same labels, same features, another model
+
+	if _, err := LoadDelta(path, b); err != nil {
+		t.Fatalf("the delta no longer loads against its own base: %v", err)
+	}
+	if _, err := LoadDelta(path, retrained); err == nil {
+		t.Error("applied a delta to a base with different weights")
+	} else if !strings.Contains(err.Error(), "different build") {
+		t.Errorf("error = %q, want it to say the weights changed", err)
+	}
+}
+
+// A delta from before the fingerprint existed cannot say which weights it
+// belongs to, so it is refused rather than trusted.
+func TestDeltaRefusesTheOldFormat(t *testing.T) {
+	tn, path := learnedDelta(t)
+	data, _ := os.ReadFile(path)
+	old := append(append([]byte{}, deltaMagicV1[:]...), data[16:]...) // v1: no fingerprint
+	os.WriteFile(path, old, 0o644)
+	if _, err := LoadDelta(path, tn.Base()); err == nil || !strings.Contains(err.Error(), "older build") {
+		t.Errorf("error = %v, want the old format refused by name", err)
+	}
+}
+
+// The delta file is read back on every start, so a corrupt one must fail
+// loudly and cheaply — not size a map from a garbage count, and not load a NaN
+// that turns every score it touches into "safe".
+func TestDeltaRejectsCorruptRows(t *testing.T) {
+	tn, path := learnedDelta(t)
+	good, _ := os.ReadFile(path)
+	base := tn.Base()
+	// The first row's count sits right after the header.
+	hdr := 8 + 8 + 4 + 4 + 5 + 2
+	for _, l := range base.Labels {
+		hdr += 2 + len(l)
+	}
+	firstCount := binary.LittleEndian.Uint32(good[hdr:])
+	if firstCount == 0 {
+		t.Skip("the first row is empty; nothing to corrupt")
+	}
+	entry := hdr + 4 // first (index, value) pair of the first row
+
+	for _, tc := range []struct {
+		name  string
+		patch func(b []byte)
+		want  string
+	}{
+		{"count past the end", func(b []byte) { binary.LittleEndian.PutUint32(b[hdr:], 1<<30) }, "room for"},
+		{"NaN adjustment", func(b []byte) { binary.LittleEndian.PutUint32(b[entry+4:], math.Float32bits(float32(math.NaN()))) }, "NaN"},
+		{"index outside the model", func(b []byte) { binary.LittleEndian.PutUint32(b[entry:], base.Cfg.Dim+7) }, "adjusts feature"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := append([]byte{}, good...)
+			tc.patch(b)
+			os.WriteFile(path, b, 0o644)
+			if _, err := LoadDelta(path, base); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %v, want it to mention %q", err, tc.want)
+			}
+		})
 	}
 }

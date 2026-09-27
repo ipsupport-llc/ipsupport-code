@@ -70,16 +70,25 @@ func Load(data []byte) (*Model, error) {
 	if mo.Cfg.Dim == 0 || n == 0 {
 		return nil, errors.New("risk: model declares no features or no labels")
 	}
-	// The weight matrix is the whole file; a bad header would otherwise make this
-	// try to allocate gigabytes before failing.
-	if want := int(mo.Cfg.Dim) * n; want > (1<<28) || want <= 0 {
-		return nil, fmt.Errorf("risk: model too large (%d labels x %d features)", n, mo.Cfg.Dim)
-	}
 	mo.Labels = make([]string, n)
 	mo.Informational = make([]bool, n)
 	for i := range mo.Labels {
 		mo.Labels[i] = r.str()
 		mo.Informational[i] = r.u8()&1 == 1
+	}
+	if r.err != nil {
+		return nil, r.err
+	}
+	// The header's dimensions have to account for exactly the bytes that are
+	// left, and that is checked BEFORE the weight matrix is allocated. A cap on
+	// the size alone still let a corrupt or hostile header ask for a gigabyte and
+	// only fail afterwards, reading past the end; the file itself is the bound.
+	want := uint64(n) * (1 + uint64(mo.Cfg.Dim)) * 4
+	switch have := uint64(len(data) - r.i); {
+	case have < want:
+		return nil, fmt.Errorf("risk: header declares %d labels x %d features (%d bytes of weights), the file has %d: %w", n, mo.Cfg.Dim, want, have, io.ErrUnexpectedEOF)
+	case have > want:
+		return nil, fmt.Errorf("risk: %d trailing bytes after the weights", have-want)
 	}
 	mo.Bias = make([]float32, n)
 	for i := range mo.Bias {
@@ -92,8 +101,15 @@ func Load(data []byte) (*Model, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	if r.i != len(data) {
-		return nil, fmt.Errorf("risk: %d trailing bytes after the weights", len(data)-r.i)
+	// A NaN anywhere poisons every sum it enters, and sigmoid(NaN) compares false
+	// against every threshold — a model that says nothing is risky, silently. An
+	// Inf does the same to one feature's calls. Refused, like any other file that
+	// would score wrongly.
+	if i, ok := firstNonFinite(mo.Bias); ok {
+		return nil, fmt.Errorf("risk: bias %d is %v", i, mo.Bias[i])
+	}
+	if i, ok := firstNonFinite(mo.W); ok {
+		return nil, fmt.Errorf("risk: weight %d (label %q) is %v", i, mo.Labels[i/int(mo.Cfg.Dim)], mo.W[i])
 	}
 	return &mo, nil
 }
@@ -157,6 +173,16 @@ func (m *Model) ScoreOf(scores []float32, label string) (float32, bool) {
 	for i, l := range m.Labels {
 		if l == label && i < len(scores) {
 			return scores[i], true
+		}
+	}
+	return 0, false
+}
+
+// firstNonFinite reports the first NaN or ±Inf in vs.
+func firstNonFinite(vs []float32) (int, bool) {
+	for i, v := range vs {
+		if f := float64(v); math.IsNaN(f) || math.IsInf(f, 0) {
+			return i, true
 		}
 	}
 	return 0, false

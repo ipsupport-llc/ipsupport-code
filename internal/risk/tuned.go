@@ -1,6 +1,7 @@
 package risk
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -76,10 +77,17 @@ const (
 // corrections still apply, still look plausible in /risk, and adjust entirely
 // the wrong things.
 //
-// A rejected delta is not a loss. It is a cache; the durable record of what
-// taught it is risk-feedback.jsonl, which is raw (tool, action, params, labels)
-// and independent of the model, the feature space and the label set. Whatever
-// changes, the corrections refit from that.
+// The same goes for the WEIGHTS. A retrained model can keep the feature space
+// and the labels and still be a different model: the delta's corrections were
+// sized against the old weights' mistakes, and applied on top of a base that
+// has since learned the same lesson they push it twice. So the delta records a
+// fingerprint of the exact base it was learned against, and is refused on any
+// other.
+//
+// A refused delta is dropped, not rebuilt: nothing replays the corrections, and
+// this workspace relearns from the answers that follow. What is kept is
+// risk-feedback.jsonl, the raw record of every correction, for retraining the
+// base offline.
 type Delta struct {
 	Cfg    FeatureConfig // the feature space these indices are positions in
 	Labels []string      // the base model's labels, in order
@@ -92,6 +100,7 @@ type Delta struct {
 type Tuned struct {
 	mu      sync.RWMutex
 	base    *Model
+	fp      [8]byte // base.Fingerprint(), computed once
 	d       *Delta
 	changed bool
 }
@@ -104,7 +113,18 @@ func NewTuned(base *Model, d *Delta) *Tuned {
 	if d == nil || len(d.Rows) != len(base.Labels) {
 		d = &Delta{Labels: base.Labels, Rows: make([]map[uint32]float32, len(base.Labels))}
 	}
-	return &Tuned{base: base, d: d}
+	return &Tuned{base: base, fp: base.Fingerprint(), d: d}
+}
+
+// Fingerprint identifies a model's exact contents — header, labels and every
+// weight. Two models that differ only in their weights have different ones, which
+// is what a delta needs to know and what Cfg and Labels cannot tell it.
+func (m *Model) Fingerprint() [8]byte {
+	h := sha256.New()
+	_ = m.Write(h) // a hash.Hash never returns a write error
+	var fp [8]byte
+	copy(fp[:], h.Sum(nil))
+	return fp
 }
 
 // Base is the underlying model — its labels, config and informational flags.
@@ -239,12 +259,17 @@ func (t *Tuned) labelIndex(label string) int {
 	return -1
 }
 
-// ResetDelta drops every local correction, in place. In place because the
-// scorer is shared: other goroutines may be scoring a call right now, and
-// swapping the whole thing out from under them is a data race.
-func (t *Tuned) ResetDelta() {
+// Reset drops every local correction, in memory and on disk at path. In place
+// because the scorer is shared: other goroutines may be scoring a call right
+// now, and swapping the whole thing out from under them is a data race.
+//
+// The file goes under the same lock SaveDelta writes it under. Removing it
+// outside (as /risk reset used to) raced a save already in flight — learned
+// just before the reset, written just after the remove — and the corrections
+// the user had just cleared came back on the next start.
+func (t *Tuned) Reset(path string) error {
 	if t == nil {
-		return
+		return nil
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -252,6 +277,10 @@ func (t *Tuned) ResetDelta() {
 		t.d.Rows[i] = nil
 	}
 	t.changed = false
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // Adjustments is how many weights the local delta currently holds, for /risk.
@@ -268,10 +297,15 @@ func (t *Tuned) Adjustments() int {
 	return n
 }
 
-// deltaMagic identifies the delta file. It is paired with a label list, so a
-// delta learned against one base model is refused rather than silently applied
-// to another whose rows mean something else.
-var deltaMagic = [8]byte{'I', 'P', 'S', 'R', 'D', 'L', 'T', 0x01}
+// deltaMagic identifies the delta file. It is followed by the fingerprint of
+// the base model it was learned against, its feature config and its label
+// list, so a delta learned against one base is refused rather than silently
+// applied to another. Version 2 added the fingerprint; a version-1 file cannot
+// say which weights it belongs to and is refused.
+var (
+	deltaMagic   = [8]byte{'I', 'P', 'S', 'R', 'D', 'L', 'T', 0x02}
+	deltaMagicV1 = [8]byte{'I', 'P', 'S', 'R', 'D', 'L', 'T', 0x01}
+)
 
 // SaveDelta writes the corrections, if any changed since they were loaded.
 func (t *Tuned) SaveDelta(path string) error {
@@ -285,6 +319,7 @@ func (t *Tuned) SaveDelta(path string) error {
 	}
 	var buf []byte
 	buf = append(buf, deltaMagic[:]...)
+	buf = append(buf, t.fp[:]...)
 	c := t.base.Cfg
 	buf = binary.LittleEndian.AppendUint32(buf, c.Dim)
 	buf = binary.LittleEndian.AppendUint32(buf, c.Seed)
@@ -327,11 +362,15 @@ func LoadDelta(path string, base *Model) (*Delta, error) {
 		return nil, err
 	}
 	r := &reader{b: data}
-	var m [8]byte
+	var m, fp [8]byte
 	r.read(m[:])
+	if r.err == nil && m == deltaMagicV1 {
+		return nil, fmt.Errorf("risk: %s was written by an older build and does not say which model it was learned against — dropping the local corrections", path)
+	}
 	if r.err == nil && m != deltaMagic {
 		return nil, fmt.Errorf("risk: %s is not a delta file", path)
 	}
+	r.read(fp[:])
 	var cfg FeatureConfig
 	cfg.Dim = r.u32()
 	cfg.Seed = r.u32()
@@ -345,24 +384,33 @@ func LoadDelta(path string, base *Model) (*Delta, error) {
 	// The feature space first: this is the mismatch that would otherwise pass
 	// unnoticed — same labels, same row count, indices meaning something else.
 	if cfg != base.Cfg {
-		return nil, fmt.Errorf("risk: delta was learned against a different feature space (%+v, model has %+v) — dropping the local corrections; they refit from the feedback log", cfg, base.Cfg)
+		return nil, fmt.Errorf("risk: delta was learned against a different feature space (%+v, model has %+v) — dropping the local corrections", cfg, base.Cfg)
 	}
 	d := &Delta{Cfg: cfg, Labels: make([]string, n), Rows: make([]map[uint32]float32, n)}
 	for i := range d.Labels {
 		d.Labels[i] = r.str()
 	}
 	for i := range d.Rows {
-		cnt := int(r.u32())
+		cnt := uint64(r.u32())
 		if r.err != nil {
 			return nil, r.err
 		}
-		if cnt > 1<<22 {
-			return nil, fmt.Errorf("risk: delta row %d claims %d adjustments", i, cnt)
+		// Each adjustment is 8 bytes; a count the rest of the file cannot hold is
+		// corrupt, and is refused before the map is sized from it.
+		if left := uint64(len(data) - r.i); cnt*8 > left {
+			return nil, fmt.Errorf("risk: delta row %d claims %d adjustments, the file has room for %d", i, cnt, left/8)
 		}
 		row := make(map[uint32]float32, cnt)
-		for j := 0; j < cnt; j++ {
+		for j := uint64(0); j < cnt; j++ {
 			idx := r.u32()
-			row[idx] = r.f32()
+			v := r.f32()
+			if f := float64(v); math.IsNaN(f) || math.IsInf(f, 0) {
+				return nil, fmt.Errorf("risk: delta row %d holds a %v adjustment", i, v)
+			}
+			if idx >= cfg.Dim {
+				return nil, fmt.Errorf("risk: delta row %d adjusts feature %d, the model has %d", i, idx, cfg.Dim)
+			}
+			row[idx] = v
 		}
 		d.Rows[i] = row
 	}
@@ -376,6 +424,14 @@ func LoadDelta(path string, base *Model) (*Delta, error) {
 		if d.Labels[i] != base.Labels[i] {
 			return nil, fmt.Errorf("risk: delta label %d is %q, model has %q — dropping the local corrections", i, d.Labels[i], base.Labels[i])
 		}
+	}
+	if r.i != len(data) {
+		return nil, fmt.Errorf("risk: %d trailing bytes after the delta", len(data)-r.i)
+	}
+	// Last, because it is the least specific: every check above names what
+	// changed, and this one can only say that SOMETHING in the weights did.
+	if fp != base.Fingerprint() {
+		return nil, fmt.Errorf("risk: delta was learned against a different build of the model (same labels and features, different weights) — dropping the local corrections")
 	}
 	return d, nil
 }

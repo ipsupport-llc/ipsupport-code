@@ -102,7 +102,7 @@ hard task, then drop back to your local one:
 /ai                       list providers (local + openai, anthropic, grok, groq, openrouter, zai)
 /ai key openai sk-…       add an API key for a built-in provider (one command)
 /ai add mylab https://api.lab.co/v1 llama-3.1 key=sk-…   add a CUSTOM provider + key in one step
-/ai openai                switch to it   ·   /ai local   back to LM Studio
+/ai openai                switch to it   ·   /ai local   back to your local server
 /model                    list models   ·   /model gpt-4o   pick   ·   /model sonnet   filter (great for OpenRouter)
 ```
 
@@ -165,7 +165,7 @@ tokens are recorded in `/usage` like any other.
 
 ### External CLI agents
 
-Locally installed CLI coding agents (Codex, Claude Code, aider…) can be sub-agents
+Locally installed CLI coding agents (Codex, Claude Code, Muse, aider…) can be sub-agents
 too — registered as **external profiles**:
 
 ```text
@@ -179,6 +179,9 @@ The assistant delegates through the same `agent` tool; the CLI runs in the targe
 --stat` summary** (review the full patch with `/diff`). Use the CLI's
 **non-interactive mode** (`exec` / `-p` / `--message`) — an interactive launch just
 hangs until the timeout (15 min default, `timeout` per profile in config.json).
+Muse (Meta's Muse Code) runs as `muse exec {task}` and keeps its own approval
+and sandbox on in that mode; to launch it with other flags, use the full form
+(`/agents add-tool muse muse exec <flags> {task}`).
 
 ⚠ External agents run **outside the sandbox**: their own tools, their own
 permissions, no policy jail, and `/rewind` can't see their edits. That's why every
@@ -627,7 +630,7 @@ judge named — and it keeps going. This repeats up to a **TTL** (`/goal ttl <n>
 default 6 re-feeds) before it gives up, on top of the usual esc / stuck / runaway
 guards and a hard step cap.
 
-The goal is a first-class, persisted object: it lives in `.agent/goal.json`, so it
+The goal is a first-class, persisted object: it lives in the workspace's state directory (`goal.json`), so it
 survives a restart — an unfinished one offers to resume **once** on the next
 start (not every time), and a completed goal clears itself. `/goal` shows the
 standing goal and its status; `/goal go`
@@ -652,7 +655,7 @@ When the prompt passes ~75% of the window the session is **auto-compacted** into
 a short summary to free room (run it any time with `/compact`; the threshold and
 whether it summarizes at all are configurable — see `memory`/`compact_threshold`
 below). Every task's goal and outcome is also archived in full, never
-summarized, to `.agent/sessions/<name>.archive.jsonl` — once there's something
+summarized, to `sessions/<name>.archive.jsonl` in the workspace's state directory — once there's something
 in it, the model gets a `history` tool to recall or search past tasks that a
 compaction summary has since shortened.
 
@@ -691,7 +694,7 @@ and **alt+enter** (or **ctrl+j**) inserts a newline by hand. **Enter** submits.
 
 **History.** With an empty input, **↑ / ↓** recall previous messages to re-run or
 fix a typo — the first **↑** jumps to your last prompt. History is **persisted per
-workspace** (`.agent/history`), so recall spans past runs; `/history` lists recent
+workspace** (`history` in its state directory), so recall spans past runs; `/history` lists recent
 prompts and `/history <text>` filters them, and **ctrl+r** opens an incremental
 reverse-search (type to narrow · ctrl+r older · enter use). **Tab** completes
 `/commands` and `@file` paths against the workspace. (PgUp/PgDn and the wheel
@@ -725,9 +728,10 @@ edit at your own risk.)
 
 ## How it works
 
-- **Native tool calling.** Talks to LM Studio's OpenAI-compatible server and lets
-  the model call tools natively. Point `llm.base_url` / `llm.api_key` at OpenAI or
-  a LiteLLM proxy instead — same client.
+- **Native tool calling.** Talks to any OpenAI-compatible server — LLMTray, LM
+  Studio, Ollama, vLLM, a LiteLLM proxy or a cloud provider — and lets the model
+  call tools natively. One client for all of them; `llm.base_url` / `llm.api_key`
+  or a `providers` entry picks the endpoint.
 - **Fat tools.** One tool per domain, each `{"action": ..., "params": {...}}`. The
   catalog stays tiny (~1k tokens) so small models prefill fast and route well; a
   declarative `Domain` generates each tool's schema, help, and validation.
@@ -736,17 +740,24 @@ edit at your own risk.)
 - **Reflection.** After a task, a second model pass distills durable lessons into
   `~/.config/ipsupport-code/knowledge.json` (env-general tool pitfalls) and durable
   **facts** about the current project (build/test/run commands, where things live,
-  conventions) into `<workspace>/.agent/facts.json` — folded into the prompt next run.
+  conventions) into `facts.json` in the workspace's state directory — folded into the prompt next run.
   Each lesson tracks when it was last seen (bumped on recurrence); `/knowledge`
   reports the store and `clear` / `purge <days>` / `retain <days>` prune stale ones
   (`retain` auto-purges on startup) so the memory doesn't accrete junk forever.
 - **Code search.** The `file` tool's `search` action greps the workspace by regex
   (`file:line: match`), skipping VCS/dep/build dirs and binaries — no external `grep`.
 - **Session memory.** Remembers your goals and its answers across turns and across
-  restarts, kept per workspace **and per agent name** (`.agent/sessions/<name>.json`).
+  restarts, kept per workspace **and per agent name** (`sessions/<name>.json` in the
+  workspace's state directory).
   On startup the TUI shows a **navigable chooser** of saved sessions (↑↓ / enter /
   d) — and on restore it replays the recent exchanges so you pick up where you
   left off. `/new <name>` starts a fresh named thread; `/new` wipes the active one.
+- **State outside the project.** What the agent writes for itself — goal, facts,
+  lessons, prompt history, sessions — lives in `~/.config/ipsupport-code/state/<workspace>-<hash>/`,
+  never in the workspace, so a model listing the project can't find and replay its
+  own state. Files *you* write (`.agent/config.json`, `system.md`, `judge.md`,
+  `compact.md`, `instructions.md`) stay in the project. Older installs are moved
+  out of `.agent/` once, on first start.
 - **Resilience.** Exponential-backoff retry on transient 5xx/network errors, an
   idle watchdog that aborts a silently-stalled stream, and a stuck-loop guard.
 - **Project instructions.** Reads a `CLAUDE.md` / `AGENTS.md` / `.agent/instructions.md`
@@ -825,7 +836,7 @@ to stderr.
 
 ```
 cmd/agent          CLI, plain REPL, the Bubble Tea TUI, external CLI-agent runner
-internal/llm        LM Studio client (streaming, retry, context detection)
+internal/llm        OpenAI-compatible client (streaming, retry, context detection)
 internal/agent      the reason → act → observe loop (+ plan mode, goal judge)
 internal/tool       fat tools: file, run, git, web, calc, agent, mcp, skill, help, history
 internal/skill      downloadable, toggleable instruction packs
@@ -837,6 +848,11 @@ internal/config     config load/merge
 internal/mcp        MCP client (stdio + HTTP)
 internal/usage      token/cost ledger (powers /usage and /budget)
 internal/selfupdate checksum-verified in-place self-update
+internal/risk       shadow-mode risk scorer (pure-Go inference, embedded weights)
+internal/sandbox    opt-in OS sandbox for `run` (Seatbelt on macOS, Landlock on Linux)
+internal/procgroup  kill a command's whole process tree on cancel/timeout
+internal/filelock   cross-process lock for files shared between running sessions
+internal/e2e        end-to-end tests: real loop, tools and policy against a fake server
 internal/textutil · internal/atomicfile   shared helpers (clipping, atomic writes)
 ```
 
@@ -847,6 +863,10 @@ and a cross-compile of every target on each push and PR.
 
 [BACKLOG.md](BACKLOG.md) lists work that is designed but not built — each entry
 says what is wrong, what the fix is, and what that fix would break.
+
+[adr/](adr/README.md) records the architecture decisions the code rests on —
+where state lives, what a workspace may override, why external agents are gated
+separately, how the risk model is trained and shipped.
 
 ## License
 

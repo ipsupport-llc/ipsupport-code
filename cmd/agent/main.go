@@ -1408,8 +1408,8 @@ func (a *app) reflectUsing() string {
 }
 
 // goalState is the standing goal — an explicit, persisted objective the agent
-// pursues across the judge-driven loop. Stored at <workspace>/.agent/goal.json so
-// it survives a restart and can be resumed.
+// pursues across the judge-driven loop. Stored as goal.json in the workspace's
+// state directory (see statePath) so it survives a restart and can be resumed.
 type goalState struct {
 	Text    string `json:"text"`
 	Status  string `json:"status"`            // active | done | incomplete

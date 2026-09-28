@@ -1,6 +1,6 @@
 # 0012. Adapt the risk model per workspace from approvals, without touching the base
 
-- **Status:** Accepted
+- **Status:** Accepted; amended by [0014](0014-approvals-are-verdicts-not-labels.md)
 - **Date:** 2026-09-27 (recorded retrospectively — describes what the code does today)
 
 ## Context
@@ -33,6 +33,6 @@ it no longer fits, is not.
   retrained model applied the old corrections on top of weights that had
   already learned them). The ledger is what carries the user's feedback
   forward, into offline retraining.
-- Known open issue, not yet decided: approving a call whose side effect was
-  *intended* (an approved `git push` should not teach that it has no external
-  side effect — that needs a partial-label mask rather than a full target).
+- Approving a call whose side effect was *intended* taught the delta that the
+  side effect did not happen. Resolved in ADR-0014: the delta adjusts only
+  whether a call is flagged here, never the label scores.

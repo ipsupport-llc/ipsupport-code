@@ -9289,8 +9289,8 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 	// not the probability, which saturates. What this path has to prove is that
 	// the answer reached the model at all.
 
-	// The correction is on disk twice: as weights for this workspace, and as an
-	// example in the dataset's own shape, so the base can be fine-tuned on it.
+	// The correction is on disk twice: as weights for this workspace, and as the
+	// answer itself in the feedback log — a verdict a person can later label.
 	if _, err := os.Stat(a.riskDeltaPath()); err != nil {
 		t.Errorf("no delta file: %v", err)
 	}
@@ -9298,8 +9298,8 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no feedback log: %v", err)
 	}
-	if !strings.Contains(string(fb), `"command":"truncate -s 0 install_manifest.txt"`) || !strings.Contains(string(fb), `"labels":["safe"]`) {
-		t.Errorf("feedback line is not a usable training example:\n%s", fb)
+	if !strings.Contains(string(fb), `"command":"truncate -s 0 install_manifest.txt"`) || !strings.Contains(string(fb), `"verdict":"approved"`) {
+		t.Errorf("feedback line does not record the answer:\n%s", fb)
 	}
 
 	// An agreement teaches nothing: the model and the human both said fine.

@@ -116,7 +116,7 @@ func (s *Shadow) Observe(tool, action string, params map[string]any, verdict Pol
 
 	slog.Debug("risk shadow",
 		"tool", tool, "action", action,
-		"risk", round2(a.Risk), "top", a.Top,
+		"risk", round2(a.Risk), "base", round2(a.BaseRisk), "top", a.Top, // base = before this workspace's corrections
 		"labels", strings.Join(a.Above(Threshold), " "),
 		"policy", verdict.String(),
 		"disagreement", dis,

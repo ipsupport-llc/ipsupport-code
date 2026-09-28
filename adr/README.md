@@ -18,5 +18,6 @@ How and why `ipsupport-code` is built the way it is. Format and rules:
 | [0009](0009-llm-subagents-depth-one.md) | LLM sub-agents: depth one, their own policy, their own observer | Accepted |
 | [0010](0010-external-cli-agents.md) | External CLI agents run outside the sandbox and are approved separately | Accepted |
 | [0011](0011-shadow-mode-risk-scoring.md) | Score tool-call risk with a small local model, in shadow mode first | Accepted |
-| [0012](0012-local-risk-learning-delta.md) | Adapt the risk model per workspace from approvals, without touching the base | Accepted |
+| [0012](0012-local-risk-learning-delta.md) | Adapt the risk model per workspace from approvals, without touching the base | Accepted; amended by 0014 |
 | [0013](0013-releases-and-self-update.md) | Distribute through GitHub Releases with a checksum-verified self-update | Accepted |
+| [0014](0014-approvals-are-verdicts-not-labels.md) | An approval is a verdict, not a label | Accepted |

@@ -208,7 +208,7 @@ def main():
     ap.add_argument("--epochs", type=int, default=EPOCHS)
     ap.add_argument("extra", nargs="*", metavar="dataset.jsonl",
                     help="extra datasets to train on, e.g. a workspace's "
-                         "risk-feedback.jsonl — the corrections real approvals collected")
+                         "risk-feedback.jsonl once you have labelled rows in it")
     args = ap.parse_args()
 
     check_vectors()
@@ -217,13 +217,25 @@ def main():
     base = len(rows)
     for extra in args.extra:
         add = [json.loads(l) for l in pathlib.Path(extra).read_text().splitlines() if l.strip()]
-        # Corrections from real use are the point of collecting them, so they are
-        # never held out: there are few, they are in-domain, and measuring on
-        # them would measure the wrong thing.
+        # An answer at an approval prompt is a VERDICT — the call was acceptable,
+        # or it was not — and never a statement of what the call does, which is
+        # what the labels are. Trained on as labels, "approved rm -rf build/"
+        # taught the model that rm -rf deletes nothing. So approval rows are
+        # skipped: both the current ones (a verdict, no labels) and older ones
+        # that recorded an approval as ["safe"]. A person turns one into a
+        # training example by writing its labels and setting "source": "manual".
+        verdicts = [r for r in add if r.get("source") == "approval"]
+        add = [r for r in add if r.get("source") != "approval" and r.get("labels")]
+        # Labelled examples from real use are the point of collecting them, so
+        # they are never held out: there are few, they are in-domain, and
+        # measuring on them would measure the wrong thing.
         for r in add:
             r["split"] = "train"
         rows += add
-        print(f"+ {len(add)} examples from {extra}")
+        print(f"+ {len(add)} labelled examples from {extra}")
+        if verdicts:
+            print(f"  skipped {len(verdicts)} approval answer(s) — verdicts, not labels; "
+                  f'label one ("labels": [...], "source": "manual") to train on it')
     print(f"dataset: {len(rows)} examples ({base} synthetic), {DIM} features, {len(LABELS)} labels")
 
     data = []

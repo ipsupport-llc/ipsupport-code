@@ -4107,3 +4107,33 @@ func TestStripNotesLeavesWhatTheUserWrote(t *testing.T) {
 		}
 	}
 }
+
+// /rewind can cut the history back to a task that ran in plan mode. With plan
+// mode off now, the next task must say so — the last word in what the model
+// sees is ON again. (Found by review: a field recording "OFF was sent" goes
+// stale the moment the history is cut.)
+func TestPlanOffIsAnnouncedAfterARewind(t *testing.T) {
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "plan"}, {Role: "assistant", Content: "did it"}, {Role: "assistant", Content: "again"},
+	}}
+	a := New(fake, tool.NewRegistry(planFileTool()), nil, nil, "SYSTEM", 5)
+	a.SetPlanMode(true)
+	a.Run(context.Background(), "plan it")
+	a.SetPlanMode(false)
+	a.Run(context.Background(), "do it") // carries the OFF note
+	a.TruncateHistory(2)                 // /rewind to just after the plan-mode task
+	a.Run(context.Background(), "do it again")
+	if l := fake.lastMsgs[len(fake.lastMsgs)-1].Content; !strings.Contains(l, planOffNote) {
+		t.Errorf("rewound past the OFF note and nothing re-announced it:\n%s", l)
+	}
+}
+
+// The authority an agent-note has comes from WHERE it is. The preamble has to
+// say that only a leading block counts, so a tag inside pasted text does not.
+func TestNotePreambleNamesThePosition(t *testing.T) {
+	for _, want := range []string{"very start of a user message", "pasted text"} {
+		if !strings.Contains(NotePreamble, want) {
+			t.Errorf("preamble does not say %q", want)
+		}
+	}
+}

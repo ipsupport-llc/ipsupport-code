@@ -85,14 +85,14 @@ type Agent struct {
 	history    []llm.Message
 	maxHistory int
 	planMode   bool
-	// notedPlan is the plan mode the model was last told about in a note (see
-	// turnNote): turning plan mode OFF has to be said once, since the ON
-	// directive is still sitting in an earlier message of the history.
-	notedPlan bool
 	// notes wait for the next task's user message (see AddNote), so an update
 	// to what the model knows never rewrites the prefix the server has cached.
-	notesMu sync.Mutex
-	notes   []string
+	// sentNotes is how many of them the running task's message carries: they
+	// leave the queue only when that message is kept in the history (remember),
+	// so a task that fails before it is remembered does not lose them.
+	notesMu   sync.Mutex
+	notes     []string
+	sentNotes int
 	// continueSide sends the goal judge as a continuation of the run itself —
 	// same system prompt, same tools, same messages, its instruction last — so
 	// a local server answers it from the prefix it already holds instead of
@@ -224,7 +224,6 @@ func (a *Agent) Reset() {
 	a.historyMu.Lock()
 	a.history = nil
 	a.historyMu.Unlock()
-	a.notedPlan = false // a fresh history has told the model nothing
 	a.historyGen.Add(1)
 }
 
@@ -287,24 +286,62 @@ func (a *Agent) ToolSchemas() []map[string]any { return a.reg.OpenAITools() }
 // the plan-mode directive. The directive used to be a second system message
 // right after the first, so every shift+tab rewrote the prompt at the end of
 // the system prompt and the server prefilled the whole history again.
-func (a *Agent) turnNote() string {
+//
+// The notes are only peeked here; remember takes them off the queue once the
+// message carrying them is in the history.
+func (a *Agent) turnNote(hist []llm.Message) string {
 	a.notesMu.Lock()
-	parts := a.notes
-	a.notes = nil
+	parts := append([]string(nil), a.notes...)
+	a.sentNotes = len(parts)
 	a.notesMu.Unlock()
 	switch {
 	case a.planMode:
 		// Every task while it is on, not once: the directive must survive the
 		// history trimming its first mention away.
 		parts = append(parts, planDirective)
-	case a.notedPlan:
+	case planNotedIn(hist):
+		// Read off the history rather than remembered in a field: a restored
+		// session, or an agent rebuilt by wire(), starts with the ON directive
+		// already in its history and no memory of having sent it.
 		parts = append(parts, planOffNote)
 	}
-	a.notedPlan = a.planMode
 	if len(parts) == 0 {
 		return ""
 	}
 	return Note(strings.Join(parts, "\n\n")) + "\n\n"
+}
+
+// planNotedIn reports whether the last word on plan mode in hist is ON.
+func planNotedIn(hist []llm.Message) bool {
+	for i := len(hist) - 1; i >= 0; i-- {
+		if hist[i].Role != "user" {
+			continue
+		}
+		if strings.Contains(hist[i].Content, planOffNote) {
+			return false
+		}
+		if strings.Contains(hist[i].Content, planDirective) {
+			return true
+		}
+	}
+	return false
+}
+
+// StripNotes removes the agent-note blocks from the start of a user message,
+// leaving what the user wrote — for anything that shows the history to a person
+// or summarizes it as the user's intent.
+func StripNotes(s string) string {
+	for {
+		t := strings.TrimLeft(s, " \n")
+		if !strings.HasPrefix(t, "<"+NoteTag+">") {
+			return s
+		}
+		end := strings.Index(t, "</"+NoteTag+">")
+		if end < 0 {
+			return s
+		}
+		s = strings.TrimLeft(t[end+len("</"+NoteTag+">"):], " \n")
+	}
 }
 
 // System returns the current base system prompt.
@@ -863,6 +900,12 @@ func (a *Agent) remember(goal, sent, final string, msgs []llm.Message) {
 	if a.archiver != nil {
 		a.archiver.Archive(goal, entry) // the archive is for the user to search: the goal as they typed it
 	}
+	a.notesMu.Lock() // the notes this message carries are delivered now — see turnNote
+	if a.sentNotes > len(a.notes) {
+		a.sentNotes = len(a.notes) // SetSystem dropped the queue meanwhile
+	}
+	a.notes, a.sentNotes = a.notes[a.sentNotes:], 0
+	a.notesMu.Unlock()
 	a.historyMu.Lock()
 	a.history = append(a.history, llm.User(sent), llm.Message{Role: "assistant", Content: entry})
 	if a.maxHistory > 0 && len(a.history) > a.maxHistory {
@@ -1019,7 +1062,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	// sent is the goal as the model receives it, notes included, and it is what
 	// the history keeps: the next task's prompt has to repeat this message byte
 	// for byte, or the server's cached prefix ends right here.
-	sent := a.turnNote() + goal
+	sent := a.turnNote(hist) + goal
 	msgs = append(msgs, llm.User(sent))
 	tools := a.reg.OpenAITools()
 	slog.Debug("run start", a.debugArgs("goal", clip(goal, 120), "tools", toolNames(tools), "plan_mode", a.planMode)...)

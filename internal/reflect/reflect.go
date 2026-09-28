@@ -169,7 +169,9 @@ func (r *Reflector) ask(ctx context.Context, half, system, summary string) (llm.
 		start := time.Now()
 		msgs := append(append([]llm.Message(nil), r.Prefix...), llm.User(agent.Note(continuationPrompt(system, r.outcome))))
 		reply, err := r.LLM.Chat(ctx, msgs, r.Tools)
-		if err == nil && len(reply.ToolCalls) == 0 && strings.Contains(reply.Content, "{") {
+		// Accepted only if it parses: a truncated `{"facts":` or prose with a
+		// brace in it would otherwise skip the fallback and yield nothing.
+		if err == nil && len(reply.ToolCalls) == 0 && parseLessons(reply.Content).Parsed {
 			p, c := reflectSpend(r.LLM)
 			slog.Debug("reflect call", "half", half, "how", "continuation",
 				"finish_reason", reply.FinishReason, "content_bytes", len(strings.TrimSpace(reply.Content)),
@@ -333,11 +335,16 @@ func summarize(t agent.Transcript) string {
 			// nudges — and labelling those "GOAL:" told the learning pass that
 			// our own scaffolding was the user's intent, which it could then
 			// distill into a "fact" about the project.
-			if agent.IsHarnessMessage(m.Content) {
-				fmt.Fprintf(&b, "HARNESS (not the user): %s\n", oneLine(m.Content))
+			// agent-notes ride on top of the goal; they are ours, not the user's.
+			content := agent.StripNotes(m.Content)
+			if agent.IsHarnessMessage(content) {
+				fmt.Fprintf(&b, "HARNESS (not the user): %s\n", oneLine(content))
 				continue
 			}
-			fmt.Fprintf(&b, "GOAL: %s\n", oneLine(m.Content))
+			if strings.TrimSpace(content) == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "GOAL: %s\n", oneLine(content))
 		case "assistant":
 			if len(m.ToolCalls) > 0 {
 				for _, tc := range m.ToolCalls {

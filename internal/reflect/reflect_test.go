@@ -567,3 +567,55 @@ func TestARejectedCredentialIsNotWrittenToTheLog(t *testing.T) {
 		t.Errorf("the drop must still be visible in the log, just without the secret:\n%s", buf.String())
 	}
 }
+
+// seqChatter answers with a fixed sequence, recording each request.
+type seqChatter struct {
+	replies []string
+	calls   [][]llm.Message
+}
+
+func (s *seqChatter) Chat(_ context.Context, msgs []llm.Message, _ []map[string]any) (llm.Message, error) {
+	s.calls = append(s.calls, msgs)
+	r := "(none)"
+	if len(s.calls) <= len(s.replies) {
+		r = s.replies[len(s.calls)-1]
+	}
+	return llm.Message{Role: "assistant", Content: r}, nil
+}
+
+// A continuation reply that only LOOKS like JSON — cut off mid-object — must
+// still fall back to the standalone call, which is the whole point of having one.
+func TestContinuationFallsBackOnTruncatedJSON(t *testing.T) {
+	c := &seqChatter{replies: []string{`{"facts":`, `{"pitfalls":[],"facts":["tests run with make race"]}`}}
+	r := New(c)
+	r.Prefix = []llm.Message{llm.System("SYSTEM"), llm.User("do it")}
+	tr := agent.Transcript{Steps: 2, Final: "done", Messages: []llm.Message{
+		llm.System("SYSTEM"), llm.User("do it"),
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "1", Name: "run", Arguments: `{"action":"shell"}`}}},
+		{Role: "tool", Name: "run", Content: "ok"},
+	}}
+	got, err := r.Reflect(context.Background(), tr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.calls) != 2 {
+		t.Fatalf("%d call(s), want the continuation then the standalone fallback", len(c.calls))
+	}
+	if c.calls[1][0].Content == "SYSTEM" {
+		t.Error("the fallback reused the task's system prompt — it should be the standalone reflection")
+	}
+	if len(got.Facts) != 1 {
+		t.Errorf("facts = %v, want the fallback's one", got.Facts)
+	}
+}
+
+// The notes the harness puts on top of a goal are not what the user asked for,
+// and the summary must not hand them to the learning pass as a GOAL.
+func TestSummaryDropsAgentNotes(t *testing.T) {
+	s := summarize(agent.Transcript{Messages: []llm.Message{
+		llm.User(agent.Note("New notes from earlier runs: - builds with make") + "\n\nadd a flag"),
+	}})
+	if strings.Contains(s, "builds with make") || !strings.Contains(s, "GOAL: add a flag") {
+		t.Errorf("summary = %q", s)
+	}
+}

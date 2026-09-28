@@ -4049,3 +4049,61 @@ func TestContinuationJudgeFallsBackWithoutAVerdict(t *testing.T) {
 		t.Errorf("fallback did not use the judge's own system prompt: %q", sys.Content)
 	}
 }
+
+// A restored session, or an agent rebuilt by wire(), inherits a history whose
+// last word on plan mode may be ON. With plan mode now off, the next task has
+// to say so — the model would otherwise keep refusing to change anything.
+func TestPlanOffIsAnnouncedAfterTheHistoryMoves(t *testing.T) {
+	first := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "a plan"}}}
+	a := New(first, tool.NewRegistry(planFileTool()), nil, nil, "SYSTEM", 5)
+	a.SetPlanMode(true)
+	a.Run(context.Background(), "plan it")
+
+	next := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "done"}}}
+	b := New(next, tool.NewRegistry(planFileTool()), nil, nil, "SYSTEM", 5) // what wire() or a restore does
+	b.SetHistory(a.History())
+	b.Run(context.Background(), "now do it")
+	if l := next.lastMsgs[len(next.lastMsgs)-1].Content; !strings.Contains(l, planOffNote) {
+		t.Errorf("plan mode went off with ON still in the history, and nothing said so:\n%s", l)
+	}
+}
+
+// errLLM fails every call.
+type errLLM struct{ calls int }
+
+func (e *errLLM) Chat(context.Context, []llm.Message, []map[string]any) (llm.Message, error) {
+	e.calls++
+	return llm.Message{}, errors.New("server went away")
+}
+
+// A note leaves the queue only when the message carrying it is kept. A task
+// that fails before it is remembered must not take the note down with it — the
+// system prompt no longer carries new facts, so the note is the only copy.
+func TestANoteSurvivesATaskThatIsNotRemembered(t *testing.T) {
+	a := New(&errLLM{}, tool.NewRegistry(planFileTool()), nil, nil, "SYSTEM", 5)
+	a.AddNote("the tests run with make race")
+	a.Run(context.Background(), "first")
+
+	ok := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "done"}}}
+	a.llm = ok
+	if n := len(a.History()); n != 0 {
+		t.Skipf("the failed run was remembered (%d messages) — this test needs one that is not", n)
+	}
+	a.Run(context.Background(), "second")
+	if l := ok.lastMsgs[len(ok.lastMsgs)-1].Content; !strings.Contains(l, "make race") {
+		t.Errorf("the note was lost with the failed task:\n%s", l)
+	}
+}
+
+func TestStripNotesLeavesWhatTheUserWrote(t *testing.T) {
+	for in, want := range map[string]string{
+		Note("a") + "\n\n" + "fix it":              "fix it",
+		Note("a") + "\n\n" + Note("b") + "\n\nok":  "ok",
+		"no note here":                             "no note here",
+		"fix <" + NoteTag + ">x</" + NoteTag + ">": "fix <" + NoteTag + ">x</" + NoteTag + ">", // only a LEADING block is ours
+	} {
+		if got := StripNotes(in); got != want {
+			t.Errorf("StripNotes(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -38,6 +38,19 @@ type Reflector struct {
 
 	LLM  llm.Chatter
 	Lite bool
+
+	// Prefix, when set, sends every reflection call as the next message of the
+	// run itself — Prefix is the run's own messages as the server last saw them,
+	// Tools the run's own tool list — so a caching local server answers from the
+	// prefix it already holds instead of prefilling a summary under a different
+	// system prompt. A reply that is not the JSON asked for falls back to the
+	// standalone call. Only meaningful when LLM talks to the same server and
+	// model the run did.
+	Prefix []llm.Message
+	Tools  []map[string]any
+	// outcome is the judge's line from the summary, which the conversation
+	// itself does not contain. Set by Reflect for the continuation.
+	outcome string
 }
 
 // New constructs a Reflector.
@@ -152,6 +165,23 @@ Only report what the transcript SHOWS failing repeatedly. If nothing failed more
 // found nothing — the same question the judge's logging already answers, left
 // open on the pass that costs the most wall-clock.
 func (r *Reflector) ask(ctx context.Context, half, system, summary string) (llm.Message, error) {
+	if len(r.Prefix) > 0 {
+		start := time.Now()
+		msgs := append(append([]llm.Message(nil), r.Prefix...), llm.User(agent.Note(continuationPrompt(system, r.outcome))))
+		reply, err := r.LLM.Chat(ctx, msgs, r.Tools)
+		if err == nil && len(reply.ToolCalls) == 0 && strings.Contains(reply.Content, "{") {
+			p, c := reflectSpend(r.LLM)
+			slog.Debug("reflect call", "half", half, "how", "continuation",
+				"finish_reason", reply.FinishReason, "content_bytes", len(strings.TrimSpace(reply.Content)),
+				"prompt_tokens", p, "completion_tokens", c, "dur", time.Since(start))
+			return reply, nil
+		}
+		if ctx.Err() != nil {
+			return reply, ctx.Err()
+		}
+		slog.Debug("reflect continuation gave no JSON — asking on its own prompt", "half", half,
+			"tool_calls", len(reply.ToolCalls), "err", err, "dur", time.Since(start))
+	}
 	start := time.Now()
 	reply, err := r.LLM.Chat(ctx, []llm.Message{llm.System(system), llm.User(summary)}, nil)
 	if err != nil {
@@ -167,6 +197,22 @@ func (r *Reflector) ask(ctx context.Context, half, system, summary string) (llm.
 		"prompt_tokens", p, "completion_tokens", c,
 		"summary_bytes", len(summary), "dur", time.Since(start))
 	return reply, nil
+}
+
+// continuationPrompt turns a reflection prompt, written for a summary "below",
+// into the instruction that follows the run itself. What the summary did for
+// free has to be said instead: the conversation also holds earlier tasks,
+// which were reflected on when they ended, and messages the harness injected,
+// which are not the user's intent.
+func continuationPrompt(system, outcome string) string {
+	s := "Reflection pass, not a task. The agent run to reflect on is the LAST task in the conversation above — from the last user request to the end. " +
+		"Earlier exchanges were reflected on when they finished. Messages the harness injected (agent-notes, goal re-feeds, nudges) are not the user's intent. " +
+		"The tools in this conversation are the agent's: do not call any.\n\n" +
+		strings.ReplaceAll(system, "run below", "run above")
+	if outcome != "" {
+		s += "\n\n" + outcome
+	}
+	return s
 }
 
 // reflectSpend reads the connection's cumulative counters when it exposes them.
@@ -195,6 +241,7 @@ func (r *Reflector) Reflect(ctx context.Context, t agent.Transcript) (Lessons, e
 	if strings.TrimSpace(summary) == "" {
 		return Lessons{}, nil
 	}
+	r.outcome = judgeLine(t)
 	// A harness-stopped run gets the narrow pass (see reflectStuckPrompt) on any
 	// provider: what it has to teach is one dead end, not project facts.
 	if t.Stopped {
@@ -311,14 +358,22 @@ func summarize(t agent.Transcript) string {
 	// and Missing on the very struct, all ignored. A run that took four judge
 	// rounds to be accepted, or was never accepted at all, teaches something
 	// quite different from a one-shot success.
-	if t.Returns > 0 || t.GoalMet || strings.TrimSpace(t.Missing) != "" {
-		fmt.Fprintf(&b, "JUDGE: goal met=%v after %d re-feed(s)", t.GoalMet, t.Returns)
-		if m := strings.TrimSpace(t.Missing); m != "" {
-			fmt.Fprintf(&b, "; last unmet: %s", oneLine(m))
-		}
-		b.WriteString("\n")
+	if j := judgeLine(t); j != "" {
+		b.WriteString(j + "\n")
 	}
 	return clipTail(b.String(), summaryBudget)
+}
+
+// judgeLine is the judge's verdict on the run, or "" when there was none.
+func judgeLine(t agent.Transcript) string {
+	if t.Returns == 0 && !t.GoalMet && strings.TrimSpace(t.Missing) == "" {
+		return ""
+	}
+	s := fmt.Sprintf("JUDGE: goal met=%v after %d re-feed(s)", t.GoalMet, t.Returns)
+	if m := strings.TrimSpace(t.Missing); m != "" {
+		s += "; last unmet: " + oneLine(m)
+	}
+	return s
 }
 
 // clipTail keeps the LAST n bytes, marking the cut — the end of a run is where

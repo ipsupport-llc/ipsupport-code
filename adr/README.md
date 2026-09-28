@@ -21,3 +21,4 @@ How and why `ipsupport-code` is built the way it is. Format and rules:
 | [0012](0012-local-risk-learning-delta.md) | Adapt the risk model per workspace from approvals, without touching the base | Accepted; amended by 0014 |
 | [0013](0013-releases-and-self-update.md) | Distribute through GitHub Releases with a checksum-verified self-update | Accepted |
 | [0014](0014-approvals-are-verdicts-not-labels.md) | An approval is a verdict, not a label | Accepted |
+| [0015](0015-append-only-request-prefix.md) | Within a session, the request prefix only grows | Accepted |

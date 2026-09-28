@@ -763,6 +763,14 @@ edit at your own risk.)
   On startup the TUI shows a **navigable chooser** of saved sessions (↑↓ / enter /
   d) — and on restore it replays the recent exchanges so you pick up where you
   left off. `/new <name>` starts a fresh named thread; `/new` wipes the active one.
+- **Cache-friendly prompts.** A local server reuses its prompt cache only while each
+  request starts with exactly what the last one did, so within a session the prompt
+  only grows at the end. The system prompt stays as the session began: facts learned
+  after a task, and the plan-mode directive, arrive as an `<agent-note>` on the next
+  task's message instead of rewriting it. On a local provider the goal judge and the
+  reflection pass go out as the next message of the task itself — same prompt, same
+  tools — so they are answered from the cache instead of prefilling the whole record
+  again (they fall back to their own prompt when that yields no answer).
 - **State outside the project.** What the agent writes for itself — goal, facts,
   lessons, prompt history, sessions — lives in `~/.config/ipsupport-code/state/<workspace>-<hash>/`,
   never in the workspace, so a model listing the project can't find and replay its

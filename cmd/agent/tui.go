@@ -306,7 +306,7 @@ func (m *tuiModel) sessionRecap() []string {
 	for _, msg := range h {
 		switch msg.Role {
 		case "user":
-			goal, _ := textutil.Clip(strings.ReplaceAll(msg.Content, "\n", " "), 200)
+			goal, _ := textutil.Clip(strings.ReplaceAll(agent.StripNotes(msg.Content), "\n", " "), 200)
 			out = append(out, cYou.Render("❯ ")+goal)
 		case "assistant":
 			if strings.TrimSpace(msg.Content) == "" {

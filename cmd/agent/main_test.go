@@ -9289,8 +9289,8 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 	// not the probability, which saturates. What this path has to prove is that
 	// the answer reached the model at all.
 
-	// The correction is on disk twice: as weights for this workspace, and as an
-	// example in the dataset's own shape, so the base can be fine-tuned on it.
+	// The correction is on disk twice: as weights for this workspace, and as the
+	// answer itself in the feedback log — a verdict a person can later label.
 	if _, err := os.Stat(a.riskDeltaPath()); err != nil {
 		t.Errorf("no delta file: %v", err)
 	}
@@ -9298,8 +9298,8 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no feedback log: %v", err)
 	}
-	if !strings.Contains(string(fb), `"command":"truncate -s 0 install_manifest.txt"`) || !strings.Contains(string(fb), `"labels":["safe"]`) {
-		t.Errorf("feedback line is not a usable training example:\n%s", fb)
+	if !strings.Contains(string(fb), `"command":"truncate -s 0 install_manifest.txt"`) || !strings.Contains(string(fb), `"verdict":"approved"`) {
+		t.Errorf("feedback line does not record the answer:\n%s", fb)
 	}
 
 	// An agreement teaches nothing: the model and the human both said fine.
@@ -9587,5 +9587,98 @@ func TestASubAgentGetsItsOwnRiskObserver(t *testing.T) {
 	}
 	if got.Risk == 0.99 && got.Top == "destructive" {
 		t.Error("the sub-agent's call still carries the parent spawn's assessment")
+	}
+}
+
+// What a local server's prompt cache matches on is the request's prefix. A fact
+// learned after a task used to rebuild the system prompt, so the next task's
+// request diverged at the facts section and the whole conversation behind it
+// was prefilled again — minutes, on a 20k-token session. The system prompt now
+// stays as the session began; the fact arrives as an agent-note on the next
+// task's message. And the reflection pass itself continues the task's own
+// request rather than starting a new one under its own system prompt.
+func TestLearningKeepsTheCachedPrefix(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	type req struct {
+		Messages []struct{ Role, Content string } `json:"messages"`
+		Tools    []any                            `json:"tools"`
+	}
+	var mu sync.Mutex
+	var reqs []req
+	main := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if notFoundOffPOST(w, r) {
+			return
+		}
+		var q req
+		json.NewDecoder(r.Body).Decode(&q)
+		mu.Lock()
+		reqs = append(reqs, q)
+		last := q.Messages[len(q.Messages)-1].Content
+		mu.Unlock()
+		switch {
+		case strings.Contains(last, "Reflection pass") && strings.Contains(last, `"facts"`):
+			io.WriteString(w, contentRespWithUsage(`{"facts":["the tests run with make race"]}`, 10, 5))
+		case strings.Contains(last, "Reflection pass"):
+			io.WriteString(w, contentRespWithUsage(`{"pitfalls":[]}`, 10, 5))
+		default:
+			main++
+			if main == 1 {
+				io.WriteString(w, toolCallRespWithUsage("calc", `{"expression":"1+1"}`, 10, 5))
+			} else {
+				io.WriteString(w, contentRespWithUsage("done", 10, 5))
+			}
+		}
+	}))
+	defer srv.Close()
+
+	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	a.cfg.LLM.BaseURL, a.cfg.LLM.Model = srv.URL, "model-a"
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+
+	tr, _ := a.runTaskStreaming(context.Background(), "first task", a.taskEpoch.Load())
+	a.applyLessons(a.runReflect(context.Background(), a.prepareReflect(), tr))
+	a.runTaskStreaming(context.Background(), "second task", a.taskEpoch.Load())
+
+	var task1, task2 req
+	var reflects []req
+	for _, q := range reqs {
+		last := q.Messages[len(q.Messages)-1].Content
+		switch {
+		case strings.Contains(last, "Reflection pass"):
+			reflects = append(reflects, q)
+		case strings.Contains(last, "first task") || q.Messages[len(q.Messages)-1].Role == "tool":
+			task1 = q
+		case strings.Contains(last, "second task"):
+			task2 = q
+		}
+	}
+	if len(task2.Messages) == 0 || len(reflects) == 0 {
+		t.Fatalf("expected a second task and a reflection pass, got %d request(s)", len(reqs))
+	}
+	if task1.Messages[0].Content != task2.Messages[0].Content {
+		t.Error("the system prompt changed between tasks — the server's cached prefix ends there")
+	}
+	if !strings.Contains(task1.Messages[0].Content, agent.NotePreamble) {
+		t.Error("the system prompt does not explain agent-notes")
+	}
+	if l := task2.Messages[len(task2.Messages)-1].Content; !strings.Contains(l, "<"+agent.NoteTag+">") || !strings.Contains(l, "make race") {
+		t.Errorf("the learned fact did not arrive as a note on the next task:\n%s", l)
+	}
+	for _, rq := range reflects {
+		for i, m := range task1.Messages {
+			if rq.Messages[i].Role != m.Role || rq.Messages[i].Content != m.Content {
+				t.Fatalf("reflection message %d differs from the task's own request", i)
+			}
+		}
+		if fmt.Sprint(rq.Tools) != fmt.Sprint(task1.Tools) {
+			t.Error("reflection sent a different tool list than the task")
+		}
 	}
 }

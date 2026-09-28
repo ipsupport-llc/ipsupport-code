@@ -31,6 +31,11 @@ import (
 // Everything else teaches nothing: an approval of a call the model already
 // thought was fine confirms only that both agreed.
 //
+// What an answer teaches is whether a call deserves attention HERE — never what
+// the call does. The delta moves the headline risk and leaves every label score
+// as the base model gave it (see Assess, and adr/0014): approving `git push` is
+// "this is fine in this project", not "this has no external side effect".
+//
 // A deny can mean "not now" or "I'll do it myself" as easily as "that is
 // dangerous", so a single one must not move the model much — and it does not.
 // The step is normalized by the number of features in the call, so one
@@ -160,12 +165,19 @@ func (t *Tuned) Assess(tool, action string, params map[string]any) Assessment {
 		} else if dz < -maxShift {
 			dz = -maxShift
 		}
-		s := sigmoid(z + dz)
-		a.Scores[l] = s
+		// What the call does stays the base model's word; the corrections only
+		// decide how much attention it gets here. Applying them to the label
+		// itself turned "approved git push" into "git push has no external side
+		// effect" — true of nothing, and written to the log as if it were.
+		base := sigmoid(z)
+		a.Scores[l] = base
 		if l == LabelSafe || t.base.informational(li) {
 			continue
 		}
-		if s > a.Risk {
+		if base > a.BaseRisk {
+			a.BaseRisk = base
+		}
+		if s := sigmoid(z + dz); s > a.Risk {
 			a.Risk, a.Top = s, l
 		}
 	}
@@ -217,7 +229,9 @@ func (t *Tuned) Learn(c Correction) int {
 	dim := int(t.base.Cfg.Dim)
 	for _, label := range c.Labels {
 		li := t.labelIndex(label)
-		if li < 0 {
+		// An informational label never reaches the headline, which is all a
+		// correction adjusts — learning one would only grow the file.
+		if li < 0 || t.base.informational(li) {
 			continue
 		}
 		if t.d.Rows[li] == nil {
@@ -438,29 +452,35 @@ func LoadDelta(path string, base *Model) (*Delta, error) {
 
 // ── the feedback log ────────────────────────────────────────────────────────
 
-// FeedbackRow is one correction, in the same shape scripts/risk_dataset.jsonl
-// uses. That is the point: the examples a run collects append straight onto the
-// synthetic dataset and retrain the BASE model offline, starting from the
-// existing weights rather than from zero. Nothing has to be exported, converted
-// or handed over — the dataset assembles itself out of real use.
+// FeedbackRow is one answer at an approval prompt, in the shape
+// scripts/risk_dataset.jsonl uses — but deliberately WITHOUT labels.
+//
+// An answer is a verdict on whether the call was acceptable, not a statement of
+// what it does, and the dataset's labels are the second thing. Recording an
+// approval as labels ["safe"] taught the next base model that `git push` has no
+// external side effect and `rm -rf build/` deletes nothing. So the row carries
+// the Verdict and what the model Scored, and the trainer skips approval rows
+// unless a person has labelled one (set "labels" and "source": "manual") — which
+// is the only way a verdict becomes a fact about the call.
 type FeedbackRow struct {
-	Tool   string         `json:"tool"`
-	Action string         `json:"action,omitempty"`
-	Params map[string]any `json:"params,omitempty"`
-	Labels []string       `json:"labels"`
-	// Source and When are ours, not the trainer's; it ignores unknown keys.
-	Source string `json:"source"`
-	When   string `json:"when"`
+	Tool    string         `json:"tool"`
+	Action  string         `json:"action,omitempty"`
+	Params  map[string]any `json:"params,omitempty"`
+	Labels  []string       `json:"labels,omitempty"`
+	Verdict string         `json:"verdict"`          // "approved" or "refused"
+	Scored  []string       `json:"scored,omitempty"` // the labels the model put on it — its claim, not the answer
+	Source  string         `json:"source"`
+	When    string         `json:"when"`
 }
 
 // AppendFeedback records one correction for later offline retraining.
 func AppendFeedback(path string, c Correction) error {
-	labels := c.Labels
-	if !c.Risky {
-		labels = []string{LabelSafe}
+	verdict := "approved"
+	if c.Risky {
+		verdict = "refused"
 	}
 	row := FeedbackRow{
-		Tool: c.Tool, Action: c.Action, Params: c.Params, Labels: labels,
+		Tool: c.Tool, Action: c.Action, Params: c.Params, Verdict: verdict, Scored: c.Labels,
 		Source: "approval", When: time.Now().UTC().Format(time.RFC3339),
 	}
 	data, err := json.Marshal(row)

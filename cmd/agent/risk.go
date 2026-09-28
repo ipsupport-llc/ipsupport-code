@@ -235,8 +235,11 @@ func (a *app) riskCommand(rest string) []string {
 			"  labels      " + strings.Join(labelSummary(m.Base()), " · "),
 		}
 		if n := feedbackCount(a.riskFeedbackPath()); n > 0 {
-			out = append(out, fmt.Sprintf("  collected   %d example(s) in %s", n, a.riskFeedbackPath()),
-				"              retrain the base on them: python3 scripts/train_risk.py --from internal/risk/model.bin "+a.riskFeedbackPath())
+			// Verdicts, not labels: the answers tuned the warnings here, and the
+			// trainer skips them until a person says what a call actually does.
+			out = append(out, fmt.Sprintf("  answers     %d recorded in %s — verdicts, not labels", n, a.riskFeedbackPath()),
+				`              to train the base on one, label it ("labels": [...], "source": "manual"), then:`,
+				"              python3 scripts/train_risk.py --from internal/risk/model.bin "+a.riskFeedbackPath())
 		}
 		return append(out, "  /risk reset  drops what this workspace learned")
 	}

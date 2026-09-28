@@ -1524,14 +1524,80 @@ func TestPlanModeBlocksMutationAndInjectsDirective(t *testing.T) {
 	if len(obs) == 0 || !strings.Contains(obs[0].Content, "plan mode is ON") {
 		t.Fatalf("write was not blocked in plan mode: %+v", obs)
 	}
+	// In an agent-note on the task's own message, not a second system message:
+	// that one sat right after the system prompt, so every shift+tab rewrote the
+	// prompt there and a local server prefilled the whole history again.
 	var sawDirective bool
+	systems := 0
 	for _, m := range fake.lastMsgs {
-		if m.Role == "system" && strings.Contains(m.Content, "PLAN MODE is ON") {
+		if m.Role == "system" {
+			systems++
+		}
+		if m.Role == "user" && strings.Contains(m.Content, "<"+NoteTag+">") && strings.Contains(m.Content, "PLAN MODE is ON") {
 			sawDirective = true
 		}
 	}
 	if !sawDirective {
-		t.Error("plan directive not injected into the prompt")
+		t.Error("plan directive not in an agent-note on the task message")
+	}
+	if systems != 1 {
+		t.Errorf("%d system messages, want exactly one", systems)
+	}
+}
+
+// The next task's request must begin with exactly the messages the previous
+// one did — that is what a server's prompt cache matches on. Neither switching
+// plan mode nor learning a note may rewrite anything already sent.
+func TestNotesAndModeSwitchesNeverRewriteThePrefix(t *testing.T) {
+	reg := tool.NewRegistry(planFileTool())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "one"},
+		{Role: "assistant", Content: "two"},
+		{Role: "assistant", Content: "three"},
+	}}
+	a := New(fake, reg, nil, nil, "SYSTEM", 5)
+
+	a.SetPlanMode(true)
+	a.Run(context.Background(), "first")
+	first := append([]llm.Message(nil), fake.lastMsgs...)
+
+	a.SetPlanMode(false)
+	a.AddNote("the tests run with make race")
+	a.Run(context.Background(), "second")
+	second := append([]llm.Message(nil), fake.lastMsgs...)
+
+	a.Run(context.Background(), "third")
+	third := fake.lastMsgs
+
+	for i, m := range first { // everything the first task sent, the second repeats
+		if second[i].Role != m.Role || second[i].Content != m.Content {
+			t.Fatalf("message %d changed between tasks:\n  was %q\n  now %q", i, m.Content, second[i].Content)
+		}
+	}
+	last := second[len(second)-1].Content
+	for _, want := range []string{"PLAN MODE is now OFF", "make race", "second"} {
+		if !strings.Contains(last, want) {
+			t.Errorf("second task's message is missing %q:\n%s", want, last)
+		}
+	}
+	// Said once: the third task carries neither the off-switch nor the note again.
+	if l := third[len(third)-1].Content; strings.Contains(l, NoteTag) {
+		t.Errorf("third task repeated a note:\n%s", l)
+	}
+	if third[0].Content != "SYSTEM" {
+		t.Errorf("system prompt changed: %q", third[0].Content)
+	}
+}
+
+// A rebuilt system prompt already carries what a queued note was going to say.
+func TestSetSystemDropsQueuedNotes(t *testing.T) {
+	fake := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "ok"}}}
+	a := New(fake, tool.NewRegistry(planFileTool()), nil, nil, "old", 5)
+	a.AddNote("a fact")
+	a.SetSystem("new, with the fact")
+	a.Run(context.Background(), "go")
+	if l := fake.lastMsgs[len(fake.lastMsgs)-1].Content; strings.Contains(l, NoteTag) {
+		t.Errorf("a note survived SetSystem:\n%s", l)
 	}
 }
 
@@ -3906,5 +3972,168 @@ func TestRiskObserverSeesEveryCallAndChangesNothing(t *testing.T) {
 	// can mark it — this package forwards it without knowing what it means.
 	if tr8.toolCallRisk != "0.99 destructive" {
 		t.Errorf("tool_call carried risk %q, want the observer's note — the UI has no other way to mark the call", tr8.toolCallRisk)
+	}
+}
+
+// recLLM records every request, for asserting what a caching server would see.
+type recLLM struct {
+	replies []llm.Message
+	calls   [][]llm.Message
+	tools   [][]map[string]any
+}
+
+func (r *recLLM) Chat(_ context.Context, msgs []llm.Message, tools []map[string]any) (llm.Message, error) {
+	r.calls = append(r.calls, append([]llm.Message(nil), msgs...))
+	r.tools = append(r.tools, tools)
+	if len(r.calls) > len(r.replies) {
+		return llm.Message{Role: "assistant", Content: "(no more replies)"}, nil
+	}
+	return r.replies[len(r.calls)-1], nil
+}
+
+// On a local server the judge is the next message of the run: the run's own
+// request, byte for byte, plus the final reply and the check — and the same
+// tools, which the chat template renders into the prompt. Anything else and
+// the server prefills the whole record again under the judge's own prompt.
+func TestContinuationJudgeReusesTheRunsPrefix(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	main := &recLLM{replies: []llm.Message{calcCall(), {Role: "assistant", Content: "all set"}}}
+	judge := &recLLM{replies: []llm.Message{{Role: "assistant", Content: "DONE"}}}
+	a := New(main, reg, nil, nil, "SYSTEM", 20)
+	a.SetGoalLoop(3, false)
+	a.SetJudgeLLM(judge)
+	a.SetSideContinuation(true)
+
+	tr, _ := a.Run(context.Background(), "add two numbers")
+	if !tr.GoalMet || len(judge.calls) != 1 {
+		t.Fatalf("goal met %v after %d judge call(s), want one DONE", tr.GoalMet, len(judge.calls))
+	}
+	last := main.calls[len(main.calls)-1]
+	got := judge.calls[0]
+	if len(got) != len(last)+2 {
+		t.Fatalf("judge sent %d messages, want the run's %d + final reply + check", len(got), len(last))
+	}
+	for i, m := range last {
+		if got[i].Role != m.Role || got[i].Content != m.Content {
+			t.Fatalf("message %d differs from what the run sent: %q vs %q", i, got[i].Content, m.Content)
+		}
+	}
+	if check := got[len(got)-1]; check.Role != "user" || !strings.Contains(check.Content, "<"+NoteTag+">") {
+		t.Errorf("the check is not an agent-note on a user message: %+v", check)
+	}
+	if fmt.Sprint(judge.tools[0]) != fmt.Sprint(main.tools[0]) {
+		t.Error("judge sent a different tool list — the rendered prompt diverges near its start")
+	}
+}
+
+// A continuation that yields no verdict — the model reached for one of the
+// agent's tools — falls back to the judge on its own prompt, so the worst case
+// is the old behaviour plus one request.
+func TestContinuationJudgeFallsBackWithoutAVerdict(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	main := &recLLM{replies: []llm.Message{calcCall(), {Role: "assistant", Content: "all set"}}}
+	judge := &recLLM{replies: []llm.Message{
+		toolCallReply("j1", "calc", `{"action":"eval","params":{"expr":"1+1"}}`),
+		{Role: "assistant", Content: "DONE"},
+	}}
+	a := New(main, reg, nil, nil, "SYSTEM", 20)
+	a.SetGoalLoop(3, false)
+	a.SetJudgeLLM(judge)
+	a.SetSideContinuation(true)
+
+	tr, _ := a.Run(context.Background(), "add two numbers")
+	if !tr.GoalMet || len(judge.calls) != 2 {
+		t.Fatalf("goal met %v after %d judge call(s), want the fallback's DONE on the second", tr.GoalMet, len(judge.calls))
+	}
+	if sys := judge.calls[1][0]; sys.Role != "system" || sys.Content == "SYSTEM" {
+		t.Errorf("fallback did not use the judge's own system prompt: %q", sys.Content)
+	}
+}
+
+// A restored session, or an agent rebuilt by wire(), inherits a history whose
+// last word on plan mode may be ON. With plan mode now off, the next task has
+// to say so — the model would otherwise keep refusing to change anything.
+func TestPlanOffIsAnnouncedAfterTheHistoryMoves(t *testing.T) {
+	first := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "a plan"}}}
+	a := New(first, tool.NewRegistry(planFileTool()), nil, nil, "SYSTEM", 5)
+	a.SetPlanMode(true)
+	a.Run(context.Background(), "plan it")
+
+	next := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "done"}}}
+	b := New(next, tool.NewRegistry(planFileTool()), nil, nil, "SYSTEM", 5) // what wire() or a restore does
+	b.SetHistory(a.History())
+	b.Run(context.Background(), "now do it")
+	if l := next.lastMsgs[len(next.lastMsgs)-1].Content; !strings.Contains(l, planOffNote) {
+		t.Errorf("plan mode went off with ON still in the history, and nothing said so:\n%s", l)
+	}
+}
+
+// errLLM fails every call.
+type errLLM struct{ calls int }
+
+func (e *errLLM) Chat(context.Context, []llm.Message, []map[string]any) (llm.Message, error) {
+	e.calls++
+	return llm.Message{}, errors.New("server went away")
+}
+
+// A note leaves the queue only when the message carrying it is kept. A task
+// that fails before it is remembered must not take the note down with it — the
+// system prompt no longer carries new facts, so the note is the only copy.
+func TestANoteSurvivesATaskThatIsNotRemembered(t *testing.T) {
+	a := New(&errLLM{}, tool.NewRegistry(planFileTool()), nil, nil, "SYSTEM", 5)
+	a.AddNote("the tests run with make race")
+	a.Run(context.Background(), "first")
+
+	ok := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "done"}}}
+	a.llm = ok
+	if n := len(a.History()); n != 0 {
+		t.Skipf("the failed run was remembered (%d messages) — this test needs one that is not", n)
+	}
+	a.Run(context.Background(), "second")
+	if l := ok.lastMsgs[len(ok.lastMsgs)-1].Content; !strings.Contains(l, "make race") {
+		t.Errorf("the note was lost with the failed task:\n%s", l)
+	}
+}
+
+func TestStripNotesLeavesWhatTheUserWrote(t *testing.T) {
+	for in, want := range map[string]string{
+		Note("a") + "\n\n" + "fix it":              "fix it",
+		Note("a") + "\n\n" + Note("b") + "\n\nok":  "ok",
+		"no note here":                             "no note here",
+		"fix <" + NoteTag + ">x</" + NoteTag + ">": "fix <" + NoteTag + ">x</" + NoteTag + ">", // only a LEADING block is ours
+	} {
+		if got := StripNotes(in); got != want {
+			t.Errorf("StripNotes(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// /rewind can cut the history back to a task that ran in plan mode. With plan
+// mode off now, the next task must say so — the last word in what the model
+// sees is ON again. (Found by review: a field recording "OFF was sent" goes
+// stale the moment the history is cut.)
+func TestPlanOffIsAnnouncedAfterARewind(t *testing.T) {
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "plan"}, {Role: "assistant", Content: "did it"}, {Role: "assistant", Content: "again"},
+	}}
+	a := New(fake, tool.NewRegistry(planFileTool()), nil, nil, "SYSTEM", 5)
+	a.SetPlanMode(true)
+	a.Run(context.Background(), "plan it")
+	a.SetPlanMode(false)
+	a.Run(context.Background(), "do it") // carries the OFF note
+	a.TruncateHistory(2)                 // /rewind to just after the plan-mode task
+	a.Run(context.Background(), "do it again")
+	if l := fake.lastMsgs[len(fake.lastMsgs)-1].Content; !strings.Contains(l, planOffNote) {
+		t.Errorf("rewound past the OFF note and nothing re-announced it:\n%s", l)
+	}
+}
+
+// The authority an agent-note has comes from WHERE it is. The preamble has to
+// say that only a leading block counts, so a tag inside pasted text does not.
+func TestNotePreambleNamesThePosition(t *testing.T) {
+	for _, want := range []string{"very start of a user message", "pasted text"} {
+		if !strings.Contains(NotePreamble, want) {
+			t.Errorf("preamble does not say %q", want)
+		}
 	}
 }

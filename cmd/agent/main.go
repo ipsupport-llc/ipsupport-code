@@ -2830,6 +2830,7 @@ func (a *app) wire() error {
 	a.ag.SetRiskObserver(a.riskObserver(pol))          // shadow-mode risk scoring: logs, blocks nothing
 	a.ag.SetContextWindow(a.activeLLM().ContextWindow) // so a single long task can watch its OWN growing trail mid-run
 	a.wireJudge()                                      // its own connection only when /reasoning judge was set
+	a.ag.SetSideContinuation(a.isLocal())              // judge as a continuation where the server caches the prefix
 	a.ag.SetMaxStuckTurns(a.cfg.MaxStuckTurns)         // 0 = internal/agent's own default
 	// A local server's KV-cache only helps while the prompt PREFIX stays
 	// identical between requests; remember()'s trim cuts from the front, which
@@ -3576,7 +3577,7 @@ func (a *app) systemPrompt() string {
 		base = strings.ReplaceAll(base, "ipsupport-code", a.cfg.Name)
 	}
 	a.promptSrc = psrc
-	out := base + fmt.Sprintf(
+	out := base + "\n\n" + agent.NotePreamble + fmt.Sprintf(
 		"\n\nToday is %s. Environment: you are running on %s; your working directory is %s. Relative paths resolve there — and by default this is a HARD JAIL: no tool (file, run's cwd, git) can reach a path outside it, an absolute path elsewhere is rejected, not silently redirected. If a task genuinely needs a different directory, say so — don't keep retrying different absolute paths or cwd values, they'll all fail the same way. Use commands that exist on this OS — on darwin prefer vm_stat/top/sw_vers over Linux-only tools like free.",
 		time.Now().Format("2006-01-02"), runtime.GOOS, a.effectiveDir())
 	if text != "" {
@@ -3792,6 +3793,11 @@ type reflectJob struct {
 	lite     bool
 	provider string
 	model    string
+	// tools is set when the pass can run as a continuation of the task (see
+	// reflect.Reflector.Prefix): a local server, the task's own model. Captured
+	// here, on the goroutine that owns the agent, because the pass runs on
+	// another one.
+	tools []map[string]any
 }
 
 // reflectResult is everything one pass produced: what it learned, what it cost,
@@ -3813,7 +3819,11 @@ func (a *app) prepareReflect() *reflectJob {
 		return nil
 	}
 	client, lite, provider, model := a.reflectTarget()
-	return &reflectJob{client: client, lite: lite, provider: provider, model: model}
+	j := &reflectJob{client: client, lite: lite, provider: provider, model: model}
+	if a.isLocal() && provider == "local" && model == a.activeLLM().Model && a.ag != nil {
+		j.tools = a.ag.ToolSchemas()
+	}
+	return j
 }
 
 // runReflect performs the pass and NOTHING else: LLM calls only, no writes to the
@@ -3826,6 +3836,9 @@ func (a *app) runReflect(ctx context.Context, j *reflectJob, tr agent.Transcript
 	refl := reflect.New(j.client)
 	refl.Lite = j.lite // facts-only, terse — for a small local model that loops
 	refl.Provider, refl.Model = j.provider, j.model
+	if j.tools != nil && len(tr.Messages) > 0 && tr.Messages[0].Role == "system" {
+		refl.Prefix, refl.Tools = tr.Messages, j.tools
+	}
 	start := time.Now()
 	lessons, err := refl.Reflect(ctx, tr)
 	res := reflectResult{job: j, lessons: lessons, dur: time.Since(start), err: err}
@@ -3881,8 +3894,14 @@ func (a *app) applyLessons(res reflectResult) int {
 		}
 	}
 	added, promptChanged := a.addFacts(lessons.Facts)
-	if promptChanged {
-		a.ag.SetSystem(a.systemPrompt()) // fold the new set into the prompt for the next task
+	if promptChanged && len(added) > 0 {
+		// A note on the next task's message, NOT a rebuilt system prompt. The
+		// facts section sits at the end of the system prompt, and rewriting it
+		// after every task made a local server prefill the whole conversation
+		// behind it again — 20k tokens, minutes, measured live. The system prompt
+		// stays as the session began; the next session folds these in.
+		a.ag.AddNote("New notes from earlier runs in this workspace — same standing as the notes in the system prompt, leads to confirm rather than facts:\n- " +
+			strings.Join(added, "\n- "))
 	}
 	for _, f := range added {
 		a.emit("fact", map[string]any{"text": f})

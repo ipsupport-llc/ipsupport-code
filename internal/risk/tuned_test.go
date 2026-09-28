@@ -198,9 +198,10 @@ func TestDeltaRefusesAMismatchedModel(t *testing.T) {
 	}
 }
 
-// The corrections are recorded in the dataset's own shape, so they concatenate
-// onto the synthetic set and fine-tune the base offline. Nothing has to be
-// exported or converted — that is the answer to "how do I hand over a dataset".
+// Answers are recorded in the dataset's own shape — but as VERDICTS, with no
+// labels. An approval says the call was acceptable, not what it does: written
+// as labels ["safe"] it taught the next base model that an approved `rm -rf`
+// deletes nothing. The trainer skips these rows until a person labels one.
 func TestFeedbackIsWrittenInTheDatasetsOwnShape(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "risk-feedback.jsonl")
 	for _, c := range []Correction{
@@ -219,12 +220,18 @@ func TestFeedbackIsWrittenInTheDatasetsOwnShape(t *testing.T) {
 	if len(lines) != 2 {
 		t.Fatalf("wrote %d line(s), want 2", len(lines))
 	}
-	// An approved false alarm is recorded as safe; a refused miss keeps the label.
-	if !strings.Contains(lines[0], `"labels":["safe"]`) {
-		t.Errorf("a false alarm should be recorded as safe:\n%s", lines[0])
-	}
-	if !strings.Contains(lines[1], `"labels":["credential_access"]`) {
-		t.Errorf("a miss should keep the label:\n%s", lines[1])
+	for i, want := range [][]string{
+		{`"verdict":"approved"`, `"scored":["destructive"]`},
+		{`"verdict":"refused"`, `"scored":["credential_access"]`},
+	} {
+		for _, w := range want {
+			if !strings.Contains(lines[i], w) {
+				t.Errorf("line %d is missing %s:\n%s", i, w, lines[i])
+			}
+		}
+		if strings.Contains(lines[i], `"labels"`) {
+			t.Errorf("line %d claims labels — an answer is a verdict, not a label:\n%s", i, lines[i])
+		}
 	}
 	for _, want := range []string{`"tool":"run"`, `"action":"shell"`, `"command":"xxd ca.key"`} {
 		if !strings.Contains(lines[1], want) {
@@ -361,3 +368,68 @@ func TestDeltaRejectsCorruptRows(t *testing.T) {
 		})
 	}
 }
+
+// An approval is a verdict on whether a call is acceptable HERE, not a claim
+// about what it does. Approving `git push` over and over must stop the warning
+// in this workspace — and must not teach that git push has no external side
+// effect. The label scores are the base model's word and stay exactly that.
+func TestApprovalsQuietTheWarningNotTheLabels(t *testing.T) {
+	tn := tunedModel(t)
+	target := map[string]any{"command": aFlaggedCall(t, tn)}
+	before := tn.Assess("run", "shell", target)
+
+	for i := 0; i < 12 && tn.Assess("run", "shell", target).Risk >= Threshold; i++ {
+		as := tn.Assess("run", "shell", target)
+		c, ok := CorrectionFrom(WithAssessment(context.Background(), "run", "shell", target, as), true)
+		if !ok {
+			t.Fatal("an approved flagged call produced no correction")
+		}
+		tn.Learn(c)
+	}
+	after := tn.Assess("run", "shell", target)
+
+	if after.Risk >= Threshold {
+		t.Errorf("still flagged after a dozen approvals: risk %.2f", after.Risk)
+	}
+	if !near(after.BaseRisk, before.BaseRisk) {
+		t.Errorf("base risk moved %.4f -> %.4f; only the workspace's view may", before.BaseRisk, after.BaseRisk)
+	}
+	for l, v := range before.Scores {
+		if !near(after.Scores[l], v) {
+			t.Errorf("label %s moved %.4f -> %.4f — an approval rewrote what the call does", l, v, after.Scores[l])
+		}
+	}
+}
+
+// And the other direction: refusing a call the model was quiet about raises the
+// warning here, without inventing a label the base model did not give it.
+func TestRefusalsRaiseTheWarningNotTheLabels(t *testing.T) {
+	tn := tunedModel(t)
+	quiet := map[string]any{"command": "go test ./..."}
+	before := tn.Assess("run", "shell", quiet)
+	if before.Risk >= Threshold {
+		t.Skip("the shipped model flags go test")
+	}
+	for i := 0; i < 3; i++ {
+		as := tn.Assess("run", "shell", quiet)
+		c, ok := CorrectionFrom(WithAssessment(context.Background(), "run", "shell", quiet, as), false)
+		if !ok {
+			break // flagged now: a refusal of a flagged call teaches nothing more
+		}
+		tn.Learn(c)
+	}
+	after := tn.Assess("run", "shell", quiet)
+	if after.Risk <= before.Risk {
+		t.Errorf("risk %.4f -> %.4f after refusals; want it raised", before.Risk, after.Risk)
+	}
+	for l, v := range before.Scores {
+		if !near(after.Scores[l], v) {
+			t.Errorf("label %s moved %.4f -> %.4f on a refusal", l, v, after.Scores[l])
+		}
+	}
+}
+
+// near compares two scores of the same call. Not ==: the dot product sums a
+// map, and Go's randomized iteration order changes the float32 rounding
+// between two evaluations of identical arithmetic.
+func near(a, b float32) bool { return a-b < 1e-5 && b-a < 1e-5 }

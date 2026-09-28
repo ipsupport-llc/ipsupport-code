@@ -69,10 +69,17 @@ const LabelSafe = "safe"
 
 // Assessment is one call's score: a single headline number to threshold on,
 // which label produced it, and the full breakdown for the log.
+//
+// The two halves answer different questions. Scores say what the call DOES —
+// the base model's word, which local learning never touches. Risk says whether
+// it deserves attention HERE, and that is what a workspace's own answers adjust
+// (see Tuned). An approved `git push` still has an external side effect; what
+// the approvals teach is that in this project it is not worth a warning.
 type Assessment struct {
-	Risk   float32            // strongest risky label's probability, 0..1
-	Top    string             // the label that produced Risk ("" if the model has only "safe")
-	Scores map[string]float32 // every label the model carries
+	Risk     float32            // strongest risky label's probability, 0..1, after this workspace's corrections
+	Top      string             // the label that produced Risk ("" if the model has only "safe")
+	BaseRisk float32            // Risk as the base model alone put it
+	Scores   map[string]float32 // every label the model carries, as the base model scored it
 }
 
 // Assess scores one tool call.
@@ -88,6 +95,7 @@ func (m *Model) Assess(tool, action string, params map[string]any) Assessment {
 			a.Risk, a.Top = scores[i], l
 		}
 	}
+	a.BaseRisk = a.Risk
 	return a
 }
 

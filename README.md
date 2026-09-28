@@ -503,8 +503,14 @@ disagreements:
 
 | | |
 |---|---|
-| it flagged the call and you **approved** | a false alarm — the labels that fired come down |
-| it stayed quiet and you **refused** | a miss — its own strongest label goes up |
+| it flagged the call and you **approved** | a warning you didn't need — calls like it stop being flagged here |
+| it stayed quiet and you **refused** | a miss — calls like it start being flagged here |
+
+What your answers change is **whether a call gets a warning in this
+workspace**, not what the model says the call does. An approved `git push`
+still reads `external_side_effect 0.95` in the log and in `/risk` — it does push
+somewhere — but after a few approvals it stops interrupting you here. The log
+shows both numbers: `risk` after this workspace's corrections, `base` before.
 
 An approval of something it also thought was fine teaches nothing; that would be
 learning from its own output. Neither does anything that isn't an answer — esc,
@@ -522,16 +528,20 @@ on the first correction; a confident wrong one takes five or six consistent
 answers. Corrections that stop being repeated decay away, and `/risk reset`
 drops them all.
 
-`/risk` shows what happened and what was learned. Nothing about this is a
-dataset you have to assemble or hand over: every correction is also appended to
-`risk-feedback.jsonl` in the workspace's state directory, in the **same shape**
-`scripts/risk_dataset.jsonl` uses — so it concatenates straight onto the
-synthetic set and fine-tunes the base, starting from the existing weights rather
-than from zero:
+`/risk` shows what happened and what was learned. Every answer is also
+appended to `risk-feedback.jsonl` in the workspace's state directory, in the
+shape `scripts/risk_dataset.jsonl` uses — as a **verdict** (`"verdict":
+"approved"`, with the labels the model `scored`), not as labels. An approval
+says the call was acceptable, not what it does, so the trainer skips these rows.
+To teach the base model something, label a row yourself — write its `labels`
+and set `"source": "manual"` — and fine-tune from the existing weights:
 
 ```sh
 python3 scripts/train_risk.py --from internal/risk/model.bin   ~/.config/ipsupport-code/state/<workspace>/risk-feedback.jsonl
 ```
+
+Rows written before v0.61, which recorded an approval as `["safe"]`, are
+skipped the same way.
 
 Two runs of the trainer on the committed dataset produce a byte-identical
 `model.bin`, so the shipped model is reproducible from the files in this repo.
@@ -539,7 +549,7 @@ Two runs of the trainer on the committed dataset produce a byte-identical
 **What it is not.** It does not replace the permission policy or the sandbox.
 The policy is still better at the extremes — it denies `rm -rf /` outright,
 whatever the allow-list says. And learning needs the prompt: with
-`-skip-permissions` nobody is asked, so nothing is labelled and nothing is
+`-skip-permissions` nobody is asked, so nothing is answered and nothing is
 learned.
 
 ## Skills
@@ -753,6 +763,14 @@ edit at your own risk.)
   On startup the TUI shows a **navigable chooser** of saved sessions (↑↓ / enter /
   d) — and on restore it replays the recent exchanges so you pick up where you
   left off. `/new <name>` starts a fresh named thread; `/new` wipes the active one.
+- **Cache-friendly prompts.** A local server reuses its prompt cache only while each
+  request starts with exactly what the last one did, so within a session the prompt
+  only grows at the end. The system prompt stays as the session began: facts learned
+  after a task, and the plan-mode directive, arrive as an `<agent-note>` on the next
+  task's message instead of rewriting it. On a local provider the goal judge and the
+  reflection pass go out as the next message of the task itself — same prompt, same
+  tools — so they are answered from the cache instead of prefilling the whole record
+  again (they fall back to their own prompt when that yields no answer).
 - **State outside the project.** What the agent writes for itself — goal, facts,
   lessons, prompt history, sessions — lives in `~/.config/ipsupport-code/state/<workspace>-<hash>/`,
   never in the workspace, so a model listing the project can't find and replay its

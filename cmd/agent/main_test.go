@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -9353,6 +9354,38 @@ func TestRiskCommandReportsAndResets(t *testing.T) {
 	// should not throw away the examples they came from.
 	if _, err := os.Stat(a.riskFeedbackPath()); err != nil {
 		t.Errorf("reset also deleted the collected examples: %v", err)
+	}
+}
+
+// /risk reset has to stay reset. The save is deferred off the approval path,
+// so a reset can land while one is mid-write — and removing the file outside
+// the lock the save holds let that save finish after the remove: the
+// corrections the user had just cleared were back on disk for the next start.
+func TestRiskResetIsNotUndoneByAnInFlightSave(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	ws := t.TempDir()
+	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	m := a.shadow.Model()
+	c := risk.Correction{Tool: "run", Action: "shell", Params: map[string]any{"command": "cat ~/.ssh/id_rsa"},
+		Risky: false, Labels: []string{"credential_access"}}
+	for i := 0; i < 300; i++ {
+		m.Learn(c)
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() { defer wg.Done(); m.SaveDelta(a.riskDeltaPath()) }() // what persistRiskLearning does
+		runtime.Gosched()
+		a.riskCommand("reset")
+		wg.Wait()
+		if _, err := os.Stat(a.riskDeltaPath()); !os.IsNotExist(err) {
+			t.Fatalf("round %d: the delta file is back on disk after /risk reset", i)
+		}
 	}
 }
 

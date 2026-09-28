@@ -2,6 +2,8 @@ package risk
 
 import (
 	"bytes"
+	"math"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -85,13 +87,45 @@ func TestLoadRejectsBadFiles(t *testing.T) {
 }
 
 // The header declares the allocation size, so a corrupt one must not be able to
-// ask for gigabytes before failing.
+// ask for memory before failing. 2 x 2^27 weights sat just under the old size
+// cap: that header made Load allocate a gigabyte and only then run out of file.
 func TestLoadRefusesAnAbsurdHeader(t *testing.T) {
 	m := tinyModel()
-	m.Cfg.Dim = 1 << 30
+	m.Cfg.Dim = 1 << 27
 	var buf bytes.Buffer
 	_ = m.Write(&buf) // writes a header claiming far more weights than follow
-	if _, err := Load(buf.Bytes()); err == nil || !strings.Contains(err.Error(), "too large") {
-		t.Errorf("error = %v, want a size refusal", err)
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err := Load(buf.Bytes())
+	runtime.ReadMemStats(&after)
+
+	if err == nil || !strings.Contains(err.Error(), "unexpected EOF") {
+		t.Errorf("error = %v, want a refusal", err)
+	}
+	if got := after.TotalAlloc - before.TotalAlloc; got > 1<<20 {
+		t.Errorf("allocated %d MB before refusing a header the file cannot back", got>>20)
+	}
+}
+
+// A NaN in the weights makes every score it touches NaN, and NaN compares false
+// against the threshold: the model would call everything safe, and say nothing.
+func TestLoadRejectsNonFiniteWeights(t *testing.T) {
+	for _, bad := range []float32{float32(math.NaN()), float32(math.Inf(1)), float32(math.Inf(-1))} {
+		m := tinyModel()
+		m.W[3] = bad
+		var buf bytes.Buffer
+		_ = m.Write(&buf)
+		if _, err := Load(buf.Bytes()); err == nil {
+			t.Errorf("loaded a model with a %v weight", bad)
+		}
+		m = tinyModel()
+		m.Bias[0] = bad
+		buf.Reset()
+		_ = m.Write(&buf)
+		if _, err := Load(buf.Bytes()); err == nil {
+			t.Errorf("loaded a model with a %v bias", bad)
+		}
 	}
 }

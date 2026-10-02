@@ -33,15 +33,38 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      # The cron is a backstop for a push that failed to publish, not a reason
+      # to ship. Rebuilding an unchanged main under a new date made every
+      # nightly client "update" to the same code once a day (reported live:
+      # nightly-20260929-b47baf7 -> nightly-20261001-b47baf7). So a scheduled
+      # run stops here when the release already carries a complete build of
+      # this commit — one archive per platform. A partial publish (a run cut
+      # short mid-upload) is not complete, and still gets redone. Pushes and
+      # manual dispatches always build.
+      - name: skip if this commit is already published
+        id: same
+        if: github.event_name == 'schedule'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          short=$(git rev-parse --short HEAD)
+          want=$(sed -n 's/^PLATFORMS := //p' Makefile | wc -w)
+          have=$(gh release view nightly --json assets -q '.assets[].name' 2>/dev/null | grep -c -- "-${short}_" || true)
+          echo "commit $short: $have of $want platform builds already on the nightly release"
+          if [ "$have" -ge "$want" ]; then echo "skip=true" >> "$GITHUB_OUTPUT"; fi
       - uses: actions/setup-go@v7
+        if: steps.same.outputs.skip != 'true'
         with:
           go-version-file: go.mod
           cache: true
       - name: tests (race)
+        if: steps.same.outputs.skip != 'true'
         run: make race
       - name: build & package archives
+        if: steps.same.outputs.skip != 'true'
         run: make archives VERSION="nightly-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
       - name: publish rolling nightly
+        if: steps.same.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |

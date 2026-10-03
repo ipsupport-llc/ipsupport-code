@@ -42,7 +42,7 @@ const (
 // Release is the resolved newest build on a channel for this OS/arch.
 type Release struct {
 	Version   string // e.g. "v0.1.0" or "nightly-20260627-9aa8de9"
-	AssetName string // the .tar.gz asset name
+	AssetName string // the .tar.gz (.zip on Windows) asset name
 	AssetURL  string
 	SumsURL   string
 }
@@ -74,13 +74,9 @@ func Latest(ctx context.Context, repo, channel string, hc *http.Client) (Release
 	// The machine's own build first: an x64 binary under emulation on ARM64
 	// (Windows on ARM, Rosetta) moves to the native one. A release without it
 	// (older ones carry no windows-arm64) falls back to this binary's own.
-	ext := ".tar.gz"
-	if goos == "windows" {
-		ext = ".zip"
-	}
 	var rel Release
 	for _, arch := range []string{nativeArch, runtime.GOARCH} {
-		suffix := "_" + goos + "-" + arch + ext
+		suffix := assetSuffix(goos, arch)
 		for _, a := range raw.Assets {
 			switch {
 			case a.Name == "checksums.txt":
@@ -148,6 +144,15 @@ var goos = runtime.GOOS
 // runtime.GOARCH for an x64 binary under emulation (Windows on ARM, Rosetta).
 // A variable so a test can play one.
 var nativeArch = hostarch.Native()
+
+// assetSuffix must match the archive names `make archives` produces.
+func assetSuffix(goos, goarch string) string {
+	ext := ".tar.gz"
+	if goos == "windows" {
+		ext = ".zip"
+	}
+	return "_" + goos + "-" + goarch + ext
+}
 
 func get(ctx context.Context, hc *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

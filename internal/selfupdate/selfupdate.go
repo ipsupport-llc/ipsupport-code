@@ -39,7 +39,7 @@ const (
 // Release is the resolved newest build on a channel for this OS/arch.
 type Release struct {
 	Version   string // e.g. "v0.1.0" or "nightly-20260627-9aa8de9"
-	AssetName string // the .tar.gz asset name
+	AssetName string // the .tar.gz (.zip on Windows) asset name
 	AssetURL  string
 	SumsURL   string
 }
@@ -68,7 +68,7 @@ func Latest(ctx context.Context, repo, channel string, hc *http.Client) (Release
 		return Release{}, err
 	}
 
-	suffix := "_" + osArch() + ".tar.gz"
+	suffix := assetSuffix(runtime.GOOS, runtime.GOARCH)
 	var rel Release
 	for _, a := range raw.Assets {
 		switch {
@@ -117,6 +117,15 @@ func Apply(ctx context.Context, rel Release, hc *http.Client) (string, error) {
 }
 
 func osArch() string { return runtime.GOOS + "-" + runtime.GOARCH }
+
+// assetSuffix must match the archive names `make archives` produces.
+func assetSuffix(goos, goarch string) string {
+	ext := ".tar.gz"
+	if goos == "windows" {
+		ext = ".zip"
+	}
+	return "_" + goos + "-" + goarch + ext
+}
 
 func get(ctx context.Context, hc *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

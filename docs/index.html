@@ -123,6 +123,12 @@
 
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:16px}
   .card{background:var(--bg-elev);border:1px solid var(--rule);border-radius:11px;padding:18px 18px 16px}
+  /* reviews */
+  .rv-sum{font-family:var(--mono);color:var(--dim);margin:-6px 0 18px}
+  .rv-sum b{color:var(--warn);font-weight:600}
+  .rv .stars{color:var(--warn);font-family:var(--mono);letter-spacing:.08em}
+  .rv p{margin:.5em 0 .6em;white-space:pre-line}
+  .rv .who{font-size:13px;color:var(--dim)}
   .card h3{margin:0 0 6px;font-size:16px;font-family:var(--mono)}
   .card h3 .i{color:var(--accent2);margin-right:7px}
   .card p{margin:0;color:var(--dim);font-size:14.5px}
@@ -322,6 +328,13 @@ cwd    ~/myproject</span>
     </div>
   </section>
 
+  <section id="reviews" hidden>
+    <h2><span class="h">#</span> what people say</h2>
+    <p class="rv-sum" id="rv-sum"></p>
+    <div class="grid" id="rv-list"></div>
+    <p class="dim">Rate it from the agent itself: <code>/rate 5 a few words</code> — reviews appear here once moderated.</p>
+  </section>
+
 </div>
 
 <footer>
@@ -332,6 +345,7 @@ cwd    ~/myproject</span>
       <a href="https://github.com/ipsupport-llc/ipsupport-code#readme">Full docs</a>
       <a href="https://github.com/ipsupport-llc/ipsupport-code/releases">Releases</a>
       <a href="https://github.com/ipsupport-llc/ipsupport-code/issues">Issues</a>
+      <a href="https://github.com/ipsupport-llc/ipsupport-code#usage-statistics-and-rating">Privacy</a>
       <a href="https://github.com/ipsupport-llc/ipsupport-code/blob/main/LICENSE">MIT</a>
     </div>
     <div class="mono dim">go build · CGO_ENABLED=0 · macOS · Linux · Windows</div>
@@ -340,6 +354,36 @@ cwd    ~/myproject</span>
 </footer>
 
 <script>
+  // Reviews, from the product's own API (ipsupport-api ADR 13 lets this page
+  // read them). Built with textContent only — review text is user input and
+  // never becomes markup. The section stays hidden when there is nothing to
+  // show or the API can't be reached.
+  (function(){
+    if (!window.fetch) return;
+    fetch('https://ipsupport.us/api/reviews?product=ipsupport-code')
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(d){
+        if (!d || !d.reviews || !d.reviews.length) return;
+        var sum = document.getElementById('rv-sum');
+        var b = document.createElement('b');
+        b.textContent = '★ ' + Number(d.summary.average).toFixed(1);
+        sum.appendChild(b);
+        sum.appendChild(document.createTextNode(' · ' + d.summary.count + (d.summary.count === 1 ? ' review' : ' reviews')));
+        var list = document.getElementById('rv-list');
+        d.reviews.slice(0, 6).forEach(function(rv){
+          var card = document.createElement('div'); card.className = 'card rv';
+          var stars = document.createElement('div'); stars.className = 'stars';
+          stars.textContent = '★★★★★'.slice(0, rv.rating) + '☆☆☆☆☆'.slice(0, 5 - rv.rating);
+          var text = document.createElement('p'); text.textContent = rv.text;
+          var who = document.createElement('div'); who.className = 'who';
+          who.textContent = (rv.author || 'anonymous') + (rv.version ? ' · ' + rv.version : '');
+          card.appendChild(stars); card.appendChild(text); card.appendChild(who);
+          list.appendChild(card);
+        });
+        document.getElementById('reviews').hidden = false;
+      })
+      .catch(function(){});
+  })();
   function copyCmd(btn){
     var code = btn.parentElement.querySelector('code');
     var cmd = code.innerText.replace(/^(PS&gt;|PS>|\$|>)\s*/,'');

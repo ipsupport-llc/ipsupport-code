@@ -174,12 +174,13 @@ type skillsMsg struct {
 	err   error
 	epoch int64 // which run this install belonged to — a force-detached one's is stale
 }
-type updateMsg struct{ notice string }   // startup freshness check result
-type updateDoneMsg struct{ text string } // /update result
-type shellDoneMsg struct{}               // returned from a drop-to-shell
-type shellCmdMsg struct{ out string }    // output of a one-off !cmd
-type diffMsg struct{ lines []string }    // output of /diff
-type windowMsg struct {                  // re-detected context window for a provider
+type updateMsg struct{ notice string }    // startup freshness check result
+type updateDoneMsg struct{ text string }  // /update result
+type rateDoneMsg struct{ lines []string } // /rate result, sent off the UI goroutine
+type shellDoneMsg struct{}                // returned from a drop-to-shell
+type shellCmdMsg struct{ out string }     // output of a one-off !cmd
+type diffMsg struct{ lines []string }     // output of /diff
+type windowMsg struct {                   // re-detected context window for a provider
 	provider string
 	tokens   int
 	epoch    int64 // model active at dispatch time — a later model switch's is stale
@@ -700,6 +701,11 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			model, cmd := m.drainQueue()
 			return model, tea.Batch(detect, cmd)
 		}
+		if !m.taskCancelled {
+			if h := m.app.rateHint(); h != "" { // at most once per two weeks — see rateHint
+				m.push(cDim.Render("  " + h))
+			}
+		}
 		return m, tea.Batch(detect, m.input.Focus())
 
 	case reflectDoneMsg:
@@ -758,6 +764,10 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case updateDoneMsg:
 		m.push(cDim.Render("  " + msg.text))
 		return m.idleDrain()
+
+	case rateDoneMsg:
+		m.pushLines(msg.lines)
+		return m, nil
 
 	case shellDoneMsg:
 		m.push(cDim.Render("  ⇱ back in ipsupport-code"))
@@ -1558,6 +1568,15 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "/risk":
 		m.pushLines(m.app.riskCommand(rest))
+	case "/telemetry":
+		m.pushLines(m.app.telemetryCommand(rest))
+	case "/rate":
+		lines, send := m.app.rateCommand(rest)
+		m.pushLines(lines)
+		if send != nil {
+			ctx := m.ctx
+			return m, func() tea.Msg { return rateDoneMsg{lines: send(ctx)} }
+		}
 		return m, nil
 	case "/goal":
 		if text, ok := m.app.launchGoalText(rest); ok {
@@ -2465,6 +2484,8 @@ var commandList = []cmdInfo{
 	{"/rewind", "pick a step to roll back to (restores files + trims the chat)"},
 	{"/reflect", "on|off|<profile> — post-task learning; run it on a stronger model"},
 	{"/risk", "what the risk scorer did and learned this run (reset — drop the local corrections)"},
+	{"/telemetry", "anonymous usage statistics: exactly what is sent · on · off · reset"},
+	{"/rate", "rate ipsupport-code: /rate <1-5> <a few words> [--name <you>] · later · never"},
 	{"/goal", "<text> — set & pursue a multi-turn goal; a judge re-feeds it until met (go · clear · ttl <n>)"},
 	{"/reasoning", "off|minimal|low|medium|high (or reflect:) — trim a thinking model's reasoning"},
 	{"/shell", "drop to a shell (or !cmd for one command); exit to return"},

@@ -139,11 +139,14 @@ func main() {
 	setupLogging()
 
 	reader := bufio.NewReader(os.Stdin)
+	existed := config.GlobalExists() // before setup can create it: an install from before, or a first run
 	if args := flag.Args(); len(args) >= 1 && args[0] == "init" {
 		maybeInit(reader, true) // `init` subcommand: (re-)run setup and exit
+		settleTelemetryDefault(existed)
 		return
 	}
 	maybeInit(reader, doInit)
+	settleTelemetryDefault(existed)
 
 	// -skip-permissions is just sugar for the two -override key=values it's
 	// documented as — expanding it here, before build(), means there's only
@@ -192,6 +195,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
+	app.startTelemetry(ctx)
 
 	taskText := strings.TrimSpace(strings.Join(flag.Args(), " "))
 	switch {
@@ -664,7 +668,8 @@ func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, o
 	if err != nil {
 		return "", err
 	}
-	if external { // a local CLI agent, not one of our LLM sub-agents
+	a.countSpawn(external, plan.llmCfg.Model) // here, on the goroutine that owns a.cfg — never in the job's own
+	if external {                             // a local CLI agent, not one of our LLM sub-agents
 		return a.spawnExternalAgent(ctx, plan.profile, extP, task, plan.subWorkspace, plan.tracer, onLine)
 	}
 	return a.runSpawnPlan(ctx, plan, task, onLine)
@@ -3611,6 +3616,7 @@ func (a *app) emit(kind string, fields map[string]any) {
 }
 
 func (a *app) recordRun(tr agent.Transcript) {
+	a.countTask(tr)
 	a.statusMu.Lock()
 	a.tasks++
 	a.steps += tr.Steps
@@ -4168,6 +4174,14 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		printLines(a.reflectCommand(rest))
 	case "/risk":
 		printLines(a.riskCommand(rest))
+	case "/telemetry":
+		printLines(a.telemetryCommand(rest))
+	case "/rate":
+		lines, send := a.rateCommand(rest)
+		printLines(lines)
+		if send != nil {
+			printLines(send(context.Background()))
+		}
 	case "/goal":
 		if text, ok := a.launchGoalText(rest); ok {
 			a.setGoal(text)
@@ -5011,6 +5025,8 @@ func helpText() string {
   /mcp             list configured MCP servers and their tools (mcp_servers in config.json)
   /rewind [n]      roll back to a previous step (restores files + trims the chat)
   /reflect [on|off|<profile>] post-task learning; run it on a stronger model
+  /telemetry       anonymous usage statistics: what is sent · on · off · reset
+  /rate <1-5> <words>  rate ipsupport-code (published after moderation; --name <you> to sign)
   /goal <text>     set & pursue a multi-turn goal (go · clear · ttl <n> · off)
   /reasoning [off|low|…] trim a thinking model's reasoning (minimal|low|medium|high)
   /shell, /sh      drop to a shell in the workspace (exit to return)
@@ -5544,6 +5560,19 @@ func (a *app) usageLedger() (days, models [][2]string) {
 func maybeInit(reader *bufio.Reader, force bool) {
 	if !force && (config.GlobalExists() || !isTTY()) {
 		return
+	}
+	// A brand-new install — no settings yet — gets usage statistics on, and is
+	// told so here, before anything could be sent (adr/0016). Re-running setup
+	// on an existing install leaves the choice already made alone.
+	if !config.GlobalExists() {
+		defer func() {
+			if !config.GlobalExists() {
+				return // setup didn't finish
+			}
+			if err := config.SaveTelemetry(true); err == nil {
+				fmt.Println("  " + telemetryNotice)
+			}
+		}()
 	}
 	def := config.Default()
 	if cur, err := config.Load("."); err == nil {

@@ -271,7 +271,10 @@ func dangerousArgv(fields []string, depth int) bool {
 		return true
 	case "rm":
 		for _, a := range fields[1:] {
-			if a == "--recursive" {
+			// GNU getopt takes any unambiguous prefix of a long option, and
+			// --recursive is rm's only long option starting with r: --r,
+			// --rec and --recursi all mean it (as does -\-r once unquoted).
+			if name := strings.TrimPrefix(a, "--"); name != a && name != "" && strings.HasPrefix("recursive", name) {
 				return true
 			}
 			if strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && strings.ContainsAny(a, "rR") {

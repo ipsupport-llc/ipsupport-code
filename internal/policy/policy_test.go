@@ -397,6 +397,7 @@ func TestFloorSeesThroughShellSyntax(t *testing.T) {
 		"command rm -fr x", "exec rm -R x", "command -p rm -r x", // POSIX builtins that run their argument
 		`"rm" -rf x`, `"rm" -fr x`, `'rm' -r x`, `r\m -fr x`, `r""m -fr x`, `$'rm' -r x`, // quoting the shell removes
 		`rm "-rf" x`, `rm '-r' x`, `rm -\r x`, `"sudo" id`, // …in flags too
+		"rm --r x", "rm --rec x", `rm -\-r x`, "rm --recursive x", // GNU long-option abbreviations
 	} {
 		if got := e.Run(cmd); got != Deny {
 			t.Errorf("Run(%q) = %v, want Deny", cmd, got)
@@ -405,7 +406,7 @@ func TestFloorSeesThroughShellSyntax(t *testing.T) {
 	// And what must keep working under the same policy.
 	for _, cmd := range []string{
 		"command -v rm", "command -v dd", "command -V init", "command -pv halt", // lookups run nothing
-		"go test ./... 2>&1", "rm file.txt", `echo "done"`, "ls & echo hi",
+		"go test ./... 2>&1", "rm file.txt", `echo "done"`, "ls & echo hi", "rm --force x", "rm --verbose x",
 	} {
 		if got := e.Run(cmd); got != Allow {
 			t.Errorf("Run(%q) = %v, want Allow", cmd, got)

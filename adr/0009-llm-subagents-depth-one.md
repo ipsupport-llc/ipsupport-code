@@ -16,7 +16,8 @@ The `agent` tool spawns a sub-agent on any configured profile (`/agents add`):
 - **Depth 1** — a sub-agent cannot spawn its own.
 - It inherits plan/auto mode, reads and writes files and uses git, but runs shell
   commands **only if** `/agents exec on`.
-- Every spawn asks for approval until `/permissions agents on`.
+- Every spawn asks for approval until `/permissions agents on` — except one
+  whose working directory is outside the workspace jail, which always asks.
 - Each sub-agent is built with its **own** policy and its **own** risk observer
   (`newSubAgent`), so an approval answered inside it is learned against its own
   call, not the parent's spawn. Per-call context (such as the risk assessment)
@@ -28,4 +29,7 @@ The `agent` tool spawns a sub-agent on any configured profile (`/agents add`):
 
 - Parallel sub-agents share nothing mutable through the app struct; anything
   per-call is carried on the context.
-- A sub-agent can't escape the parent's workspace jail.
+- A sub-agent is jailed to its own working directory. One pointed outside the
+  parent's workspace is a decision the user makes every time; relaxed spawn
+  approvals do not cover it. *(Corrected 2026-10-04: this said a sub-agent
+  can't escape the parent's jail, which a directory argument always could.)*

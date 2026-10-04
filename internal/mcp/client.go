@@ -130,6 +130,7 @@ func (c *Client) handshake(ctx context.Context) error {
 func (c *Client) listTools(ctx context.Context) ([]Tool, error) {
 	var tools []Tool
 	cursor := ""
+	seen := map[string]bool{}
 	for {
 		params := map[string]any{}
 		if cursor != "" {
@@ -150,6 +151,11 @@ func (c *Client) listTools(ctx context.Context) ([]Tool, error) {
 		if out.NextCursor == "" {
 			return tools, nil
 		}
+		// A cursor seen before would page forever; so would an endless list.
+		if seen[out.NextCursor] || len(seen) >= 100 {
+			return nil, fmt.Errorf("tools/list did not end (cursor %q after %d pages)", out.NextCursor, len(seen)+1)
+		}
+		seen[out.NextCursor] = true
 		cursor = out.NextCursor
 	}
 }

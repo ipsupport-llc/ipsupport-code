@@ -610,7 +610,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 	// arrived". finishReason is the server's own stated reason for stopping
 	// (once a real reply is returned) — surfaced so a debug log showing empty
 	// content can say the model quietly matched "stop" vs. got cut off.
-	chunks := 0
+	chunks, dropped := 0, 0
 	var finishReason string
 	// reasoning accumulates this call's own reasoning/thinking text — still
 	// never sent back to the model (toWire only maps the fields it explicitly
@@ -678,8 +678,17 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 		if err := json.Unmarshal([]byte(payload), &ch); err != nil {
 			// A chunk we can't parse is DROPPED — if that ever bites again (a
 			// gateway inventing a new shape), IPS_LOG=debug shows the evidence.
+			// Counted: in a turn with tool calls it may have held part of their
+			// arguments (see the check after the loop).
 			slog.Debug("stream chunk unparsed", "err", err, "payload", textutil.OneLine(payload, 240))
+			dropped++
 			continue
+		}
+		if ch.Error != nil {
+			// The server said the generation failed. What streamed before this
+			// is not an answer (found by review: it was returned as one).
+			// A plain error: the retry loop treats it as transient.
+			return Message{}, fmt.Errorf("llm stream: the server reported an error mid-stream: %s", ch.Error.Message)
 		}
 		if len(ch.Choices) > 0 {
 			if fr := ch.Choices[0].FinishReason; fr != "" {
@@ -803,6 +812,13 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 		return Message{}, fmt.Errorf("llm stream ended without completing (no [DONE]): %d chunks, %d content bytes, %d reasoning bytes, %d tool-call arg bytes accumulated before it cut off",
 			chunks, content.Len(), reasoning.Len(), argsLen)
 	}
+	if dropped > 0 && len(order) > 0 {
+		// A dropped chunk in a turn with tool calls may have carried part of
+		// their arguments, and what is left can still be valid JSON — a file
+		// write with its content cut short, run as if whole (found by review).
+		// Retry the turn instead. A text-only turn stays lenient.
+		return Message{}, fmt.Errorf("llm stream: %d unparseable chunk(s) in a turn with tool calls — not running arguments that may be incomplete", dropped)
+	}
 	// Only now — stream confirmed complete — commit to shared state.
 	c.mu.Lock()
 	if usageSeen {
@@ -911,6 +927,11 @@ func stripChannelTokens(s string) string {
 }
 
 type streamChunk struct {
+	// Error is a server-side failure reported inside the stream, as a data
+	// chunk of its own (some servers do this and still end with [DONE]).
+	Error *struct {
+		Message string `json:"message"`
+	} `json:"error"`
 	Choices []struct {
 		// FinishReason is the server's own stated reason for stopping this
 		// choice (e.g. "stop", "length", "tool_calls", "content_filter") — only

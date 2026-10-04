@@ -75,3 +75,46 @@ func itoa(n int) string {
 	}
 	return string(b[i:])
 }
+
+// An oversized JSON body is refused rather than decoded into memory.
+func TestHTTPRefusesAnOversizedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"pad":"`)
+		chunk := strings.Repeat("x", 1<<20)
+		for i := 0; i <= maxMessageBytes>>20; i++ {
+			io.WriteString(w, chunk)
+		}
+		io.WriteString(w, `"}}`)
+	}))
+	defer srv.Close()
+	tr, _ := dialHTTP("x", Server{URL: srv.URL})
+	id := 1
+	if _, err := tr.roundTrip(context.Background(), rpcMsg{ID: &id, Method: "m"}); err == nil {
+		t.Fatal("an oversized response body was accepted")
+	}
+}
+
+// The server's headers (API keys) must not follow a redirect to another host.
+func TestHTTPDoesNotCarryHeadersToAnotherHost(t *testing.T) {
+	var leaked string
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		leaked = r.Header.Get("X-Api-Key")
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{}}`)
+	}))
+	defer other.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, strings.Replace(other.URL, "127.0.0.1", "localhost", 1), http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	tr, _ := dialHTTP("x", Server{URL: srv.URL, Headers: map[string]string{"X-Api-Key": "k"}})
+	id := 1
+	_, err := tr.roundTrip(context.Background(), rpcMsg{ID: &id, Method: "m"})
+	if leaked != "" {
+		t.Fatalf("the API key reached the redirect target (err %v)", err)
+	}
+	if err == nil {
+		t.Fatal("a cross-host redirect was followed silently")
+	}
+}

@@ -26,11 +26,13 @@ const (
 // Go map iteration is randomized, and without this the features for one call
 // would differ run to run.
 func CallText(tool, action string, params map[string]any) string {
-	var b strings.Builder
-	b.WriteString(tool)
+	// Caps count characters, not bytes: Python's len and slices do, and a byte
+	// cut can split a rune in two.
+	var b []rune
+	b = append(b, []rune(tool)...)
 	if action != "" {
-		b.WriteString(" ")
-		b.WriteString(action)
+		b = append(b, ' ')
+		b = append(b, []rune(action)...)
 	}
 	keys := make([]string, 0, len(params))
 	for k := range params {
@@ -42,22 +44,22 @@ func CallText(tool, action string, params map[string]any) string {
 		if v == "" {
 			continue
 		}
-		if len(v) > maxValue {
-			v = v[:maxValue]
+		r := []rune(v)
+		if len(r) > maxValue {
+			r = r[:maxValue]
 		}
-		b.WriteString(" ")
-		b.WriteString(k)
-		b.WriteString("=")
-		b.WriteString(v)
-		if b.Len() > maxText {
+		b = append(b, ' ')
+		b = append(b, []rune(k)...)
+		b = append(b, '=')
+		b = append(b, r...)
+		if len(b) > maxText {
 			break
 		}
 	}
-	s := b.String()
-	if len(s) > maxText {
-		s = s[:maxText]
+	if len(b) > maxText {
+		b = b[:maxText]
 	}
-	return s
+	return string(b)
 }
 
 // LabelSafe is the label that means "none of the risky ones". It is scored like

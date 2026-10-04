@@ -17,10 +17,17 @@ judge named, up to a TTL (default 6), inside the usual esc / stuck-loop /
 runaway guards and a hard step cap. **When goal mode is on, the judge decides**;
 the agent's own claim of completion is not enough.
 
-Guards against the loop itself: an unparseable judge reply counts as done; a turn
-that called no tools is never judged or re-fed; a re-fed run that does no work
-gets one nudge, then the loop stops. A loop that stops without the judge
-confirming success says so plainly. Plain tasks run once with no judge.
+Guards against the loop itself: an unparseable judge reply is asked once more,
+then counts as **not met** and the goal is re-fed — a judge that cannot answer
+has confirmed nothing; a re-fed run that finishes without doing any work gets one
+nudge, and if it idles again it goes to the judge like any other finish. A
+continuation judge (ADR-0015) that answers with a tool call has not answered. A
+loop that stops without the judge confirming success says so plainly. Plain
+tasks run once with no judge.
+
+*Corrected 2026-10-04:* this section first said an unparseable reply counts as
+done and a turn with no tool calls is never judged. Neither has been true since
+the judge became the only way to end a goal run early.
 
 ## Consequences
 

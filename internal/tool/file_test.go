@@ -809,3 +809,42 @@ func TestDispatchInfersReadOnlyAction(t *testing.T) {
 		t.Error("a file was written from an inferred (guessed) action")
 	}
 }
+
+// write and edit loaded the existing file whole to diff or edit it, with no
+// bound: a multi-gigabyte data file exhausted memory (found by review). Above
+// maxEditBytes, edit refuses and write replaces without a diff.
+func TestWriteAndEditBoundWhatTheyLoad(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	big := filepath.Join(dir, "data.bin")
+	f, _ := os.Create(big)
+	f.WriteString("needle")
+	f.Truncate(maxEditBytes + 1<<20) // sparse: instant, no disk
+	f.Close()
+	ctx := context.Background()
+	if r := tl.Call(ctx, "edit", map[string]any{"path": "data.bin", "find": "needle", "replace": "thread"}); !r.IsError || !strings.Contains(r.Content, "too large") {
+		t.Errorf("edit of a %d MB file: %+v", (maxEditBytes+1<<20)>>20, r)
+	}
+	if r := tl.Call(ctx, "write", map[string]any{"path": "data.bin", "content": "x"}); r.IsError {
+		t.Errorf("write over a large file failed: %s", r.Content)
+	}
+}
+
+// search and find walk the tree with no regard for cancellation: over a big
+// tree (a sub-agent jailed to ~) a cancelled task's walk ran on to the end
+// (found by review). A cancelled context stops the walk.
+func TestSearchAndFindStopWhenCancelled(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 50; i++ {
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("f%02d.txt", i)), []byte("needle"), 0o644)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if r := tl.Call(ctx, "search", map[string]any{"query": "needle"}); strings.Count(r.Content, "needle") == 50 {
+		t.Errorf("search walked the whole tree after cancellation")
+	}
+	if r := tl.Call(ctx, "find", map[string]any{"pattern": "*.txt"}); strings.Count(r.Content, ".txt") == 50 {
+		t.Errorf("find walked the whole tree after cancellation")
+	}
+}

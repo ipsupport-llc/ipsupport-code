@@ -128,3 +128,29 @@ func TestLatestNoAssetForPlatform(t *testing.T) {
 		t.Error("expected an error when no asset matches this platform")
 	}
 }
+
+// Only a regular, non-empty file of a size we will read whole is a binary:
+// a directory or symlink entry yielded zero bytes and an oversized one was cut
+// short — and either was then written over the working executable.
+func TestExtractRefusesWhatIsNotAWholeBinary(t *testing.T) {
+	entry := func(h *tar.Header, body []byte) []byte {
+		var buf bytes.Buffer
+		gz := gzip.NewWriter(&buf)
+		tw := tar.NewWriter(gz)
+		_ = tw.WriteHeader(h)
+		_, _ = tw.Write(body)
+		_ = tw.Flush() // an oversized header with no body: the header bytes are what matters
+		_ = gz.Close()
+		return buf.Bytes()
+	}
+	for what, data := range map[string][]byte{
+		"directory": entry(&tar.Header{Name: "ipsupport-code/", Typeflag: tar.TypeDir, Mode: 0o755}, nil),
+		"symlink":   entry(&tar.Header{Name: "ipsupport-code", Typeflag: tar.TypeSymlink, Linkname: "/bin/sh"}, nil),
+		"empty":     entry(&tar.Header{Name: "ipsupport-code", Typeflag: tar.TypeReg, Mode: 0o755}, nil),
+		"oversized": entry(&tar.Header{Name: "ipsupport-code", Typeflag: tar.TypeReg, Mode: 0o755, Size: maxBinaryBytes + 1}, nil),
+	} {
+		if got, err := extractBinary(data, "ipsupport-code"); err == nil {
+			t.Errorf("%s entry: extracted %d bytes with no error", what, len(got))
+		}
+	}
+}

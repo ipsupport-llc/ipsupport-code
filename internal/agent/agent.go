@@ -582,6 +582,12 @@ func (a *Agent) FrontTrimCount() int64 { return a.frontTrim.Load() }
 // checkpoint from before the rebuild spuriously valid again.
 func (a *Agent) SeedHistoryGen(g int64) { a.historyGen.Store(g) }
 
+// SeedFrontTrim carries FrontTrimCount into a rebuilt Agent, for the same
+// reason as SeedHistoryGen: /rewind maps a checkpoint's history length forward
+// by the trims since it was captured, and a count restarting at zero turns
+// that delta negative.
+func (a *Agent) SeedFrontTrim(n int64) { a.frontTrim.Store(n) }
+
 // Compact summarizes the session so far into a short recap and replaces the
 // history with it, freeing context while keeping continuity. Returns how many
 // messages were compacted (0 if there was nothing worth compacting).
@@ -634,6 +640,13 @@ func (a *Agent) Compact(ctx context.Context, focus string) (int, error) {
 	}, nil)
 	if err != nil {
 		return 0, err
+	}
+	// No recap, no compaction. A reply with empty content — a reasoning model
+	// that spent its whole output budget thinking, finish_reason=length — used
+	// to replace the conversation with an empty summary, and report success
+	// (found by review). Keep the history; the caller sees the error.
+	if strings.TrimSpace(reply.Content) == "" {
+		return 0, fmt.Errorf("compaction produced no summary (finish_reason=%q) — the conversation was left as it was", reply.FinishReason)
 	}
 	summary := "[Summary of earlier conversation]\n" + reply.Content
 	if len(digests) > 0 {
@@ -1107,6 +1120,14 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	idleNudged := false       // already pushed a no-progress model once since the last re-feed?
 	promptTokens := 0         // last known real prompt size from a MAIN-turn Chat call — see Transcript.PromptTokens
 	for step := 0; step < a.maxSteps; step++ {
+		// Force-detached (see Detach): the UI has moved on to a fresh agent.
+		// Going on would run this step's hooks, which drain /btw notes and
+		// finished-job results that now belong to that agent, and make more
+		// model calls nobody is waiting for. Stop as a cancellation would.
+		if a.detached.Load() {
+			tr.Messages, tr.Stopped, tr.Cancelled = msgs, true, true
+			return tr, context.Canceled
+		}
 		tr.Steps = step + 1
 
 		// Side-channel steering (/btw): fold any notes the user dropped mid-run into
@@ -1725,6 +1746,7 @@ var harnessPrefixes = []string{
 	emptyReplyNudge[:40],
 	refusalNudge[:40],
 	idleNudge[:40],
+	degenerateNudge[:40], // one collapsed generation's push-back (found missing by review)
 	// Delivered background-job results and /btw notes. The doc comment above
 	// always claimed these were covered and the list never included them, so a
 	// finished sub-agent's entire answer — and every /btw the user dropped
@@ -2038,6 +2060,15 @@ func (a *Agent) judgeAsk(ctx context.Context, how string, msgs []llm.Message, to
 		return judgeUnclear, ""
 	}
 	judgeP, judgeC := judgeSpend(a.judgeChatter(), p0, c0)
+	if how == "continuation" && len(reply.ToolCalls) > 0 {
+		// The continuation is offered the AGENT's tools, done() among them, and
+		// parseJudgeReply reads a done() call as a DONE verdict — but the
+		// agent's done means "I'm finished", not "the goal is met" (found by
+		// review). A continuation that calls any tool has given no verdict; the
+		// standalone judge, with its own done/more, decides.
+		slog.Debug("goal judge continuation called a tool — asking the standalone judge", a.debugArgs("tools", len(reply.ToolCalls))...)
+		return judgeUnclear, ""
+	}
 	verdict, missing, source := parseJudgeReply(reply)
 	// Where the verdict came from. Caught live: a run came back "verdict=done"
 	// with the model having produced nothing, and the log could not say whether

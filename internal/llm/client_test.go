@@ -1051,3 +1051,38 @@ func TestRetryAttemptsResolvesTheConfiguredCount(t *testing.T) {
 		t.Errorf("retryAttempts(16) = %d, want 16", got)
 	}
 }
+
+// A server can report an error inside the stream, as a data chunk, and still
+// end with [DONE]. That error decoded into an empty chunk and the partial text
+// before it came back as a complete answer (found by review).
+func TestParseStreamSurfacesAnErrorChunk(t *testing.T) {
+	raw := "data: {\"choices\":[{\"delta\":{\"content\":\"Results: \"}}]}\n" +
+		"data: {\"error\":{\"message\":\"generation failed\"}}\n" +
+		"data: [DONE]\n"
+	cl := NewOpenAIClient(config.LLM{BaseURL: "http://unused", Model: "fake"})
+	var n int
+	if _, err := cl.parseStream(strings.NewReader(raw), func() {}, 100000, &n, 0); err == nil || !strings.Contains(err.Error(), "generation failed") {
+		t.Errorf("err = %v, want the server's error", err)
+	}
+}
+
+// An unparseable chunk is dropped, and in a turn with tool calls it may have
+// carried part of the arguments: the rest can still be valid JSON — shortened
+// file content, dispatched as if whole (found by review). Such a turn is an
+// error (retried); a plain-text turn stays lenient.
+func TestParseStreamRefusesToolCallsAfterADroppedChunk(t *testing.T) {
+	tc := func(args string) string {
+		b, _ := json.Marshal(args)
+		return `data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"file","arguments":` + string(b) + `}}]}}]}` + "\n"
+	}
+	raw := tc(`{"action":"write","params":{"path":"a.txt","content":"`) + "data: {not json\n" + tc(`end"}}`) + "data: [DONE]\n"
+	cl := NewOpenAIClient(config.LLM{BaseURL: "http://unused", Model: "fake"})
+	var n int
+	if _, err := cl.parseStream(strings.NewReader(raw), func() {}, 100000, &n, 0); err == nil {
+		t.Error("a tool call assembled around a dropped chunk was returned as whole")
+	}
+	text := "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\ndata: {not json\ndata: [DONE]\n"
+	if m, err := cl.parseStream(strings.NewReader(text), func() {}, 100000, &n, 0); err != nil || m.Content != "hello" {
+		t.Errorf("a plain-text turn with a dropped chunk: %q, %v", m.Content, err)
+	}
+}

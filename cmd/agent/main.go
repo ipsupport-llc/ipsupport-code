@@ -438,10 +438,15 @@ type app struct {
 	costMu         sync.Mutex // guards sessionCostUSD (parallel sub-agent spawns accrue too)
 	sessionCostUSD float64    // estimated spend this process run, for the SessionBudgetUSD guard
 
-	client          *llm.OpenAIClient
-	ag              *agent.Agent
-	pol             *policy.Engine // host policy/jail; sub-agents in a dir get their own
-	workdir         string         // absolute session working dir (set by /cd); "" = workspace
+	client  *llm.OpenAIClient
+	ag      *agent.Agent
+	pol     *policy.Engine // host policy/jail; sub-agents in a dir get their own
+	workdir string         // absolute session working dir (set by /cd); "" = workspace
+	// sessionLive is set once this process holds the session's real
+	// conversation — it was loaded, a task ran, or a fresh one was started.
+	// Until then the in-memory history is the empty startup agent, and saving
+	// it would overwrite the session on disk (see switchSession).
+	sessionLive     bool
 	subReg          *tool.Registry // tools for sub-agents (no `agent` tool → no recursion)
 	spawnSeq        atomic.Int64   // unique id per sub-agent spawn (for grouping its UI events)
 	mcpMu           sync.Mutex     // guards the lazy MCP client cache, in-flight connect attempts, and mcpShuttingDown
@@ -514,6 +519,10 @@ type app struct {
 	telemetryCtx    context.Context
 	telemetryWorker sync.Once
 	telemetryWG     sync.WaitGroup // the sender, while it runs
+	// offlineNow mirrors a.cfg.Offline for tools built once and used later
+	// on other goroutines — a background sub-agent's web and git. wire() sets
+	// it; they read it on every call (tool.NewWebLive / NewGitLive).
+	offlineNow atomic.Bool
 }
 
 func build(workspace, sessionName string, overrides []string, reader *bufio.Reader) (*app, func(), error) {
@@ -694,15 +703,19 @@ func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, o
 // (/ai add from the foreground) is a Go runtime panic, not just a stale
 // value.
 type spawnPlan struct {
-	profile        string
-	provider       string
-	llmCfg         config.LLM
-	rolePrompt     string
-	subReg         *tool.Registry
-	subPol         *policy.Engine // the sub-agent's OWN engine, for its own risk observer
-	subWorkspace   string
-	planMode       bool
-	spawnDefault   string
+	profile      string
+	provider     string
+	llmCfg       config.LLM
+	rolePrompt   string
+	subReg       *tool.Registry
+	subPol       *policy.Engine // the sub-agent's OWN engine, for its own risk observer
+	subWorkspace string
+	planMode     bool
+	spawnDefault string
+	// outsideJail: the sub-agent was pointed at a directory outside the host
+	// workspace jail. Allowed — working in another project is the point of
+	// dir — but never silently: it asks even when spawns are relaxed.
+	outsideJail    bool
 	tracer         trace.Tracer
 	priceOverrides map[string]usage.Price
 	goalMaxSteps   int
@@ -813,11 +826,14 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	subWorkspace := a.pol.Workdir()
 	var subReg *tool.Registry
 	var planPol *policy.Engine // set alongside subReg below
+	var outsideJail bool
 	if d := strings.TrimSpace(dir); d != "" {
 		root, err := a.resolveSpawnDir(d)
 		if err != nil {
 			return spawnPlan{}, false, p, err
 		}
+		_, jailErr := a.pol.Resolve(root)
+		outsideJail = jailErr != nil
 		if fi, statErr := os.Stat(root); statErr != nil || !fi.IsDir() {
 			return spawnPlan{}, false, p, fmt.Errorf("dir %q is not a directory", dir)
 		}
@@ -847,7 +863,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	}
 	return spawnPlan{
 		profile: profile, provider: provider, llmCfg: llmCfg, rolePrompt: p.Prompt,
-		subReg: subReg, subPol: planPol, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default,
+		subReg: subReg, subPol: planPol, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default, outsideJail: outsideJail,
 		tracer: tracer, priceOverrides: priceOverrides, goalMaxSteps: a.cfg.GoalMaxSteps,
 	}, false, p, nil
 }
@@ -871,8 +887,15 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 	// behind a shared lock — the approver (TUI bridge / stdin prompt) already
 	// serializes concurrent prompts on its own, and a mutex held here would
 	// block an unrelated job's own spawn/mcp approval behind this one's.
-	if plan.spawnDefault != "allow" {
-		approved := a.approveGated(ctx, "spawn agent", fmt.Sprintf("%s · %s · %s\n  task: %s", plan.profile, plan.llmCfg.Model, plan.subWorkspace, task))
+	if plan.spawnDefault != "allow" || plan.outsideJail {
+		// Outside the workspace is its own kind of approval, not a "spawn …"
+		// one: an allow-for-this-session given to ordinary spawns must not
+		// cover a sub-agent sent outside the jail.
+		kind, where := "spawn agent", plan.subWorkspace
+		if plan.outsideJail {
+			kind, where = "agent outside workspace", where+"  (outside the workspace)"
+		}
+		approved := a.approveGated(ctx, kind, fmt.Sprintf("%s · %s · %s\n  task: %s", plan.profile, plan.llmCfg.Model, where, task))
 		if !approved {
 			return "", fmt.Errorf("spawn denied by user")
 		}
@@ -1009,7 +1032,7 @@ func (a *app) buildSubReg(pol *policy.Engine, root string) *tool.Registry {
 	if a.cfg.Spawn.Exec {
 		tools = append(tools, tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, a.sandboxWrapperFor(root)))
 	}
-	tools = append(tools, tool.NewGit(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.cfg.Offline), tool.NewWeb(nil, a.cfg.Offline), tool.NewCalc(), tool.NewDone())
+	tools = append(tools, tool.NewGitLive(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.offlineNow.Load), tool.NewWebLive(nil, a.offlineNow.Load), tool.NewCalc(), tool.NewDone())
 	if a.skills != nil && a.skills.HasEnabled() {
 		tools = append(tools, tool.NewSkill(a.skills))
 	}
@@ -2590,6 +2613,27 @@ func (a *app) mcpSchema(ctx context.Context, server, tool string) string {
 	return fmt.Sprintf("no tool %q on %q", tool, server)
 }
 
+// mcpCallDetail is what an MCP call's approval shows: the server, the tool and
+// its arguments — all of them, up to a generous cap, with how much was left
+// out said plainly. Sixty characters and a silent cut showed a benign prefix
+// while "…; curl evil" sat in the tail (found by review).
+func mcpCallDetail(server, tool string, args map[string]any) string {
+	detail := server + "." + tool
+	if len(args) == 0 {
+		return detail
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return detail
+	}
+	const max = 2000
+	s := strings.Join(strings.Fields(string(b)), " ")
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max]) + fmt.Sprintf(" …(+%d more characters not shown)", len(r)-max)
+	}
+	return detail + " " + s
+}
+
 // mcpCall runs an MCP tool, asking approval first (it's external code that can do
 // anything).
 func (a *app) mcpCall(ctx context.Context, server, tool string, args map[string]any) (string, error) {
@@ -2597,13 +2641,7 @@ func (a *app) mcpCall(ctx context.Context, server, tool string, args map[string]
 	if err != nil {
 		return "", err
 	}
-	detail := server + "." + tool
-	if len(args) > 0 {
-		if b, e := json.Marshal(args); e == nil {
-			detail += " " + oneLine(string(b), 60)
-		}
-	}
-	approved := a.approveGated(ctx, "mcp call", detail)
+	approved := a.approveGated(ctx, "mcp call", mcpCallDetail(server, tool, args))
 	if !approved {
 		return "", fmt.Errorf("mcp call denied by user")
 	}
@@ -2760,6 +2798,7 @@ func (a *app) sandboxWrapperFor(root string) tool.CmdWrapper {
 }
 
 func (a *app) wire() error {
+	a.offlineNow.Store(a.cfg.Offline)
 	pol, err := policy.New(a.cfg)
 	if err != nil {
 		return fmt.Errorf("policy: %w", err)
@@ -2772,8 +2811,8 @@ func (a *app) wire() error {
 	tools := []tool.Tool{
 		tool.NewFile(pol, gatedApprover{a}, a.snapFile),
 		tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, a.sandboxWrapper()),
-		tool.NewGit(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.cfg.Offline),
-		tool.NewWeb(nil, a.cfg.Offline), // nil → NewWeb's own 30s-timeout client; task ctx has no deadline of its own
+		tool.NewGitLive(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.offlineNow.Load),
+		tool.NewWebLive(nil, a.offlineNow.Load), // nil → its own 30s-timeout client; task ctx has no deadline of its own
 		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),
 		tool.NewCalc(),
 		tool.NewDone(),
@@ -2825,19 +2864,22 @@ func (a *app) wire() error {
 	// the TUI bridge and on /login to reload config; without this hand-off the
 	// restored conversation would be dropped and every launch would start blank.
 	var prior []llm.Message
-	var priorGen int64
+	var priorGen, priorTrim int64
 	if a.ag != nil {
 		prior = a.ag.History()
 		priorGen = a.ag.HistoryGen()
+		priorTrim = a.ag.FrontTrimCount()
 	}
 	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.goalSteps())
-	// Carry historyGen forward too: a fresh Agent starts at 0, and SetHistory
-	// below always bumps by exactly 1 — without seeding, every rebuild would
-	// land back at gen=1 regardless of how many rebuilds (or a /clear) came
-	// before, letting a checkpoint invalidated pre-rebuild become spuriously
-	// valid again against the new Agent instance.
-	a.ag.SeedHistoryGen(priorGen)
+	// Carry historyGen forward too: a fresh Agent starts at 0, and without
+	// seeding every rebuild would land back at the same low gen, letting a
+	// checkpoint invalidated pre-rebuild become spuriously valid again. It is
+	// seeded AFTER SetHistory, which bumps it: the conversation is unchanged,
+	// and a bump here invalidated every /rewind checkpoint on each /model or
+	// /config change. The front-trim count comes along for the same reason.
 	a.ag.SetHistory(prior)
+	a.ag.SeedHistoryGen(priorGen)
+	a.ag.SeedFrontTrim(priorTrim)
 	a.ag.SetPlanMode(a.planMode)     // carry the mode into the rebuilt agent
 	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
@@ -3052,6 +3094,7 @@ func (a *app) loadSession() {
 	}
 	a.ag.SetHistory(sf.History)
 	a.restoreWorkdir(sf.Workdir)
+	a.sessionLive = true
 }
 
 // restoreWorkdir re-applies a saved /cd — best-effort, silently keeping the
@@ -3080,7 +3123,10 @@ func (a *app) restoreWorkdir(dir string) {
 // writes name as the default identity (explicit /new <name>); a bare /new's
 // auto-named scratch thread doesn't persist, so the default doesn't drift.
 func (a *app) newNamedSession(name string, persist bool) error {
-	a.saveSession()
+	if a.sessionLive {
+		a.saveSession()
+	}
+	defer func() { a.sessionLive = true }() // the fresh thread is this process's own
 	a.cfg.Name = name
 	if persist {
 		if err := config.SaveGlobal(name, a.cfg.LLM); err != nil {
@@ -3246,15 +3292,28 @@ func (a *app) listSessionsLines() []string {
 // (saved, like /rename), re-wires so the prompt reflects it, and loads that name's
 // thread (empty if it's a brand-new name).
 func (a *app) switchSession(name string) error {
-	a.saveSession()
+	// Save the session being left only if this process actually holds it. On
+	// the startup chooser it doesn't — nothing was loaded — and saving the
+	// empty startup agent wiped the configured session's history.
+	if a.sessionLive {
+		a.saveSession()
+	}
 	a.cfg.Name = name
 	if err := config.SaveGlobal(name, a.cfg.LLM); err != nil {
 		return err
 	}
+	a.workdir = ""                   // the target's own /cd is restored below, from the workspace root — not from this one's
 	if err := a.wire(); err != nil { // new-name prompt; carries (old) history
 		return err
 	}
 	a.ag.Reset()
+	// Nothing of the session being left comes along: not its "allow for this
+	// session" grants, and not its standing goal (goal files are per session).
+	a.resetSessionAllow()
+	a.statusMu.Lock()
+	a.goal = goalState{}
+	a.statusMu.Unlock()
+	a.loadGoal()
 	a.loadSession() // replace with the target name's thread
 	return nil
 }
@@ -3629,6 +3688,7 @@ func (a *app) emit(kind string, fields map[string]any) {
 
 func (a *app) recordRun(tr agent.Transcript) {
 	a.countTask(tr)
+	a.sessionLive = true // the conversation now holds real work worth saving
 	a.statusMu.Lock()
 	a.tasks++
 	a.steps += tr.Steps
@@ -5931,7 +5991,7 @@ func (s *stdinApprover) ApproveAnswered(ctx context.Context, kind, detail string
 
 	result := make(chan lineResult, 1) // buffered: the read goroutine must never block sending here, even if abandoned
 	go func() {
-		line, err := s.stdin.readApproveLine()
+		line, err := s.stdin.readApproveLineCtx(ctx)
 		result <- lineResult{line, err}
 	}()
 
@@ -5984,9 +6044,30 @@ func (s *stdinApprover) ApproveAnswered(ctx context.Context, kind, detail string
 // keystrokes the TUI never sees.
 type stdinOwner struct {
 	r          *bufio.Reader
-	cmdReq     chan chan lineResult
-	approveReq chan chan lineResult
+	cmdReq     chan lineReq
+	approveReq chan lineReq
 	once       sync.Once
+}
+
+// lineReq is one reader waiting for a line. done, when set, closes once the
+// reader has given up (its approval was cancelled — /jobs kill): such a
+// request still sits in the queue, and handing it the next line threw away
+// the answer meant for the approval asked after it.
+type lineReq struct {
+	reply chan lineResult
+	done  <-chan struct{}
+}
+
+func (q lineReq) live() bool {
+	if q.done == nil {
+		return true
+	}
+	select {
+	case <-q.done:
+		return false
+	default:
+		return true
+	}
 }
 
 // lineResult is one ReadString('\n') outcome, delivered to whichever request
@@ -5997,7 +6078,11 @@ type lineResult struct {
 }
 
 func newStdinOwner(r *bufio.Reader) *stdinOwner {
-	return &stdinOwner{r: r, cmdReq: make(chan chan lineResult, 1), approveReq: make(chan chan lineResult, 1)}
+	// approveReq is buffered beyond one so a cancelled request still queued
+	// never blocks the next approval's own request from joining the queue —
+	// it must be there by the time the line arrives, or pickRecipient could
+	// hand the answer to the command loop instead.
+	return &stdinOwner{r: r, cmdReq: make(chan lineReq, 1), approveReq: make(chan lineReq, 16)}
 }
 
 // start launches the sole reader goroutine on first use; a no-op thereafter.
@@ -6015,31 +6100,45 @@ func (o *stdinOwner) run() {
 
 // pickRecipient blocks until the command loop or a pending approval wants the
 // line just read, favoring an approval whenever both are waiting at once.
+// Requests whose reader gave up are skipped.
 func (o *stdinOwner) pickRecipient() chan lineResult {
-	select {
-	case reply := <-o.approveReq:
-		return reply
-	default:
-	}
-	select {
-	case reply := <-o.approveReq:
-		return reply
-	case reply := <-o.cmdReq:
-		return reply
+	for {
+		select {
+		case q := <-o.approveReq:
+			if q.live() {
+				return q.reply
+			}
+			continue
+		default:
+		}
+		select {
+		case q := <-o.approveReq:
+			if q.live() {
+				return q.reply
+			}
+		case q := <-o.cmdReq:
+			return q.reply
+		}
 	}
 }
 
 // readCmdLine reads the plain REPL's next command line.
-func (o *stdinOwner) readCmdLine() (string, error) { return o.readVia(o.cmdReq) }
+func (o *stdinOwner) readCmdLine() (string, error) { return o.readVia(o.cmdReq, nil) }
 
 // readApproveLine reads a background job's approval answer, taking priority
 // over a command line the REPL loop may be waiting on (see pickRecipient).
-func (o *stdinOwner) readApproveLine() (string, error) { return o.readVia(o.approveReq) }
+func (o *stdinOwner) readApproveLine() (string, error) { return o.readVia(o.approveReq, nil) }
 
-func (o *stdinOwner) readVia(req chan chan lineResult) (string, error) {
+// readApproveLineCtx is readApproveLine for an approval that may be cancelled:
+// once ctx is done, the next line is no longer this reader's.
+func (o *stdinOwner) readApproveLineCtx(ctx context.Context) (string, error) {
+	return o.readVia(o.approveReq, ctx.Done())
+}
+
+func (o *stdinOwner) readVia(req chan lineReq, done <-chan struct{}) (string, error) {
 	o.start()
 	reply := make(chan lineResult, 1)
-	req <- reply
+	req <- lineReq{reply: reply, done: done}
 	res := <-reply
 	return res.line, res.err
 }

@@ -90,3 +90,29 @@ func TestDialStdioCloseDoesNotHangOnOrphanedGrandchild(t *testing.T) {
 		t.Fatalf("close() took %s — want a prompt return, not a wait on the orphaned grandchild", elapsed)
 	}
 }
+
+// A server that never ends a line must not grow the reader without bound:
+// past maxMessageBytes the stream is treated as broken and the waiting call
+// fails instead of buffering forever.
+func TestStdioRefusesAnUnboundedLine(t *testing.T) {
+	reqR, reqW := io.Pipe()
+	respR, respW := io.Pipe()
+	tr := newStdio(reqW, respR, func() { reqW.Close(); respW.Close() })
+	defer tr.close()
+	go io.Copy(io.Discard, reqR)
+	go func() {
+		chunk := []byte(strings.Repeat("x", 1<<20))
+		for i := 0; i <= maxMessageBytes>>20; i++ {
+			if _, err := respW.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+	id := 1
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := tr.roundTrip(ctx, rpcMsg{ID: &id, Method: "m"})
+	if err == nil || ctx.Err() != nil {
+		t.Fatalf("err = %v (ctx %v); want the transport to fail on the oversized line", err, ctx.Err())
+	}
+}

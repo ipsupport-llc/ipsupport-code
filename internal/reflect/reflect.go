@@ -408,7 +408,10 @@ func failedToolResults(t agent.Transcript) int {
 // usedTools reports whether the run actually called any tool.
 func usedTools(t agent.Transcript) bool {
 	for _, m := range t.Messages {
-		if m.Role == "tool" {
+		// The done signal's paired result is a tool message too, but a run that
+		// only said "done" did no work to learn from (found by review: it paid
+		// for one or two reflection calls over nothing).
+		if m.Role == "tool" && m.Name != "done" {
 			return true
 		}
 	}
@@ -487,9 +490,20 @@ func parseLessons(content string) Lessons {
 			})
 		}
 		for _, f := range raw.Facts {
-			if s := strings.TrimSpace(f); s != "" {
-				out.Facts = append(out.Facts, s)
+			s := strings.TrimSpace(f)
+			if s == "" {
+				continue
 			}
+			// Facts are project-specific by design, so only the credential
+			// check applies — but that one does: a fact goes into every later
+			// prompt and to any reflect/judge provider, and "the database URL
+			// is postgres://user:PASS@…" went there unfiltered while pitfalls
+			// were checked (found by review). Not logged, for the same reason.
+			if knowledge.HasCredential(s) {
+				slog.Debug("fact rejected", "reason", "credential")
+				continue
+			}
+			out.Facts = append(out.Facts, s)
 		}
 		// Keep scanning past a decoy/empty object (e.g. a format-example `{}` the
 		// model emits before the real one) — only a candidate with actual content wins.

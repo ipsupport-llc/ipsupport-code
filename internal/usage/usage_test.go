@@ -490,3 +490,30 @@ func TestTokensPerSecZeroWithoutDuration(t *testing.T) {
 		t.Errorf("TokensPerSec = %v, want 0 (no duration recorded)", got)
 	}
 }
+
+// A purge in one session must not delete what another session saved after
+// this one loaded the ledger.
+func TestPurgeKeepsAnotherSessionsEntries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "usage.json")
+	seed, _ := Open(path)
+	seed.Add("2026-01-01", "p", "m", 10, 10, 0)
+	if err := seed.Save(); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := Open(path)
+	b, _ := Open(path)
+	b.Add("2026-10-04", "p", "m", 5, 5, 0)
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if n := a.Purge("2026-06-01"); n != 1 {
+		t.Fatalf("purged %d, want 1", n)
+	}
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+	final, _ := Open(path)
+	if got := final.Total().Tokens(); got != 10 {
+		t.Fatalf("tokens on disk = %d, want b's 10 to survive a's purge", got)
+	}
+}

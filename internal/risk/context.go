@@ -58,6 +58,7 @@ func (a Assessment) Note() string {
 // Only the two disagreements teach anything:
 //
 //	flagged and approved -> a false alarm; the labels that fired are exactly known
+//	                        (or, when only the corrections raised it, the top one)
 //	quiet and refused    -> a miss; the human supplies THAT it is risky, and the
 //	                        model's own strongest label supplies the guess at which
 //
@@ -77,6 +78,11 @@ func CorrectionFrom(ctx context.Context, approved bool) (Correction, bool) {
 			if l != LabelSafe && v >= Threshold {
 				fired = append(fired, l)
 			}
+		}
+		// No base label fired: this workspace's own corrections raised it, and
+		// the label they raised is the one to teach back down.
+		if len(fired) == 0 && s.a.Top != "" {
+			fired = []string{s.a.Top}
 		}
 		if len(fired) == 0 {
 			return Correction{}, false

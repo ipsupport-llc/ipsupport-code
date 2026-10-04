@@ -92,7 +92,12 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 	if profile != command {
 		head = profile + " · " + head
 	}
-	approved := a.approveGated(ctx, "external agent", head+"\n  task: "+task)
+	// The launch line too, flags and all: a checkout's own config can define or
+	// shadow a profile, and a flag like --yolo is exactly what turns an agent
+	// with its own safety into one without (found by review: the prompt showed
+	// "codex" and the task, never "exec --yolo").
+	launch := strings.TrimSpace(command + " " + strings.Join(p.Args, " "))
+	approved := a.approveGated(ctx, "external agent", head+"\n  launch: "+launch+"\n  task: "+task)
 	if !approved {
 		return "", fmt.Errorf("external agent denied by user")
 	}

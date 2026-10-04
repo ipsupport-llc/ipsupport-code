@@ -688,3 +688,75 @@ func TestHasCredentialSpotsWhatMustNotBeLogged(t *testing.T) {
 		}
 	}
 }
+
+// A connection URL carries its password in the userinfo; it is a credential
+// (found by review: such a fact reached every later prompt).
+func TestHasCredentialSeesAPasswordInAURL(t *testing.T) {
+	for s, want := range map[string]bool{
+		"the database URL is postgres://app:hunter2@db.internal/prod": true,
+		"clone https://user:ghtoken@github.com/o/r.git":               true,
+		"see https://github.com/o/r and git@github.com:o/r.git":       false,
+		"run go test ./...": false,
+	} {
+		if HasCredential(s) != want {
+			t.Errorf("HasCredential(%q) = %v", s, !want)
+		}
+	}
+}
+
+// A retrieval bump is persisted even when the session derives no new lesson.
+func TestMarkUsedReachesDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k.json")
+	kb, _ := Open(path)
+	p := Pitfall{Domain: "d", ErrorPattern: "boom", ProvenFix: "x"}
+	kb.Add(p)
+	if err := kb.Save(); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := Open(path)
+	again.MarkUsed(p)
+	if err := again.Save(); err != nil {
+		t.Fatal(err)
+	}
+	final, _ := Open(path)
+	if got := final.All()[0].Hits; got != 2 {
+		t.Fatalf("hits on disk = %d, want 2", got)
+	}
+}
+
+// Purging or deleting in one session must not wipe what another session saved
+// after this one loaded the file.
+func TestPurgeAndDeleteKeepAnotherSessionsLessons(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "k.json")
+	old := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seed := &KB{path: path, now: func() time.Time { return old }}
+	seed.Add(Pitfall{Domain: "d", ErrorPattern: "stale", ProvenFix: "x"})
+	seed.Add(Pitfall{Domain: "d", ErrorPattern: "unwanted", ProvenFix: "x"})
+	if err := seed.Save(); err != nil {
+		t.Fatal(err)
+	}
+	later := func() time.Time { return old.AddDate(0, 0, 100) }
+	a, _ := Open(path)
+	a.now = later
+	b, _ := Open(path)
+	b.now = later
+	b.Add(Pitfall{Domain: "d", ErrorPattern: "fresh from b", ProvenFix: "y"})
+	if err := b.Save(); err != nil {
+		t.Fatal(err)
+	}
+	a.Delete(Pitfall{Domain: "d", ErrorPattern: "unwanted"})
+	if n := a.Purge(30); n != 1 {
+		t.Fatalf("purged %d, want 1", n)
+	}
+	if err := a.Save(); err != nil {
+		t.Fatal(err)
+	}
+	final, _ := Open(path)
+	var got []string
+	for _, p := range final.All() {
+		got = append(got, p.ErrorPattern)
+	}
+	if len(got) != 1 || got[0] != "fresh from b" {
+		t.Fatalf("lessons on disk = %q, want only b's fresh one", got)
+	}
+}

@@ -14,6 +14,10 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/procgroup"
 )
 
+// maxMessageBytes bounds one JSON-RPC message from a server, on either
+// transport, so a broken or hostile server cannot make us buffer without end.
+const maxMessageBytes = 8 << 20
+
 // stdioTransport speaks newline-delimited JSON-RPC to a subprocess over its
 // stdin/stdout. A single long-lived reader loop dispatches each response to the
 // waiter registered for its id, so a cancelled/timed-out call just unregisters its
@@ -80,7 +84,7 @@ func newStdio(w io.Writer, r io.Reader, closeFn func()) *stdioTransport {
 func (t *stdioTransport) readLoop() {
 	defer close(t.done)
 	for {
-		line, err := t.br.ReadBytes('\n')
+		line, err := readLine(t.br)
 		if err != nil {
 			t.mu.Lock()
 			t.readErr = err
@@ -102,6 +106,22 @@ func (t *stdioTransport) readLoop() {
 		t.mu.Unlock()
 		if ok {
 			ch <- m // ch is buffered(1) → never blocks the reader
+		}
+	}
+}
+
+// readLine reads one newline-terminated line of at most maxMessageBytes; a
+// longer one is an error, which ends the stream like EOF does.
+func readLine(br *bufio.Reader) ([]byte, error) {
+	var line []byte
+	for {
+		chunk, err := br.ReadSlice('\n')
+		if len(line)+len(chunk) > maxMessageBytes {
+			return nil, fmt.Errorf("server sent a message over %d MiB", maxMessageBytes>>20)
+		}
+		line = append(line, chunk...)
+		if err != bufio.ErrBufferFull {
+			return line, err
 		}
 	}
 }

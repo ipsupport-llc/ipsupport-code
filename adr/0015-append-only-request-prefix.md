@@ -52,3 +52,8 @@ the conversation:
 - Anything that inserts, reorders or rewrites earlier messages mid-session costs
   a full prefill on a local server, and needs a reason stated where it is done.
   Front trimming and compaction are the known, deliberate cases.
+- Between tasks, history keeps the task's message and its final answer (plus a
+  digest of what changed), not every step. So the next task's request diverges
+  from the last one's at the first tool call of the previous task, and the
+  server reuses the cache up to there. That is by design: replaying every step
+  would cost more context than the prefill it saves.

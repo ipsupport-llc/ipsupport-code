@@ -346,6 +346,7 @@ func (m *tuiModel) chooseActivate() (tea.Model, tea.Cmd) {
 		m.app.ag.Reset()
 		m.app.ag.SetSystem(m.app.systemPrompt())
 		m.app.clearGoal() // an explicit fresh session must not inherit the old one's standing goal
+		m.app.sessionLive = true
 		m.push(cDim.Render("  — new session: " + m.app.cfg.Name + " —"))
 		return m, nil
 	}
@@ -798,6 +799,14 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// from — is discarded outright: same provider name doesn't mean same
 		// model (e.g. two different local models both report provider "local").
 		if msg.epoch != m.app.modelEpoch.Load() {
+			return m, nil
+		}
+		// A task is running — possibly behind an approval prompt or the /config
+		// panel, states that are not stRunning but still have a task under them.
+		// Its goroutine reads a.cfg and a.ag, so neither may change now: not the
+		// cfg write below, not a wire(). Drop the result; windowDetected stays
+		// false, and the task's end (taskDoneMsg) probes again.
+		if m.cancel != nil {
 			return m, nil
 		}
 		if msg.tokens > 0 {

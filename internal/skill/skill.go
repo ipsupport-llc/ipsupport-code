@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
@@ -104,6 +105,7 @@ func (s *Store) seedBuiltins() {
 	seeded := s.loadSeeded()
 	entries, _ := builtinFS.ReadDir("builtin")
 	changed := false
+	var added []string
 	for _, e := range entries {
 		name := strings.TrimSuffix(e.Name(), ".md")
 		data, err := builtinFS.ReadFile("builtin/" + e.Name())
@@ -115,9 +117,7 @@ func (s *Store) seedBuiltins() {
 		if !was { // never seeded → install unless a user file already owns the name
 			if _, err := os.Stat(s.skillPath(name)); err != nil {
 				if os.WriteFile(s.skillPath(name), data, 0o644) == nil {
-					if _, ok := s.state[name]; !ok {
-						s.state[name] = entry{Enabled: false, Source: "built-in"}
-					}
+					added = append(added, name)
 				}
 			}
 			seeded[name], changed = sum, true
@@ -138,7 +138,13 @@ func (s *Store) seedBuiltins() {
 		// else: user edited it (keep their copy) or removed it (stays removed).
 	}
 	if changed {
-		_ = s.saveState()
+		_ = s.changeState(func(st map[string]entry) {
+			for _, name := range added {
+				if _, ok := st[name]; !ok {
+					st[name] = entry{Enabled: false, Source: "built-in"}
+				}
+			}
+		})
 		_ = s.saveSeeded(seeded)
 	}
 }
@@ -194,14 +200,35 @@ func (s *Store) skillPath(name string) string {
 	return filepath.Join(s.dir, name+".md")
 }
 
-// saveState marshals s.state to disk. Callers must hold s.mu (or be running
-// before the Store is shared, as during Open).
-func (s *Store) saveState() error {
-	data, err := json.MarshalIndent(s.state, "", "  ")
+// changeState applies edit to the state on disk and saves it. Callers must
+// hold s.mu (or be running before the Store is shared, as during Open).
+//
+// The edit goes onto a fresh read of state.json, under the file lock, not onto
+// this Store's copy: the directory is shared by every session on the machine,
+// and writing the whole cached map back undid whatever another session had
+// toggled since this one opened. A file that will not parse keeps the old
+// behavior — our own copy is written — so a corrupt state is replaced only on
+// an explicit change, as Open promises.
+func (s *Store) changeState(edit func(map[string]entry)) error {
+	if unlock, err := filelock.Lock(s.statePath()); err == nil {
+		defer unlock()
+	}
+	fresh := map[string]entry{}
+	if data, err := os.ReadFile(s.statePath()); err == nil {
+		if json.Unmarshal(data, &fresh) != nil || fresh == nil {
+			fresh = maps.Clone(s.state)
+		}
+	}
+	edit(fresh)
+	data, err := json.MarshalIndent(fresh, "", "  ")
 	if err != nil {
 		return err
 	}
-	return writeLocked(s.statePath(), data, 0o644)
+	if err := atomicfile.Write(s.statePath(), data, 0o644); err != nil {
+		return err
+	}
+	s.state = fresh
+	return nil
 }
 
 // List returns every installed skill (enabled and disabled), sorted by name. A
@@ -283,10 +310,11 @@ func (s *Store) SetEnabled(name string, on bool) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	e := s.state[name]
-	e.Enabled = on
-	s.state[name] = e
-	return s.saveState()
+	return s.changeState(func(st map[string]entry) {
+		e := st[name]
+		e.Enabled = on
+		st[name] = e
+	})
 }
 
 // Remove deletes an installed skill.
@@ -299,8 +327,7 @@ func (s *Store) Remove(name string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	delete(s.state, name)
-	return s.saveState()
+	return s.changeState(func(st map[string]entry) { delete(st, name) })
 }
 
 // Install downloads skills from a source and enables them. The source is a URL
@@ -324,6 +351,9 @@ func (s *Store) installFile(ctx context.Context, rawURL string) ([]string, error
 		return nil, err
 	}
 	name := skillName(body, rawURL)
+	if err := s.refuseReplacing([]string{name}, rawURL); err != nil {
+		return nil, err
+	}
 	if err := s.write(name, body, rawURL); err != nil {
 		return nil, err
 	}
@@ -352,7 +382,8 @@ func (s *Store) installGit(ctx context.Context, repo string) ([]string, error) {
 		m, _ := filepath.Glob(glob)
 		files = append(files, m...)
 	}
-	var names []string
+	type found struct{ name, body string }
+	var pack []found
 	seen := map[string]bool{}
 	for _, p := range files {
 		if strings.EqualFold(filepath.Base(p), "readme.md") {
@@ -382,27 +413,58 @@ func (s *Store) installGit(ctx context.Context, repo string) ([]string, error) {
 			continue
 		}
 		seen[name] = true
-		if err := s.write(name, string(data), repo); err != nil {
-			return names, err
-		}
-		names = append(names, name)
+		pack = append(pack, found{name, string(data)})
 	}
-	if len(names) == 0 {
+	if len(pack) == 0 {
 		return nil, fmt.Errorf("no skill markdown found in %s (looked at *.md and skills/*.md)", repo)
 	}
+	var names []string
+	for _, f := range pack {
+		names = append(names, f.name)
+	}
+	if err := s.refuseReplacing(names, repo); err != nil {
+		return nil, err
+	}
+	for i, f := range pack {
+		if err := s.write(f.name, f.body, repo); err != nil {
+			return names[:i], err
+		}
+	}
 	return names, nil
+}
+
+// refuseReplacing fails the whole install when any of names is already a skill
+// from somewhere else — a built-in, a file the user wrote, another pack.
+// Installing over it used to replace it silently, enabled. Reinstalling from
+// the same source is an update, and allowed.
+func (s *Store) refuseReplacing(names []string, source string) error {
+	var taken []string
+	for _, name := range names {
+		if _, err := os.Stat(s.skillPath(name)); err != nil {
+			continue
+		}
+		s.mu.RLock()
+		from := s.state[name].Source
+		s.mu.RUnlock()
+		if from != source {
+			taken = append(taken, name)
+		}
+	}
+	if len(taken) > 0 {
+		return fmt.Errorf("already installed from elsewhere: %s — remove it first (/skills remove <name>)", strings.Join(taken, ", "))
+	}
+	return nil
 }
 
 // write saves a skill file, records its source, and enables it.
 func (s *Store) write(name, body, source string) error {
 	clipped, _ := textutil.Clip(body, maxSkillBytes)
-	if err := os.WriteFile(s.skillPath(name), []byte(clipped), 0o644); err != nil {
+	if err := atomicfile.Write(s.skillPath(name), []byte(clipped), 0o644); err != nil {
 		return err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.state[name] = entry{Enabled: true, Source: source}
-	return s.saveState()
+	return s.changeState(func(st map[string]entry) { st[name] = entry{Enabled: true, Source: source} })
 }
 
 func (s *Store) fetch(ctx context.Context, rawURL string) (string, error) {

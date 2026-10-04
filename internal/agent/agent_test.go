@@ -701,9 +701,7 @@ func TestArchiverReceivesEveryRememberedTurn(t *testing.T) {
 	}
 
 	a.Detach()
-	if _, err := a.Run(context.Background(), "second task"); err != nil {
-		t.Fatal(err)
-	}
+	a.Run(context.Background(), "second task") // a detached agent stops at once (cancelled)
 	if len(ar.goals) != 1 {
 		t.Errorf("a detached agent must not archive: goals = %+v", ar.goals)
 	}
@@ -4150,5 +4148,112 @@ func TestToolUsesCountsOnlyThisRun(t *testing.T) {
 	tr, _ := a.Run(context.Background(), "read x")
 	if tr.ToolUses["file"] != 1 || len(tr.ToolUses) != 1 {
 		t.Errorf("ToolUses = %v, want this run's one file call", tr.ToolUses)
+	}
+}
+
+// Plan mode's gate asked "does this action mutate?" of the action as the
+// model wrote it — and a missing or garbled action is not a known mutating
+// one, while Dispatch then infers it and runs it anyway: run with only a
+// "command" param executed a shell command in plan mode (found by review).
+func TestPlanModeGateSeesThroughAMissingAction(t *testing.T) {
+	ran := false
+	shell := tool.NewDomain(tool.DomainSpec{
+		Name: "run", Summary: "shell",
+		Actions: []tool.Action{{Name: "shell", Mutates: true, Params: []tool.Param{tool.Req("command", "str")},
+			Run: func(context.Context, tool.Args) tool.Result { ran = true; return tool.Ok("ran") }}},
+	})
+	for _, args := range []string{
+		`{"params":{"command":"touch created.txt"}}`,                // no action at all
+		`{"action":"<|shell|>","params":{"command":"touch x.txt"}}`, // garbled
+	} {
+		ran = false
+		fake := &scriptLLM{replies: []llm.Message{
+			toolCallReply("c1", "run", args),
+			{Role: "assistant", Content: "plan"},
+		}}
+		a := New(fake, tool.NewRegistry(shell), nil, nil, "", 5)
+		a.SetPlanMode(true)
+		a.Run(context.Background(), "make a file")
+		if ran {
+			t.Errorf("plan mode ran a shell command for %s", args)
+		}
+	}
+}
+
+// detachOnChat detaches its agent from inside the model call — a wedged
+// request that unblocks after the UI has force-detached it.
+type detachOnChat struct {
+	a     *Agent
+	calls int
+}
+
+func (d *detachOnChat) Chat(context.Context, []llm.Message, []map[string]any) (llm.Message, error) {
+	d.calls++
+	d.a.Detach()
+	return toolCallReply("c1", "file", `{"action":"read","params":{"path":"x"}}`), nil
+}
+
+// A force-detached run that unblocks must stop at the next step, not go on:
+// its step hooks drain /btw notes and finished-job results, and by then they
+// belong to the fresh agent the UI swapped in (found by review).
+func TestADetachedRunStopsAtTheNextStep(t *testing.T) {
+	fake := &detachOnChat{}
+	a := New(fake, tool.NewRegistry(planFileTool()), nil, nil, "", 5)
+	fake.a = a
+	hooks := 0
+	a.SetBeforeTurn(func() []llm.Message { hooks++; return nil })
+	a.Run(context.Background(), "go")
+	if fake.calls != 1 || hooks != 1 {
+		t.Errorf("after detaching: %d model call(s), %d step hook(s) — want 1 and 1", fake.calls, hooks)
+	}
+}
+
+// The continuation judge is offered the agent's own tools, done() among them —
+// and done is the agent's "I'm finished" signal, which explicitly does not
+// confirm the goal. parseJudgeReply read a done() call as a DONE verdict, so
+// the run was accepted with no judgment at all (found by review). Any tool
+// call from a continuation is discarded, and the standalone judge decides.
+func TestContinuationJudgeIgnoresTheAgentsDone(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc(), tool.NewDone())
+	main := &recLLM{replies: []llm.Message{calcCall(), {Role: "assistant", Content: "all set"}}}
+	judge := &recLLM{replies: []llm.Message{
+		toolCallReply("j1", "done", `{"action":"done","params":{}}`),
+		{Role: "assistant", Content: "MORE: the result was never shown"},
+	}}
+	a := New(main, reg, nil, nil, "SYSTEM", 20)
+	a.SetGoalLoop(1, false)
+	a.SetJudgeLLM(judge)
+	a.SetSideContinuation(true)
+	tr, _ := a.Run(context.Background(), "add two numbers")
+	if len(judge.calls) < 2 {
+		t.Fatalf("the agent's done() was taken as the verdict: %d judge call(s), goal met %v", len(judge.calls), tr.GoalMet)
+	}
+	if tr.GoalMet {
+		t.Error("goal met on the strength of the agent's own done()")
+	}
+}
+
+// A compaction that comes back empty — a reasoning model that spent its whole
+// budget thinking — replaced the conversation with an empty recap and called
+// it success (found by review). The history must survive it.
+func TestAnEmptyCompactionKeepsTheHistory(t *testing.T) {
+	fake := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "", FinishReason: "length"}}}
+	a := New(fake, tool.NewRegistry(planFileTool()), nil, nil, "", 5)
+	h := []llm.Message{llm.User("keep the SIP details"), {Role: "assistant", Content: "noted"},
+		llm.User("and the trunk name"), {Role: "assistant", Content: "noted too"}}
+	a.SetHistory(h)
+	if _, err := a.Compact(context.Background(), ""); err == nil {
+		t.Error("an empty recap was reported as a successful compaction")
+	}
+	if got := a.History(); len(got) != len(h) || got[0].Content != h[0].Content {
+		t.Errorf("history replaced by an empty recap: %+v", got)
+	}
+}
+
+// The collapsed-generation push-back is the harness talking, not the user —
+// labelled as a GOAL it could be learned as a fact (found by review).
+func TestDegenerateNudgeIsAHarnessMessage(t *testing.T) {
+	if !IsHarnessMessage(degenerateNudge) {
+		t.Error("degenerateNudge is not recognised as a harness message")
 	}
 }

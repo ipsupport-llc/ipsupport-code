@@ -9,6 +9,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeMCP is a minimal MCP server speaking newline-delimited JSON-RPC over conn.
@@ -147,5 +148,34 @@ func TestClientCallSurfacesToolError(t *testing.T) {
 	defer c.Close()
 	if _, err := c.Call(context.Background(), "x", nil); err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Errorf("a tool isError must surface as an error, got %v", err)
+	}
+}
+
+// A server that keeps handing back a cursor must not loop forever.
+func TestClientListToolsStopsOnARepeatedCursor(t *testing.T) {
+	cConn, sConn := net.Pipe()
+	go func() {
+		defer sConn.Close()
+		br := bufio.NewReader(sConn)
+		for {
+			line, err := br.ReadBytes('\n')
+			if err != nil {
+				return
+			}
+			var req struct {
+				ID *int `json:"id"`
+			}
+			if json.Unmarshal(bytes.TrimSpace(line), &req) != nil || req.ID == nil {
+				continue
+			}
+			fmt.Fprintf(sConn, `{"jsonrpc":"2.0","id":%d,"result":{"tools":[{"name":"a"}],"nextCursor":"same"}}`+"\n", *req.ID)
+		}
+	}()
+	c := newClient("fake", cConn, cConn, func() { cConn.Close() })
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := c.listTools(ctx); err == nil || ctx.Err() != nil {
+		t.Fatalf("err = %v (ctx %v); want a prompt error for the repeated cursor", err, ctx.Err())
 	}
 }

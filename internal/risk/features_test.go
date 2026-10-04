@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // testCfg must match the constants at the top of scripts/train_risk.py.
@@ -118,5 +119,16 @@ func TestFeatureVectorIsUnitLength(t *testing.T) {
 	// An empty vector stays empty rather than dividing by zero.
 	if v := Featurize(testCfg, ""); len(v) != 0 {
 		t.Errorf("empty text produced %d features", len(v))
+	}
+}
+
+// CallText caps by characters, as scripts/train_risk.py does: a byte cap
+// split a multi-byte rune and diverged from the text the model was trained on.
+func TestCallTextCapsByCharacters(t *testing.T) {
+	v := strings.Repeat("й", maxValue+10)
+	got := CallText("run", "", map[string]any{"command": v})
+	want := "run command=" + strings.Repeat("й", maxValue)
+	if got != want {
+		t.Fatalf("got %d runes (valid UTF-8: %v), want %d", utf8.RuneCountInString(got), utf8.ValidString(got), utf8.RuneCountInString(want))
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -433,3 +434,99 @@ func TestRefusalsRaiseTheWarningNotTheLabels(t *testing.T) {
 // map, and Go's randomized iteration order changes the float32 rounding
 // between two evaluations of identical arithmetic.
 func near(a, b float32) bool { return a-b < 1e-5 && b-a < 1e-5 }
+
+// Two sessions on one workspace share the delta file. Each must add its own
+// corrections to what is on disk, not overwrite the other's; and a reset in
+// one must not be undone by the other's next save.
+func TestTwoSessionsShareTheDelta(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "risk-delta.bin")
+	base, _ := Default()
+	learn := func(tn *Tuned, cmd string) {
+		tn.Learn(Correction{Tool: "run", Action: "shell", Params: map[string]any{"command": cmd}, Labels: []string{"destructive"}})
+	}
+	// sum adds (sign=1) or subtracts (sign=-1) y into x.
+	sum := func(x, y []map[uint32]float32, sign float32) []map[uint32]float32 {
+		out := cloneRows(x)
+		for i, r := range y {
+			for k, v := range r {
+				out[i][k] += sign * v
+			}
+		}
+		return out
+	}
+	fileIs := func(want []map[uint32]float32, what string) {
+		t.Helper()
+		d, err := LoadDelta(path, base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range want {
+			for k, v := range want[i] {
+				if diff := d.Rows[i][k] - v; (v > pruneBelow || v < -pruneBelow) && (diff > 1e-5 || diff < -1e-5) {
+					t.Fatalf("%s: row %d feature %d is %v on disk, want %v", what, i, k, d.Rows[i][k], v)
+				}
+			}
+			for k, v := range d.Rows[i] {
+				if w := want[i][k]; w == 0 && v != 0 {
+					t.Fatalf("%s: row %d feature %d is %v on disk, want none", what, i, k, v)
+				}
+			}
+		}
+	}
+
+	a, b := NewTuned(base, nil), NewTuned(base, nil)
+	learn(a, "rm -rf build")
+	fromA := cloneRows(a.d.Rows)
+	if err := a.SaveDelta(path); err != nil {
+		t.Fatal(err)
+	}
+	learn(b, "git clean -fdx")
+	fromB := cloneRows(b.d.Rows)
+	if err := b.SaveDelta(path); err != nil {
+		t.Fatal(err)
+	}
+	fileIs(sum(fromA, fromB, 1), "after both saved")
+
+	if err := a.Reset(path); err != nil {
+		t.Fatal(err)
+	}
+	before := cloneRows(b.d.Rows)
+	learn(b, "docker system prune -af")
+	after := cloneRows(b.d.Rows)
+	if err := b.SaveDelta(path); err != nil {
+		t.Fatal(err)
+	}
+	fileIs(sum(after, before, -1), "after a reset elsewhere")
+}
+
+// The feedback log carries the full, unredacted arguments of approved calls,
+// so other local users must not be able to read it — including a log an
+// older build already created world-readable.
+func TestFeedbackIsPrivate(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no POSIX modes")
+	}
+	path := filepath.Join(t.TempDir(), "risk-feedback.jsonl")
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendFeedback(path, Correction{Tool: "run", Action: "shell", Params: map[string]any{"command": "ls"}}); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v, want 0600", fi.Mode().Perm())
+	}
+}
+
+// A call the workspace's own corrections pushed over the threshold, while every
+// base label stayed under it, must still be unlearnable by approving it — or a
+// false alarm the delta created could only be cleared by /risk reset.
+func TestAnApprovalUndoesAFalseAlarmTheDeltaCreated(t *testing.T) {
+	as := Assessment{Risk: 0.7, Top: "destructive", BaseRisk: 0.3,
+		Scores: map[string]float32{"destructive": 0.3, "safe": 0.6}}
+	ctx := WithAssessment(context.Background(), "run", "shell", map[string]any{"command": "make clean"}, as)
+	c, ok := CorrectionFrom(ctx, true)
+	if !ok || len(c.Labels) != 1 || c.Labels[0] != "destructive" || c.Risky {
+		t.Fatalf("correction = %+v, %v; want an approval teaching %q down", c, ok, "destructive")
+	}
+}

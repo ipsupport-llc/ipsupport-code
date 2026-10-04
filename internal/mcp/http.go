@@ -31,7 +31,18 @@ func dialHTTP(_ string, s Server) (transport, error) {
 	if !strings.HasPrefix(s.URL, "http://") && !strings.HasPrefix(s.URL, "https://") {
 		return nil, fmt.Errorf("url must start with http:// or https://")
 	}
-	return &httpTransport{url: s.URL, headers: s.Headers, hc: &http.Client{}}, nil
+	hc := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		// The configured headers (API keys) would follow the redirect; Go only
+		// strips its own auth headers, so refuse to leave the original host.
+		if req.URL.Host != via[0].URL.Host {
+			return fmt.Errorf("refusing a redirect to another host (%s)", req.URL.Host)
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		return nil
+	}}
+	return &httpTransport{url: s.URL, headers: s.Headers, hc: hc}, nil
 }
 
 func (t *httpTransport) close() {}
@@ -98,8 +109,15 @@ func (t *httpTransport) do(ctx context.Context, msg rpcMsg) (*rpcResp, error) {
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		return readSSE(resp.Body, msg.ID)
 	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxMessageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxMessageBytes {
+		return nil, fmt.Errorf("server sent a response over %d MiB", maxMessageBytes>>20)
+	}
 	var m rpcResp
-	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, err
 	}
 	return &m, nil
@@ -108,7 +126,7 @@ func (t *httpTransport) do(ctx context.Context, msg rpcMsg) (*rpcResp, error) {
 // readSSE scans an event stream for the JSON-RPC response matching id.
 func readSSE(r io.Reader, id *int) (*rpcResp, error) {
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	sc.Buffer(make([]byte, 0, 64*1024), maxMessageBytes)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if !strings.HasPrefix(line, "data:") {

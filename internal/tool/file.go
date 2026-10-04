@@ -25,6 +25,12 @@ import (
 
 const maxReadBytes = 200_000
 
+// maxEditBytes bounds what write and edit load into memory to diff or edit a
+// file. Both read the existing file whole; on a multi-gigabyte data file that
+// was enough to exhaust memory (found by review). Above it, write replaces the
+// file without a diff, and edit refuses.
+const maxEditBytes = 8 << 20
+
 // fileMu serializes the actual read-modify-write filesystem work in write/
 // append/edit/mkdir — NOT the approval prompt before it (that can wait
 // arbitrarily long on the user, and would otherwise block an unrelated
@@ -295,7 +301,7 @@ func (f *fileTool) readWindow(abs, path string, offset, limit int) Result {
 
 // search greps the workspace for a regex (literal if it doesn't compile), under
 // the jail, skipping VCS/dep/build dirs and binary or oversized files. Read-only.
-func (f *fileTool) search(_ context.Context, a Args) Result {
+func (f *fileTool) search(ctx context.Context, a Args) Result {
 	query := a.Str("query")
 	root := a.Str("path")
 	if root == "" {
@@ -318,6 +324,9 @@ func (f *fileTool) search(_ context.Context, a Args) Result {
 	var b strings.Builder
 	n := 0
 	_ = filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil { // cancelled (esc, a killed job): a walk over a big tree must not run on for minutes
+			return ctx.Err()
+		}
 		if err != nil {
 			return nil
 		}
@@ -404,8 +413,10 @@ func (f *fileTool) writeFile(ctx context.Context, action string, a Args, appendM
 	f.snapshot(abs) // checkpoint the prior content before we change it
 	var old string
 	if !appendMode {
-		if data, e := os.ReadFile(abs); e == nil {
-			old = string(data)
+		if fi, e := os.Stat(abs); e == nil && fi.Size() <= maxEditBytes {
+			if data, e := os.ReadFile(abs); e == nil {
+				old = string(data)
+			}
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
@@ -536,6 +547,9 @@ func (f *fileTool) edit(ctx context.Context, a Args) Result {
 		return Err("edit " + path + " denied by workspace policy")
 	}
 	f.snapshot(abs) // checkpoint the prior content before we change it
+	if fi, e := os.Stat(abs); e == nil && fi.Size() > maxEditBytes {
+		return Err(fmt.Sprintf("%s is %d MB — too large to edit by text replacement; rewrite it with write, or use a tool made for large files", path, fi.Size()>>20))
+	}
 	data, err := os.ReadFile(abs)
 	if err != nil {
 		return Err("cannot read " + path + ": " + err.Error())
@@ -567,7 +581,7 @@ func (f *fileTool) edit(ctx context.Context, a Args) Result {
 
 // find globs filenames under the jail (paths only), skipping VCS/dep/build dirs
 // and symlinks — locate a file without listing whole trees or reading contents.
-func (f *fileTool) find(_ context.Context, a Args) Result {
+func (f *fileTool) find(ctx context.Context, a Args) Result {
 	pattern := a.Str("pattern")
 	root := a.Str("path")
 	if root == "" {
@@ -585,6 +599,9 @@ func (f *fileTool) find(_ context.Context, a Args) Result {
 	var out []string
 	stopped := false
 	_ = filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
+		if ctx.Err() != nil { // cancelled (esc, a killed job): a walk over a big tree must not run on for minutes
+			return ctx.Err()
+		}
 		if err != nil {
 			return nil
 		}

@@ -37,14 +37,14 @@ type Store struct {
 	mu      sync.Mutex
 	path    string
 	entries []Entry
-	// pending holds the Add() deltas not yet folded into the on-disk file — Save
-	// replays them onto a freshly re-read copy of the file instead of blindly
-	// overwriting it with entries, so a separate ipsupport-code process sharing
-	// the same global usage store can't have its update silently lost. overwrite
-	// (set by Purge/Clear) skips that merge: those are a deliberate replace of
-	// the whole ledger, not a delta.
-	pending   []Entry
-	overwrite bool
+	// pending is the log of every change not yet on disk — Add deltas, purges,
+	// clears — each as the edit it made to entries. Save replays them, in
+	// order, onto a freshly re-read copy of the file instead of writing entries
+	// over it, so a separate ipsupport-code process sharing the same global
+	// usage store can't have its update silently lost — not to an Add, and not
+	// to a Purge either, which used to replace the whole file with this
+	// process's stale snapshot.
+	pending []func(*[]Entry)
 }
 
 // Open loads the ledger, or starts empty if the file is absent. A blank path
@@ -78,8 +78,9 @@ func (s *Store) Add(date, provider, model string, prompt, completion int, dur ti
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	addEntry(&s.entries, date, provider, model, prompt, completion, dur)
-	addEntry(&s.pending, date, provider, model, prompt, completion, dur)
+	add := func(list *[]Entry) { addEntry(list, date, provider, model, prompt, completion, dur) }
+	add(&s.entries)
+	s.pending = append(s.pending, add)
 }
 
 // addEntry folds (date, provider, model, prompt, completion, duration) into
@@ -116,13 +117,11 @@ func readEntries(path string) ([]Entry, error) {
 }
 
 // Save writes the ledger (no-op for an in-memory store). Before writing, it
-// re-reads the file and replays this Store's own pending Add() deltas onto
+// re-reads the file and replays this Store's own pending changes onto
 // that fresh copy instead of blindly overwriting it with entries — otherwise
 // two separate ipsupport-code processes sharing the same global usage store
 // could have one's update silently lost to the other's last write (the mutex
-// only protects against races WITHIN one process). Purge/Clear set overwrite,
-// skipping the merge: those are a deliberate replace of the whole ledger. When
-// neither applies — nothing pending and no overwrite due — there is nothing
+// only protects against races WITHIN one process). With nothing pending there is nothing
 // of this Store's own to persist, so Save skips the write entirely instead of
 // falling through to an unconditional write of s.entries: that write would
 // have no fresh read backing it, so a stale in-memory snapshot (e.g. after an
@@ -132,8 +131,8 @@ func readEntries(path string) ([]Entry, error) {
 // processes from interleaving (one's read landing before the other's write,
 // so each only ever merges its own delta) the same way the in-process mutex
 // keeps two goroutines from interleaving. The write itself is atomic (temp +
-// rename) so a crash mid-write can't truncate the file either. pending/
-// overwrite are only cleared once that write actually succeeds — if it
+// rename) so a crash mid-write can't truncate the file either. pending
+// is only cleared once that write actually succeeds — if it
 // fails, they're left intact so the next Save replays them instead of
 // silently losing them (a concurrent Add's own Save wouldn't otherwise know
 // to replay a delta it never recorded).
@@ -143,7 +142,7 @@ func (s *Store) Save() error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.overwrite && len(s.pending) == 0 {
+	if len(s.pending) == 0 {
 		return nil // nothing of ours to persist — see doc comment above
 	}
 	unlock, err := filelock.Lock(s.path)
@@ -151,16 +150,14 @@ func (s *Store) Save() error {
 		return err
 	}
 	defer unlock()
-	if !s.overwrite && len(s.pending) > 0 {
-		if onDisk, err := readEntries(s.path); err == nil {
-			for _, p := range s.pending {
-				addEntry(&onDisk, p.Date, p.Provider, p.Model, p.Prompt, p.Completion, time.Duration(p.DurationMS)*time.Millisecond)
-			}
-			s.entries = onDisk
+	if onDisk, err := readEntries(s.path); err == nil {
+		for _, op := range s.pending {
+			op(&onDisk)
 		}
-		// on a read error, fall back to writing our own in-memory state — no
-		// worse than the previous unconditional-overwrite behavior.
+		s.entries = onDisk
 	}
+	// on a read error, fall back to writing our own in-memory state — no
+	// worse than the previous unconditional-overwrite behavior.
 	data, err := json.MarshalIndent(s.entries, "", "  ")
 	if err != nil {
 		return err
@@ -169,7 +166,6 @@ func (s *Store) Save() error {
 		return err
 	}
 	s.pending = nil
-	s.overwrite = false
 	return nil
 }
 
@@ -227,25 +223,25 @@ func (s *Store) Total() Total {
 func (s *Store) Purge(cutoff string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	kept := s.entries[:0]
-	removed := 0
-	for _, e := range s.entries {
-		if e.Date < cutoff {
-			removed++
-			continue
+	purge := func(list *[]Entry) int {
+		kept := (*list)[:0]
+		removed := 0
+		for _, e := range *list {
+			if e.Date < cutoff {
+				removed++
+				continue
+			}
+			kept = append(kept, e)
 		}
-		kept = append(kept, e)
+		*list = kept
+		return removed
 	}
-	s.entries = kept
+	// Recorded only when it removed something, so a no-op purge leaves Save
+	// with nothing to write. On replay it removes only what is old on disk:
+	// an entry another session saved since is recent, and stays.
+	removed := purge(&s.entries)
 	if removed > 0 {
-		// A deliberate replace: clear pending too, since s.entries above already
-		// reflects every pending delta (Add keeps them in lockstep) and overwrite
-		// makes Save write s.entries directly. On a no-op purge, leave pending
-		// alone — otherwise an earlier Add's not-yet-saved delta would be wiped
-		// here with neither overwrite nor pending left to tell Save there's
-		// anything of ours to persist, silently losing it.
-		s.pending = nil
-		s.overwrite = true
+		s.pending = append(s.pending, func(list *[]Entry) { purge(list) })
 	}
 	return removed
 }
@@ -255,8 +251,7 @@ func (s *Store) Clear() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.entries = nil
-	s.pending = nil
-	s.overwrite = true
+	s.pending = append(s.pending, func(list *[]Entry) { *list = nil })
 }
 
 // ByDay returns per-day totals, most recent day first.

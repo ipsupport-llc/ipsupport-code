@@ -39,7 +39,7 @@ const (
 
 type webTool struct {
 	hc      *http.Client
-	offline bool
+	offline func() bool // asked on every call: see NewWebLive
 }
 
 // offlineMsg is returned by every web action while offline mode is on, so the
@@ -54,6 +54,13 @@ const offlineMsg = "offline mode is ON — the web is disabled right now (no int
 // is true, every action refuses with offlineMsg instead of touching the
 // network.
 func NewWeb(hc *http.Client, offline bool) Tool {
+	return NewWebLive(hc, func() bool { return offline })
+}
+
+// NewWebLive is NewWeb with offline mode read on every call. A tool built
+// once — a background sub-agent's — must see /offline on when it happens,
+// not keep egressing on the value it was built with (found by review).
+func NewWebLive(hc *http.Client, offline func() bool) Tool {
 	if hc == nil {
 		hc = &http.Client{Timeout: 30 * time.Second} // a hostile/slow server must not hang fetch forever
 	}
@@ -94,7 +101,7 @@ func inferWebAction(params map[string]any) string {
 
 // offlineBlocked reports an offline refusal for a web action; ok=true means stop.
 func (w *webTool) offlineBlocked() (Result, bool) {
-	if w.offline {
+	if w.offline() {
 		return Err(offlineMsg), true
 	}
 	return Result{}, false

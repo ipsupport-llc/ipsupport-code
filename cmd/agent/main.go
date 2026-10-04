@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -111,7 +112,10 @@ func main() {
 			fmt.Println("ipsupport-code", version)
 			return
 		case "update":
-			runUpdate(args[1:])
+			runUpdate(args[1:], http.DefaultClient)
+			return
+		case "update6": // the same, over IPv6 only (undocumented)
+			runUpdate(args[1:], ipv6Client())
 			return
 		case "config":
 			runConfig(workspace, args[1:])
@@ -309,7 +313,7 @@ func misplacedFlags(args []string, lookup func(string) *flag.Flag) []string {
 
 // runUpdate downloads and installs a newer binary from GitHub Releases for the
 // configured channel (an optional "stable"/"nightly" arg switches and saves it).
-func runUpdate(args []string) {
+func runUpdate(args []string, client *http.Client) {
 	cfg, _ := config.Load(".")
 	channel := cfg.Channel
 	if channel == "" {
@@ -330,7 +334,7 @@ func runUpdate(args []string) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	rel, err := selfupdate.Latest(ctx, selfupdate.Repo, channel, http.DefaultClient)
+	rel, err := selfupdate.Latest(ctx, selfupdate.Repo, channel, client)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "update:", err)
 		os.Exit(1)
@@ -340,12 +344,23 @@ func runUpdate(args []string) {
 		return
 	}
 	fmt.Printf("updating %s → %s (%s channel)…\n", version, rel.Version, channel)
-	path, err := selfupdate.Apply(ctx, rel, http.DefaultClient)
+	path, err := selfupdate.Apply(ctx, rel, client)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "update:", err)
 		os.Exit(1)
 	}
 	fmt.Printf("done — %s is now %s\n", path, rel.Version)
+}
+
+// ipv6Client is an HTTP client that dials over IPv6 only — for a host whose
+// IPv4 path is broken or absent (NAT64/DNS64 networks).
+func ipv6Client() *http.Client {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	tr.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
+		return d.DialContext(ctx, "tcp6", addr)
+	}
+	return &http.Client{Transport: tr}
 }
 
 // startupNotice runs freshnessNotice under a short timeout (best-effort).
@@ -4230,7 +4245,7 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		if a.cfg.Offline {
 			fmt.Println("offline mode is on — /update needs the internet. Run /offline off first.")
 		} else {
-			runUpdate(strings.Fields(rest))
+			runUpdate(strings.Fields(rest), http.DefaultClient)
 		}
 	case "/offline":
 		printLines(a.offlineCommand(rest))

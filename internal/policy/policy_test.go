@@ -383,3 +383,66 @@ func TestJailDisabled(t *testing.T) {
 		t.Errorf("Write(/tmp/anywhere) with jail disabled = %v,%v want Allow,nil", d, err)
 	}
 }
+
+// Ways past the argv floor, found by review (Muse Code): with the default
+// loosened to allow — which a checkout's own config may do — each of these
+// reached `sh -c` as a recursive delete with no prompt. The glob floor
+// ("rm -rf*") is literal, so a reordered flag is all it took.
+func TestFloorSeesThroughShellSyntax(t *testing.T) {
+	c := config.Default() // the real floor: deny globs + the argv check
+	c.Run.Default = "allow"
+	e := eng(t, c)
+	for _, cmd := range []string{
+		"echo ok & rm -fr ~/w", "echo ok & rm -r ~/w", "true & sudo id", // a lone & starts the next job
+		"command rm -fr x", "exec rm -R x", "command -p rm -r x", // POSIX builtins that run their argument
+		`"rm" -rf x`, `"rm" -fr x`, `'rm' -r x`, `r\m -fr x`, `r""m -fr x`, `$'rm' -r x`, // quoting the shell removes
+		`rm "-rf" x`, `rm '-r' x`, `rm -\r x`, `"sudo" id`, // …in flags too
+	} {
+		if got := e.Run(cmd); got != Deny {
+			t.Errorf("Run(%q) = %v, want Deny", cmd, got)
+		}
+	}
+	// And what must keep working under the same policy.
+	for _, cmd := range []string{
+		"command -v rm", "go test ./... 2>&1", "rm file.txt", `echo "done"`, "ls & echo hi",
+	} {
+		if got := e.Run(cmd); got != Allow {
+			t.Errorf("Run(%q) = %v, want Allow", cmd, got)
+		}
+	}
+}
+
+// A file system that ignores case — macOS's and Windows' defaults — makes
+// .ENV the .env file and .GIT/config the repository's config. The secret and
+// write floors match without case; nothing else changes.
+func TestSecretAndWriteFloorsIgnoreCase(t *testing.T) {
+	c := config.Default()
+	c.Workspace = t.TempDir()
+	c.File.Default = "allow"
+	e := eng(t, c)
+	for _, f := range []string{".ENV", ".Env.local", "deploy/SECRETS.yaml", "deploy/Secret.yaml"} {
+		// The secret refusal specifically — a jail error would pass this falsely.
+		if err := e.Read(f); err == nil || !strings.Contains(err.Error(), "secrets") {
+			t.Errorf("Read(%q) = %v, want the secrets refusal", f, err)
+		}
+	}
+	for _, f := range []string{".ENV", ".GIT/config", "conf/MySecret.txt"} {
+		if d, _ := e.Write(f); d != Deny {
+			t.Errorf("Write(%q) = %v, want Deny", f, d)
+		}
+	}
+	if err := e.Read("README.md"); err != nil {
+		t.Errorf("an ordinary file was refused: %v", err)
+	}
+}
+
+func TestShellUnquote(t *testing.T) {
+	for in, want := range map[string]string{
+		`rm`: `rm`, `"rm"`: `rm`, `'rm'`: `rm`, `r\m`: `rm`, `r""m`: `rm`, `$'rm'`: `rm`,
+		`"it's"`: `it's`, `'a"b'`: `a"b`, `\"`: `"`, `$HOME`: `$HOME`, `-\r`: `-r`,
+	} {
+		if got := shellUnquote(in); got != want {
+			t.Errorf("shellUnquote(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

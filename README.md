@@ -875,8 +875,17 @@ Permissions for `run` and `file` resolve per action: a **deny** glob blocks, an
 **allow** glob runs without asking, otherwise the **default** (`ask`/`allow`/`deny`)
 applies. Run-command deny globs match *anywhere* in the command (so `rm -rf*`
 catches `cd x && rm -rf /`); file globs are path-aware (`**`, `*.go`) and confined
-to `jail`. The protective deny floor is always unioned in — your config adds to
-it, it can't remove it.
+to `jail`. A run **allow** glob must match each chained command whole, and `*`
+means any characters: `ls*` also allows `lsof -i`. To allow just `ls` with
+arguments, write `ls *` (plus `ls` for the bare command).
+
+The protective deny floor is always unioned in — your config adds to it, it can't
+remove it. It judges the words the shell will actually run — after quotes and
+backslashes are removed, through `command`/`exec`/`env`/`xargs` and similar
+wrappers, across `;`, `&&`, `||`, `|` and `&` — and the deny and secret-file
+floors ignore case, since macOS and Windows file systems do. It is still a static
+check: `sh -c "…"`, variables and encoded commands get past it, and the `ask`
+default is what stops those.
 
 Logging: `IPS_LOG=debug|info|warn|error` (default `warn`). In the TUI it writes to
 `~/.config/ipsupport-code/agent.log` (so raw log lines don't bleed over the

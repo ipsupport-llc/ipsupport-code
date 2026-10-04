@@ -102,9 +102,12 @@ func (e *Engine) SetWorkdir(dir string) (string, error) {
 }
 
 // shellOps splits a command on the operators that chain one command into the
-// next (&&, ||, ;, |, newline). A separator inside quotes only over-splits, which
-// makes allow-matching MORE cautious (more segments to satisfy) — safe by design.
-var shellOps = regexp.MustCompile(`&&|\|\||[;|\n]`)
+// next (&&, ||, ;, |, &, newline). A single & matters as much as ;: "a & rm -fr x"
+// backgrounds a and then runs the delete, and without it the floor saw one
+// segment whose command was a. A separator inside quotes, or the & of a
+// redirection like 2>&1, only over-splits, which makes both the floor and
+// allow-matching MORE cautious (more segments to check) — safe by design.
+var shellOps = regexp.MustCompile(`&&|\|\||[;|&\n]`)
 
 // Run decides whether a shell command may execute:
 //   - the hard floor (dangerous base exe / rm -r…, plus configured deny globs) → Deny;
@@ -138,6 +141,12 @@ func (e *Engine) allowsAll(cmd string, segs []string) bool {
 	if strings.Contains(cmd, "$(") || strings.Contains(cmd, "`") || strings.Contains(cmd, "${") {
 		return false
 	}
+	// A lone & backgrounds a process. It is a separator now (see shellOps), so
+	// it no longer shows up inside a segment for the check below to refuse —
+	// look for it on the whole command instead.
+	if strings.Contains(strings.ReplaceAll(cmd, "&&", ""), "&") {
+		return false
+	}
 	matchedAny := false
 	for _, s := range segs {
 		if s = strings.TrimSpace(s); s == "" {
@@ -162,6 +171,7 @@ func (e *Engine) allowsAll(cmd string, segs []string) bool {
 var cmdWrappers = map[string]bool{
 	"xargs": true, "nohup": true, "nice": true, "ionice": true,
 	"stdbuf": true, "env": true, "setsid": true, "time": true, "timeout": true,
+	"command": true, "exec": true, // POSIX shell builtins that run their argument
 }
 
 // looksLikeArgValue reports whether a token is a bare number/duration (e.g. the "5"
@@ -191,6 +201,14 @@ func dangerousArgv(fields []string, depth int) bool {
 	if len(fields) == 0 || depth > 4 {
 		return false
 	}
+	// Judge the words the shell will actually run, not how they were typed:
+	// `"rm" -rf`, `'rm' -r`, `r\m -fr` and `rm "-rf"` all reach the shell as
+	// rm -rf, and comparing the raw text let every one of them past.
+	words := make([]string, len(fields))
+	for i, f := range fields {
+		words[i] = shellUnquote(f)
+	}
+	fields = words
 	base := filepath.Base(fields[0])
 	switch base {
 	case "sudo", "doas", "mkfs", "dd", "shutdown", "reboot", "halt", "poweroff", "init":
@@ -213,6 +231,43 @@ func dangerousArgv(fields []string, depth int) bool {
 		return dangerousArgv(rest, depth+1)
 	}
 	return false
+}
+
+// shellUnquote removes the quoting a POSIX shell removes from one word: '…',
+// "…", $'…' (bash), and a backslash before a character outside single quotes.
+// Best-effort, like the rest of the floor: escapes inside $'…' (\x72) and
+// expansions ($x, $(…)) are not evaluated — a static check can't see those,
+// and the ask-default is the backstop for them.
+func shellUnquote(s string) string {
+	if !strings.ContainsAny(s, `'"\`) {
+		return s
+	}
+	var b strings.Builder
+	inSingle, inDouble := false, false
+	rs := []rune(s)
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		switch {
+		case inSingle:
+			if r == '\'' {
+				inSingle = false
+			} else {
+				b.WriteRune(r)
+			}
+		case r == '\\' && i+1 < len(rs):
+			i++
+			b.WriteRune(rs[i])
+		case r == '"':
+			inDouble = !inDouble
+		case r == '\'' && !inDouble:
+			inSingle = true
+		case r == '$' && !inDouble && i+1 < len(rs) && rs[i+1] == '\'':
+			// $'…' opens an ANSI-C quoted word; the $ is not part of it
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 // Write decides whether a file may be written: jail first (escape is an error),
@@ -240,7 +295,7 @@ func (e *Engine) Write(path string) (Decision, error) {
 // denied file while approval was pending — Resolve alone only re-enforces the
 // jail, not the deny-write glob.
 func (e *Engine) DeniedWrite(abs string) bool {
-	return fileMatch(e.file.DenyWrite, e.rel(abs))
+	return fileMatchFold(e.file.DenyWrite, e.rel(abs))
 }
 
 // secretReadFloor blocks reading obvious credential files, so the agent can't
@@ -262,7 +317,7 @@ func (e *Engine) Read(path string) error {
 
 // IsSecret reports whether an absolute path matches the secret-read floor, so the
 // search/find walkers can skip it (not just the direct read path).
-func (e *Engine) IsSecret(abs string) bool { return fileMatch(secretReadFloor, e.rel(abs)) }
+func (e *Engine) IsSecret(abs string) bool { return fileMatchFold(secretReadFloor, e.rel(abs)) }
 
 // Resolve returns the absolute, symlink-resolved path for a (possibly relative)
 // input and errors if it escapes the jail. Relative paths resolve against the
@@ -402,6 +457,21 @@ func parseDefault(s string) Decision {
 func fileMatch(patterns []string, rel string) bool {
 	for _, p := range patterns {
 		if ok, _ := doublestar.Match(p, rel); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// fileMatchFold is fileMatch ignoring case, for DENY lists only. The default
+// filesystems on macOS and Windows don't distinguish case: there .ENV is the
+// .env file, SECRETS.yaml is as secret as secrets.yaml, and .GIT/config is the
+// repository's own config. Allow lists stay case-sensitive — matching less is
+// the cautious direction for them.
+func fileMatchFold(patterns []string, rel string) bool {
+	rel = strings.ToLower(rel)
+	for _, p := range patterns {
+		if ok, _ := doublestar.Match(strings.ToLower(p), rel); ok {
 			return true
 		}
 	}

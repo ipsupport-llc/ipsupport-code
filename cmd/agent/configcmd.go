@@ -78,7 +78,7 @@ func runConfig(workspace string, args []string) {
 			fatal(err)
 		}
 		fmt.Printf("set %s  (%s)\n", rest[1], path) // don't echo the value — it may be a secret
-		applyTelemetryKey(workspace, rest[1])
+		applyTelemetryKey(rest[1])
 		if w := shadowWarning(workspace, *local, rest[1]); w != "" {
 			fmt.Fprintln(os.Stderr, w)
 		}
@@ -92,7 +92,7 @@ func runConfig(workspace string, args []string) {
 			fatal(err)
 		}
 		fmt.Printf("unset %s  (%s)\n", rest[1], path)
-		applyTelemetryKey(workspace, rest[1])
+		applyTelemetryKey(rest[1])
 		if w := shadowWarning(workspace, *local, rest[1]); w != "" {
 			fmt.Fprintln(os.Stderr, w)
 		}

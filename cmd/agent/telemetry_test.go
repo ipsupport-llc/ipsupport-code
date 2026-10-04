@@ -312,7 +312,13 @@ func TestConfigSetTelemetryFalseForgetsAtOnce(t *testing.T) {
 	a := telemetryApp(t)
 	a.countTask(agent.Transcript{})
 	config.SaveTelemetry(false) // what `config set telemetry false` writes
-	applyTelemetryKey(t.TempDir(), "telemetry")
+	// Run from a checkout whose own config is broken: unrelated, and it must
+	// not keep the opt-out from taking effect.
+	ws := t.TempDir()
+	os.MkdirAll(filepath.Join(ws, ".agent"), 0o755)
+	os.WriteFile(filepath.Join(ws, ".agent", "config.json"), []byte("{not json"), 0o644)
+	t.Chdir(ws)
+	applyTelemetryKey("telemetry")
 	if _, err := os.Stat(telemetryPath()); !os.IsNotExist(err) {
 		t.Error("config set telemetry false kept the install ID and counters")
 	}

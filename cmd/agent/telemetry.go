@@ -66,12 +66,14 @@ func settleTelemetryDefault(existed bool) {
 // deleted, exactly as /telemetry off does. That is also what stops sessions
 // already running — with the state gone they record and send nothing (see
 // refreshTelemetry and telemetry.Send).
-func applyTelemetryKey(workspace, key string) {
+func applyTelemetryKey(key string) {
 	if key != "telemetry" {
 		return
 	}
-	cfg, err := config.Load(workspace)
-	if err != nil || (cfg.Telemetry != nil && *cfg.Telemetry) {
+	// The global file alone: a malformed workspace config must not keep an
+	// opt-out that was just saved from taking effect.
+	on, err := config.GlobalTelemetry()
+	if err != nil || (on != nil && *on) {
 		return
 	}
 	if _, err := os.Stat(telemetryPath()); err == nil {

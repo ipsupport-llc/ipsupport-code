@@ -629,6 +629,26 @@ func SaveUsageRetention(days int) error {
 // SaveSpawn persists the sub-agent spawn policy (approval mode + exec) globally.
 func SaveSpawn(s SpawnPolicy) error { return mergeGlobalKeys(map[string]any{"spawn": s}) }
 
+// GlobalTelemetry reads the usage-statistics setting from the global file
+// alone (nil: never decided). The setting is global-only, so nothing else can
+// change it — and an opt-out must not depend on a workspace file parsing.
+func GlobalTelemetry() (*bool, error) {
+	data, err := os.ReadFile(GlobalPath())
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var v struct {
+		Telemetry *bool `json:"telemetry"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, err
+	}
+	return v.Telemetry, nil
+}
+
 // SaveTelemetry persists the usage-statistics setting globally.
 func SaveTelemetry(on bool) error { return mergeGlobalKeys(map[string]any{"telemetry": on}) }
 

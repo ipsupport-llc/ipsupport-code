@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -193,7 +192,7 @@ func TestFileSearchSkipsSymlinks(t *testing.T) {
 // filter let it through; the fix adds a regular-file check.
 func TestFileSearchSkipsFIFO(t *testing.T) {
 	dir := t.TempDir()
-	if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o600); err != nil {
+	if err := mkfifo(filepath.Join(dir, "pipe")); err != nil {
 		t.Skipf("mkfifo unsupported here: %v", err)
 	}
 	tl := fileToolFor(t, dir, "allow", yes())
@@ -219,7 +218,7 @@ func TestFileSearchSkipsFIFO(t *testing.T) {
 // so search's fix doesn't cover it.
 func TestFileReadSkipsFIFO(t *testing.T) {
 	dir := t.TempDir()
-	if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o600); err != nil {
+	if err := mkfifo(filepath.Join(dir, "pipe")); err != nil {
 		t.Skipf("mkfifo unsupported here: %v", err)
 	}
 	tl := fileToolFor(t, dir, "allow", yes())
@@ -243,7 +242,7 @@ func TestFileReadSkipsFIFO(t *testing.T) {
 // path — readWindow has its own os.Open call, distinct from readPlain's.
 func TestFileReadWindowSkipsFIFO(t *testing.T) {
 	dir := t.TempDir()
-	if err := syscall.Mkfifo(filepath.Join(dir, "pipe"), 0o600); err != nil {
+	if err := mkfifo(filepath.Join(dir, "pipe")); err != nil {
 		t.Skipf("mkfifo unsupported here: %v", err)
 	}
 	tl := fileToolFor(t, dir, "allow", yes())

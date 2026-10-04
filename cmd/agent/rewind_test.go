@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -222,7 +221,7 @@ func TestApplyRewindRefusesToDeleteThroughAncestorSymlink(t *testing.T) {
 func TestSnapFileSkipsFIFO(t *testing.T) {
 	ws := t.TempDir()
 	fifoPath := filepath.Join(ws, "pipe")
-	if err := syscall.Mkfifo(fifoPath, 0o600); err != nil {
+	if err := mkfifo(fifoPath); err != nil {
 		t.Skipf("mkfifo unsupported here: %v", err)
 	}
 

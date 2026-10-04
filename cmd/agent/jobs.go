@@ -74,7 +74,8 @@ func (a *app) spawnAgentBackground(_ context.Context, profile, task, dir string)
 	if err != nil {
 		return "", err
 	}
-	resolved := plan.profile // set on both branches of resolveSpawn
+	a.countSpawn(external, plan.llmCfg.Model) // reads a.cfg: here, before the job's goroutine exists
+	resolved := plan.profile                  // set on both branches of resolveSpawn
 	// Detached lifetime: the job survives its parent task (and esc). Cancelled
 	// only via /jobs kill — or process exit.
 	jctx, cancel := context.WithCancel(context.Background())

@@ -230,6 +230,12 @@ type Config struct {
 	// that own their own upgrades. No omitempty: false must round-trip and show in
 	// `config list`.
 	UpdateCheck bool `json:"update_check"`
+	// Telemetry is the anonymous daily usage report (adr/0016): nil means never
+	// decided, which is off. First-run setup writes it on for a new install; a
+	// build that finds an install without it writes it off — an update never
+	// turns it on. Global only: a workspace can't turn it on, or off, for the
+	// user (restored after the workspace merge in Load).
+	Telemetry *bool `json:"telemetry,omitempty"`
 	// ReflectDisabled skips the post-task reflection pass (lesson distillation).
 	// Reflection is on by default; turn it off when a weak model loops there.
 	ReflectDisabled bool `json:"reflect_disabled,omitempty"`
@@ -623,6 +629,29 @@ func SaveUsageRetention(days int) error {
 // SaveSpawn persists the sub-agent spawn policy (approval mode + exec) globally.
 func SaveSpawn(s SpawnPolicy) error { return mergeGlobalKeys(map[string]any{"spawn": s}) }
 
+// GlobalTelemetry reads the usage-statistics setting from the global file
+// alone (nil: never decided). The setting is global-only, so nothing else can
+// change it — and an opt-out must not depend on a workspace file parsing.
+func GlobalTelemetry() (*bool, error) {
+	data, err := os.ReadFile(GlobalPath())
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var v struct {
+		Telemetry *bool `json:"telemetry"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, err
+	}
+	return v.Telemetry, nil
+}
+
+// SaveTelemetry persists the usage-statistics setting globally.
+func SaveTelemetry(on bool) error { return mergeGlobalKeys(map[string]any{"telemetry": on}) }
+
 // SaveOffline persists the offline-mode flag globally.
 func SaveOffline(off bool) error { return mergeGlobalKeys(map[string]any{"offline": off}) }
 
@@ -1014,6 +1043,14 @@ func Load(workspace string) (Config, error) {
 	// than allocating a fresh one, so a bare `:=` copy would still alias the
 	// same map mergeFile is about to write "evil" into below.
 	trustedLLM := cfg.LLM
+	// The VALUE, not the pointer: json.Unmarshal writes through a non-nil
+	// *bool, so a saved pointer would change along with the workspace's
+	// "telemetry": true and turn on what the user had turned off.
+	var trustedTelemetry *bool
+	if cfg.Telemetry != nil {
+		v := *cfg.Telemetry
+		trustedTelemetry = &v
+	}
 	trustedProviders := make(map[string]LLM, len(cfg.Providers))
 	for name, l := range cfg.Providers {
 		trustedProviders[name] = l
@@ -1026,7 +1063,7 @@ func Load(workspace string) (Config, error) {
 	if err := mergeFile(&cfg, filepath.Join(abs, ".agent", "config.json")); err != nil {
 		return cfg, err
 	}
-	cfg.LLM, cfg.Providers = trustedLLM, trustedProviders
+	cfg.LLM, cfg.Providers, cfg.Telemetry = trustedLLM, trustedProviders, trustedTelemetry
 
 	cfg.Workspace = abs
 	cfg.Run.Deny = union(cfg.Run.Deny, runDenyFloor)

@@ -256,6 +256,36 @@ skipped. Your configured model connection is untouched either way — if it's
 a local server on localhost it needs no network anyway; if you pointed it at a
 remote endpoint, that traffic still goes out. `/offline off` re-enables it.
 
+## Usage statistics and rating
+
+**Anonymous usage statistics** help decide what to work on. They are **on by
+default for a new install** — first-run setup says so — and **an update never
+turns them on** for an install that existed before: it is written off.
+
+- **What is sent**, once a day, about the day before: the version, OS and its
+  version, CPU architecture, Apple chip (Apple silicon only), memory size,
+  language, how many times each feature was used (`tasks`, `tool_calls`,
+  `goals`, `subagents`, `external_agents`, `mcp`, `skills`, `plan_mode`,
+  `local_model`, `cloud_model`), the coarse **family** of models used (`qwen`,
+  `nemotron`, `claude`…) and a random install ID.
+- **Never sent:** code, prompts, commands, tool arguments or output, file names
+  or paths, model names, API keys, provider URLs.
+- `/telemetry` shows exactly the reports waiting to be sent. `/telemetry off`
+  (or `ipsupport-code config set telemetry false`) turns it off and deletes the
+  install ID and every unsent counter; `/telemetry reset` makes a new ID.
+- Nothing is recorded under `DO_NOT_TRACK=1` or in `/offline` mode, from a
+  piped first run that never saw setup, or by a development build. A
+  workspace's `.agent/config.json` can't turn it on.
+- The first report goes only after the first day ends, so it can be turned off
+  before anything leaves the machine. The server's side — what it keeps and for
+  how long — is [ipsupport-api's telemetry spec](https://github.com/ipsupport-llc/ipsupport-api/blob/main/docs/telemetry.md).
+
+**Rate it** from inside the agent: `/rate 5 works great with my local model`
+(add `--name <you>` to sign it). Ratings are moderated, then shown on the
+[website](https://ipsupport-llc.github.io/ipsupport-code/#reviews). After the
+first day a single dim line may suggest it — at most once every two weeks;
+`/rate never` stops that.
+
 ## Quick start
 
 1. Start a local server with a **tool-calling** model loaded (e.g.
@@ -695,6 +725,8 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | `/rename <name>` | rename the agent (saved in settings) |
 | `/sessions` | list / switch / delete saved sessions (per agent name) |
 | `/agents` | sub-agent profiles: `add` (LLM) / `add-tool` (external CLI) / `rm` / `exec` |
+| `/telemetry` | anonymous usage statistics: exactly what is sent · `on` · `off` · `reset` |
+| `/rate` | rate ipsupport-code: `/rate <1-5> <a few words> [--name <you>]` · `later` · `never` |
 | `/loop <interval> [xN] <task>` | re-run a task on an interval (e.g. `/loop 5m <task>`, `/loop 30s x10 <task>`); **esc** stops it |
 | `/help` | command list |
 | `/exit`, `/quit` | leave |

@@ -22,7 +22,11 @@ import (
 
 // Transcript is the full record of one task run.
 type Transcript struct {
-	Messages  []llm.Message
+	Messages []llm.Message
+	// ToolUses counts the tool calls THIS run made, by tool. Messages also
+	// holds the session history the run started from, so counting tool
+	// messages there would count earlier tasks again.
+	ToolUses  map[string]int
 	Final     string
 	Steps     int
 	Cancelled bool // the user cancelled (esc) specifically
@@ -1436,6 +1440,12 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		actedSinceReturn = true
 		results, nErr := a.runToolCalls(ctx, assistant.ToolCalls)
 		msgs = append(msgs, results...)
+		if tr.ToolUses == nil {
+			tr.ToolUses = map[string]int{}
+		}
+		for _, r := range results {
+			tr.ToolUses[r.Name]++
+		}
 		if a.contextWindow > 0 {
 			if freed := trimIfNearWindow(msgs, a.contextWindow, sentEst, promptTokens); freed > 0 {
 				a.emit("context_trim", map[string]any{"bytes_freed": freed})

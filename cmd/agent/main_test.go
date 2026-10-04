@@ -3132,6 +3132,27 @@ func TestAsyncOpsDrainQueue(t *testing.T) {
 	}
 }
 
+// /rate goes async, which stops the queue drain; its result resumes it when the
+// UI is idle — and leaves a task the user started meanwhile alone.
+func TestRateResultResumesTheQueue(t *testing.T) {
+	m := &tuiModel{state: stIdle, width: 80, input: textarea.New(),
+		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	m.app.client = llm.NewOpenAIClient(config.LLM{})
+	m.queued = []string{"/help"}
+	m.Update(rateDoneMsg{lines: []string{"thank you"}})
+	if len(m.queued) != 0 || !strings.Contains(strings.Join(m.history, "\n"), "commands") {
+		t.Errorf("the queue after /rate did not run: %v", m.queued)
+	}
+
+	busy := &tuiModel{state: stRunning, width: 80, input: textarea.New(),
+		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	busy.queued = []string{"/help"}
+	busy.Update(rateDoneMsg{lines: []string{"thank you"}})
+	if busy.state != stRunning || len(busy.queued) != 1 {
+		t.Errorf("a rating result disturbed a running task: state %v, queue %v", busy.state, busy.queued)
+	}
+}
+
 // With the judge loop off (/goal off) a clean finish must mark the goal done —
 // otherwise the startup resume prompt nags forever. Cancelled runs stay incomplete.
 // With the judge loop off (ttl 0) a clean reply used to count as completion and

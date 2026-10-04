@@ -4207,3 +4207,53 @@ func TestADetachedRunStopsAtTheNextStep(t *testing.T) {
 		t.Errorf("after detaching: %d model call(s), %d step hook(s) — want 1 and 1", fake.calls, hooks)
 	}
 }
+
+// The continuation judge is offered the agent's own tools, done() among them —
+// and done is the agent's "I'm finished" signal, which explicitly does not
+// confirm the goal. parseJudgeReply read a done() call as a DONE verdict, so
+// the run was accepted with no judgment at all (found by review). Any tool
+// call from a continuation is discarded, and the standalone judge decides.
+func TestContinuationJudgeIgnoresTheAgentsDone(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc(), tool.NewDone())
+	main := &recLLM{replies: []llm.Message{calcCall(), {Role: "assistant", Content: "all set"}}}
+	judge := &recLLM{replies: []llm.Message{
+		toolCallReply("j1", "done", `{"action":"done","params":{}}`),
+		{Role: "assistant", Content: "MORE: the result was never shown"},
+	}}
+	a := New(main, reg, nil, nil, "SYSTEM", 20)
+	a.SetGoalLoop(1, false)
+	a.SetJudgeLLM(judge)
+	a.SetSideContinuation(true)
+	tr, _ := a.Run(context.Background(), "add two numbers")
+	if len(judge.calls) < 2 {
+		t.Fatalf("the agent's done() was taken as the verdict: %d judge call(s), goal met %v", len(judge.calls), tr.GoalMet)
+	}
+	if tr.GoalMet {
+		t.Error("goal met on the strength of the agent's own done()")
+	}
+}
+
+// A compaction that comes back empty — a reasoning model that spent its whole
+// budget thinking — replaced the conversation with an empty recap and called
+// it success (found by review). The history must survive it.
+func TestAnEmptyCompactionKeepsTheHistory(t *testing.T) {
+	fake := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "", FinishReason: "length"}}}
+	a := New(fake, tool.NewRegistry(planFileTool()), nil, nil, "", 5)
+	h := []llm.Message{llm.User("keep the SIP details"), {Role: "assistant", Content: "noted"},
+		llm.User("and the trunk name"), {Role: "assistant", Content: "noted too"}}
+	a.SetHistory(h)
+	if _, err := a.Compact(context.Background(), ""); err == nil {
+		t.Error("an empty recap was reported as a successful compaction")
+	}
+	if got := a.History(); len(got) != len(h) || got[0].Content != h[0].Content {
+		t.Errorf("history replaced by an empty recap: %+v", got)
+	}
+}
+
+// The collapsed-generation push-back is the harness talking, not the user —
+// labelled as a GOAL it could be learned as a fact (found by review).
+func TestDegenerateNudgeIsAHarnessMessage(t *testing.T) {
+	if !IsHarnessMessage(degenerateNudge) {
+		t.Error("degenerateNudge is not recognised as a harness message")
+	}
+}

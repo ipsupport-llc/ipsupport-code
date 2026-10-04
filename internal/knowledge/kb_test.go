@@ -688,3 +688,18 @@ func TestHasCredentialSpotsWhatMustNotBeLogged(t *testing.T) {
 		}
 	}
 }
+
+// A connection URL carries its password in the userinfo; it is a credential
+// (found by review: such a fact reached every later prompt).
+func TestHasCredentialSeesAPasswordInAURL(t *testing.T) {
+	for s, want := range map[string]bool{
+		"the database URL is postgres://app:hunter2@db.internal/prod": true,
+		"clone https://user:ghtoken@github.com/o/r.git":               true,
+		"see https://github.com/o/r and git@github.com:o/r.git":       false,
+		"run go test ./...": false,
+	} {
+		if HasCredential(s) != want {
+			t.Errorf("HasCredential(%q) = %v", s, !want)
+		}
+	}
+}

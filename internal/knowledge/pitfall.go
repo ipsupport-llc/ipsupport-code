@@ -82,7 +82,9 @@ var credential = regexp.MustCompile(`(?i)\b\w*(?:token|secret|passwo?r?d|api[_-]
 	`|\b(?:ghp|gho|ghs|ghu|ghr)_[A-Za-z0-9]{8,}` +
 	`|\bsk-[A-Za-z0-9_-]{8,}` +
 	`|\bxox[baprs]-[A-Za-z0-9-]{8,}` +
-	`|\bAKIA[A-Z0-9]{8,}`)
+	`|\bAKIA[A-Z0-9]{8,}` +
+	// A URL with a password in it: postgres://user:pass@host, https://u:p@…
+	`|\b[a-z][a-z0-9+.-]*://[^\s/:@]+:[^\s/@]+@`)
 
 // HasCredential reports whether s contains something that looks like a secret.
 // Used to decide whether a rejected lesson can be logged at all: a store that

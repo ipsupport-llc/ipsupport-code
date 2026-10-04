@@ -641,6 +641,13 @@ func (a *Agent) Compact(ctx context.Context, focus string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	// No recap, no compaction. A reply with empty content — a reasoning model
+	// that spent its whole output budget thinking, finish_reason=length — used
+	// to replace the conversation with an empty summary, and report success
+	// (found by review). Keep the history; the caller sees the error.
+	if strings.TrimSpace(reply.Content) == "" {
+		return 0, fmt.Errorf("compaction produced no summary (finish_reason=%q) — the conversation was left as it was", reply.FinishReason)
+	}
 	summary := "[Summary of earlier conversation]\n" + reply.Content
 	if len(digests) > 0 {
 		// Starts with actionsDigestMarker (not bespoke wording) so a LATER Compact
@@ -1739,6 +1746,7 @@ var harnessPrefixes = []string{
 	emptyReplyNudge[:40],
 	refusalNudge[:40],
 	idleNudge[:40],
+	degenerateNudge[:40], // one collapsed generation's push-back (found missing by review)
 	// Delivered background-job results and /btw notes. The doc comment above
 	// always claimed these were covered and the list never included them, so a
 	// finished sub-agent's entire answer — and every /btw the user dropped
@@ -2052,6 +2060,15 @@ func (a *Agent) judgeAsk(ctx context.Context, how string, msgs []llm.Message, to
 		return judgeUnclear, ""
 	}
 	judgeP, judgeC := judgeSpend(a.judgeChatter(), p0, c0)
+	if how == "continuation" && len(reply.ToolCalls) > 0 {
+		// The continuation is offered the AGENT's tools, done() among them, and
+		// parseJudgeReply reads a done() call as a DONE verdict — but the
+		// agent's done means "I'm finished", not "the goal is met" (found by
+		// review). A continuation that calls any tool has given no verdict; the
+		// standalone judge, with its own done/more, decides.
+		slog.Debug("goal judge continuation called a tool — asking the standalone judge", a.debugArgs("tools", len(reply.ToolCalls))...)
+		return judgeUnclear, ""
+	}
 	verdict, missing, source := parseJudgeReply(reply)
 	// Where the verdict came from. Caught live: a run came back "verdict=done"
 	// with the model having produced nothing, and the log could not say whether

@@ -619,3 +619,25 @@ func TestSummaryDropsAgentNotes(t *testing.T) {
 		t.Errorf("summary = %q", s)
 	}
 }
+
+// Facts go into every later prompt; a credential in one must not (found by
+// review: pitfalls were checked, facts were not).
+func TestFactsWithCredentialsAreDropped(t *testing.T) {
+	l := parseLessons(`{"facts":["tests run with make race","the database URL is postgres://app:hunter2@db.internal/prod"]}`)
+	if len(l.Facts) != 1 || l.Facts[0] != "tests run with make race" {
+		t.Errorf("facts = %q", l.Facts)
+	}
+}
+
+// A run that only signalled done did nothing to learn from.
+func TestADoneOnlyRunIsNotReflectedOn(t *testing.T) {
+	c := &seqChatter{replies: []string{`{"facts":["x"]}`}}
+	_, err := New(c).Reflect(context.Background(), agent.Transcript{Steps: 1, Final: "ok", Messages: []llm.Message{
+		llm.User("say hi"),
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "d", Name: "done", Arguments: `{"action":"done"}`}}},
+		{Role: "tool", Name: "done", Content: "(noted)"},
+	}})
+	if err != nil || len(c.calls) != 0 {
+		t.Errorf("reflected on a done-only run: %d call(s), err %v", len(c.calls), err)
+	}
+}

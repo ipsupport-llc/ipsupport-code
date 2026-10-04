@@ -906,3 +906,17 @@ func TestGitPushApprovalShowsTheRealURL(t *testing.T) {
 		t.Errorf("approval hid the rewritten URL: %q", detail)
 	}
 }
+
+// A push goes to the remote's push URL when it has one; the approval must name
+// that, not the fetch URL.
+func TestGitPushApprovalShowsThePushURL(t *testing.T) {
+	dir := initRepo(t)
+	exec.Command("git", "-C", dir, "remote", "add", "origin", "https://github.com/example/r.git").Run()
+	exec.Command("git", "-C", dir, "remote", "set-url", "--push", "origin", "https://other.example/r.git").Run()
+	var detail string
+	ap := approverFunc(func(_, d string) bool { detail = d; return false })
+	gitToolFor(t, dir, ap).Call(context.Background(), "push", map[string]any{"remote": "origin"})
+	if !strings.Contains(detail, "other.example") {
+		t.Errorf("approval did not name the push URL: %q", detail)
+	}
+}

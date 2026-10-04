@@ -274,8 +274,17 @@ func (g *gitTool) runNet(ctx context.Context, action string, args ...string) Res
 func (g *gitTool) runNetTo(ctx context.Context, action, remote string, args ...string) Result {
 	note := ""
 	if remote != "" && !g.offline() {
-		if u := g.run(ctx, action, false, "ls-remote", "--get-url", "--", remote); !u.IsError {
-			if url := strings.TrimSpace(u.Content); url != "" && url != remote {
+		// A push goes to the push URL(s) when the remote has them; get-url
+		// fails for a remote given as a URL, which ls-remote still expands.
+		u := Result{IsError: true}
+		if action == "push" {
+			u = g.run(ctx, action, false, "remote", "get-url", "--push", "--all", "--", remote)
+		}
+		if u.IsError {
+			u = g.run(ctx, action, false, "ls-remote", "--get-url", "--", remote)
+		}
+		if !u.IsError {
+			if url := strings.Join(strings.Fields(u.Content), ", "); url != "" && url != remote {
 				note = "   → " + url
 			}
 		}

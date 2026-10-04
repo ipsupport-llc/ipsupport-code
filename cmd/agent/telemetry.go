@@ -114,18 +114,23 @@ func (a *app) refreshTelemetry() { a.applyTelemetry(false) }
 // from the config just read from disk, and an explicit /telemetry on. Runs on
 // the goroutine that owns a.cfg; everything else reads only telemetryOn.
 func (a *app) applyTelemetry(create bool) {
-	_, active, _ := a.telemetryStatus()
-	if !active || a.telemetryCtx == nil {
-		a.telemetryOn.Store(active)
-		return
-	}
-	if create {
+	enabled, active, _ := a.telemetryStatus()
+	// Consent makes the state, even while reporting is paused (offline,
+	// DO_NOT_TRACK, a dev build): the pause stops recording and sending, not
+	// the choice. Otherwise "/telemetry on" while offline left no state, and
+	// coming back online read the missing state as an opt-out made elsewhere.
+	if create && enabled && a.telemetryCtx != nil {
 		if err := telemetry.Enable(telemetryPath()); err != nil {
 			slog.Debug("telemetry state", "err", err)
 			a.telemetryOn.Store(false)
 			return
 		}
-	} else if s, err := telemetry.Load(telemetryPath()); err != nil || s.InstallID == "" {
+	}
+	if !active || a.telemetryCtx == nil {
+		a.telemetryOn.Store(active)
+		return
+	}
+	if s, err := telemetry.Load(telemetryPath()); err != nil || s.InstallID == "" {
 		a.telemetryOn.Store(false) // turned off elsewhere: stay off until a launch or /telemetry on
 		return
 	}

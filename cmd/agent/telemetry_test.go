@@ -285,3 +285,22 @@ func TestRewireDoesNotUndoAnotherSessionsOptOut(t *testing.T) {
 		t.Error("the gate stayed open with no state")
 	}
 }
+
+// Turning it on while offline is still consent: when the session comes back
+// online, reporting starts — it is not mistaken for an opt-out made elsewhere.
+func TestOptInWhileOfflineSurvivesGoingOnline(t *testing.T) {
+	a := telemetryApp(t)
+	telemetry.Disable(telemetryPath())
+	off := false
+	a.cfg.Telemetry, a.cfg.Offline = &off, true
+	ctx, cancel := context.WithCancel(context.Background())
+	a.startTelemetry(ctx)
+	defer func() { cancel(); a.telemetryWG.Wait() }()
+
+	a.telemetryCommand("on") // offline: paused, but chosen
+	a.cfg.Offline = false
+	a.refreshTelemetry() // what /offline off's wire() does
+	if !a.telemetryOn.Load() {
+		t.Error("an opt-in made offline was lost on going online")
+	}
+}

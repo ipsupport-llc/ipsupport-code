@@ -460,10 +460,29 @@ func TestQuotedOperatorsDontSplitTheFloor(t *testing.T) {
 			t.Errorf("Run(%q) = %v, want Deny", cmd, got)
 		}
 	}
+}
+
+// A splitter that understands quotes can be fooled by quotes the shell does
+// NOT honor (found by review): a quote inside a comment hides the newline
+// after it, and the & of a redirection cuts a command from its flags. Both
+// splits are checked, so a command has to fool both at once.
+func TestBothSplitsAreChecked(t *testing.T) {
+	c := config.Default()
+	c.Run.Default = "allow"
+	e := eng(t, c)
+	for _, cmd := range []string{
+		"rm 2>&1 -r example", "rm -r >&2 example",
+		"echo ok # \"\nrm -r example\n# \"",
+	} {
+		if got := e.Run(cmd); got != Deny {
+			t.Errorf("Run(%q) = %v, want Deny", cmd, got)
+		}
+	}
+	// The same comment trick must not stretch an allow glob over a hidden command.
 	c2 := config.Default()
-	c2.Run = config.RunPolicy{Default: "ask", Allow: []string{"echo *"}}
-	if got := eng(t, c2).Run(`echo "a;b"`); got != Allow {
-		t.Errorf(`one quoted echo was split into two commands: %v`, got)
+	c2.Run = config.RunPolicy{Default: "ask", Allow: []string{"ls*"}}
+	if got := eng(t, c2).Run("ls # \"\nrm x\n# \""); got == Allow {
+		t.Error("an allow glob matched a command hidden behind a comment")
 	}
 }
 

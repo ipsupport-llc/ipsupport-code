@@ -149,6 +149,22 @@ func splitCommands(cmd string) []string {
 	return append(segs, b.String())
 }
 
+// quoteBlindOps is the other way to split: on the chaining operators without
+// any notion of quoting (and not on a lone &, which also opens redirections).
+var quoteBlindOps = regexp.MustCompile(`&&|\|\||[;|\n]`)
+
+// commandSegments is every segment of BOTH splits. Neither alone is safe:
+// the quote-aware split is fooled by a quote the shell ignores — one inside a
+// comment (`ls # "⏎rm x⏎# "`) — or cuts at the & of a redirection
+// (`rm 2>&1 -r x`); the quote-blind split is fooled by a quoted operator
+// (`rm "a;b" -r`) and doesn't see a lone &. Their blind spots don't overlap,
+// so the floor denies when EITHER finds a dangerous command, and an allow
+// glob must match every segment of both. The cost is caution where the
+// quote-blind split over-splits: `echo "a;b"` asks under an "echo *" glob.
+func commandSegments(cmd string) []string {
+	return append(splitCommands(cmd), quoteBlindOps.Split(cmd, -1)...)
+}
+
 // Run decides whether a shell command may execute:
 //   - the hard floor (dangerous base exe / rm -r…, plus configured deny globs) → Deny;
 //   - else EVERY chained segment must match an allow glob → Allow (so an allowed
@@ -156,7 +172,7 @@ func splitCommands(cmd string) []string {
 //   - else the default.
 func (e *Engine) Run(command string) Decision {
 	cmd := normWS(command)
-	segs := splitCommands(cmd)
+	segs := commandSegments(cmd)
 	for _, s := range segs {
 		if dangerousSegment(strings.TrimSpace(s)) {
 			return Deny

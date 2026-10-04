@@ -699,15 +699,19 @@ func (a *app) spawnAgentTapped(ctx context.Context, profile, task, dir string, o
 // (/ai add from the foreground) is a Go runtime panic, not just a stale
 // value.
 type spawnPlan struct {
-	profile        string
-	provider       string
-	llmCfg         config.LLM
-	rolePrompt     string
-	subReg         *tool.Registry
-	subPol         *policy.Engine // the sub-agent's OWN engine, for its own risk observer
-	subWorkspace   string
-	planMode       bool
-	spawnDefault   string
+	profile      string
+	provider     string
+	llmCfg       config.LLM
+	rolePrompt   string
+	subReg       *tool.Registry
+	subPol       *policy.Engine // the sub-agent's OWN engine, for its own risk observer
+	subWorkspace string
+	planMode     bool
+	spawnDefault string
+	// outsideJail: the sub-agent was pointed at a directory outside the host
+	// workspace jail. Allowed — working in another project is the point of
+	// dir — but never silently: it asks even when spawns are relaxed.
+	outsideJail    bool
 	tracer         trace.Tracer
 	priceOverrides map[string]usage.Price
 	goalMaxSteps   int
@@ -818,11 +822,14 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	subWorkspace := a.pol.Workdir()
 	var subReg *tool.Registry
 	var planPol *policy.Engine // set alongside subReg below
+	var outsideJail bool
 	if d := strings.TrimSpace(dir); d != "" {
 		root, err := a.resolveSpawnDir(d)
 		if err != nil {
 			return spawnPlan{}, false, p, err
 		}
+		_, jailErr := a.pol.Resolve(root)
+		outsideJail = jailErr != nil
 		if fi, statErr := os.Stat(root); statErr != nil || !fi.IsDir() {
 			return spawnPlan{}, false, p, fmt.Errorf("dir %q is not a directory", dir)
 		}
@@ -852,7 +859,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	}
 	return spawnPlan{
 		profile: profile, provider: provider, llmCfg: llmCfg, rolePrompt: p.Prompt,
-		subReg: subReg, subPol: planPol, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default,
+		subReg: subReg, subPol: planPol, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default, outsideJail: outsideJail,
 		tracer: tracer, priceOverrides: priceOverrides, goalMaxSteps: a.cfg.GoalMaxSteps,
 	}, false, p, nil
 }
@@ -876,8 +883,15 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 	// behind a shared lock — the approver (TUI bridge / stdin prompt) already
 	// serializes concurrent prompts on its own, and a mutex held here would
 	// block an unrelated job's own spawn/mcp approval behind this one's.
-	if plan.spawnDefault != "allow" {
-		approved := a.approveGated(ctx, "spawn agent", fmt.Sprintf("%s · %s · %s\n  task: %s", plan.profile, plan.llmCfg.Model, plan.subWorkspace, task))
+	if plan.spawnDefault != "allow" || plan.outsideJail {
+		// Outside the workspace is its own kind of approval, not a "spawn …"
+		// one: an allow-for-this-session given to ordinary spawns must not
+		// cover a sub-agent sent outside the jail.
+		kind, where := "spawn agent", plan.subWorkspace
+		if plan.outsideJail {
+			kind, where = "agent outside workspace", where+"  (outside the workspace)"
+		}
+		approved := a.approveGated(ctx, kind, fmt.Sprintf("%s · %s · %s\n  task: %s", plan.profile, plan.llmCfg.Model, where, task))
 		if !approved {
 			return "", fmt.Errorf("spawn denied by user")
 		}
@@ -2830,19 +2844,22 @@ func (a *app) wire() error {
 	// the TUI bridge and on /login to reload config; without this hand-off the
 	// restored conversation would be dropped and every launch would start blank.
 	var prior []llm.Message
-	var priorGen int64
+	var priorGen, priorTrim int64
 	if a.ag != nil {
 		prior = a.ag.History()
 		priorGen = a.ag.HistoryGen()
+		priorTrim = a.ag.FrontTrimCount()
 	}
 	a.ag = agent.New(a.client, reg, a.kb, a.tracer, a.systemPrompt(), a.goalSteps())
-	// Carry historyGen forward too: a fresh Agent starts at 0, and SetHistory
-	// below always bumps by exactly 1 — without seeding, every rebuild would
-	// land back at gen=1 regardless of how many rebuilds (or a /clear) came
-	// before, letting a checkpoint invalidated pre-rebuild become spuriously
-	// valid again against the new Agent instance.
-	a.ag.SeedHistoryGen(priorGen)
+	// Carry historyGen forward too: a fresh Agent starts at 0, and without
+	// seeding every rebuild would land back at the same low gen, letting a
+	// checkpoint invalidated pre-rebuild become spuriously valid again. It is
+	// seeded AFTER SetHistory, which bumps it: the conversation is unchanged,
+	// and a bump here invalidated every /rewind checkpoint on each /model or
+	// /config change. The front-trim count comes along for the same reason.
 	a.ag.SetHistory(prior)
+	a.ag.SeedHistoryGen(priorGen)
+	a.ag.SeedFrontTrim(priorTrim)
 	a.ag.SetPlanMode(a.planMode)     // carry the mode into the rebuilt agent
 	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
@@ -5954,7 +5971,7 @@ func (s *stdinApprover) ApproveAnswered(ctx context.Context, kind, detail string
 
 	result := make(chan lineResult, 1) // buffered: the read goroutine must never block sending here, even if abandoned
 	go func() {
-		line, err := s.stdin.readApproveLine()
+		line, err := s.stdin.readApproveLineCtx(ctx)
 		result <- lineResult{line, err}
 	}()
 
@@ -6007,9 +6024,30 @@ func (s *stdinApprover) ApproveAnswered(ctx context.Context, kind, detail string
 // keystrokes the TUI never sees.
 type stdinOwner struct {
 	r          *bufio.Reader
-	cmdReq     chan chan lineResult
-	approveReq chan chan lineResult
+	cmdReq     chan lineReq
+	approveReq chan lineReq
 	once       sync.Once
+}
+
+// lineReq is one reader waiting for a line. done, when set, closes once the
+// reader has given up (its approval was cancelled — /jobs kill): such a
+// request still sits in the queue, and handing it the next line threw away
+// the answer meant for the approval asked after it.
+type lineReq struct {
+	reply chan lineResult
+	done  <-chan struct{}
+}
+
+func (q lineReq) live() bool {
+	if q.done == nil {
+		return true
+	}
+	select {
+	case <-q.done:
+		return false
+	default:
+		return true
+	}
 }
 
 // lineResult is one ReadString('\n') outcome, delivered to whichever request
@@ -6020,7 +6058,11 @@ type lineResult struct {
 }
 
 func newStdinOwner(r *bufio.Reader) *stdinOwner {
-	return &stdinOwner{r: r, cmdReq: make(chan chan lineResult, 1), approveReq: make(chan chan lineResult, 1)}
+	// approveReq is buffered beyond one so a cancelled request still queued
+	// never blocks the next approval's own request from joining the queue —
+	// it must be there by the time the line arrives, or pickRecipient could
+	// hand the answer to the command loop instead.
+	return &stdinOwner{r: r, cmdReq: make(chan lineReq, 1), approveReq: make(chan lineReq, 16)}
 }
 
 // start launches the sole reader goroutine on first use; a no-op thereafter.
@@ -6038,31 +6080,45 @@ func (o *stdinOwner) run() {
 
 // pickRecipient blocks until the command loop or a pending approval wants the
 // line just read, favoring an approval whenever both are waiting at once.
+// Requests whose reader gave up are skipped.
 func (o *stdinOwner) pickRecipient() chan lineResult {
-	select {
-	case reply := <-o.approveReq:
-		return reply
-	default:
-	}
-	select {
-	case reply := <-o.approveReq:
-		return reply
-	case reply := <-o.cmdReq:
-		return reply
+	for {
+		select {
+		case q := <-o.approveReq:
+			if q.live() {
+				return q.reply
+			}
+			continue
+		default:
+		}
+		select {
+		case q := <-o.approveReq:
+			if q.live() {
+				return q.reply
+			}
+		case q := <-o.cmdReq:
+			return q.reply
+		}
 	}
 }
 
 // readCmdLine reads the plain REPL's next command line.
-func (o *stdinOwner) readCmdLine() (string, error) { return o.readVia(o.cmdReq) }
+func (o *stdinOwner) readCmdLine() (string, error) { return o.readVia(o.cmdReq, nil) }
 
 // readApproveLine reads a background job's approval answer, taking priority
 // over a command line the REPL loop may be waiting on (see pickRecipient).
-func (o *stdinOwner) readApproveLine() (string, error) { return o.readVia(o.approveReq) }
+func (o *stdinOwner) readApproveLine() (string, error) { return o.readVia(o.approveReq, nil) }
 
-func (o *stdinOwner) readVia(req chan chan lineResult) (string, error) {
+// readApproveLineCtx is readApproveLine for an approval that may be cancelled:
+// once ctx is done, the next line is no longer this reader's.
+func (o *stdinOwner) readApproveLineCtx(ctx context.Context) (string, error) {
+	return o.readVia(o.approveReq, ctx.Done())
+}
+
+func (o *stdinOwner) readVia(req chan lineReq, done <-chan struct{}) (string, error) {
 	o.start()
 	reply := make(chan lineResult, 1)
-	req <- reply
+	req <- lineReq{reply: reply, done: done}
 	res := <-reply
 	return res.line, res.err
 }

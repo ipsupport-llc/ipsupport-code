@@ -701,9 +701,7 @@ func TestArchiverReceivesEveryRememberedTurn(t *testing.T) {
 	}
 
 	a.Detach()
-	if _, err := a.Run(context.Background(), "second task"); err != nil {
-		t.Fatal(err)
-	}
+	a.Run(context.Background(), "second task") // a detached agent stops at once (cancelled)
 	if len(ar.goals) != 1 {
 		t.Errorf("a detached agent must not archive: goals = %+v", ar.goals)
 	}
@@ -4179,5 +4177,33 @@ func TestPlanModeGateSeesThroughAMissingAction(t *testing.T) {
 		if ran {
 			t.Errorf("plan mode ran a shell command for %s", args)
 		}
+	}
+}
+
+// detachOnChat detaches its agent from inside the model call — a wedged
+// request that unblocks after the UI has force-detached it.
+type detachOnChat struct {
+	a     *Agent
+	calls int
+}
+
+func (d *detachOnChat) Chat(context.Context, []llm.Message, []map[string]any) (llm.Message, error) {
+	d.calls++
+	d.a.Detach()
+	return toolCallReply("c1", "file", `{"action":"read","params":{"path":"x"}}`), nil
+}
+
+// A force-detached run that unblocks must stop at the next step, not go on:
+// its step hooks drain /btw notes and finished-job results, and by then they
+// belong to the fresh agent the UI swapped in (found by review).
+func TestADetachedRunStopsAtTheNextStep(t *testing.T) {
+	fake := &detachOnChat{}
+	a := New(fake, tool.NewRegistry(planFileTool()), nil, nil, "", 5)
+	fake.a = a
+	hooks := 0
+	a.SetBeforeTurn(func() []llm.Message { hooks++; return nil })
+	a.Run(context.Background(), "go")
+	if fake.calls != 1 || hooks != 1 {
+		t.Errorf("after detaching: %d model call(s), %d step hook(s) — want 1 and 1", fake.calls, hooks)
 	}
 }

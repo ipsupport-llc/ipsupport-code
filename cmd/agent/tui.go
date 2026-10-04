@@ -801,6 +801,14 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.epoch != m.app.modelEpoch.Load() {
 			return m, nil
 		}
+		// A task is running — possibly behind an approval prompt or the /config
+		// panel, states that are not stRunning but still have a task under them.
+		// Its goroutine reads a.cfg and a.ag, so neither may change now: not the
+		// cfg write below, not a wire(). Drop the result; windowDetected stays
+		// false, and the task's end (taskDoneMsg) probes again.
+		if m.cancel != nil {
+			return m, nil
+		}
 		if msg.tokens > 0 {
 			changed := m.app.applyWindow(msg.provider, msg.tokens)
 			if msg.provider == m.app.providerName() {

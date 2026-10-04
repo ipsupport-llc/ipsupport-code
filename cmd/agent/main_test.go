@@ -7474,9 +7474,9 @@ func TestStdinOwnerApprovalPriorityOverPendingCommand(t *testing.T) {
 	// arrival order. Both channels are buffered (cap 1), so these sends
 	// complete immediately without needing a goroutine of their own.
 	cmdReply := make(chan lineResult, 1)
-	o.cmdReq <- cmdReply
+	o.cmdReq <- lineReq{reply: cmdReply}
 	approveReply := make(chan lineResult, 1)
-	o.approveReq <- approveReply
+	o.approveReq <- lineReq{reply: approveReply}
 
 	// Only now does any data become available to read — in a goroutine since
 	// io.Pipe's Write blocks until the owner's ReadString consumes it.
@@ -9760,5 +9760,143 @@ func TestSwitchingFromTheChooserKeepsTheOtherSession(t *testing.T) {
 	}
 	if b.workdir != "" {
 		t.Errorf("B kept A's working dir %q", b.workdir)
+	}
+}
+
+// A context-window probe that lands while a task runs must change nothing the
+// task's goroutine reads. The guard was "not in the running state", which an
+// approval prompt or the /config panel over a running task also satisfies:
+// the probe then rewrote a.cfg and called wire(), swapping the agent under
+// the task (found by review). The task's end probes again.
+func TestWindowProbeWaitsForTheTask(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	m := &tuiModel{state: stApprove, width: 80, input: textarea.New(), app: a}
+	m.cancel = func() {} // a task is running behind the approval prompt
+	agentBefore, windowBefore := a.ag, a.cfg.LLM.ContextWindow
+	m.Update(windowMsg{provider: a.providerName(), tokens: windowBefore + 4096, epoch: a.modelEpoch.Load()})
+	if a.ag != agentBefore {
+		t.Error("a probe re-wired the agent under a running task")
+	}
+	if a.cfg.LLM.ContextWindow != windowBefore || a.windowDetected {
+		t.Error("a probe wrote a.cfg while a task's goroutine reads it")
+	}
+}
+
+// recordingApprover keeps every approval it was asked for, and refuses.
+type recordingApprover struct{ details []string }
+
+func (r *recordingApprover) Approve(_ context.Context, _, detail string) bool {
+	r.details = append(r.details, detail)
+	return false
+}
+
+// A checkout's own config may define — or shadow — an external agent profile,
+// and its launch flags are what make it dangerous: `codex exec --yolo` runs
+// unsandboxed with no approvals of its own. The prompt showed the command,
+// dir and task but never the flags (found by review); it shows the whole
+// launch line now.
+func TestExternalAgentApprovalShowsTheLaunchLine(t *testing.T) {
+	rec := &recordingApprover{}
+	a := &app{cfg: config.Default(), workspace: t.TempDir(), approver: rec}
+	p := config.AgentProfile{Kind: "external", Command: "codex", Args: []string{"exec", "--yolo", "{task}"}}
+	if _, err := a.spawnExternalAgent(context.Background(), "codex", p, "fix the tests", a.workspace, nil, nil); err == nil {
+		t.Fatal("ran without approval")
+	}
+	if len(rec.details) != 1 || !strings.Contains(rec.details[0], "codex exec --yolo") {
+		t.Errorf("approval did not show the launch flags: %q", rec.details)
+	}
+}
+
+// A sub-agent may be pointed at another project with dir — but outside the
+// workspace jail that must never happen silently: with spawns relaxed, it ran
+// there with no prompt at all (found by review; ADR-0009 promised the jail).
+func TestSubAgentOutsideTheJailAlwaysAsks(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
+	}))
+	defer srv.Close()
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.BaseURL, cfg.LLM.Type = srv.URL+"/v1", ""
+	cfg.Agents = map[string]config.AgentProfile{"loc": {Provider: "local"}}
+	cfg.Spawn.Default = "allow" // /permissions agents on
+	os.MkdirAll(filepath.Join(cfg.Workspace, "sub"), 0o755)
+	kb, _ := knowledge.Open("")
+	rec := &recordingApprover{}
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, approver: rec, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.allowSession("spawn agent") // and 'a' pressed on an earlier spawn
+
+	if _, err := a.spawnAgentTapped(context.Background(), "loc", "look around", "sub", nil); err != nil || len(rec.details) != 0 {
+		t.Fatalf("inside the jail, relaxed: err=%v, asked %d time(s)", err, len(rec.details))
+	}
+	if _, err := a.spawnAgentTapped(context.Background(), "loc", "read their notes", t.TempDir(), nil); err == nil {
+		t.Error("a sub-agent ran outside the workspace without asking")
+	}
+	if len(rec.details) != 1 || !strings.Contains(rec.details[0], "outside the workspace") {
+		t.Errorf("the prompt did not say it was outside the workspace: %q", rec.details)
+	}
+}
+
+// An approval cancelled while waiting for its answer (/jobs kill) left its
+// request queued, and the next line typed — the answer to the NEXT approval —
+// went to it and was lost (found by review). A cancelled request is skipped.
+func TestACancelledApprovalDoesNotStealTheNextAnswer(t *testing.T) {
+	pr, pw := io.Pipe()
+	o := newStdinOwner(bufio.NewReader(pr))
+	ctx, cancel := context.WithCancel(context.Background())
+	go o.readApproveLineCtx(ctx) // the killed job's approval, waiting
+	for len(o.approveReq) == 0 {
+		runtime.Gosched()
+	}
+	cancel()
+	got := make(chan string, 1)
+	go func() { l, _ := o.readApproveLineCtx(context.Background()); got <- l }() // the next approval
+	for len(o.approveReq) < 2 {
+		runtime.Gosched()
+	}
+	go pw.Write([]byte("y\n"))
+	select {
+	case l := <-got:
+		if l != "y\n" {
+			t.Errorf("the next approval read %q", l)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the answer went to the cancelled approval")
+	}
+}
+
+// wire() runs on /model, /config changes and more; the conversation it carries
+// over is the same, so /rewind's checkpoints must stay valid across it. It
+// bumped the history generation (SetHistory after seeding it) and restarted
+// the front-trim count from zero, so any setting change made every earlier
+// checkpoint unusable (found by review).
+func TestRewindSurvivesARewire(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	a.ag.SetHistory([]llm.Message{llm.User("one"), {Role: "assistant", Content: "1"}})
+	cp := a.beginCheckpoint("two")
+	a.ag.SetHistory(append(a.ag.History(), llm.User("two"), llm.Message{Role: "assistant", Content: "2"}))
+	cp.gen = a.ag.HistoryGen()       // the task's own turns are part of what the checkpoint undoes
+	if err := a.wire(); err != nil { // e.g. /model
+		t.Fatal(err)
+	}
+	if !a.checkpointValid(cp) {
+		t.Fatal("a re-wire invalidated the checkpoint")
 	}
 }

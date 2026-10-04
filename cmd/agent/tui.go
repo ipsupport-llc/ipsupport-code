@@ -346,6 +346,7 @@ func (m *tuiModel) chooseActivate() (tea.Model, tea.Cmd) {
 		m.app.ag.Reset()
 		m.app.ag.SetSystem(m.app.systemPrompt())
 		m.app.clearGoal() // an explicit fresh session must not inherit the old one's standing goal
+		m.app.sessionLive = true
 		m.push(cDim.Render("  — new session: " + m.app.cfg.Name + " —"))
 		return m, nil
 	}

@@ -438,10 +438,15 @@ type app struct {
 	costMu         sync.Mutex // guards sessionCostUSD (parallel sub-agent spawns accrue too)
 	sessionCostUSD float64    // estimated spend this process run, for the SessionBudgetUSD guard
 
-	client          *llm.OpenAIClient
-	ag              *agent.Agent
-	pol             *policy.Engine // host policy/jail; sub-agents in a dir get their own
-	workdir         string         // absolute session working dir (set by /cd); "" = workspace
+	client  *llm.OpenAIClient
+	ag      *agent.Agent
+	pol     *policy.Engine // host policy/jail; sub-agents in a dir get their own
+	workdir string         // absolute session working dir (set by /cd); "" = workspace
+	// sessionLive is set once this process holds the session's real
+	// conversation — it was loaded, a task ran, or a fresh one was started.
+	// Until then the in-memory history is the empty startup agent, and saving
+	// it would overwrite the session on disk (see switchSession).
+	sessionLive     bool
 	subReg          *tool.Registry // tools for sub-agents (no `agent` tool → no recursion)
 	spawnSeq        atomic.Int64   // unique id per sub-agent spawn (for grouping its UI events)
 	mcpMu           sync.Mutex     // guards the lazy MCP client cache, in-flight connect attempts, and mcpShuttingDown
@@ -3052,6 +3057,7 @@ func (a *app) loadSession() {
 	}
 	a.ag.SetHistory(sf.History)
 	a.restoreWorkdir(sf.Workdir)
+	a.sessionLive = true
 }
 
 // restoreWorkdir re-applies a saved /cd — best-effort, silently keeping the
@@ -3080,7 +3086,10 @@ func (a *app) restoreWorkdir(dir string) {
 // writes name as the default identity (explicit /new <name>); a bare /new's
 // auto-named scratch thread doesn't persist, so the default doesn't drift.
 func (a *app) newNamedSession(name string, persist bool) error {
-	a.saveSession()
+	if a.sessionLive {
+		a.saveSession()
+	}
+	defer func() { a.sessionLive = true }() // the fresh thread is this process's own
 	a.cfg.Name = name
 	if persist {
 		if err := config.SaveGlobal(name, a.cfg.LLM); err != nil {
@@ -3246,15 +3255,28 @@ func (a *app) listSessionsLines() []string {
 // (saved, like /rename), re-wires so the prompt reflects it, and loads that name's
 // thread (empty if it's a brand-new name).
 func (a *app) switchSession(name string) error {
-	a.saveSession()
+	// Save the session being left only if this process actually holds it. On
+	// the startup chooser it doesn't — nothing was loaded — and saving the
+	// empty startup agent wiped the configured session's history.
+	if a.sessionLive {
+		a.saveSession()
+	}
 	a.cfg.Name = name
 	if err := config.SaveGlobal(name, a.cfg.LLM); err != nil {
 		return err
 	}
+	a.workdir = ""                   // the target's own /cd is restored below, from the workspace root — not from this one's
 	if err := a.wire(); err != nil { // new-name prompt; carries (old) history
 		return err
 	}
 	a.ag.Reset()
+	// Nothing of the session being left comes along: not its "allow for this
+	// session" grants, and not its standing goal (goal files are per session).
+	a.resetSessionAllow()
+	a.statusMu.Lock()
+	a.goal = goalState{}
+	a.statusMu.Unlock()
+	a.loadGoal()
 	a.loadSession() // replace with the target name's thread
 	return nil
 }
@@ -3629,6 +3651,7 @@ func (a *app) emit(kind string, fields map[string]any) {
 
 func (a *app) recordRun(tr agent.Transcript) {
 	a.countTask(tr)
+	a.sessionLive = true // the conversation now holds real work worth saving
 	a.statusMu.Lock()
 	a.tasks++
 	a.steps += tr.Steps

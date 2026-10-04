@@ -9703,3 +9703,62 @@ func TestLearningKeepsTheCachedPrefix(t *testing.T) {
 		}
 	}
 }
+
+// Picking another session on the startup chooser must not touch the one that
+// was configured: its history was never loaded, and saving the empty startup
+// agent "on the way out" overwrote it (found by review). Switching also must
+// not carry the old session's goal, session grants or /cd across.
+func TestSwitchingFromTheChooserKeepsTheOtherSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	os.MkdirAll(filepath.Join(cfg.Workspace, "backend"), 0o755)
+	os.MkdirAll(filepath.Join(cfg.Workspace, "frontend"), 0o755)
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	// Two saved sessions, written by earlier runs: A (the configured name) and B.
+	a.ag.SetHistory([]llm.Message{llm.User("a-goal"), {Role: "assistant", Content: "a-answer"}})
+	a.saveSession()
+	a.setGoal("goal of A")
+	a.saveGoal()
+	a.sessionsCommand("bee")
+	a.ag.SetHistory([]llm.Message{llm.User("b-goal"), {Role: "assistant", Content: "b-answer"}})
+	a.saveSession()
+	a.clearGoal()
+	a.sessionsCommand(config.Default().Name)
+
+	// A fresh launch: configured name A, nothing loaded yet — what the chooser sees.
+	b := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := b.wire(); err != nil {
+		t.Fatal(err)
+	}
+	b.allowSession("run shell")
+	b.cdCommand("backend")
+	b.setGoal("stale goal")
+	if err := b.switchSession("bee"); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	c.cfg.Name = config.Default().Name
+	if err := c.wire(); err != nil {
+		t.Fatal(err)
+	}
+	c.loadSession()
+	if c.ag.SessionLen() != 2 {
+		t.Fatalf("session A was overwritten by the chooser: %d message(s) left", c.ag.SessionLen())
+	}
+	if g := b.goalSnapshot(); g.Text != "" {
+		t.Errorf("B inherited goal %q", g.Text)
+	}
+	if b.sessionAllowed("run shell") {
+		t.Error("B inherited A's allow-for-this-session")
+	}
+	if b.workdir != "" {
+		t.Errorf("B kept A's working dir %q", b.workdir)
+	}
+}

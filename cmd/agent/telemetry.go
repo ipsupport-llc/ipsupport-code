@@ -93,34 +93,47 @@ func (a *app) startTelemetry(ctx context.Context) {
 			s.FirstLaunch = time.Now()
 		}
 	})
-	enabled, active, _ := a.telemetryStatus()
-	path := telemetryPath()
-	if !enabled {
-		if _, err := os.Stat(path); err == nil {
-			_ = telemetry.Disable(path) // off means the install ID and unsent counters go too
+	if enabled, _, _ := a.telemetryStatus(); !enabled {
+		if _, err := os.Stat(telemetryPath()); err == nil {
+			_ = telemetry.Disable(telemetryPath()) // off means the install ID and unsent counters go too
 		}
+	}
+	a.telemetryCtx = ctx
+	a.refreshTelemetry()
+}
+
+// refreshTelemetry re-reads the setting after anything that may change it —
+// launch, wire() (offline mode, a new config), /telemetry — and starts the
+// sender the first time reporting is live. Runs on the goroutine that owns
+// a.cfg; everything else reads only telemetryOn.
+func (a *app) refreshTelemetry() {
+	_, active, _ := a.telemetryStatus()
+	a.telemetryOn.Store(active)
+	if !active || a.telemetryCtx == nil {
 		return
 	}
-	if !active {
-		return
-	}
-	if err := telemetry.Enable(path); err != nil {
+	if err := telemetry.Enable(telemetryPath()); err != nil {
 		slog.Debug("telemetry state", "err", err)
 		return
 	}
 	a.recordTelemetry(telemetry.Counts{}) // a day the program ran on is reported
-	go func() {
-		t := time.NewTicker(3 * time.Hour)
-		defer t.Stop()
-		for {
-			a.sendTelemetry(ctx)
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
+	ctx := a.telemetryCtx
+	a.telemetryWorker.Do(func() {
+		go func() {
+			t := time.NewTicker(3 * time.Hour)
+			defer t.Stop()
+			for {
+				if a.telemetryOn.Load() { // gone offline, or turned off, since the last round
+					a.sendTelemetry(ctx)
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-t.C:
+				}
 			}
-		}
-	}()
+		}()
+	})
 }
 
 func (a *app) sendTelemetry(ctx context.Context) {
@@ -135,8 +148,9 @@ func (a *app) sendTelemetry(ctx context.Context) {
 }
 
 // recordTelemetry adds to today's counters, when reports are being kept.
+// It reads only the gate, never a.cfg: it runs on task goroutines.
 func (a *app) recordTelemetry(c telemetry.Counts) {
-	if _, active, _ := a.telemetryStatus(); !active {
+	if !a.telemetryOn.Load() {
 		return
 	}
 	if err := telemetry.Record(telemetryPath(), time.Now().Format(time.DateOnly), c); err != nil {
@@ -148,16 +162,13 @@ func (a *app) recordTelemetry(c telemetry.Counts) {
 // whether it was a goal or plan-mode run, and the kind and family of model.
 func (a *app) countTask(tr agent.Transcript) {
 	f := map[string]int{"tasks": 1}
-	for _, m := range tr.Messages {
-		if m.Role != "tool" {
-			continue
-		}
-		f["tool_calls"]++
-		switch m.Name {
+	for tool, n := range tr.ToolUses { // this run's own calls — not the history it started from
+		f["tool_calls"] += n
+		switch tool {
 		case "mcp":
-			f["mcp"]++
+			f["mcp"] += n
 		case "skill":
-			f["skills"]++
+			f["skills"] += n
 		}
 	}
 	if a.goal.Status == "active" || tr.Returns > 0 || tr.GoalMet {
@@ -195,7 +206,8 @@ func (a *app) telemetryCommand(rest string) []string {
 		}
 		t := true
 		a.cfg.Telemetry = &t
-		if _, active, _ := a.telemetryStatus(); active {
+		a.refreshTelemetry() // starts the sender if this session hadn't
+		if _, active, _ := a.telemetryStatus(); active && a.telemetryCtx == nil {
 			_ = telemetry.Enable(path)
 		}
 		return append([]string{"usage statistics on — a new anonymous install ID"}, a.telemetryStatusLines()...)
@@ -205,6 +217,7 @@ func (a *app) telemetryCommand(rest string) []string {
 		}
 		f := false
 		a.cfg.Telemetry = &f
+		a.refreshTelemetry() // the sender's next round sees it off
 		if err := telemetry.Disable(path); err != nil {
 			return []string{"error: " + err.Error()}
 		}

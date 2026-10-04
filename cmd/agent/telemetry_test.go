@@ -82,6 +82,7 @@ func telemetryApp(t *testing.T) *app {
 	if err := telemetry.Enable(telemetryPath()); err != nil {
 		t.Fatal(err)
 	}
+	a.refreshTelemetry() // what wire() does: sets the gate from a.cfg
 	return a
 }
 
@@ -89,11 +90,15 @@ func telemetryApp(t *testing.T) *app {
 func TestATaskIsCounted(t *testing.T) {
 	a := telemetryApp(t)
 	a.cfg.LLM.Model = "mlx-community/Qwen3-Coder-30B"
-	a.countTask(agent.Transcript{Messages: []llm.Message{
-		llm.User("refactor internal/secret/plan.go"),
-		{Role: "tool", Name: "file", Content: "ok"},
-		{Role: "tool", Name: "mcp", Content: "ok"},
-	}})
+	a.countTask(agent.Transcript{
+		Messages: []llm.Message{
+			{Role: "tool", Name: "run", Content: "an EARLIER task's call, in the history"},
+			llm.User("refactor internal/secret/plan.go"),
+			{Role: "tool", Name: "file", Content: "ok"},
+			{Role: "tool", Name: "mcp", Content: "ok"},
+		},
+		ToolUses: map[string]int{"file": 1, "mcp": 1}, // what this run itself did
+	})
 	a.countSpawn(true, "")
 	s, _ := telemetry.Load(telemetryPath())
 	d := s.Days[time.Now().Format(time.DateOnly)]
@@ -120,6 +125,7 @@ func TestATaskIsCounted(t *testing.T) {
 func TestDoNotTrackPauses(t *testing.T) {
 	a := telemetryApp(t)
 	t.Setenv("DO_NOT_TRACK", "1")
+	a.refreshTelemetry()
 	a.countTask(agent.Transcript{})
 	if s, _ := telemetry.Load(telemetryPath()); len(s.Days) != 0 {
 		t.Errorf("recorded under DO_NOT_TRACK: %v", s.Days)
@@ -191,5 +197,69 @@ func TestRateHintOncePerTwoWeeks(t *testing.T) {
 	}
 	if h := a.rateHint(); h != "" {
 		t.Errorf("suggested twice in a row: %q", h)
+	}
+}
+
+// The user's explicit choice in the global config is theirs, in both
+// directions: a checkout's config can't flip it. (json.Unmarshal writes
+// through a non-nil *bool — saving the pointer was not saving the value.)
+func TestWorkspaceCannotOverrideAnExplicitChoice(t *testing.T) {
+	for _, global := range []bool{false, true} {
+		t.Setenv("HOME", t.TempDir())
+		config.SaveTelemetry(global)
+		ws := t.TempDir()
+		os.MkdirAll(filepath.Join(ws, ".agent"), 0o755)
+		os.WriteFile(filepath.Join(ws, ".agent", "config.json"),
+			[]byte(`{"telemetry": `+map[bool]string{true: "false", false: "true"}[global]+`}`), 0o644)
+		cfg, _ := config.Load(ws)
+		if cfg.Telemetry == nil || *cfg.Telemetry != global {
+			t.Errorf("global %v, workspace said the opposite: got %v", global, cfg.Telemetry)
+		}
+	}
+}
+
+// Going offline mid-session stops recording and sending at once.
+func TestOfflineClosesTheGate(t *testing.T) {
+	a := telemetryApp(t)
+	a.cfg.Offline = true
+	a.refreshTelemetry() // what /offline's wire() does
+	if a.telemetryOn.Load() {
+		t.Fatal("still live offline")
+	}
+	a.countTask(agent.Transcript{})
+	if s, _ := telemetry.Load(telemetryPath()); len(s.Days) != 0 {
+		t.Errorf("recorded while offline: %v", s.Days)
+	}
+}
+
+// A session launched with telemetry off that turns it on starts sending —
+// not only after the next restart.
+func TestTurningOnMidSessionStartsTheSender(t *testing.T) {
+	a := telemetryApp(t)
+	got := make(chan string, 4)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got <- r.URL.Path
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+	t.Setenv("IPS_API_BASE", ts.URL)
+
+	off := false
+	a.cfg.Telemetry = &off
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.startTelemetry(ctx) // launched off: no sender, state forgotten
+	yesterday := time.Now().AddDate(0, 0, -1).Format(time.DateOnly)
+	telemetry.Enable(telemetryPath())
+	telemetry.Record(telemetryPath(), yesterday, telemetry.Counts{Features: map[string]int{"tasks": 1}})
+
+	a.telemetryCommand("on")
+	select {
+	case p := <-got:
+		if p != "/telemetry" {
+			t.Errorf("sent to %s", p)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("turning it on mid-session never started the sender")
 	}
 }

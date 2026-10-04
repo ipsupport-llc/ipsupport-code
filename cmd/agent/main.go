@@ -503,6 +503,16 @@ type app struct {
 	// riskSaves counts the deferred writes still in flight, so the process can
 	// wait for them on the way out (see waitRiskSaves).
 	riskSaves sync.WaitGroup
+	// telemetryOn is whether usage statistics are being recorded and sent right
+	// now. Set on the goroutine that owns a.cfg (refreshTelemetry, from wire and
+	// /telemetry); read by the sender's ticker and by task goroutines, which must
+	// never read a.cfg themselves.
+	telemetryOn atomic.Bool
+	// telemetryCtx is set once main has started telemetry; until then nothing
+	// touches the state file (a test that calls wire() must never delete or
+	// create one). telemetryWorker starts the sender at most once.
+	telemetryCtx    context.Context
+	telemetryWorker sync.Once
 }
 
 func build(workspace, sessionName string, overrides []string, reader *bufio.Reader) (*app, func(), error) {
@@ -2853,6 +2863,7 @@ func (a *app) wire() error {
 		}
 	}
 	a.ag.SetMaxHistory(hist)
+	a.refreshTelemetry() // a.cfg may have changed under it — /offline, /login, a model switch
 	return nil
 }
 

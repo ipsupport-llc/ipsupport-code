@@ -4137,3 +4137,18 @@ func TestNotePreambleNamesThePosition(t *testing.T) {
 		}
 	}
 }
+
+// ToolUses counts the run's own calls. The history it starts from may hold
+// earlier tool messages (a restored session); those were counted when they ran.
+func TestToolUsesCountsOnlyThisRun(t *testing.T) {
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "file", `{"action":"read","params":{"path":"x"}}`),
+		{Role: "assistant", Content: "done"},
+	}}
+	a := New(fake, tool.NewRegistry(planFileTool()), nil, nil, "SYSTEM", 5)
+	a.SetHistory([]llm.Message{llm.User("earlier"), {Role: "tool", Name: "file", Content: "old"}, {Role: "assistant", Content: "ok"}})
+	tr, _ := a.Run(context.Background(), "read x")
+	if tr.ToolUses["file"] != 1 || len(tr.ToolUses) != 1 {
+		t.Errorf("ToolUses = %v, want this run's one file call", tr.ToolUses)
+	}
+}

@@ -1022,7 +1022,15 @@ func Load(workspace string) (Config, error) {
 	// reuses (mutates in place) an already-non-nil destination map rather
 	// than allocating a fresh one, so a bare `:=` copy would still alias the
 	// same map mergeFile is about to write "evil" into below.
-	trustedLLM, trustedTelemetry := cfg.LLM, cfg.Telemetry
+	trustedLLM := cfg.LLM
+	// The VALUE, not the pointer: json.Unmarshal writes through a non-nil
+	// *bool, so a saved pointer would change along with the workspace's
+	// "telemetry": true and turn on what the user had turned off.
+	var trustedTelemetry *bool
+	if cfg.Telemetry != nil {
+		v := *cfg.Telemetry
+		trustedTelemetry = &v
+	}
 	trustedProviders := make(map[string]LLM, len(cfg.Providers))
 	for name, l := range cfg.Providers {
 		trustedProviders[name] = l

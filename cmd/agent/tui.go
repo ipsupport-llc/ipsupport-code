@@ -767,6 +767,13 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case rateDoneMsg:
 		m.pushLines(msg.lines)
+		// The queue stopped at /rate (it went async); pick it up again — but
+		// only if nothing else started meanwhile: unlike /update, /rate never
+		// put the UI in a running state, so idleDrain's reset could clobber a
+		// task the user began while the rating was in flight.
+		if m.state == stIdle && len(m.queued) > 0 {
+			return m.drainQueue()
+		}
 		return m, nil
 
 	case shellDoneMsg:

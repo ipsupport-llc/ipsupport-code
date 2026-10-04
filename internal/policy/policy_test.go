@@ -446,3 +446,37 @@ func TestShellUnquote(t *testing.T) {
 		}
 	}
 }
+
+// Splitting where the shell doesn't is not cautious for the floor: a quoted
+// operator cut `rm "a&b" -r` into `rm "a` and `b" -r`, parting the command
+// from its -r, and neither half looked like a recursive delete (found by
+// review). Commands split the way the shell splits them.
+func TestQuotedOperatorsDontSplitTheFloor(t *testing.T) {
+	c := config.Default()
+	c.Run.Default = "allow"
+	e := eng(t, c)
+	for _, cmd := range []string{`rm "a&b" -r`, `rm "a;b" -r`, `rm 'a|b' -fr`, `rm a\&b -r`, `rm "a&&b" -R`} {
+		if got := e.Run(cmd); got != Deny {
+			t.Errorf("Run(%q) = %v, want Deny", cmd, got)
+		}
+	}
+	c2 := config.Default()
+	c2.Run = config.RunPolicy{Default: "ask", Allow: []string{"echo *"}}
+	if got := eng(t, c2).Run(`echo "a;b"`); got != Allow {
+		t.Errorf(`one quoted echo was split into two commands: %v`, got)
+	}
+}
+
+func TestSplitCommands(t *testing.T) {
+	for in, want := range map[string][]string{
+		`a && b || c; d | e & f`: {"a ", " b ", " c", " d ", " e ", " f"},
+		`echo "x;y" ; z`:         {`echo "x;y" `, " z"},
+		`echo 'a&b'|wc`:          {`echo 'a&b'`, "wc"},
+		`echo a\;b`:              {`echo a\;b`},
+		"a\nb":                   {"a", "b"},
+	} {
+		if got := splitCommands(in); strings.Join(got, "¦") != strings.Join(want, "¦") {
+			t.Errorf("splitCommands(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

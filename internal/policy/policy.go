@@ -101,13 +101,53 @@ func (e *Engine) SetWorkdir(dir string) (string, error) {
 	return abs, nil
 }
 
-// shellOps splits a command on the operators that chain one command into the
-// next (&&, ||, ;, |, &, newline). A single & matters as much as ;: "a & rm -fr x"
-// backgrounds a and then runs the delete, and without it the floor saw one
-// segment whose command was a. A separator inside quotes, or the & of a
-// redirection like 2>&1, only over-splits, which makes both the floor and
-// allow-matching MORE cautious (more segments to check) — safe by design.
-var shellOps = regexp.MustCompile(`&&|\|\||[;|&\n]`)
+// splitCommands splits a command line into the commands it chains — on &&, ||,
+// ;, |, & and newline — the way the shell does: an operator inside quotes or
+// after a backslash is text, not a separator. A single & matters as much as ;:
+// "a & rm -fr x" backgrounds a and then runs the delete.
+//
+// Splitting where the shell doesn't is NOT the cautious direction. It used to
+// be a regexp that ignored quoting, and `rm "a&b" -r` came apart into `rm "a`
+// and `b" -r` — the executable in one segment, its -r in the other, and the
+// floor saw neither as a recursive delete. The & of a redirection (2>&1, &>)
+// still splits; that only parts a redirection target from its operator, never
+// a command from its flags.
+func splitCommands(cmd string) []string {
+	var segs []string
+	var b strings.Builder
+	inSingle, inDouble := false, false
+	rs := []rune(cmd)
+	cut := func() { segs = append(segs, b.String()); b.Reset() }
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		switch {
+		case inSingle:
+			if r == '\'' {
+				inSingle = false
+			}
+		case r == '\\' && i+1 < len(rs):
+			b.WriteRune(r)
+			i++
+			r = rs[i]
+		case r == '"':
+			inDouble = !inDouble
+		case inDouble:
+		case r == '\'':
+			inSingle = true
+		case r == '\n' || r == ';':
+			cut()
+			continue
+		case r == '&' || r == '|':
+			if i+1 < len(rs) && rs[i+1] == r { // && or ||
+				i++
+			}
+			cut()
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return append(segs, b.String())
+}
 
 // Run decides whether a shell command may execute:
 //   - the hard floor (dangerous base exe / rm -r…, plus configured deny globs) → Deny;
@@ -116,7 +156,7 @@ var shellOps = regexp.MustCompile(`&&|\|\||[;|&\n]`)
 //   - else the default.
 func (e *Engine) Run(command string) Decision {
 	cmd := normWS(command)
-	segs := shellOps.Split(cmd, -1)
+	segs := splitCommands(cmd)
 	for _, s := range segs {
 		if dangerousSegment(strings.TrimSpace(s)) {
 			return Deny
@@ -141,7 +181,7 @@ func (e *Engine) allowsAll(cmd string, segs []string) bool {
 	if strings.Contains(cmd, "$(") || strings.Contains(cmd, "`") || strings.Contains(cmd, "${") {
 		return false
 	}
-	// A lone & backgrounds a process. It is a separator now (see shellOps), so
+	// A lone & backgrounds a process. It is a separator now (see splitCommands), so
 	// it no longer shows up inside a segment for the check below to refuse —
 	// look for it on the whole command instead.
 	if strings.Contains(strings.ReplaceAll(cmd, "&&", ""), "&") {
@@ -521,11 +561,11 @@ func anyMatch(res []*regexp.Regexp, s string) bool {
 // normWS collapses runs of horizontal whitespace (space/tab) to a single
 // space so "rm  -rf" and "rm -rf" compare equal. It deliberately does NOT
 // touch newlines — strings.Fields would, since it treats \n as ordinary
-// whitespace, which used to erase the newline BEFORE Run's shellOps.Split
+// whitespace, which used to erase the newline BEFORE Run's splitCommands
 // ever saw it: "echo safe\ncurl evil" collapsed to one "echo safe curl evil"
 // segment, matching an "echo *" allow glob whole, while `sh -c` still ran
 // both as separate commands (a real shell treats a bare newline exactly like
-// `;`). Run must split on shellOps BEFORE normalizing, and normalizing must
+// `;`). Run must split (splitCommands) BEFORE normalizing, and normalizing must
 // leave that split's newlines alone.
 func normWS(s string) string {
 	fields := strings.FieldsFunc(s, func(r rune) bool { return r == ' ' || r == '\t' })

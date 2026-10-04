@@ -136,3 +136,66 @@ hints are injected, which changes the prompt on successful turns — the one pla
 the current design is careful to stay out of. Both reviews flagged the shape as
 limiting; neither proposed a mechanism that pays for itself. It is here so it is
 not rediscovered as new.
+
+---
+
+## 5. Retried LLM attempts vanish from the usage ledger
+
+**What is wrong.** An attempt that streams and then fails retriably is rolled
+back (`rollbackCompletionCount`), and only the final attempt is reconciled, so
+`/usage` and the token budget undercount a retried call. Found in the 2026-10-04
+full-project review (Muse).
+
+**The fix.** Keep a failed attempt's streamed completion tokens in the ledger as
+spent; reconcile only the successful attempt's reported usage on top.
+
+**What it breaks.** The budget guard then trips sooner on a flaky server, and the
+counts stop matching what the provider bills when the provider does not bill a
+dropped stream.
+
+## 6. A clone destination is checked before approval, used after
+
+**What is wrong.** `git clone` resolves and jail-checks its destination, then
+waits for approval; a parent directory swapped for a symlink in that window
+sends the clone outside the workspace. Needs a second process acting on the
+workspace during the prompt. Found by Codex in the same review.
+
+**The fix.** Re-resolve the destination after approval, or clone into a temp
+directory inside the workspace and rename into place.
+
+**What it breaks.** The rename variant changes the error a half-finished clone
+leaves behind; the re-check variant only narrows the window.
+
+## 7. Background descendants outlive a `run` whose shell already exited
+
+**What is wrong.** `sleep 600 &` in `run.shell`: the shell exits, `WaitDelay`
+closes the pipe, the tool returns, and nothing kills the group — the context
+watcher already returned. Same for an external agent that leaves children
+(ADR-0010). Found by Codex.
+
+**The fix.** Kill the process group unconditionally once `Wait` returns.
+
+**What it breaks.** Anything a user deliberately backgrounds through `run`
+(a dev server started for the next step) dies with the call — which is a
+behavior change to announce, not a silent fix.
+
+## 8. No process-tree kill on Windows
+
+**What is wrong.** `procgroup_windows.go` sets only `WaitDelay`; a timed-out or
+cancelled command's grandchildren keep running and holding ports.
+
+**The fix.** A job object per command, closed on cancel.
+
+**What it breaks.** Needs a Windows CI runner to verify; nothing to break
+without one, which is why it waits.
+
+## 9. `recoverTextToolCall` has no callers
+
+**What is wrong.** The salvage of tool calls a model wrote as text is documented
+and tested but never consulted by `Run`.
+
+**The fix.** Wire it in for an otherwise empty reply, as its comment says — or
+delete it.
+
+**What it breaks.** Wiring it in executes calls the model only described, which
+is the reason it should stay limited to empty replies, behind the usual gate.

@@ -18,8 +18,8 @@ import (
 type gitTool struct {
 	pol     *policy.Engine
 	ap      Approver
-	maxOut  int // per-call output cap in bytes (see OutputBudget)
-	offline bool
+	maxOut  int         // per-call output cap in bytes (see OutputBudget)
+	offline func() bool // asked on every call: see NewGitLive
 }
 
 // gitNetTimeout bounds the actions that talk to a server. The 60s a local action
@@ -32,6 +32,12 @@ const gitNetTimeout = 5 * time.Minute
 // offline is true the actions that need a server refuse, the same way the web
 // tool does.
 func NewGit(p *policy.Engine, ap Approver, ctxWindow int, offline bool) Tool {
+	return NewGitLive(p, ap, ctxWindow, func() bool { return offline })
+}
+
+// NewGitLive is NewGit with offline mode read on every networked call, for the
+// same reason as NewWebLive.
+func NewGitLive(p *policy.Engine, ap Approver, ctxWindow int, offline func() bool) Tool {
 	g := &gitTool{pol: p, ap: ap, maxOut: OutputBudget(ctxWindow), offline: offline}
 	return NewDomain(DomainSpec{
 		Name:    "git",
@@ -97,9 +103,42 @@ func repoDirFromURL(u string) string {
 	return s
 }
 
+// localGitPath reports whether a clone URL or remote argument names a path on
+// this machine rather than a server — /x, ./x, ~/x, file://x, or a bare
+// relative path with a slash and no host — so the jail applies to it.
+func localGitPath(v string) bool {
+	switch {
+	case strings.HasPrefix(v, "file:"):
+		return true
+	case strings.Contains(v, "://"):
+		return false
+	case strings.HasPrefix(v, "/"), strings.HasPrefix(v, "."), strings.HasPrefix(v, "~"), filepath.IsAbs(v):
+		return true
+	}
+	slash, colon := strings.IndexAny(v, `/\`), strings.Index(v, ":")
+	return slash >= 0 && (colon < 0 || colon > slash) // host:path (scp-style) is a server
+}
+
+// checkLocalGitPath keeps a local repository path inside the jail: cloning or
+// fetching from one outside reads files the jail exists to keep out, and
+// pushing to one writes there (found by review).
+func (g *gitTool) checkLocalGitPath(v string) error {
+	if !localGitPath(v) {
+		return nil
+	}
+	p := strings.TrimPrefix(strings.TrimPrefix(v, "file://"), "file:")
+	if _, err := g.pol.Resolve(p); err != nil {
+		return errors.New("a local repository outside the workspace isn't reachable from here: " + v)
+	}
+	return nil
+}
+
 func (g *gitTool) clone(ctx context.Context, a Args) Result {
 	url := strings.TrimSpace(a.Str("url"))
 	if err := checkRemoteURL(url); err != nil {
+		return Err(err.Error())
+	}
+	if err := g.checkLocalGitPath(url); err != nil {
 		return Err(err.Error())
 	}
 	dir := strings.TrimSpace(a.Str("dir"))
@@ -130,7 +169,10 @@ func (g *gitTool) fetch(ctx context.Context, a Args) Result {
 	if err := checkGitName("remote", remote); err != nil {
 		return Err(err.Error())
 	}
-	return g.runNet(ctx, "fetch", "fetch", "--", remote)
+	if err := g.checkLocalGitPath(remote); err != nil {
+		return Err(err.Error())
+	}
+	return g.runNetTo(ctx, "fetch", remote, "fetch", "--", remote)
 }
 
 func (g *gitTool) pull(ctx context.Context, a Args) Result {
@@ -155,7 +197,10 @@ func (g *gitTool) pull(ctx context.Context, a Args) Result {
 			args = append(args, branch)
 		}
 	}
-	return g.runNet(ctx, "pull", args...)
+	if err := g.checkLocalGitPath(remote); err != nil {
+		return Err(err.Error())
+	}
+	return g.runNetTo(ctx, "pull", remote, args...)
 }
 
 func (g *gitTool) push(ctx context.Context, a Args) Result {
@@ -171,7 +216,11 @@ func (g *gitTool) push(ctx context.Context, a Args) Result {
 		}
 	}
 	// No --force, and no way to ask for one: a force-push destroys history on a
-	// server, which is the one git mistake an approval prompt cannot undo.
+	// server, which is the one git mistake an approval prompt cannot undo. A
+	// refspec starting with "+" is a force push too.
+	if strings.HasPrefix(branch, "+") {
+		return Err("refusing a force push (a refspec starting with +): push without it, or force-push yourself")
+	}
 	args := []string{"push"}
 	if a.Bool("set_upstream") {
 		args = append(args, "--set-upstream")
@@ -182,7 +231,10 @@ func (g *gitTool) push(ctx context.Context, a Args) Result {
 			args = append(args, branch)
 		}
 	}
-	return g.runNet(ctx, "push", args...)
+	if err := g.checkLocalGitPath(remote); err != nil {
+		return Err(err.Error())
+	}
+	return g.runNetTo(ctx, "push", remote, args...)
 }
 
 // remote lists remotes, or adds one (repointing it if the name already exists).
@@ -212,7 +264,23 @@ func (g *gitTool) remote(ctx context.Context, a Args) Result {
 
 // runNet runs an action that talks to a server.
 func (g *gitTool) runNet(ctx context.Context, action string, args ...string) Result {
-	if g.offline {
+	return g.runNetTo(ctx, action, "", args...)
+}
+
+// runNetTo is runNet for an action on a named remote: the approval shows where
+// git will actually connect. A checkout's own config can rewrite a remote's
+// URL (url.<x>.insteadOf), so "push origin" alone can send to somewhere the
+// person approving never saw (found by review).
+func (g *gitTool) runNetTo(ctx context.Context, action, remote string, args ...string) Result {
+	note := ""
+	if remote != "" && !g.offline() {
+		if u := g.run(ctx, action, false, "ls-remote", "--get-url", "--", remote); !u.IsError {
+			if url := strings.TrimSpace(u.Content); url != "" && url != remote {
+				note = "   → " + url
+			}
+		}
+	}
+	if g.offline() {
 		return Err("offline mode is ON — git " + action + " needs the network. This is temporary: run /offline off when you're back online.")
 	}
 	// protocol.ext.allow=never is the second lock behind checkRemoteURL: a
@@ -227,7 +295,7 @@ func (g *gitTool) runNet(ctx context.Context, action string, args ...string) Res
 	if os.Getenv("GIT_SSH_COMMAND") == "" { // don't stomp a deliberately configured one
 		env = append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
 	}
-	return g.runWith(ctx, action, true, gitNetTimeout, env, flags, args...)
+	return g.runWith(ctx, action, true, gitNetTimeout, env, flags, note, args...)
 }
 
 func (g *gitTool) initRepo(ctx context.Context, _ Args) Result {
@@ -391,6 +459,11 @@ func (g *gitTool) show(ctx context.Context, a Args) Result {
 		if err := g.checkRevPathPolicy(ctx, path); err != nil {
 			return Err(err.Error())
 		}
+	} else if kind := g.run(ctx, "show", false, "cat-file", "-t", ref); !kind.IsError && strings.TrimSpace(kind.Content) == "blob" {
+		// A raw object ID names a file's content with no path to check: a
+		// committed .env came back whole (found by review). The <rev>:<path>
+		// form goes through the same jail and secret checks file.read applies.
+		return Err("show a file as <rev>:<path> (e.g. HEAD:main.go), not by its object ID — the path is what the jail and secret checks need")
 	}
 	return g.run(ctx, "show", false, "show", "--stat", ref)
 }
@@ -448,7 +521,17 @@ func (g *gitTool) add(ctx context.Context, a Args) Result {
 	// them. --dry-run prints exactly the paths the real add would take, the same
 	// enumerate-then-check shape diff already uses.
 	dry := append([]string{"add", "--dry-run", "--ignore-missing", "--"}, paths...)
-	if listed := g.run(ctx, "add", false, dry...); !listed.IsError {
+	listed := g.run(ctx, "add", false, dry...)
+	// Fail closed. The list comes through the same output cap the model sees,
+	// and a list cut short was checked only up to the cut — the rest was then
+	// staged unchecked (found by review). A dry-run that errors checked nothing.
+	if listed.IsError {
+		return Err("could not check what would be staged, so nothing was: " + listed.Content)
+	}
+	if strings.HasSuffix(listed.Content, "…[truncated]") {
+		return Err("too many files to check for secrets in one go — add them in smaller groups (a directory or a few paths at a time)")
+	}
+	{
 		var blocked []string
 		for _, line := range strings.Split(listed.Content, "\n") {
 			name, ok := addedPath(line)
@@ -514,15 +597,15 @@ func (g *gitTool) checkout(ctx context.Context, a Args) Result {
 }
 
 func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ...string) Result {
-	return g.runWith(ctx, action, mutating, defaultRunTimeout, nil, nil, args...)
+	return g.runWith(ctx, action, mutating, defaultRunTimeout, nil, nil, "", args...)
 }
 
 // runWith is run with the knobs the networked actions need: a longer timeout,
 // extra environment, and extra global "-c" flags. The flags are deliberately not
 // part of the approval text — what the user is asked to approve is the command
 // they would have typed, not our hardening.
-func (g *gitTool) runWith(ctx context.Context, action string, mutating bool, timeout time.Duration, extraEnv, gitFlags []string, args ...string) Result {
-	if mutating && !g.ap.Approve(ctx, "git", "git "+strings.Join(args, " ")) {
+func (g *gitTool) runWith(ctx context.Context, action string, mutating bool, timeout time.Duration, extraEnv, gitFlags []string, note string, args ...string) Result {
+	if mutating && !g.ap.Approve(ctx, "git", "git "+strings.Join(args, " ")+note) {
 		return Err("git " + action + " denied by user")
 	}
 	dir, err := g.pol.Resolve(".")

@@ -519,6 +519,10 @@ type app struct {
 	telemetryCtx    context.Context
 	telemetryWorker sync.Once
 	telemetryWG     sync.WaitGroup // the sender, while it runs
+	// offlineNow mirrors a.cfg.Offline for tools built once and used later
+	// on other goroutines — a background sub-agent's web and git. wire() sets
+	// it; they read it on every call (tool.NewWebLive / NewGitLive).
+	offlineNow atomic.Bool
 }
 
 func build(workspace, sessionName string, overrides []string, reader *bufio.Reader) (*app, func(), error) {
@@ -1028,7 +1032,7 @@ func (a *app) buildSubReg(pol *policy.Engine, root string) *tool.Registry {
 	if a.cfg.Spawn.Exec {
 		tools = append(tools, tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, a.sandboxWrapperFor(root)))
 	}
-	tools = append(tools, tool.NewGit(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.cfg.Offline), tool.NewWeb(nil, a.cfg.Offline), tool.NewCalc(), tool.NewDone())
+	tools = append(tools, tool.NewGitLive(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.offlineNow.Load), tool.NewWebLive(nil, a.offlineNow.Load), tool.NewCalc(), tool.NewDone())
 	if a.skills != nil && a.skills.HasEnabled() {
 		tools = append(tools, tool.NewSkill(a.skills))
 	}
@@ -2609,6 +2613,27 @@ func (a *app) mcpSchema(ctx context.Context, server, tool string) string {
 	return fmt.Sprintf("no tool %q on %q", tool, server)
 }
 
+// mcpCallDetail is what an MCP call's approval shows: the server, the tool and
+// its arguments — all of them, up to a generous cap, with how much was left
+// out said plainly. Sixty characters and a silent cut showed a benign prefix
+// while "…; curl evil" sat in the tail (found by review).
+func mcpCallDetail(server, tool string, args map[string]any) string {
+	detail := server + "." + tool
+	if len(args) == 0 {
+		return detail
+	}
+	b, err := json.Marshal(args)
+	if err != nil {
+		return detail
+	}
+	const max = 2000
+	s := strings.Join(strings.Fields(string(b)), " ")
+	if r := []rune(s); len(r) > max {
+		s = string(r[:max]) + fmt.Sprintf(" …(+%d more characters not shown)", len(r)-max)
+	}
+	return detail + " " + s
+}
+
 // mcpCall runs an MCP tool, asking approval first (it's external code that can do
 // anything).
 func (a *app) mcpCall(ctx context.Context, server, tool string, args map[string]any) (string, error) {
@@ -2616,13 +2641,7 @@ func (a *app) mcpCall(ctx context.Context, server, tool string, args map[string]
 	if err != nil {
 		return "", err
 	}
-	detail := server + "." + tool
-	if len(args) > 0 {
-		if b, e := json.Marshal(args); e == nil {
-			detail += " " + oneLine(string(b), 60)
-		}
-	}
-	approved := a.approveGated(ctx, "mcp call", detail)
+	approved := a.approveGated(ctx, "mcp call", mcpCallDetail(server, tool, args))
 	if !approved {
 		return "", fmt.Errorf("mcp call denied by user")
 	}
@@ -2779,6 +2798,7 @@ func (a *app) sandboxWrapperFor(root string) tool.CmdWrapper {
 }
 
 func (a *app) wire() error {
+	a.offlineNow.Store(a.cfg.Offline)
 	pol, err := policy.New(a.cfg)
 	if err != nil {
 		return fmt.Errorf("policy: %w", err)
@@ -2791,8 +2811,8 @@ func (a *app) wire() error {
 	tools := []tool.Tool{
 		tool.NewFile(pol, gatedApprover{a}, a.snapFile),
 		tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, a.sandboxWrapper()),
-		tool.NewGit(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.cfg.Offline),
-		tool.NewWeb(nil, a.cfg.Offline), // nil → NewWeb's own 30s-timeout client; task ctx has no deadline of its own
+		tool.NewGitLive(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.offlineNow.Load),
+		tool.NewWebLive(nil, a.offlineNow.Load), // nil → its own 30s-timeout client; task ctx has no deadline of its own
 		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),
 		tool.NewCalc(),
 		tool.NewDone(),

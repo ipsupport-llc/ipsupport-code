@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -641,11 +642,14 @@ func TestCloneRejectsRemoteHelperURLs(t *testing.T) {
 // Cloned from a LOCAL repo on purpose: an unreachable URL fails on its own and
 // would let this pass with no jail at all.
 func TestCloneDestinationStaysInTheWorkspace(t *testing.T) {
-	src := initRepo(t)
-	if out, err := exec.Command("git", "-C", src, "commit", "--allow-empty", "-m", "seed").CombinedOutput(); err != nil {
+	ws := t.TempDir()
+	src := filepath.Join(ws, "src") // the source inside the jail: a local path outside it is refused on its own
+	if out, err := exec.Command("git", "init", "-q", src).CombinedOutput(); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", src, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-m", "seed").CombinedOutput(); err != nil {
 		t.Fatalf("seed commit: %v\n%s", err, out)
 	}
-	ws := t.TempDir()
 	tl := gitToolFor(t, ws, yes())
 	ctx := context.Background()
 
@@ -801,5 +805,104 @@ func TestAddRefusesToStageSecrets(t *testing.T) {
 	// An ordinary file still stages fine.
 	if r := tl.Call(ctx, "add", map[string]any{"paths": "main.go"}); r.IsError {
 		t.Errorf("add main.go: %s", r.Content)
+	}
+}
+
+// git add checks what --dry-run says it would stage — but read through the
+// same output cap the model sees. A long enough list was cut before the
+// secret, and the unchecked rest was staged anyway (found by review, both
+// reviewers). A list too long to check, or a dry-run that fails, refuses.
+func TestGitAddRefusesWhatItCouldNotCheck(t *testing.T) {
+	dir := initRepo(t)
+	for i := 0; i < 600; i++ {
+		os.WriteFile(filepath.Join(dir, fmt.Sprintf("a%04d.txt", i)), []byte("x"), 0o644)
+	}
+	os.WriteFile(filepath.Join(dir, "zz-secret.txt"), []byte("API_KEY=hunter2"), 0o644)
+	c := config.Default()
+	c.Workspace = dir
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	e, err := policy.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tl := NewGit(e, yes(), 1000, false) // a small window: the 4 KB output floor
+	r := tl.Call(context.Background(), "add", map[string]any{"paths": "."})
+	out, _ := exec.Command("git", "-C", dir, "diff", "--cached", "--name-only").CombinedOutput()
+	if strings.Contains(string(out), "zz-secret.txt") {
+		t.Fatalf("the secret was staged past a truncated check (result: %s)", r.Content)
+	}
+	if !r.IsError {
+		t.Errorf("add should refuse a list it couldn't check whole: %s", r.Content)
+	}
+}
+
+// push promises no force — but a "+" refspec is a force push, and only a
+// leading dash and "::" were refused (found by review).
+func TestGitPushRefusesAForceRefspec(t *testing.T) {
+	dir := initRepo(t)
+	tl := gitToolFor(t, dir, yes())
+	r := tl.Call(context.Background(), "push", map[string]any{"remote": "origin", "branch": "+HEAD:refs/heads/main"})
+	if !r.IsError || !strings.Contains(r.Content, "force") {
+		t.Errorf("a + refspec was not refused as a force push: %+v", r)
+	}
+}
+
+// show by raw object ID reads a blob with no path to check: a committed .env
+// came back whole (found by review). A blob must be named <rev>:<path>.
+func TestGitShowRefusesARawBlob(t *testing.T) {
+	dir := initRepo(t)
+	os.WriteFile(filepath.Join(dir, ".env"), []byte("API_KEY=hunter2"), 0o644)
+	exec.Command("git", "-C", dir, "add", "-f", ".env").Run()
+	exec.Command("git", "-C", dir, "commit", "-qm", "env").Run()
+	id, _ := exec.Command("git", "-C", dir, "rev-parse", "HEAD:.env").Output()
+	tl := gitToolFor(t, dir, yes())
+	r := tl.Call(context.Background(), "show", map[string]any{"ref": strings.TrimSpace(string(id))})
+	if !r.IsError || strings.Contains(r.Content, "hunter2") {
+		t.Errorf("show <blob id> = %+v, want refused", r)
+	}
+	if r := tl.Call(context.Background(), "show", map[string]any{"ref": "HEAD"}); r.IsError {
+		t.Errorf("show HEAD broke: %s", r.Content)
+	}
+}
+
+// A local path is a repository on this machine: cloning or fetching from one
+// outside the workspace read files the jail keeps out, and pushing to one
+// wrote there (found by review). Servers and remote names are unaffected.
+func TestGitLocalPathsStayInTheJail(t *testing.T) {
+	outside := initRepo(t)
+	exec.Command("git", "-C", outside, "commit", "--allow-empty", "-m", "seed").Run()
+	ws := initRepo(t)
+	tl := gitToolFor(t, ws, yes())
+	ctx := context.Background()
+	for action, args := range map[string]map[string]any{
+		"clone": {"url": outside, "dir": "copy"},
+		"fetch": {"remote": outside},
+		"push":  {"remote": "file://" + outside},
+	} {
+		if r := tl.Call(ctx, action, args); !r.IsError || !strings.Contains(r.Content, "outside the workspace") {
+			t.Errorf("%s from a local path outside the jail: %+v", action, r)
+		}
+	}
+	for v, local := range map[string]bool{
+		"origin": false, "https://github.com/o/r.git": false, "git@github.com:o/r.git": false,
+		"/srv/repo": true, "./sub": true, "~/r": true, "file:///srv/r": true, "sub/repo": true,
+	} {
+		if localGitPath(v) != local {
+			t.Errorf("localGitPath(%q) = %v", v, !local)
+		}
+	}
+}
+
+// A checkout's config can rewrite a remote's URL (insteadOf). The approval
+// shows where git will really connect, not just the remote's name.
+func TestGitPushApprovalShowsTheRealURL(t *testing.T) {
+	dir := initRepo(t)
+	exec.Command("git", "-C", dir, "remote", "add", "origin", "https://github.com/example/r.git").Run()
+	exec.Command("git", "-C", dir, "config", "url.https://evil.example/.insteadOf", "https://github.com/example/").Run()
+	var detail string
+	ap := approverFunc(func(_, d string) bool { detail = d; return false })
+	gitToolFor(t, dir, ap).Call(context.Background(), "push", map[string]any{"remote": "origin"})
+	if !strings.Contains(detail, "evil.example") {
+		t.Errorf("approval hid the rewritten URL: %q", detail)
 	}
 }

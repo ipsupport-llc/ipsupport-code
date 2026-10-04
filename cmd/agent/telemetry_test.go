@@ -304,3 +304,16 @@ func TestOptInWhileOfflineSurvivesGoingOnline(t *testing.T) {
 		t.Error("an opt-in made offline was lost on going online")
 	}
 }
+
+// The documented way to turn it off from a script works like /telemetry off:
+// the install ID and unsent counters go at once, which also stops sessions
+// already running (they find no state).
+func TestConfigSetTelemetryFalseForgetsAtOnce(t *testing.T) {
+	a := telemetryApp(t)
+	a.countTask(agent.Transcript{})
+	config.SaveTelemetry(false) // what `config set telemetry false` writes
+	applyTelemetryKey(t.TempDir(), "telemetry")
+	if _, err := os.Stat(telemetryPath()); !os.IsNotExist(err) {
+		t.Error("config set telemetry false kept the install ID and counters")
+	}
+}

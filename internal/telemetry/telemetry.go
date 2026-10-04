@@ -248,6 +248,9 @@ type SendOptions struct {
 	Now      func() time.Time
 	// UserAgent identifies the program, not the system.
 	UserAgent string
+	// Keep, when set, is asked before each day is posted; false stops the
+	// round (the session went offline or turned reporting off mid-batch).
+	Keep func() bool
 }
 
 // SendResult says what one Send did.
@@ -305,6 +308,15 @@ func Send(ctx context.Context, o SendOptions) (SendResult, error) {
 	done := map[string]bool{}
 	next := time.Time{}
 	for _, day := range due {
+		// Consent is checked again before every day, not once per round: the
+		// session may have gone offline, or the user turned reporting off —
+		// here or in another session, which deletes the state.
+		if o.Keep != nil && !o.Keep() {
+			return res, nil
+		}
+		if cur, err := Load(o.Path); err != nil || cur.InstallID != s.InstallID {
+			return res, nil
+		}
 		code, wait, err := post(ctx, o, BuildReport(s, day, o.Version, o.Info))
 		switch {
 		case err != nil || code == http.StatusRequestTimeout || code >= 500:

@@ -236,3 +236,34 @@ func TestGBSnapsToShippedSizes(t *testing.T) {
 		}
 	}
 }
+
+// Turning reporting off while a batch is going out stops the rest of it —
+// whether the session closed its gate or another session deleted the state.
+func TestAnOptOutMidBatchStopsTheRest(t *testing.T) {
+	for _, how := range []string{"gate", "state deleted"} {
+		t.Run(how, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "telemetry.json")
+			Enable(path)
+			for _, d := range []string{"2026-10-01", "2026-10-02", "2026-10-03"} {
+				Record(path, d, Counts{})
+			}
+			open := true
+			srv := &server{status: func(string) (int, string) {
+				if how == "gate" {
+					open = false
+				} else {
+					Disable(path)
+				}
+				return http.StatusNoContent, ""
+			}}
+			ts := httptest.NewServer(http.HandlerFunc(srv.handler))
+			defer ts.Close()
+			Send(context.Background(), SendOptions{Path: path, Endpoint: ts.URL, Version: "v0.61.0",
+				Now:  func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local) },
+				Keep: func() bool { return open }})
+			if len(srv.reports) != 1 {
+				t.Errorf("sent %d report(s) after the opt-out, want just the one in flight", len(srv.reports))
+			}
+		})
+	}
+}

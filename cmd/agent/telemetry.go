@@ -61,6 +61,26 @@ func settleTelemetryDefault(existed bool) {
 	}
 }
 
+// applyTelemetryKey makes `config set|unset telemetry` take effect at once:
+// when the setting is now off, the install ID and every unsent counter are
+// deleted, exactly as /telemetry off does. That is also what stops sessions
+// already running — with the state gone they record and send nothing (see
+// refreshTelemetry and telemetry.Send).
+func applyTelemetryKey(workspace, key string) {
+	if key != "telemetry" {
+		return
+	}
+	cfg, err := config.Load(workspace)
+	if err != nil || (cfg.Telemetry != nil && *cfg.Telemetry) {
+		return
+	}
+	if _, err := os.Stat(telemetryPath()); err == nil {
+		if err := telemetry.Disable(telemetryPath()); err == nil {
+			fmt.Println("usage statistics off — the install ID and every unsent counter are deleted")
+		}
+	}
+}
+
 // telemetryStatus says whether reports are recorded and sent, and if not, why.
 func (a *app) telemetryStatus() (enabled, active bool, why string) {
 	enabled = a.cfg.Telemetry != nil && *a.cfg.Telemetry
@@ -162,6 +182,7 @@ func (a *app) sendTelemetry(ctx context.Context) {
 	res, err := telemetry.Send(ctx, telemetry.SendOptions{
 		Path: telemetryPath(), Endpoint: base + "/telemetry", Version: version,
 		Info: telemetry.CollectInfo(), UserAgent: userAgent(),
+		Keep: a.telemetryOn.Load, // /telemetry off or /offline on mid-batch stops the rest
 	})
 	if err != nil || res.Sent > 0 || res.Dropped > 0 || res.Deferred {
 		slog.Debug("telemetry send", "sent", res.Sent, "dropped", res.Dropped, "deferred", res.Deferred, "err", err)

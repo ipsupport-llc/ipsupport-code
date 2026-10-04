@@ -99,27 +99,43 @@ func (a *app) startTelemetry(ctx context.Context) {
 		}
 	}
 	a.telemetryCtx = ctx
-	a.refreshTelemetry()
+	a.applyTelemetry(true)
 }
 
-// refreshTelemetry re-reads the setting after anything that may change it —
-// launch, wire() (offline mode, a new config), /telemetry — and starts the
-// sender the first time reporting is live. Runs on the goroutine that owns
-// a.cfg; everything else reads only telemetryOn.
-func (a *app) refreshTelemetry() {
+// refreshTelemetry re-reads the setting after anything that may have changed
+// it under this session — wire() runs on /offline, /login, a model switch —
+// without ever creating the state. Another session's /telemetry off deletes
+// the shared state and saves the opt-out; this session's a.cfg still says on,
+// and recreating the install ID here would resume reporting without consent.
+func (a *app) refreshTelemetry() { a.applyTelemetry(false) }
+
+// applyTelemetry sets the gate and starts the sender the first time reporting
+// is live. create is for the two points that may (re)create the state: launch,
+// from the config just read from disk, and an explicit /telemetry on. Runs on
+// the goroutine that owns a.cfg; everything else reads only telemetryOn.
+func (a *app) applyTelemetry(create bool) {
 	_, active, _ := a.telemetryStatus()
-	a.telemetryOn.Store(active)
 	if !active || a.telemetryCtx == nil {
+		a.telemetryOn.Store(active)
 		return
 	}
-	if err := telemetry.Enable(telemetryPath()); err != nil {
-		slog.Debug("telemetry state", "err", err)
+	if create {
+		if err := telemetry.Enable(telemetryPath()); err != nil {
+			slog.Debug("telemetry state", "err", err)
+			a.telemetryOn.Store(false)
+			return
+		}
+	} else if s, err := telemetry.Load(telemetryPath()); err != nil || s.InstallID == "" {
+		a.telemetryOn.Store(false) // turned off elsewhere: stay off until a launch or /telemetry on
 		return
 	}
+	a.telemetryOn.Store(true)
 	a.recordTelemetry(telemetry.Counts{}) // a day the program ran on is reported
 	ctx := a.telemetryCtx
 	a.telemetryWorker.Do(func() {
+		a.telemetryWG.Add(1)
 		go func() {
+			defer a.telemetryWG.Done()
 			t := time.NewTicker(3 * time.Hour)
 			defer t.Stop()
 			for {
@@ -206,7 +222,7 @@ func (a *app) telemetryCommand(rest string) []string {
 		}
 		t := true
 		a.cfg.Telemetry = &t
-		a.refreshTelemetry() // starts the sender if this session hadn't
+		a.applyTelemetry(true) // an explicit opt-in: (re)create the state, start the sender if this session hadn't
 		if _, active, _ := a.telemetryStatus(); active && a.telemetryCtx == nil {
 			_ = telemetry.Enable(path)
 		}

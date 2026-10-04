@@ -513,6 +513,7 @@ type app struct {
 	// create one). telemetryWorker starts the sender at most once.
 	telemetryCtx    context.Context
 	telemetryWorker sync.Once
+	telemetryWG     sync.WaitGroup // the sender, while it runs
 }
 
 func build(workspace, sessionName string, overrides []string, reader *bufio.Reader) (*app, func(), error) {

@@ -262,4 +262,26 @@ func TestTurningOnMidSessionStartsTheSender(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("turning it on mid-session never started the sender")
 	}
+	cancel()
+	a.telemetryWG.Wait() // the sender finishes its write before the temp dir goes
+}
+
+// Another session's /telemetry off deletes the shared state and saves the
+// opt-out. This session still has telemetry on in memory; a re-wire here (a
+// model switch) must not recreate the install ID and resume reporting.
+func TestRewireDoesNotUndoAnotherSessionsOptOut(t *testing.T) {
+	a := telemetryApp(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	a.startTelemetry(ctx)
+	defer func() { cancel(); a.telemetryWG.Wait() }()
+
+	telemetry.Disable(telemetryPath()) // what the OTHER session's /telemetry off did
+	config.SaveTelemetry(false)
+	a.refreshTelemetry() // this session's wire()
+	if s, _ := telemetry.Load(telemetryPath()); s.InstallID != "" {
+		t.Fatal("a re-wire recreated the install ID the user deleted")
+	}
+	if a.telemetryOn.Load() {
+		t.Error("the gate stayed open with no state")
+	}
 }

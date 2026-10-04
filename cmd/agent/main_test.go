@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -9934,5 +9935,31 @@ func TestMCPApprovalShowsTheArguments(t *testing.T) {
 	long := map[string]any{"blob": strings.Repeat("y", 5000)}
 	if d := mcpCallDetail("srv", "put", long); !strings.Contains(d, "more characters not shown") {
 		t.Errorf("a cut was not marked: %d chars", len(d))
+	}
+}
+
+// update6's client dials IPv6 only: it reaches a server on [::1] and never
+// falls back to one on 127.0.0.1.
+func TestIPv6ClientDialsOnlyIPv6(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {})
+	l6, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skip("no IPv6 loopback:", err)
+	}
+	s6 := &httptest.Server{Listener: l6, Config: &http.Server{Handler: ok}}
+	s6.Start()
+	defer s6.Close()
+	s4 := httptest.NewServer(ok)
+	defer s4.Close()
+
+	c := ipv6Client()
+	if resp, err := c.Get(s6.URL); err != nil {
+		t.Fatalf("IPv6 server: %v", err)
+	} else {
+		resp.Body.Close()
+	}
+	if resp, err := c.Get(s4.URL); err == nil {
+		resp.Body.Close()
+		t.Fatal("reached an IPv4-only server")
 	}
 }

@@ -332,9 +332,13 @@ func runUpdate(args []string, client *http.Client) {
 	if len(args) >= 1 {
 		switch arg := strings.TrimLeft(args[0], "-"); arg { // --nightly reads as naturally as nightly
 		case selfupdate.Stable, selfupdate.Nightly:
-			channel = arg
-			if err := config.SaveChannel(channel); err != nil {
-				fmt.Fprintln(os.Stderr, "warning: channel not saved:", err)
+			if arg != channel {
+				channel = arg
+				if err := config.SaveChannel(channel); err != nil {
+					fmt.Fprintln(os.Stderr, "warning: channel not saved:", err)
+				} else {
+					fmt.Printf("channel set to %s\n", channel)
+				}
 			}
 		default:
 			fmt.Fprintf(os.Stderr, "unknown channel %q — use 'stable' or 'nightly'\n", args[0])

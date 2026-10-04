@@ -89,6 +89,15 @@ func (d *Domain) Mutates(action string) bool {
 	if a, ok := d.index[action]; ok {
 		return a.Mutates
 	}
+	// A missing or garbled action is not "no mutation": Dispatch infers the
+	// action from the params and runs it (run with only "command" runs shell).
+	// So an action this domain doesn't recognize mutates if any of its actions
+	// can — plan mode's gate and the sequential-batch check both rely on this.
+	for _, a := range d.spec.Actions {
+		if a.Mutates {
+			return true
+		}
+	}
 	return false
 }
 

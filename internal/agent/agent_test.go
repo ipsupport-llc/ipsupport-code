@@ -4152,3 +4152,32 @@ func TestToolUsesCountsOnlyThisRun(t *testing.T) {
 		t.Errorf("ToolUses = %v, want this run's one file call", tr.ToolUses)
 	}
 }
+
+// Plan mode's gate asked "does this action mutate?" of the action as the
+// model wrote it — and a missing or garbled action is not a known mutating
+// one, while Dispatch then infers it and runs it anyway: run with only a
+// "command" param executed a shell command in plan mode (found by review).
+func TestPlanModeGateSeesThroughAMissingAction(t *testing.T) {
+	ran := false
+	shell := tool.NewDomain(tool.DomainSpec{
+		Name: "run", Summary: "shell",
+		Actions: []tool.Action{{Name: "shell", Mutates: true, Params: []tool.Param{tool.Req("command", "str")},
+			Run: func(context.Context, tool.Args) tool.Result { ran = true; return tool.Ok("ran") }}},
+	})
+	for _, args := range []string{
+		`{"params":{"command":"touch created.txt"}}`,                // no action at all
+		`{"action":"<|shell|>","params":{"command":"touch x.txt"}}`, // garbled
+	} {
+		ran = false
+		fake := &scriptLLM{replies: []llm.Message{
+			toolCallReply("c1", "run", args),
+			{Role: "assistant", Content: "plan"},
+		}}
+		a := New(fake, tool.NewRegistry(shell), nil, nil, "", 5)
+		a.SetPlanMode(true)
+		a.Run(context.Background(), "make a file")
+		if ran {
+			t.Errorf("plan mode ran a shell command for %s", args)
+		}
+	}
+}

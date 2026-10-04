@@ -107,6 +107,7 @@ type Tuned struct {
 	base    *Model
 	fp      [8]byte // base.Fingerprint(), computed once
 	d       *Delta
+	synced  []map[uint32]float32 // the rows as last read from or written to disk
 	changed bool
 }
 
@@ -118,7 +119,18 @@ func NewTuned(base *Model, d *Delta) *Tuned {
 	if d == nil || len(d.Rows) != len(base.Labels) {
 		d = &Delta{Labels: base.Labels, Rows: make([]map[uint32]float32, len(base.Labels))}
 	}
-	return &Tuned{base: base, fp: base.Fingerprint(), d: d}
+	return &Tuned{base: base, fp: base.Fingerprint(), d: d, synced: cloneRows(d.Rows)}
+}
+
+func cloneRows(rows []map[uint32]float32) []map[uint32]float32 {
+	out := make([]map[uint32]float32, len(rows))
+	for i, r := range rows {
+		out[i] = make(map[uint32]float32, len(r))
+		for k, v := range r {
+			out[i][k] = v
+		}
+	}
+	return out
 }
 
 // Fingerprint identifies a model's exact contents — header, labels and every
@@ -277,19 +289,26 @@ func (t *Tuned) labelIndex(label string) int {
 // because the scorer is shared: other goroutines may be scoring a call right
 // now, and swapping the whole thing out from under them is a data race.
 //
-// The file goes under the same lock SaveDelta writes it under. Removing it
-// outside (as /risk reset used to) raced a save already in flight — learned
+// The file goes under the same locks SaveDelta writes it under — the in-process
+// one and the file lock another session on this workspace saves under. Removing
+// it outside (as /risk reset used to) raced a save already in flight — learned
 // just before the reset, written just after the remove — and the corrections
 // the user had just cleared came back on the next start.
 func (t *Tuned) Reset(path string) error {
 	if t == nil {
 		return nil
 	}
+	unlock, err := filelock.Lock(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for i := range t.d.Rows {
 		t.d.Rows[i] = nil
 	}
+	t.synced = cloneRows(t.d.Rows)
 	t.changed = false
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return err
@@ -322,14 +341,47 @@ var (
 )
 
 // SaveDelta writes the corrections, if any changed since they were loaded.
+//
+// Another session on the same workspace may have saved since this one last
+// read the file, or reset it. So the save is a merge under a file lock: what is
+// on disk now, plus what THIS session learned since it last synced. Writing the
+// in-memory rows wholesale lost the other session's corrections, and brought
+// back the ones a reset in the other session had cleared.
 func (t *Tuned) SaveDelta(path string) error {
 	if t == nil {
 		return nil
 	}
+	unlock, err := filelock.Lock(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if !t.changed {
 		return nil
+	}
+	rows := make([]map[uint32]float32, len(t.d.Rows))
+	if disk, err := LoadDelta(path, t.base); err == nil {
+		rows = disk.Rows // missing, or refused for another model: this session's learning alone
+	}
+	for i, r := range t.d.Rows {
+		if rows[i] == nil {
+			rows[i] = map[uint32]float32{}
+		}
+		for idx, v := range r {
+			rows[i][idx] += v - t.synced[i][idx]
+		}
+		for idx, v := range t.synced[i] {
+			if _, ok := r[idx]; !ok {
+				rows[i][idx] -= v // pruned here since the last sync
+			}
+		}
+		for idx, v := range rows[i] {
+			if v > -pruneBelow && v < pruneBelow {
+				delete(rows[i], idx)
+			}
+		}
 	}
 	var buf []byte
 	buf = append(buf, deltaMagic[:]...)
@@ -348,7 +400,7 @@ func (t *Tuned) SaveDelta(path string) error {
 		buf = binary.LittleEndian.AppendUint16(buf, uint16(len(l)))
 		buf = append(buf, l...)
 	}
-	for _, r := range t.d.Rows {
+	for _, r := range rows {
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(len(r)))
 		idxs := make([]uint32, 0, len(r))
 		for i := range r {
@@ -363,6 +415,7 @@ func (t *Tuned) SaveDelta(path string) error {
 	if err := atomicfile.Write(path, buf, 0o644); err != nil {
 		return err
 	}
+	t.d.Rows, t.synced = rows, cloneRows(rows)
 	t.changed = false
 	return nil
 }
@@ -497,11 +550,14 @@ func AppendFeedback(path string, c Correction) error {
 	if unlock, err := filelock.Lock(path); err == nil {
 		defer unlock()
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// Private: a row holds the call's full arguments, secrets included. Chmod
+	// too, for a log an older build created world-readable.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	_ = f.Chmod(0o600)
 	if _, err := f.Write(append(data, '\n')); err != nil {
 		return err
 	}

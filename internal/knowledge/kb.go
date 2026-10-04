@@ -38,16 +38,20 @@ type KB struct {
 	mu       sync.Mutex
 	path     string
 	pitfalls []Pitfall
-	// pending is the raw log of Add() calls not yet folded into the on-disk
-	// file — Save replays them (via mergeOne, same as Add itself) onto a
-	// freshly re-read copy of the file instead of blindly overwriting it, so a
-	// separate ipsupport-code process sharing the same store can't have its
-	// lessons silently lost. overwrite (set by Purge/Clear) skips that merge:
-	// those are a deliberate replace of the whole store, not a delta.
-	pending   []Pitfall
-	overwrite bool
-	now       func() time.Time // overridable clock for tests
+	// pending is the log of every change not yet on disk — adds, retrieval
+	// bumps, deletes, purges — each as the edit it made to pitfalls. Save
+	// replays them, in order, onto a freshly re-read copy of the file instead
+	// of writing pitfalls over it, so a separate ipsupport-code process sharing
+	// the store can't have its lessons silently lost — not to an Add, and not
+	// to a Purge or Delete either, which used to replace the whole file with
+	// this process's stale snapshot.
+	pending []kbOp
+	now     func() time.Time // overridable clock for tests
 }
+
+// kbOp is one change to a list of lessons, applied once to the in-memory list
+// when it happens and again to the fresh on-disk list at Save.
+type kbOp func(list *[]Pitfall)
 
 // Open loads the store at path. A missing file is an empty store, not an error.
 func Open(path string) (*KB, error) {
@@ -66,15 +70,44 @@ func Open(path string) (*KB, error) {
 	// Back-fill timestamps on pre-dated entries so age-based pruning has a baseline
 	// (they start aging from now). Persisted on the next Save.
 	today := kb.today()
-	for i := range kb.pitfalls {
-		if kb.pitfalls[i].LastSeen == "" {
-			kb.pitfalls[i].LastSeen = today
-		}
-		if kb.pitfalls[i].Added == "" {
-			kb.pitfalls[i].Added = today
+	for _, p := range kb.pitfalls {
+		if p.LastSeen == "" || p.Added == "" {
+			kb.apply(func(list *[]Pitfall) {
+				for i := range *list {
+					if (*list)[i].LastSeen == "" {
+						(*list)[i].LastSeen = today
+					}
+					if (*list)[i].Added == "" {
+						(*list)[i].Added = today
+					}
+				}
+			})
+			break
 		}
 	}
 	return kb, nil
+}
+
+// apply makes a change now and records it for Save to replay. Callers hold mu
+// (Open's caller has the only reference).
+func (k *KB) apply(op kbOp) {
+	op(&k.pitfalls)
+	k.pending = append(k.pending, op)
+}
+
+// removeWhere drops every lesson drop reports true for, returning how many.
+func removeWhere(list *[]Pitfall, drop func(Pitfall) bool) int {
+	kept := (*list)[:0]
+	n := 0
+	for _, p := range *list {
+		if drop(p) {
+			n++
+			continue
+		}
+		kept = append(kept, p)
+	}
+	*list = kept
+	return n
 }
 
 func (k *KB) today() string {
@@ -91,8 +124,10 @@ func (k *KB) Add(p Pitfall) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	today := k.today()
-	isNew := mergeOne(&k.pitfalls, p, today)
-	k.pending = append(k.pending, p) // replayed onto fresh on-disk state at Save
+	isNew := false
+	k.apply(func(list *[]Pitfall) {
+		isNew = mergeOne(list, p, today) // isNew is read only from the first, in-memory, run
+	})
 	return isNew
 }
 
@@ -144,26 +179,16 @@ func (k *KB) Purge(maxAgeDays int) int {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	cutoff := k.now().AddDate(0, 0, -maxAgeDays)
-	kept := k.pitfalls[:0]
-	dropped := 0
-	for _, p := range k.pitfalls {
+	stale := func(p Pitfall) bool {
 		t, err := time.Parse(dateFmt, p.LastSeen)
-		if err == nil && t.Before(cutoff) {
-			dropped++
-			continue
-		}
-		kept = append(kept, p)
+		return err == nil && t.Before(cutoff)
 	}
-	k.pitfalls = kept
+	// Recorded only when it removed something, so a no-op purge leaves Save
+	// with nothing to write. On replay it removes only what is stale on disk:
+	// a lesson another session saved since is fresh, and stays.
+	dropped := removeWhere(&k.pitfalls, stale)
 	if dropped > 0 {
-		// A deliberate replace: clear pending too, since k.pitfalls above already
-		// reflects every pending lesson (Add keeps them in lockstep) and
-		// overwrite makes Save write k.pitfalls directly. On a no-op purge,
-		// leave pending alone — otherwise an earlier Add's not-yet-saved lesson
-		// would be wiped here with neither overwrite nor pending left to tell
-		// Save there's anything of ours to persist, silently losing it.
-		k.pending = nil
-		k.overwrite = true
+		k.pending = append(k.pending, func(list *[]Pitfall) { removeWhere(list, stale) })
 	}
 	return dropped
 }
@@ -173,9 +198,7 @@ func (k *KB) Clear() int {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	n := len(k.pitfalls)
-	k.pitfalls = nil
-	k.pending = nil
-	k.overwrite = true
+	k.apply(func(list *[]Pitfall) { *list = nil })
 	return n
 }
 
@@ -201,18 +224,12 @@ func (k *KB) Delete(p Pitfall) bool {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	key := dedupeKey(p)
-	for i := range k.pitfalls {
-		if dedupeKey(k.pitfalls[i]) == key {
-			k.pitfalls = append(k.pitfalls[:i], k.pitfalls[i+1:]...)
-			// Same reasoning as Purge: k.pitfalls already reflects every pending
-			// Add, so replace the file wholesale rather than replaying pending
-			// lessons — which would resurrect the one just deleted.
-			k.pending = nil
-			k.overwrite = true
-			return true
-		}
+	match := func(q Pitfall) bool { return dedupeKey(q) == key }
+	if removeWhere(&k.pitfalls, match) == 0 {
+		return false
 	}
-	return false
+	k.pending = append(k.pending, func(list *[]Pitfall) { removeWhere(list, match) })
+	return true
 }
 
 // DropWhere removes every lesson for which drop reports true, returning how many
@@ -221,19 +238,9 @@ func (k *KB) Delete(p Pitfall) bool {
 func (k *KB) DropWhere(drop func(Pitfall) bool) int {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	kept := k.pitfalls[:0]
-	dropped := 0
-	for _, p := range k.pitfalls {
-		if drop(p) {
-			dropped++
-			continue
-		}
-		kept = append(kept, p)
-	}
-	k.pitfalls = kept
+	dropped := removeWhere(&k.pitfalls, drop)
 	if dropped > 0 {
-		k.pending = nil
-		k.overwrite = true
+		k.pending = append(k.pending, func(list *[]Pitfall) { removeWhere(list, drop) })
 	}
 	return dropped
 }
@@ -254,14 +261,16 @@ func (k *KB) DropWhere(drop func(Pitfall) bool) int {
 func (k *KB) MarkUsed(p Pitfall) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	key := dedupeKey(p)
-	for i := range k.pitfalls {
-		if dedupeKey(k.pitfalls[i]) == key {
-			k.pitfalls[i].Hits++
-			k.pitfalls[i].LastSeen = k.today()
-			return
+	key, today := dedupeKey(p), k.today()
+	k.apply(func(list *[]Pitfall) {
+		for i := range *list {
+			if dedupeKey((*list)[i]) == key {
+				(*list)[i].Hits++
+				(*list)[i].LastSeen = today
+				return
+			}
 		}
-	}
+	})
 }
 
 // Count reports how many lessons are stored. Nil-safe, like All.
@@ -344,14 +353,12 @@ func readPitfalls(path string) ([]Pitfall, error) {
 }
 
 // Save writes the store to disk as pretty JSON, creating the parent directory.
-// Before writing, it re-reads the file and replays this KB's own pending Add()
-// lessons onto that fresh copy instead of blindly overwriting it with
+// Before writing, it re-reads the file and replays this KB's own pending
+// changes onto that fresh copy instead of blindly overwriting it with
 // pitfalls — otherwise two separate ipsupport-code processes sharing the same
 // same store could have one's learned lesson silently lost to the other's last
-// write (the mutex only protects against races WITHIN one process). Purge/
-// Clear set overwrite, skipping the merge: those are a deliberate replace of
-// the whole store. When neither applies — nothing pending and no overwrite
-// due — there is nothing of this KB's own to persist, so Save skips the write
+// write (the mutex only protects against races WITHIN one process). With
+// nothing pending there is nothing of this KB's own to persist, so Save skips the write
 // entirely instead of falling through to an unconditional write of
 // k.pitfalls: that write would have no fresh read backing it, so a stale
 // in-memory snapshot (e.g. after an idle flush, or a no-op Purge, with no Add
@@ -362,14 +369,14 @@ func readPitfalls(path string) ([]Pitfall, error) {
 // in-process mutex keeps two goroutines from interleaving; an in-memory KB
 // (path=="") skips it, since there's nothing on disk to serialize around. The
 // write itself is atomic (temp + rename) so a crash mid-write can't truncate
-// the lessons file either. pending/overwrite are only cleared once that write
+// the lessons file either. pending is only cleared once that write
 // actually succeeds — if it fails, they're left intact so the next Save
 // replays them instead of silently losing them (a concurrent Add's own Save
 // wouldn't otherwise know to replay a lesson it never recorded).
 func (k *KB) Save() error {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if !k.overwrite && len(k.pending) == 0 {
+	if len(k.pending) == 0 {
 		return nil // nothing of ours to persist — see doc comment above
 	}
 	if k.path != "" {
@@ -379,17 +386,14 @@ func (k *KB) Save() error {
 		}
 		defer unlock()
 	}
-	if !k.overwrite && len(k.pending) > 0 {
-		if onDisk, err := readPitfalls(k.path); err == nil {
-			today := k.today()
-			for _, p := range k.pending {
-				mergeOne(&onDisk, p, today)
-			}
-			k.pitfalls = onDisk
+	if onDisk, err := readPitfalls(k.path); err == nil {
+		for _, op := range k.pending {
+			op(&onDisk)
 		}
-		// on a read error, fall back to writing our own in-memory state — no
-		// worse than the previous unconditional-overwrite behavior.
+		k.pitfalls = onDisk
 	}
+	// on a read error, fall back to writing our own in-memory state — no
+	// worse than the previous unconditional-overwrite behavior.
 	data, err := json.MarshalIndent(k.pitfalls, "", "  ")
 	if err != nil {
 		return &KnowledgeError{Op: "marshal", Path: k.path, Err: err}
@@ -398,7 +402,6 @@ func (k *KB) Save() error {
 		return &KnowledgeError{Op: "write", Path: k.path, Err: err}
 	}
 	k.pending = nil
-	k.overwrite = false
 	return nil
 }
 

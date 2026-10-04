@@ -170,9 +170,26 @@ func extractBinary(gzData []byte, name string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if filepath.Base(h.Name) == name {
-			return io.ReadAll(io.LimitReader(tr, maxBinaryBytes)) // cap the decompressed read (gzip-bomb guard)
+		if filepath.Base(h.Name) != name {
+			continue
 		}
+		// Whatever this returns is written over the working executable, so it
+		// must be the whole of a real file: a directory or link entry reads as
+		// zero bytes, and a read cut at the cap is a truncated binary.
+		if h.Typeflag != tar.TypeReg {
+			return nil, fmt.Errorf("%q in the archive is not a regular file", name)
+		}
+		if h.Size <= 0 || h.Size > maxBinaryBytes {
+			return nil, fmt.Errorf("%q in the archive is %d bytes — refusing (limit %d MiB)", name, h.Size, maxBinaryBytes>>20)
+		}
+		bin, err := io.ReadAll(io.LimitReader(tr, maxBinaryBytes)) // cap the decompressed read (gzip-bomb guard)
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(bin)) != h.Size {
+			return nil, fmt.Errorf("%q in the archive is truncated (%d of %d bytes)", name, len(bin), h.Size)
+		}
+		return bin, nil
 	}
 	return nil, fmt.Errorf("%q not found in the archive", name)
 }

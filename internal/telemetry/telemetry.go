@@ -21,6 +21,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -340,7 +341,12 @@ func Send(ctx context.Context, o SendOptions) (SendResult, error) {
 			return false
 		}
 		for day := range done {
-			delete(st.Days, day)
+			// Only if it is still what was sent: a task that finished around
+			// midnight can add to a day while its report is in flight, and the
+			// next send of the whole day replaces this one on the server.
+			if reflect.DeepEqual(st.Days[day], s.Days[day]) {
+				delete(st.Days, day)
+			}
 		}
 		st.NextAttempt = next
 		return true

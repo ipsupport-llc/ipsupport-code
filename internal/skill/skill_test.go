@@ -370,3 +370,47 @@ func TestIsGit(t *testing.T) {
 		}
 	}
 }
+
+// Two sessions share the skills directory: each toggle must survive the other's
+// save, not be overwritten by its stale copy of the state.
+func TestTogglesFromTwoSessionsBothStick(t *testing.T) {
+	dir := t.TempDir()
+	a, _ := Open(dir, nil)
+	b, _ := Open(dir, nil)
+	list := a.List()
+	if len(list) < 2 {
+		t.Skip("needs two built-in skills")
+	}
+	if err := a.SetEnabled(list[0].Name, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.SetEnabled(list[1].Name, true); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := Open(dir, nil)
+	for _, n := range []string{list[0].Name, list[1].Name} {
+		if sk, _ := c.Get(n); !sk.Enabled {
+			t.Errorf("%q lost its toggle to the other session's save", n)
+		}
+	}
+}
+
+// Installing a pack must not silently replace a skill already installed from
+// somewhere else — a built-in included.
+func TestInstallRefusesToReplaceAnotherSkill(t *testing.T) {
+	dir := t.TempDir()
+	s, _ := Open(dir, nil)
+	name := s.List()[0].Name
+	before, _ := os.ReadFile(filepath.Join(dir, name+".md"))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("---\nname: " + name + "\n---\nsomething else entirely"))
+	}))
+	defer srv.Close()
+	s.http = srv.Client()
+	if _, err := s.Install(context.Background(), srv.URL); err == nil {
+		t.Fatal("an install replaced an existing skill without a word")
+	}
+	if after, _ := os.ReadFile(filepath.Join(dir, name+".md")); string(after) != string(before) {
+		t.Fatal("the existing skill's file was overwritten")
+	}
+}

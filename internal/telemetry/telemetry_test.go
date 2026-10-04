@@ -267,3 +267,21 @@ func TestAnOptOutMidBatchStopsTheRest(t *testing.T) {
 		})
 	}
 }
+
+// A count recorded into a day while that day's report is in flight must not be
+// deleted with it: the day stays, and its next send carries the whole day.
+func TestARecordDuringTheSendIsKept(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "telemetry.json")
+	Enable(path)
+	Record(path, "2026-10-03", Counts{Features: map[string]int{"tasks": 1}})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		Record(path, "2026-10-03", Counts{Features: map[string]int{"tasks": 1}})
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer ts.Close()
+	sendAt(t, path, ts.URL, time.Date(2026, 10, 4, 0, 0, 1, 0, time.Local))
+	s, _ := Load(path)
+	if d := s.Days["2026-10-03"]; d == nil || d.Features["tasks"] != 2 {
+		t.Fatalf("day after the send = %+v, want it kept with both tasks", d)
+	}
+}

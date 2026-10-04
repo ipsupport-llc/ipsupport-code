@@ -279,6 +279,19 @@ func dangerousArgv(fields []string, depth int) bool {
 			}
 		}
 	}
+	if base == "command" {
+		// `command -v x` / `command -V x` only look x up; they run nothing,
+		// and treating them as running x denied a harmless `command -v dd`
+		// for good. Any other form (plain, -p) runs its argument.
+		for _, a := range fields[1:] {
+			if !strings.HasPrefix(a, "-") || a == "--" {
+				break
+			}
+			if strings.ContainsAny(a, "vV") {
+				return false
+			}
+		}
+	}
 	if cmdWrappers[base] {
 		rest := fields[1:] // skip the wrapper's flags, VAR=val assignments, and flag values
 		for len(rest) > 0 && (strings.HasPrefix(rest[0], "-") || strings.Contains(rest[0], "=") || looksLikeArgValue(rest[0])) {

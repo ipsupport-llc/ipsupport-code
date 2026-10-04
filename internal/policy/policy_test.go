@@ -404,7 +404,8 @@ func TestFloorSeesThroughShellSyntax(t *testing.T) {
 	}
 	// And what must keep working under the same policy.
 	for _, cmd := range []string{
-		"command -v rm", "go test ./... 2>&1", "rm file.txt", `echo "done"`, "ls & echo hi",
+		"command -v rm", "command -v dd", "command -V init", "command -pv halt", // lookups run nothing
+		"go test ./... 2>&1", "rm file.txt", `echo "done"`, "ls & echo hi",
 	} {
 		if got := e.Run(cmd); got != Allow {
 			t.Errorf("Run(%q) = %v, want Allow", cmd, got)

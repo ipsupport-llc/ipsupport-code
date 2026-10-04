@@ -759,10 +759,7 @@ func SetFileValue(path string, perm os.FileMode, dotted, raw string) error {
 	if err != nil {
 		return err
 	}
-	if err := setPath(root, segs, parseValue(raw)); err != nil {
-		return err
-	}
-	if err := validateConfigObject(root); err != nil {
+	if err := setValidated(root, segs, raw); err != nil {
 		return err
 	}
 	return writeObject(path, perm, root)
@@ -781,10 +778,7 @@ func ApplyOverride(cfg *Config, dotted, raw string) error {
 		return err
 	}
 	root := toObject(*cfg)
-	if err := setPath(root, segs, parseValue(raw)); err != nil {
-		return err
-	}
-	if err := validateConfigObject(root); err != nil {
+	if err := setValidated(root, segs, raw); err != nil {
 		return err
 	}
 	data, err := json.Marshal(root)
@@ -941,6 +935,27 @@ func parseValue(raw string) any {
 		return v
 	}
 	return raw
+}
+
+// setValidated sets raw at segs and validates the result. A value that parses
+// as JSON but does not fit the field is retried as the literal string, so a
+// string field takes `123` or `true` as typed (an all-digit API key) rather
+// than refusing it as a number.
+func setValidated(root map[string]any, segs []string, raw string) error {
+	val := parseValue(raw)
+	if err := setPath(root, segs, val); err != nil {
+		return err
+	}
+	err := validateConfigObject(root)
+	if _, isString := val.(string); err == nil || isString {
+		return err
+	}
+	_ = setPath(root, segs, raw)
+	if validateConfigObject(root) == nil {
+		return nil
+	}
+	_ = setPath(root, segs, val)
+	return err
 }
 
 func setPath(root map[string]any, segs []string, val any) error {

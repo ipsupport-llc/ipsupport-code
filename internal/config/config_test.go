@@ -547,3 +547,20 @@ func TestStateIsPerWorkspaceAndOutsideIt(t *testing.T) {
 		t.Error("StateDir is not stable")
 	}
 }
+
+// A value that parses as JSON but lands on a string field is that string: an
+// all-digit API key or a numeric-looking name must not be refused as a number.
+func TestSetFileValueKeepsDigitsForAStringField(t *testing.T) {
+	isolate(t)
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := SetFileValue(path, 0o600, "providers.openai.api_key", "123"); err != nil {
+		t.Fatalf("SetFileValue: %v", err)
+	}
+	if got, ok := LookupPathInFile(path, "providers.openai.api_key"); !ok || got != "123" {
+		t.Errorf("api_key = %#v (ok=%v), want the string \"123\"", got, ok)
+	}
+	// A real type error still fails.
+	if err := SetFileValue(path, 0o600, "goal_max_returns", "abc"); err == nil {
+		t.Error("a string for a number field was accepted")
+	}
+}

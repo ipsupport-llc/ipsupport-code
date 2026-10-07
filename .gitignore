@@ -12,3 +12,6 @@
 # the checked-in example config.
 .agent/*
 !.agent/config.example.json
+
+# Python bytecode from running scripts/
+__pycache__/

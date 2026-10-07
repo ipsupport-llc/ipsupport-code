@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -9938,28 +9939,48 @@ func TestMCPApprovalShowsTheArguments(t *testing.T) {
 	}
 }
 
-// update6's client dials IPv6 only: it reaches a server on [::1] and never
-// falls back to one on 127.0.0.1.
-func TestIPv6ClientDialsOnlyIPv6(t *testing.T) {
-	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {})
+// update6's client prefers IPv6: a name with both addresses is reached over
+// IPv6, and a host with no IPv6 at all still over IPv4.
+func TestIPv6ClientPrefersIPv6(t *testing.T) {
 	l6, err := net.Listen("tcp6", "[::1]:0")
 	if err != nil {
 		t.Skip("no IPv6 loopback:", err)
 	}
-	s6 := &httptest.Server{Listener: l6, Config: &http.Server{Handler: ok}}
-	s6.Start()
-	defer s6.Close()
-	s4 := httptest.NewServer(ok)
-	defer s4.Close()
-
-	c := ipv6Client()
-	if resp, err := c.Get(s6.URL); err != nil {
-		t.Fatalf("IPv6 server: %v", err)
-	} else {
-		resp.Body.Close()
+	port := l6.Addr().(*net.TCPAddr).Port
+	l4, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		l6.Close()
+		t.Skip("port not free on IPv4 too:", err)
 	}
-	if resp, err := c.Get(s4.URL); err == nil {
-		resp.Body.Close()
-		t.Fatal("reached an IPv4-only server")
+	serve := func(l net.Listener, name string) *httptest.Server {
+		s := &httptest.Server{Listener: l, Config: &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			io.WriteString(w, name)
+		})}}
+		s.Start()
+		return s
+	}
+	s6, s4 := serve(l6, "v6"), serve(l4, "v4")
+	defer s6.Close()
+	defer s4.Close()
+	get := func(url string) string {
+		resp, err := ipv6Client().Get(url)
+		if err != nil {
+			t.Fatalf("%s: %v", url, err)
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		return string(b)
+	}
+	if got := get(s6.URL); got != "v6" {
+		t.Errorf("an IPv6 host answered %q, want v6", got)
+	}
+	if got := get(s4.URL); got != "v4" {
+		t.Errorf("an IPv4-only host answered %q, want v4 — no fallback", got)
+	}
+	// Where localhost has both addresses, IPv6 must win.
+	if addrs, _ := net.LookupHost("localhost"); slices.Contains(addrs, "::1") && slices.Contains(addrs, "127.0.0.1") {
+		if got := get(fmt.Sprintf("http://localhost:%d", port)); got != "v6" {
+			t.Errorf("a name with both addresses went over %s, want v6", got)
+		}
 	}
 }

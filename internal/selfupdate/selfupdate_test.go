@@ -242,6 +242,9 @@ func TestReplaceInUseMovesTheOldOneAside(t *testing.T) {
 	if b, _ := os.ReadFile(exe + ".old"); string(b) != "old" {
 		t.Fatalf(".old holds %q, want the previous build", b)
 	}
+	if _, err := os.Stat(exe + ".new"); !os.IsNotExist(err) {
+		t.Fatalf(".new left behind: %v", err)
+	}
 	removeOld(exe)
 	if _, err := os.Stat(exe + ".old"); !os.IsNotExist(err) {
 		t.Fatalf(".old still there after cleanup: %v", err)

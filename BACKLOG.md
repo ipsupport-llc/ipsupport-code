@@ -179,17 +179,7 @@ watcher already returned. Same for an external agent that leaves children
 (a dev server started for the next step) dies with the call — which is a
 behavior change to announce, not a silent fix.
 
-## 8. No process-tree kill on Windows
-
-**What is wrong.** `procgroup_windows.go` sets only `WaitDelay`; a timed-out or
-cancelled command's grandchildren keep running and holding ports.
-
-**The fix.** A job object per command, closed on cancel.
-
-**What it breaks.** Needs a Windows CI runner to verify; nothing to break
-without one, which is why it waits.
-
-## 9. `recoverTextToolCall` has no callers
+## 8. `recoverTextToolCall` has no callers
 
 **What is wrong.** The salvage of tool calls a model wrote as text is documented
 and tested but never consulted by `Run`.

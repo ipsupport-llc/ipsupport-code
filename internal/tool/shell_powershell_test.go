@@ -37,6 +37,7 @@ func TestPowerShellBehavesLikeShC(t *testing.T) {
 		{`Get-Item /no/such/path`, "Cannot find path", 1},
 		{`Get-Item /no/such/path; Write-Output after`, "after", 0},
 		{`Write-Output a && Write-Output b`, "a\nb", 0},
+		{"Write-Output foo `", "foo", 0}, // a trailing backtick must not eat the exit-code tail
 	} {
 		out, code := run(c.line)
 		if code != c.code || !strings.Contains(out, c.want) {
@@ -71,6 +72,10 @@ func TestCLIXMLIsDecodedToText(t *testing.T) {
 	}
 	if plain := "no xml here & <b>"; decodeCLIXML(plain) != plain {
 		t.Error("plain output was changed")
+	}
+	// The same XML without PowerShell's marker is a program's own output.
+	if fixture := strings.TrimPrefix(out, "#< CLIXML\r\n"); decodeCLIXML(fixture) != fixture {
+		t.Error("XML printed by a program was rewritten")
 	}
 }
 

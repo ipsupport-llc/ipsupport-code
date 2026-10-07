@@ -133,6 +133,14 @@ func (s Shell) Command(ctx context.Context, line string) *exec.Cmd {
 	return cmd
 }
 
+// InteractiveCommand opens Interactive with the same fresh PATH as run, so
+// /shell finds what run finds.
+func (s Shell) InteractiveCommand(ctx context.Context) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, s.Interactive())
+	cmd.Env = withEnv(os.Environ(), "Path", freshPath())
+	return cmd
+}
+
 // Interactive is the shell /shell opens.
 func (s Shell) Interactive() string {
 	if s == "cmd" {

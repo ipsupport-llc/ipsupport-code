@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -5021,7 +5022,7 @@ func (a *app) userShellCommand(ctx context.Context, line string) *exec.Cmd {
 func (a *app) runShell(ctx context.Context) {
 	sh := a.shellPath()
 	fmt.Printf("— %s (exit to return to ipsupport-code) —\n", sh)
-	cmd := exec.CommandContext(ctx, sh)
+	cmd := tool.Shell(a.cfg.Run.Shell).InteractiveCommand(ctx)
 	cmd.Dir = a.workspace
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	_ = cmd.Run() // a non-zero shell exit is normal; nothing to report
@@ -5036,6 +5037,15 @@ func (a *app) runShellLine(ctx context.Context, cmdline string) {
 	cmd := a.userShellCommand(ctx, cmdline)
 	cmd.Dir = a.workspace
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if runtime.GOOS == "windows" {
+		// Windows PowerShell 5.1 writes errors to stderr as CLIXML: hold them
+		// and print them as text, as the TUI's !cmd and run do.
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		_ = cmd.Run()
+		fmt.Fprint(os.Stderr, tool.Shell(a.cfg.Run.Shell).CleanOutput(stderr.String()))
+		return
+	}
 	_ = cmd.Run()
 }
 

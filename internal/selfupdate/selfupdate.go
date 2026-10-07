@@ -273,18 +273,26 @@ func executable() (string, error) {
 
 // replaceInUse installs bin at exe while exe is running. Windows will not let a
 // running .exe be overwritten or replaced by a rename, but it will let it be
-// renamed: so the old one moves aside to exe.old, the new one is written in its
-// place, and RemoveOld deletes the old one on the next start. If the write
-// fails, the old one is moved back.
+// renamed: so the new one is written whole next to it first (exe.new), then
+// the old one moves aside to exe.old and the new one takes its name — two
+// renames, so a crash can't leave the name empty for long, and never with the
+// new build half-written. RemoveOld deletes exe.old on the next start.
 func replaceInUse(exe string, bin []byte) error {
-	old := exe + ".old"
+	next, old := exe+".new", exe+".old"
+	if err := atomicfile.Write(next, bin, 0o755); err != nil {
+		return fmt.Errorf("can't write %s: %w", next, err)
+	}
 	_ = os.Remove(old) // left by an earlier update
 	if err := os.Rename(exe, old); err != nil {
+		_ = os.Remove(next)
 		return fmt.Errorf("can't move the running %s aside: %w", exe, err)
 	}
-	if err := atomicfile.Write(exe, bin, 0o755); err != nil {
-		_ = os.Rename(old, exe)
-		return fmt.Errorf("can't write %s: %w", exe, err)
+	if err := os.Rename(next, exe); err != nil {
+		if rerr := os.Rename(old, exe); rerr != nil {
+			return fmt.Errorf("can't put %s in place (%v), and the old one couldn't be put back (%v) — it is at %s", next, err, rerr, old)
+		}
+		_ = os.Remove(next)
+		return fmt.Errorf("can't put %s in place: %w", next, err)
 	}
 	return nil
 }

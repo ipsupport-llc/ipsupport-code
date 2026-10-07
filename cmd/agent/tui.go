@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -1684,7 +1683,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		}
 	case "/shell", "/sh":
 		sh := m.app.shellPath()
-		c := exec.Command(sh)
+		c := tool.Shell(m.app.cfg.Run.Shell).InteractiveCommand(context.Background())
 		c.Dir = m.app.workspace
 		m.push(cDim.Render("  ⇲ dropping to " + sh + " — exit to return"))
 		return m, tea.ExecProcess(c, func(error) tea.Msg { return shellDoneMsg{} })
@@ -1843,6 +1842,7 @@ func (m *tuiModel) startUpdate(arg string) tea.Cmd {
 	if channel == "" {
 		channel = selfupdate.Stable
 	}
+	arg = strings.TrimLeft(arg, "-") // --nightly, as the CLI's update takes it
 	if arg == selfupdate.Stable || arg == selfupdate.Nightly {
 		channel = arg
 		_ = config.SaveChannel(channel)

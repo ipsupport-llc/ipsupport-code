@@ -41,6 +41,11 @@ func (s Shell) Command(ctx context.Context, line string) *exec.Cmd {
 	return exec.CommandContext(ctx, name, args...)
 }
 
+// InteractiveCommand opens Interactive.
+func (s Shell) InteractiveCommand(ctx context.Context) *exec.Cmd {
+	return exec.CommandContext(ctx, s.Interactive())
+}
+
 // Interactive is the shell /shell opens: the user's own.
 func (Shell) Interactive() string {
 	if s := os.Getenv("SHELL"); s != "" {

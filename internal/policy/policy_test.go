@@ -553,6 +553,8 @@ func TestWindowsFloor(t *testing.T) {
 		"Stop-Computer",
 		"shutdown.exe /s /t 0",
 		"echo x; Remove-Item y -Recurse",
+		"rm.exe -fr build",
+		"rm -Rf build",
 	} {
 		if got := e.Run(cmd); got != Deny {
 			t.Errorf("Run(%q) = %v, want Deny", cmd, got)

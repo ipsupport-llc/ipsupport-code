@@ -292,11 +292,13 @@ func windowsBase(word string) string {
 }
 
 // windowsRecursive: -Recurse in any unambiguous PowerShell prefix (-r, -rec,
-// -Recurse:$true), or cmd's /s, also inside a run of switches like /s/q.
+// -Recurse:$true), a short POSIX cluster for Git's rm.exe (-fr, -Rf), or cmd's
+// /s, also inside a run of switches like /s/q. -Force is not one: a long
+// option with an r in it is not recursion.
 func windowsRecursive(args []string) bool {
 	for _, a := range args {
 		a = strings.ToLower(a)
-		if strings.HasPrefix(a, "-r") {
+		if strings.HasPrefix(a, "-r") || (len(a) <= 3 && strings.HasPrefix(a, "-") && !strings.HasPrefix(a, "--") && strings.Contains(a, "r")) {
 			return true
 		}
 		if strings.HasPrefix(a, "/") && slices.Contains(strings.Split(a[1:], "/"), "s") {

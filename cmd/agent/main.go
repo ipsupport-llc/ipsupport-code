@@ -354,13 +354,19 @@ func runUpdate(args []string, client *http.Client) {
 	fmt.Printf("done — %s is now %s\n", path, rel.Version)
 }
 
-// ipv6Client is an HTTP client that dials over IPv6 only — for a host whose
-// IPv4 path is broken or absent (NAT64/DNS64 networks).
+// ipv6Client is an HTTP client that prefers IPv6 — for a network whose IPv4
+// path to GitHub crawls while IPv6 (often NAT64/DNS64, GitHub itself has no
+// AAAA) is fast. Every connection tries IPv6 first and only falls back to IPv4
+// when the host has no IPv6 route at all: IPv6-only used to fail outright on
+// api.github.com where the release files themselves came over IPv6.
 func ipv6Client() *http.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 	tr.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
-		return d.DialContext(ctx, "tcp6", addr)
+		if c, err := d.DialContext(ctx, "tcp6", addr); err == nil {
+			return c, nil
+		}
+		return d.DialContext(ctx, "tcp4", addr)
 	}
 	return &http.Client{Transport: tr}
 }

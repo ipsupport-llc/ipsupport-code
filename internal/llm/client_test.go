@@ -175,7 +175,7 @@ func TestParseStreamIncompleteErrorReportsDiagnostics(t *testing.T) {
 		"data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n"
 	cl := NewOpenAIClient(config.LLM{BaseURL: "http://unused", Model: "fake"})
 	var reqCompl int
-	_, err := cl.parseStream(strings.NewReader(raw), func() {}, 100000, &reqCompl, 0)
+	_, err := cl.parseStream(strings.NewReader(raw), func() {}, nil, 100000, &reqCompl, 0)
 	if err == nil {
 		t.Fatal("expected an error for a stream with no [DONE]")
 	}
@@ -621,7 +621,7 @@ func TestParseStreamTicksOnlyOnProgress(t *testing.T) {
 
 	// A comment/heartbeat, a blank data line, and an empty delta — no progress.
 	heartbeats := ": ping\n\ndata: \n\ndata: {\"choices\":[{\"delta\":{}}]}\n\ndata: [DONE]\n\n"
-	if _, err := cl.parseStream(strings.NewReader(heartbeats), tick, 0, new(int), 0); err != nil {
+	if _, err := cl.parseStream(strings.NewReader(heartbeats), tick, nil, 0, new(int), 0); err != nil {
 		t.Fatal(err)
 	}
 	if ticks != 0 {
@@ -631,7 +631,7 @@ func TestParseStreamTicksOnlyOnProgress(t *testing.T) {
 	// A real content delta does reset it.
 	ticks = 0
 	real := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"
-	if _, err := cl.parseStream(strings.NewReader(real), tick, 0, new(int), 0); err != nil {
+	if _, err := cl.parseStream(strings.NewReader(real), tick, nil, 0, new(int), 0); err != nil {
 		t.Fatal(err)
 	}
 	if ticks != 1 {
@@ -651,7 +651,7 @@ func TestParseStreamAccumulatesLiveOutput(t *testing.T) {
 		"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n" +
 		"data: {\"choices\":[{\"delta\":{\"content\":\"the answer\"}}]}\n\n" +
 		"data: [DONE]\n\n"
-	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, 0, new(int), 0)
+	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, nil, 0, new(int), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -665,7 +665,7 @@ func TestParseStreamAccumulatesLiveOutput(t *testing.T) {
 	// OpenRouter's alternate reasoning key.
 	cl2 := NewOpenAIClient(config.LLM{Model: "x"})
 	sse2 := "data: {\"choices\":[{\"delta\":{\"reasoning\":\"pondering\"}}]}\n\ndata: [DONE]\n\n"
-	if _, err := cl2.parseStream(strings.NewReader(sse2), func() {}, 0, new(int), 0); err != nil {
+	if _, err := cl2.parseStream(strings.NewReader(sse2), func() {}, nil, 0, new(int), 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := cl2.Live(); got != "pondering" {
@@ -676,7 +676,7 @@ func TestParseStreamAccumulatesLiveOutput(t *testing.T) {
 	// still populate Live() — this is the case that was reported empty live.
 	cl3 := NewOpenAIClient(config.LLM{Model: "x"})
 	sse3 := "data: {\"choices\":[{\"delta\":{\"content\":\"plain answer\"}}]}\n\ndata: [DONE]\n\n"
-	if _, err := cl3.parseStream(strings.NewReader(sse3), func() {}, 0, new(int), 0); err != nil {
+	if _, err := cl3.parseStream(strings.NewReader(sse3), func() {}, nil, 0, new(int), 0); err != nil {
 		t.Fatal(err)
 	}
 	if got := cl3.Live(); got != "plain answer" {
@@ -748,7 +748,7 @@ func TestStripChannelTokens(t *testing.T) {
 func TestParseStreamStripsLeakedChannelToken(t *testing.T) {
 	cl := NewOpenAIClient(config.LLM{Model: "x"})
 	sse := `data: {"choices":[{"delta":{"content":"<channel|>I'll help you build this."}}]}` + "\n\ndata: [DONE]\n\n"
-	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, 0, new(int), 0)
+	msg, err := cl.parseStream(strings.NewReader(sse), func() {}, nil, 0, new(int), 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1061,7 +1061,7 @@ func TestParseStreamSurfacesAnErrorChunk(t *testing.T) {
 		"data: [DONE]\n"
 	cl := NewOpenAIClient(config.LLM{BaseURL: "http://unused", Model: "fake"})
 	var n int
-	if _, err := cl.parseStream(strings.NewReader(raw), func() {}, 100000, &n, 0); err == nil || !strings.Contains(err.Error(), "generation failed") {
+	if _, err := cl.parseStream(strings.NewReader(raw), func() {}, nil, 100000, &n, 0); err == nil || !strings.Contains(err.Error(), "generation failed") {
 		t.Errorf("err = %v, want the server's error", err)
 	}
 }
@@ -1078,11 +1078,57 @@ func TestParseStreamRefusesToolCallsAfterADroppedChunk(t *testing.T) {
 	raw := tc(`{"action":"write","params":{"path":"a.txt","content":"`) + "data: {not json\n" + tc(`end"}}`) + "data: [DONE]\n"
 	cl := NewOpenAIClient(config.LLM{BaseURL: "http://unused", Model: "fake"})
 	var n int
-	if _, err := cl.parseStream(strings.NewReader(raw), func() {}, 100000, &n, 0); err == nil {
+	if _, err := cl.parseStream(strings.NewReader(raw), func() {}, nil, 100000, &n, 0); err == nil {
 		t.Error("a tool call assembled around a dropped chunk was returned as whole")
 	}
 	text := "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\ndata: {not json\ndata: [DONE]\n"
-	if m, err := cl.parseStream(strings.NewReader(text), func() {}, 100000, &n, 0); err != nil || m.Content != "hello" {
+	if m, err := cl.parseStream(strings.NewReader(text), func() {}, nil, 100000, &n, 0); err != nil || m.Content != "hello" {
 		t.Errorf("a plain-text turn with a dropped chunk: %q, %v", m.Content, err)
+	}
+}
+
+// A local server reads a long prompt for minutes before its first token, and
+// says so with SSE comments (": keepalive"). Before the first token those keep
+// the request alive; after it, only tokens do — a wedged generation that
+// heartbeats must still be cut off.
+func TestParseStreamKeepaliveCountsOnlyBeforeTheFirstToken(t *testing.T) {
+	cl := NewOpenAIClient(config.LLM{Model: "x"})
+	ticks, alive := 0, 0
+	sse := ": keepalive\n\n: keepalive\n\n" +
+		"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n" +
+		": keepalive\n\n" +
+		"data: [DONE]\n\n"
+	if _, err := cl.parseStream(strings.NewReader(sse), func() { ticks++ }, func() { alive++ }, 0, new(int), 0); err != nil {
+		t.Fatal(err)
+	}
+	if alive != 2 || ticks != 1 {
+		t.Errorf("alive = %d, ticks = %d; want the 2 keepalives before the token to count, the one after not, and 1 token", alive, ticks)
+	}
+}
+
+// End to end: a server that only sends keep-alives for longer than the idle
+// window before its first token still gets its answer read — once, with no
+// retry restarting the prompt from scratch.
+func TestALongPrefillWithKeepalivesIsNotCutOff(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		f := w.(http.Flusher)
+		for i := 0; i < 6; i++ { // 3s of prefill against a 1s idle window
+			io.WriteString(w, ": keepalive\n\n")
+			f.Flush()
+			time.Sleep(500 * time.Millisecond)
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	c := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "test", IdleTimeoutSeconds: 1, RetryAttempts: 1})
+	m, err := c.Chat(context.Background(), []Message{User("hi")}, nil)
+	if err != nil || m.Content != "done" {
+		t.Fatalf("got %q, %v; want the answer after the long prefill", m.Content, err)
+	}
+	if n := calls.Load(); n != 1 {
+		t.Errorf("%d requests, want 1 — a retry restarts the prefill", n)
 	}
 }

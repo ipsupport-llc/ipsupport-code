@@ -207,6 +207,12 @@ func maxResponseTokens(ctxWindow int) int {
 	return limit
 }
 
+// prefillCap bounds how long a server's keep-alive comments alone may hold a
+// request open before the first token: long enough for a local model to read
+// a long context, short enough that a server which only ever heartbeats does
+// not hang the task.
+const prefillCap = 10 * time.Minute
+
 // startIdleWatchdog cancels the request if neither the response nor any stream
 // chunk arrives within c.idle. It returns a tick func the reader calls on each
 // chunk to push the deadline back; the goroutine exits when ctx is done.
@@ -567,7 +573,13 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 	// when a server never reports real usage numbers at all.
 	promptEstimate := len(buf) / 4
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
-		m, err := c.parseStream(resp.Body, tick, c.maxRespTk, reqCompl, promptEstimate)
+		start := time.Now()
+		alive := func() {
+			if time.Since(start) < max(prefillCap, c.idle) {
+				tick()
+			}
+		}
+		m, err := c.parseStream(resp.Body, tick, alive, c.maxRespTk, reqCompl, promptEstimate)
 		if err != nil {
 			var re *runawayError
 			var de *degenerateOutputError
@@ -597,7 +609,10 @@ func oneLine(s string) string { return textutil.OneLine(s, 150) }
 // time (LM Studio sends roughly one token per chunk). The final usage chunk
 // reconciles the estimate with the real count. promptEstimate is the fallback
 // used when the server never sends one at all (see below).
-func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl *int, promptEstimate int) (Message, error) {
+//
+// alive is called for an SSE comment (": keepalive") before the first token —
+// a local server still reading a long prompt; nil ignores them.
+func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, reqCompl *int, promptEstimate int) (Message, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	var content strings.Builder
@@ -626,7 +641,9 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 	// *reqCompl is this attempt's own bump count, owned by the caller (Chat's
 	// retry loop) so a retriable failure can roll back exactly this attempt's
 	// contribution to the shared c.complTk — see Chat.
+	started := false
 	progress := func() {
+		started = true
 		(*reqCompl)++
 		c.bumpToken()
 		tick()
@@ -666,6 +683,14 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick func(), maxTk int, reqCompl
 		}
 		line := strings.TrimSpace(sc.Text())
 		if !strings.HasPrefix(line, "data:") {
+			// Before the first token a keep-alive comment is a server reading
+			// the prompt (prefill takes minutes for a long context on a local
+			// model): it holds the request open — within prefillCap, see send.
+			// After it, a heartbeat without tokens is a wedged generation and
+			// counts for nothing, as above.
+			if !started && alive != nil && strings.HasPrefix(line, ":") {
+				alive()
+			}
 			continue
 		}
 		payload := strings.TrimSpace(line[len("data:"):])

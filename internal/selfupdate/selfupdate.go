@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
+	"github.com/ipsupport-llc/ipsupport-code/internal/hostarch"
 )
 
 // Repo is the GitHub "owner/name" releases are pulled from.
@@ -71,8 +72,8 @@ func Latest(ctx context.Context, repo, channel string, hc *http.Client) (Release
 	}
 
 	// The machine's own build first: an x64 binary under emulation on ARM64
-	// moves to the native one. A release without it (older ones carry no
-	// windows-arm64) falls back to this binary's own.
+	// (Windows on ARM, Rosetta) moves to the native one. A release without it
+	// (older ones carry no windows-arm64) falls back to this binary's own.
 	ext := ".tar.gz"
 	if goos == "windows" {
 		ext = ".zip"
@@ -144,9 +145,9 @@ func osArch() string { return goos + "-" + runtime.GOARCH }
 var goos = runtime.GOOS
 
 // nativeArch is the machine's own architecture, which differs from
-// runtime.GOARCH for an x64 binary under emulation on Windows on ARM (see
-// arch_windows.go). A variable so a test can play one.
-var nativeArch = runtime.GOARCH
+// runtime.GOARCH for an x64 binary under emulation (Windows on ARM, Rosetta).
+// A variable so a test can play one.
+var nativeArch = hostarch.Native()
 
 func get(ctx context.Context, hc *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

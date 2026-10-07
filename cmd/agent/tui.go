@@ -26,6 +26,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/legal"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/selfupdate"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
@@ -1541,6 +1542,8 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.push(cDim.Render(m.app.setMode(true)))
 	case "/auto":
 		m.push(cDim.Render(m.app.setMode(false)))
+	case "/license", "/licenses":
+		m.pushLines(append(strings.Split(legal.Summary(), "\n"), "", "Full texts: ipsupport-code --license"))
 	case "/update":
 		if m.app.cfg.Offline {
 			m.push(cDim.Render("offline mode is on — /update needs the internet. Run /offline off first."))
@@ -1766,7 +1769,7 @@ func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
 	switch cmd {
 	case "/exit", "/quit":
 		return m, tea.Quit
-	case "/status", "/help", "/?", "/color", "/diff", "/history", "/jobs", "/snip":
+	case "/status", "/help", "/?", "/color", "/diff", "/history", "/jobs", "/snip", "/license", "/licenses":
 		// Always safe: pure info (incl. /history <filter> and the read-only /diff),
 		// /color which only recolors the frame, or /snip (edits the input / its own
 		// store, never the running stack).
@@ -2495,6 +2498,7 @@ var commandList = []cmdInfo{
 	{"/model", "list the provider's models, or pick one"},
 	{"/config", "settings panel — interactive in the TUI (↑↓ · enter · esc); a static overview in the REPL"},
 	{"/update", "self-update from GitHub (stable|nightly)"},
+	{"/license", "licenses of ipsupport-code and what it links (full texts: --license)"},
 	{"/offline", "on|off — work without internet (disables web + update checks)"},
 	{"/cd", "set the working dir (Tab-completes sub-dirs; relative paths + sub-agents resolve there)"},
 	{"/knowledge", "learned-lessons store: report · list · drop <n> · clear · purge <days> · retain <days>"},

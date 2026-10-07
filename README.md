@@ -938,3 +938,9 @@ separately, how the risk model is trained and shipped.
 ## License
 
 [MIT](LICENSE) © ipsupport-llc
+
+The binary carries the licenses of everything it links (all MIT or BSD) and
+of the data its risk model was trained from: `/license` lists them,
+`ipsupport-code --license` prints the full texts. After changing
+dependencies, regenerate them with `go run ./internal/legal/gen`; a test
+fails until you do.

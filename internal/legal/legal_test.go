@@ -28,6 +28,10 @@ func TestNoticesCoverEveryLinkedModule(t *testing.T) {
 			if mod != "" && !strings.Contains(summary, mod+" ") {
 				t.Errorf("%s (%s) has no notice — run: go run ./internal/legal/gen", mod, goos)
 			}
+			// The table row alone is not the notice: MIT and BSD require the text.
+			if mod != "" && !strings.Contains(Full(), "---- "+mod+" (") {
+				t.Errorf("%s (%s) has no license text — run: go run ./internal/legal/gen", mod, goos)
+			}
 		}
 	}
 	if !strings.Contains(Full(), marker) || strings.Contains(Summary(), "Permission is hereby granted") {

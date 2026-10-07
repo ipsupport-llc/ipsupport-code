@@ -208,9 +208,10 @@ func maxResponseTokens(ctxWindow int) int {
 }
 
 // prefillCap bounds how long a server's keep-alive comments alone may hold a
-// request open before the first token: long enough for a local model to read
-// a long context, short enough that a server which only ever heartbeats does
-// not hang the task.
+// request open before the first token — the last one counted still buys one
+// idle window, so the most is prefillCap plus that: long enough for a local
+// model to read a long context, short enough that a server which only ever
+// heartbeats does not hang the task.
 const prefillCap = 10 * time.Minute
 
 // startIdleWatchdog cancels the request if neither the response nor any stream
@@ -575,7 +576,7 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 	if strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") {
 		start := time.Now()
 		alive := func() {
-			if time.Since(start) < max(prefillCap, c.idle) {
+			if time.Since(start) < prefillCap {
 				tick()
 			}
 		}

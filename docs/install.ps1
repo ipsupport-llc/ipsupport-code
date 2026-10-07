@@ -101,8 +101,15 @@ Write-Host "-> installed: $Dest"
 # Never over an ipco.cmd that is not ours.
 $shim = Join-Path $dir 'ipco.cmd'
 $leaf = Split-Path -Leaf $Dest
-if (-not (Test-Path $shim) -or (Get-Content -Raw $shim) -match 'ipsupport-code') {
-  Set-Content -Path $shim -Value "@`"%~dp0$leaf`" %*" -Encoding Ascii
+# Ours carries the marker line; one written before it existed is the single
+# launch line alone. Anything else is someone else's ipco.
+$mine = (-not (Test-Path $shim))
+if (-not $mine) {
+  $old = (Get-Content -Raw $shim).Trim()
+  $mine = ($old -match '(?m)^@rem ipsupport-code ipco shim\r?$') -or ($old -match '^@"%~dp0[^"]+\.exe" %\*$')
+}
+if ($mine) {
+  Set-Content -Path $shim -Value "@rem ipsupport-code ipco shim`r`n@`"%~dp0$leaf`" %*" -Encoding Ascii
   Write-Host "-> also as:   ipco"
 }
 

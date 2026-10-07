@@ -30,9 +30,15 @@ person:
   real operator data.
 
 The trainer reports the honest set separately from the generated holdout, and
-a new model ships only if it is no worse on the honest set. A program whose
-tldr page is in the honest set is never used as generator vocabulary, so the
-set also measures programs the generator never saw.
+a new model ships only if it is no worse on the honest set. The two never
+share a command: the generator drops one that is in the honest set, and the
+trainer leaves out of the report any row that is training data. Programs may
+be shared — `choco`, `reg`, `netsh` are both generator vocabulary and in the
+set — so the set measures new commands, not new programs; measuring unseen
+programs is part of step 3, when the vocabulary comes from real sources.
+
+*Amended 2026-10-07:* this first said a tldr program in the set would never be
+generator vocabulary, which was not true of the set as built.
 
 **2. Labels are derived, not assigned.** Each generated example records what
 the command does (read, write, delete, execute, install, escalate, persist,

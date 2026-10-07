@@ -57,6 +57,13 @@ outside the repository.
 
 ## Baseline
 
-The model shipped in v0.62.13, before any change ADR-0018 asks for: of 700 rows,
-74 of 199 risky calls missed and 75 of 501 ordinary calls flagged; Windows
+The model shipped in v0.62.13, before any change ADR-0018 asks for: of 699 rows,
+74 of 198 risky calls missed and 75 of 501 ordinary calls flagged; Windows
 misses 24 of 41. That is the number every later change is measured against.
+
+## History
+
+| model | missed | false alarms | windows missed | notes |
+|---|---|---|---|---|
+| v0.62.13 (baseline) | 74/198 | 75/501 | 24/41 | |
+| v0.62.15 | 74/198 | 70/501 | 26/41 | leaks (file uploads) taught; flag twins; absolute Windows project paths |

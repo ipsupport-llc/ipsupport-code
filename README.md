@@ -70,6 +70,9 @@ iex (irm https://ipsupport-llc.github.io/ipsupport-code/install.ps1)
 That's the nightly; for a channel/tag use the scriptblock form (so it can take an
 arg): `& ([scriptblock]::Create((irm https://ipsupport-llc.github.io/ipsupport-code/install.ps1))) latest`.
 
+Both installers also add the short name **`ipco`** beside it (a symlink; on
+Windows a one-line `ipco.cmd`), unless something else already owns that name.
+
 **Or download the archive** for your platform from the
 [latest release](https://github.com/ipsupport-llc/ipsupport-code/releases/latest)
 (or the rolling [`nightly`](https://github.com/ipsupport-llc/ipsupport-code/releases/tag/nightly)):

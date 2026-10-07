@@ -95,6 +95,17 @@ try {
 Write-Host "-> installed: $Dest"
 & $Dest -version
 
+# The short name: ipco. A one-line ipco.cmd beside the .exe, not a link — a
+# symlink needs admin or developer mode, and a hardlink or copy would keep
+# running the old build after the first self-update renames the .exe.
+# Never over an ipco.cmd that is not ours.
+$shim = Join-Path $dir 'ipco.cmd'
+$leaf = Split-Path -Leaf $Dest
+if (-not (Test-Path $shim) -or (Get-Content -Raw $shim) -match 'ipsupport-code') {
+  Set-Content -Path $shim -Value "@`"%~dp0$leaf`" %*" -Encoding Ascii
+  Write-Host "-> also as:   ipco"
+}
+
 # Put the install dir on the user PATH (idempotent).
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if (-not $userPath) { $userPath = '' }

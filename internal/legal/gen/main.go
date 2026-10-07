@@ -3,9 +3,9 @@
 // text — MIT and BSD both require the notice to travel with the binary — plus
 // the data the risk model was trained from.
 //
-// Run from the repository root after changing dependencies:
+// Run after changing dependencies, from anywhere in the repository:
 //
-//	go run ./internal/legal/gen
+//	go run ./internal/legal/gen   (or: go generate ./internal/legal)
 //
 // legal_test.go fails until it is run, so a new dependency cannot ship without
 // its notice.
@@ -64,6 +64,19 @@ type module struct {
 }
 
 func main() {
+	// go generate runs this in internal/legal; everything below is relative to
+	// the repository root, so find it.
+	for dir, _ := os.Getwd(); ; dir = filepath.Dir(dir) {
+		if b, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil && strings.Contains(string(b), "module github.com/ipsupport-llc/ipsupport-code\n") {
+			if err := os.Chdir(dir); err != nil {
+				fail("chdir %s: %v", dir, err)
+			}
+			break
+		}
+		if filepath.Dir(dir) == dir {
+			fail("not inside the ipsupport-code repository")
+		}
+	}
 	// Every platform a release ships for: landlock is Linux's alone, coninput
 	// Windows', and a notice missing for one of them is missing.
 	var lines []string

@@ -93,11 +93,15 @@ chmod +x "$DEST"
 echo "→ installed: $DEST"
 "$DEST" -version
 
-# The short name: ipco, a relative symlink beside it. Never over a file that
-# is not already our link — someone else's ipco keeps its name.
+# The short name: ipco, a relative symlink beside it — made only where the name
+# is free (not even a dangling link), or already ours. Any other ipco, link or
+# file, keeps its name.
 link="$(dirname "$DEST")/ipco"
-if [ ! -e "$link" ] || [ -L "$link" ]; then
-  ln -sfn "$(basename "$DEST")" "$link" && echo "→ also as:   ipco"
+ours="$(basename "$DEST")"
+if [ ! -e "$link" ] && [ ! -L "$link" ]; then
+  ln -s "$ours" "$link" && echo "→ also as:   ipco"
+elif [ -L "$link" ] && [ "$(readlink "$link")" = "$ours" ]; then
+  echo "→ also as:   ipco"
 fi
 
 # How to run it: on PATH → by name; otherwise the full path + per-shell hint.

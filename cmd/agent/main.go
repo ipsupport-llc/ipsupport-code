@@ -363,17 +363,24 @@ func runUpdate(args []string, client *http.Client) {
 
 // ipv6Client is an HTTP client that prefers IPv6 — for a network whose IPv4
 // path to GitHub crawls while IPv6 (often NAT64/DNS64, GitHub itself has no
-// AAAA) is fast. Every connection tries IPv6 first and only falls back to IPv4
-// when the host has no IPv6 route at all: IPv6-only used to fail outright on
-// api.github.com where the release files themselves came over IPv6.
+// AAAA) is fast. Every connection tries IPv6 first, for a few seconds, then
+// IPv4: IPv6-only used to fail outright on api.github.com where the release
+// files themselves came over IPv6. The short first try keeps a host whose
+// IPv6 is blackholed from costing a full dial timeout per connection.
 func ipv6Client() *http.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
-	d := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
+	d6 := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+	d4 := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}
 	tr.DialContext = func(ctx context.Context, _, addr string) (net.Conn, error) {
-		if c, err := d.DialContext(ctx, "tcp6", addr); err == nil {
+		c, err6 := d6.DialContext(ctx, "tcp6", addr)
+		if err6 == nil {
 			return c, nil
 		}
-		return d.DialContext(ctx, "tcp4", addr)
+		c, err4 := d4.DialContext(ctx, "tcp4", addr)
+		if err4 != nil {
+			return nil, fmt.Errorf("ipv6: %v; ipv4: %w", err6, err4)
+		}
+		return c, nil
 	}
 	return &http.Client{Transport: tr}
 }

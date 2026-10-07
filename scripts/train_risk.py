@@ -162,8 +162,21 @@ def honest_eval(path, W, b, title):
     risky label at 0.5 or over is a warning — overall, per OS and per category,
     so a regression in one corner is not averaged away by the rest."""
     if not path.exists():
-        return
+        # The ship gate cannot pass by not running: a missing set is an error,
+        # not a quiet skip that leaves a model looking measured.
+        sys.exit(f"honest set {path} not found — nothing was measured")
     rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+    # Never trained on means disjoint from the training set: a row that is also
+    # there measures memory, not judgement, and is left out of the report.
+    trained = {json.loads(l)["params"].get("command", "").strip()
+               for l in (pathlib.Path(__file__).with_name("risk_dataset.jsonl").read_text().splitlines())
+               if l.strip() and json.loads(l).get("split") != "holdout"}
+    overlap = [r for r in rows if r.get("params", {}).get("command", "").strip() in trained]
+    if overlap:
+        print(f"\n  ! {len(overlap)} row(s) of {path.name} are also training data — left out of this report:")
+        for r in overlap[:5]:
+            print(f"      {r['params']['command'][:76]}")
+        rows = [r for r in rows if r not in overlap]
     RISKY = [i for i, l in enumerate(LABELS) if l != "safe" and l not in INFORMATIONAL]
     groups = {}
     misses, alarms = [], []
@@ -275,8 +288,16 @@ def main():
         return
     rows = [json.loads(l) for l in (here / "risk_dataset.jsonl").read_text().splitlines() if l.strip()]
     base = len(rows)
+    honest = {json.loads(l)["params"].get("command", "").strip()
+              for l in (here / "risk_eval.jsonl").read_text().splitlines() if l.strip()}
     for extra in args.extra:
         add = [json.loads(l) for l in pathlib.Path(extra).read_text().splitlines() if l.strip()]
+        # The honest set is never trained on (ADR-0018), even when passed in by
+        # mistake: its rows are dropped here, loudly.
+        clash = [r for r in add if r.get("params", {}).get("command", "").strip() in honest]
+        if clash:
+            print(f"  dropped {len(clash)} row(s) of {extra} that are in the honest set — it is never trained on")
+            add = [r for r in add if r not in clash]
         # An answer at an approval prompt is a VERDICT — the call was acceptable,
         # or it was not — and never a statement of what the call does, which is
         # what the labels are. Trained on as labels, "approved rm -rf build/"

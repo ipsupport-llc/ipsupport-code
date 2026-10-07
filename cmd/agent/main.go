@@ -33,6 +33,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
+	"github.com/ipsupport-llc/ipsupport-code/internal/legal"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/mcp"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
@@ -74,6 +75,7 @@ func main() {
 		workspace       string
 		doInit          bool
 		showVersion     bool
+		showLicense     bool
 		dumpPrompt      bool
 		newSession      bool
 		sessionName     string
@@ -87,6 +89,7 @@ func main() {
 	flag.StringVar(&workspace, "C", ".", "workspace directory")
 	flag.BoolVar(&doInit, "init", false, "re-run first-time setup (server URL, API key, model)")
 	flag.BoolVar(&showVersion, "version", false, "print version and exit")
+	flag.BoolVar(&showLicense, "license", false, "print the licenses of ipsupport-code and everything it links, and exit")
 	flag.BoolVar(&dumpPrompt, "dump-prompt", false, "print the built-in system prompt and exit (e.g. > .agent/system.md to start editing)")
 	flag.BoolVar(&newSession, "new", false, "start a fresh session (don't restore the saved one)")
 	flag.StringVar(&sessionName, "session", "", "use a named session (a separate saved thread, its own log and goal)")
@@ -100,6 +103,10 @@ func main() {
 	flag.Parse()
 	if showVersion {
 		fmt.Println("ipsupport-code", version)
+		return
+	}
+	if showLicense {
+		fmt.Print(legal.Full())
 		return
 	}
 	if dumpPrompt {
@@ -4251,6 +4258,9 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 		fmt.Println(a.setMode(true))
 	case "/auto":
 		fmt.Println(a.setMode(false))
+	case "/license", "/licenses":
+		fmt.Println(legal.Summary())
+		fmt.Println("\nFull texts: ipsupport-code --license")
 	case "/update":
 		if a.cfg.Offline {
 			fmt.Println("offline mode is on — /update needs the internet. Run /offline off first.")

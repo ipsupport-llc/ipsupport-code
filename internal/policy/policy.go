@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
@@ -194,6 +196,12 @@ func (e *Engine) allowsAll(cmd string, segs []string) bool {
 	if len(e.allow) == 0 {
 		return false
 	}
+	// Windows runs commands in PowerShell (or cmd): ( ), $( ), @( ), { } and
+	// [type]:: run nested code there, and cmd's %VAR% and ^ rewrite the line —
+	// all invisible to a glob that sees the prefix. Never auto-allowed.
+	if windowsShell && strings.ContainsAny(cmd, "()[]{}$@^%") {
+		return false
+	}
 	if strings.Contains(cmd, "$(") || strings.Contains(cmd, "`") || strings.Contains(cmd, "${") {
 		return false
 	}
@@ -253,6 +261,51 @@ func looksLikeArgValue(s string) bool {
 // ask-default is the real backstop when allow-globs aren't set.
 func dangerousSegment(seg string) bool { return dangerousArgv(strings.Fields(seg), 0) }
 
+// windowsShell: commands run in PowerShell or cmd (tool.Shell), where names
+// carry no case and maybe .exe, and the ways to wipe a tree or a disk have
+// their own names. A variable so a test can play Windows.
+var windowsShell = runtime.GOOS == "windows"
+
+// windowsRemovers delete files: Remove-Item and its PowerShell aliases, which
+// share cmd's del/erase/rd/rmdir names.
+var windowsRemovers = map[string]bool{
+	"remove-item": true, "ri": true, "rm": true, "rmdir": true, "rd": true, "del": true, "erase": true,
+}
+
+// windowsWipers end a machine or a disk outright, whatever their arguments.
+var windowsWipers = map[string]bool{
+	"format": true, "format-volume": true, "clear-disk": true, "initialize-disk": true,
+	"remove-partition": true, "diskpart": true, "stop-computer": true, "restart-computer": true,
+}
+
+// windowsBase is how Windows names the program: no directory (either slash),
+// no case, no executable extension.
+func windowsBase(word string) string {
+	if i := strings.LastIndexAny(word, `\/`); i >= 0 {
+		word = word[i+1:]
+	}
+	word = strings.ToLower(word)
+	for _, ext := range []string{".exe", ".com", ".bat", ".cmd"} {
+		word = strings.TrimSuffix(word, ext)
+	}
+	return word
+}
+
+// windowsRecursive: -Recurse in any unambiguous PowerShell prefix (-r, -rec,
+// -Recurse:$true), or cmd's /s, also inside a run of switches like /s/q.
+func windowsRecursive(args []string) bool {
+	for _, a := range args {
+		a = strings.ToLower(a)
+		if strings.HasPrefix(a, "-r") {
+			return true
+		}
+		if strings.HasPrefix(a, "/") && slices.Contains(strings.Split(a[1:], "/"), "s") {
+			return true
+		}
+	}
+	return false
+}
+
 func dangerousArgv(fields []string, depth int) bool {
 	if len(fields) == 0 || depth > 4 {
 		return false
@@ -264,8 +317,22 @@ func dangerousArgv(fields []string, depth int) bool {
 	for i, f := range fields {
 		words[i] = shellUnquote(f)
 	}
+	raw := fields[0]
 	fields = words
 	base := filepath.Base(fields[0])
+	if windowsShell {
+		// From the word as typed, quotes aside: to PowerShell and cmd a
+		// backslash is a path separator, not the escape shellUnquote removes.
+		base = windowsBase(strings.Trim(raw, `"'`))
+		if windowsWipers[base] {
+			return true
+		}
+		// Before the POSIX rm rule below: there any r in a flag means
+		// recursive, and PowerShell's rm -Force would be refused for good.
+		if windowsRemovers[base] {
+			return windowsRecursive(fields[1:])
+		}
+	}
 	switch base {
 	case "sudo", "doas", "mkfs", "dd", "shutdown", "reboot", "halt", "poweroff", "init":
 		return true

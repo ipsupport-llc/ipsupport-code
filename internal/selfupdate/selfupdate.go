@@ -47,6 +47,9 @@ type Release struct {
 // Latest resolves the newest release on the channel and the asset for this
 // machine. A nil client uses http.DefaultClient.
 func Latest(ctx context.Context, repo, channel string, hc *http.Client) (Release, error) {
+	if goos == "windows" {
+		return Release{}, errWindows
+	}
 	if hc == nil {
 		hc = http.DefaultClient
 	}
@@ -92,8 +95,8 @@ func Apply(ctx context.Context, rel Release, hc *http.Client) (string, error) {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
-	if runtime.GOOS == "windows" {
-		return "", fmt.Errorf("self-update isn't supported on Windows yet; download the .zip from the Releases page")
+	if goos == "windows" {
+		return "", errWindows
 	}
 	if rel.SumsURL == "" {
 		return "", fmt.Errorf("release %s has no checksums.txt asset — refusing to install an unverified binary", rel.Version)
@@ -116,7 +119,15 @@ func Apply(ctx context.Context, rel Release, hc *http.Client) (string, error) {
 	return replaceExecutable(bin)
 }
 
-func osArch() string { return runtime.GOOS + "-" + runtime.GOARCH }
+func osArch() string { return goos + "-" + runtime.GOARCH }
+
+// goos is runtime.GOOS, a variable so a test can play Windows.
+var goos = runtime.GOOS
+
+// errWindows: a running .exe cannot be replaced in place, so on Windows the
+// installer is the update — and it picks the machine's native build (x64 or
+// ARM64), which a self-update from an emulated x64 binary could not see.
+var errWindows = fmt.Errorf("self-update isn't supported on Windows — re-run the installer to update:\n  iex (irm https://ipsupport-llc.github.io/ipsupport-code/install.ps1)")
 
 func get(ctx context.Context, hc *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

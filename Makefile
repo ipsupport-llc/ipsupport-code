@@ -1,6 +1,6 @@
 PKG := ./cmd/agent
 BIN := ipsupport-code
-PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
+PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
 # Version stamped into the binary: the current tag, else the short commit.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)

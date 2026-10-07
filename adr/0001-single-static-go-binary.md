@@ -12,7 +12,7 @@ that can be missing, the wrong version, or broken by the project it is working o
 ## Decision
 
 `ipsupport-code` is a single Go binary built with `CGO_ENABLED=0 -trimpath`
-for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64 and windows/amd64
+for linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64 and windows/arm64
 (`Makefile`: `release`, `archives`). Everything it needs at runtime is compiled or
 `go:embed`-ed in — including the risk model's weights (see ADR-0011). Tools that
 would usually shell out are built in: the `file` tool's `search` is its own

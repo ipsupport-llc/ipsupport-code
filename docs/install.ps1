@@ -22,7 +22,10 @@ $ProgressPreference = 'SilentlyContinue'   # the progress bar cripples download 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 $repo = 'ipsupport-llc/ipsupport-code'
-$arch = 'amd64'   # only a windows-amd64 build is published (runs under emulation on ARM64)
+# The machine's architecture, from WMI rather than $env:PROCESSOR_ARCHITECTURE,
+# which an x64 PowerShell under emulation on ARM64 reports as AMD64. 12 = ARM64.
+$arch = 'amd64'
+try { if ((Get-CimInstance Win32_Processor).Architecture -contains 12) { $arch = 'arm64' } } catch { }
 $ua = @{ 'User-Agent' = 'ipsupport-code-install' }
 
 if (-not $Dest) {
@@ -42,6 +45,13 @@ $api = if ($Tag -eq 'latest') {
 Write-Host "-> resolving $Tag release for windows-$arch ..."
 $rel = Invoke-RestMethod -Headers $ua -Uri $api
 $zip = $rel.assets | Where-Object { $_.name -like "*_windows-$arch.zip" } | Select-Object -First 1
+if (-not $zip -and $arch -eq 'arm64') {
+  # Releases before v0.62.5 carry no ARM64 build; the x64 one runs under
+  # emulation on Windows 11 (not on Windows 10 on ARM).
+  Write-Host "-> no windows-arm64 build in the '$Tag' release; installing windows-amd64 (runs under emulation on Windows 11)"
+  $arch = 'amd64'
+  $zip = $rel.assets | Where-Object { $_.name -like "*_windows-$arch.zip" } | Select-Object -First 1
+}
 $sum = $rel.assets | Where-Object { $_.name -eq 'checksums.txt' } | Select-Object -First 1
 if (-not $zip) { throw "no windows-$arch asset in the '$Tag' release" }
 # A release can carry more than one build for a platform (the rolling nightly

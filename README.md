@@ -74,7 +74,7 @@ arg): `& ([scriptblock]::Create((irm https://ipsupport-llc.github.io/ipsupport-c
 [latest release](https://github.com/ipsupport-llc/ipsupport-code/releases/latest)
 (or the rolling [`nightly`](https://github.com/ipsupport-llc/ipsupport-code/releases/tag/nightly)):
 `darwin-arm64` (Apple Silicon), `darwin-amd64` (Intel Mac), `linux-amd64`,
-`linux-arm64`, `windows-amd64`. Each release also ships `checksums.txt` (SHA-256).
+`linux-arm64`, `windows-amd64`, `windows-arm64`. Each release also ships `checksums.txt` (SHA-256).
 
 ```sh
 tar -xzf ipsupport-code_*_darwin-arm64.tar.gz   # .zip on Windows

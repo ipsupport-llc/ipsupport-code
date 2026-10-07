@@ -154,3 +154,15 @@ func TestExtractRefusesWhatIsNotAWholeBinary(t *testing.T) {
 		}
 	}
 }
+
+// On Windows there is no self-update: say so, and how to update, instead of
+// failing to find a .tar.gz that Windows releases never carry.
+func TestLatestOnWindowsPointsAtTheInstaller(t *testing.T) {
+	old := goos
+	goos = "windows"
+	defer func() { goos = old }()
+	_, err := Latest(context.Background(), "o/r", Stable, http.DefaultClient)
+	if err == nil || !strings.Contains(err.Error(), "install.ps1") {
+		t.Fatalf("err = %v, want a pointer to the installer", err)
+	}
+}

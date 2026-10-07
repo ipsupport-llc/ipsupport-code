@@ -52,7 +52,7 @@ jobs:
       - name: build (host)
         run: make build
       - name: build (darwin/windows cross)
-        run: GOOS=darwin GOARCH=arm64 go build ./... && GOOS=windows GOARCH=amd64 go build ./...
+        run: GOOS=darwin GOARCH=arm64 go build ./... && GOOS=windows GOARCH=amd64 go build ./... && GOOS=windows GOARCH=arm64 go build ./...
 
   # The macOS sandbox (Seatbelt) can only be exercised on macOS, so run the
   # sandbox package's tests there — they execute real sandbox-exec confinement.

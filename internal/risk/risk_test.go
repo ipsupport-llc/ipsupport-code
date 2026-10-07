@@ -170,7 +170,11 @@ func TestReadsAreQuietWritesAreNot(t *testing.T) {
 		t.Fatal(err)
 	}
 	run := func(c string) float32 { return m.Assess("run", "shell", map[string]any{"command": c}).Risk }
-	for _, c := range []string{"curl https://example.com", "curl https://example.org/page", "curl https://docs.rs/serde", "curl -L https://go.dev/dl/", "curl -o go.tgz https://go.dev/dl/go.tgz", "wget https://docs.rs/serde"} {
+	for _, c := range []string{"curl https://example.com", "curl https://example.org/page", "curl https://docs.rs/serde", "curl -L https://go.dev/dl/", "curl -o go.tgz https://go.dev/dl/go.tgz", "wget https://docs.rs/serde",
+		// Unseen hosts and long API paths, and /dev/null as a sink: these
+		// scored 0.47 and 0.90 destructive on a model that knew a dozen URLs.
+		"curl -s https://some-app.onrender.com/api/v1/books/random 2>&1",
+		`curl -s -o /dev/null -w "%{http_code}" https://other-thing.herokuapp.com/api/v2/items/42`} {
 		if r := run(c); r >= Threshold {
 			t.Errorf("%q: risk %.2f — a read flagged as risky", c, r)
 		}

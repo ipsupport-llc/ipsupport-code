@@ -276,6 +276,32 @@ for v in GET_VERBS:
     for h in NET_HOSTS + ["https://get.example.sh", "https://x.io/i.sh", "https://install.example.com"]:
         add("run", "shell", {"command": f"{v} {h}"}, [N], "train" if rng.random() > 0.2 else "holdout")
 
+# Real URLs, not a dozen example.com ones: a long unseen address broke into
+# character n-grams the model had never seen in a safe call, and they drifted
+# into destructive — `curl -s https://goquotes-api.herokuapp.com/api/v1/quotes/
+# random` scored 0.47 destructive. Crossed with the usual tails a model adds
+# (2>&1, | head, | jq .), which change nothing either.
+REAL_URLS = [
+    "https://goquotes-api.herokuapp.com/api/v1/quotes/random", "https://my-app.vercel.app/api/health",
+    "https://status.fly.dev/v1/apps/web", "https://site.netlify.app/.netlify/functions/ping",
+    "https://jsonplaceholder.typicode.com/todos/1", "https://httpbin.org/get?x=1",
+    "https://api.openweathermap.org/data/2.5/weather?q=Kyiv", "https://catfact.ninja/fact",
+    "https://api.coindesk.com/v1/bpi/currentprice.json", "https://dog.ceo/api/breeds/image/random",
+    "https://official-joke-api.appspot.com/random_joke", "https://api.ipify.org?format=json",
+    "https://wttr.in/London?format=3", "https://ifconfig.me", "http://localhost:3000/api/users?page=2",
+    "http://127.0.0.1:8000/docs", "https://api.stripe.com/v1/charges?limit=3",
+    "https://hacker-news.firebaseio.com/v0/topstories.json", "https://api.spacexdata.com/v4/launches/latest",
+    "https://en.wikipedia.org/w/api.php?action=query&format=json", "https://www.googleapis.com/books/v1/volumes?q=go",
+    "https://proxy.golang.org/github.com/spf13/cobra/@v/list", "https://deno.land/x/oak/mod.ts",
+    "https://unpkg.com/react@18/umd/react.production.min.js", "https://ghcr.io/v2/o/app/tags/list",
+]
+READ_TAILS = ["", " 2>&1", " | head -20", " | jq .", " | head -c 500", " -o /dev/null -w '%{http_code}'"]
+for v in ("curl -s", "curl", "curl -sL", "curl -fsS", "wget -qO-"):
+    for u in REAL_URLS:
+        tail = rng.choice(READ_TAILS)
+        add("run", "shell", {"command": f"{v} '{u}'{tail}" if "?" in u or "&" in u else f"{v} {u}{tail}"}, [N],
+            "train" if rng.random() > 0.2 else "holdout")
+
 # And the other half of the same lesson: what makes a request change something
 # is its METHOD or a body, not its host. Crossed over the same hosts, so the
 # side effect is learned from -X POST / -d / -T, and DELETE as destructive.

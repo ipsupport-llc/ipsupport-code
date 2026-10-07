@@ -6542,7 +6542,7 @@ func TestSystemPromptIncludesTodaysDate(t *testing.T) {
 	if p := a.systemPrompt(); !strings.Contains(p, want) {
 		t.Errorf("system prompt missing %q:\n%s", want, p)
 	}
-	if p := a.subAgentPrompt(ws, ""); !strings.Contains(p, want) {
+	if p := a.subAgentPrompt(ws, "", ""); !strings.Contains(p, want) {
 		t.Errorf("sub-agent prompt missing %q:\n%s", want, p)
 	}
 }

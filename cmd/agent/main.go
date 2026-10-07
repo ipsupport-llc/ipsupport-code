@@ -6,6 +6,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -735,6 +736,7 @@ type spawnPlan struct {
 	tracer         trace.Tracer
 	priceOverrides map[string]usage.Price
 	goalMaxSteps   int
+	shell          tool.Shell // read here, not from a.cfg in the spawn's goroutine
 }
 
 // newSubAgent builds the delegate. Extracted so the wiring is assertable: a
@@ -743,7 +745,7 @@ type spawnPlan struct {
 // own tool call is recorded against the spawn, with the spawn's parameters.
 func (a *app) newSubAgent(plan spawnPlan, client *llm.OpenAIClient, id string) *agent.Agent {
 	sub := agent.New(client, plan.subReg, a.kb, plan.tracer,
-		a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt),
+		a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt, plan.shell),
 		resolveStepBudget(plan.goalMaxSteps, plan.llmCfg))
 	sub.SetPlanMode(plan.planMode)
 	sub.SetLabel(id)
@@ -881,6 +883,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 		profile: profile, provider: provider, llmCfg: llmCfg, rolePrompt: p.Prompt,
 		subReg: subReg, subPol: planPol, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default, outsideJail: outsideJail,
 		tracer: tracer, priceOverrides: priceOverrides, goalMaxSteps: a.cfg.GoalMaxSteps,
+		shell: tool.Shell(a.cfg.Run.Shell),
 	}, false, p, nil
 }
 
@@ -1060,11 +1063,11 @@ func (a *app) buildSubReg(pol *policy.Engine, root string) *tool.Registry {
 // project instructions found there, the enabled-skills index, and the profile's
 // role. It does NOT inject the host's learned facts — those belong to the host
 // workspace, not the directory the sub-agent was pointed at.
-func (a *app) subAgentPrompt(workspace, role string) string {
+func (a *app) subAgentPrompt(workspace, role string, shell tool.Shell) string {
 	out := agent.SubAgentSystemPrompt()
 	out += fmt.Sprintf(
 		"\n\nToday is %s. Environment: you are running on %s; your working directory is %s. Use commands that exist on this OS. All file/run/git paths resolve in that directory.",
-		time.Now().Format("2006-01-02"), runtime.GOOS, workspace)
+		time.Now().Format("2006-01-02"), runtime.GOOS, workspace) + shell.PromptNote()
 	if text, src := loadInstructions(workspace); text != "" {
 		out += "\n\n## Project instructions (from " + src + ") — follow these:\n" + text
 	}
@@ -3671,7 +3674,7 @@ func (a *app) systemPrompt() string {
 	a.promptSrc = psrc
 	out := base + "\n\n" + agent.NotePreamble + fmt.Sprintf(
 		"\n\nToday is %s. Environment: you are running on %s; your working directory is %s. Relative paths resolve there — and by default this is a HARD JAIL: no tool (file, run's cwd, git) can reach a path outside it, an absolute path elsewhere is rejected, not silently redirected. If a task genuinely needs a different directory, say so — don't keep retrying different absolute paths or cwd values, they'll all fail the same way. Use commands that exist on this OS — on darwin prefer vm_stat/top/sw_vers over Linux-only tools like free.",
-		time.Now().Format("2006-01-02"), runtime.GOOS, a.effectiveDir())
+		time.Now().Format("2006-01-02"), runtime.GOOS, a.effectiveDir()) + tool.Shell(a.cfg.Run.Shell).PromptNote()
 	if text != "" {
 		out += "\n\n## Project instructions (from " + src + ") — follow these:\n" + text
 	}
@@ -5019,7 +5022,7 @@ func (a *app) userShellCommand(ctx context.Context, line string) *exec.Cmd {
 func (a *app) runShell(ctx context.Context) {
 	sh := a.shellPath()
 	fmt.Printf("— %s (exit to return to ipsupport-code) —\n", sh)
-	cmd := exec.CommandContext(ctx, sh)
+	cmd := tool.Shell(a.cfg.Run.Shell).InteractiveCommand(ctx)
 	cmd.Dir = a.workspace
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	_ = cmd.Run() // a non-zero shell exit is normal; nothing to report
@@ -5034,6 +5037,15 @@ func (a *app) runShellLine(ctx context.Context, cmdline string) {
 	cmd := a.userShellCommand(ctx, cmdline)
 	cmd.Dir = a.workspace
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if runtime.GOOS == "windows" {
+		// Windows PowerShell 5.1 writes errors to stderr as CLIXML: hold them
+		// and print them as text, as the TUI's !cmd and run do.
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		_ = cmd.Run()
+		fmt.Fprint(os.Stderr, tool.Shell(a.cfg.Run.Shell).CleanOutput(stderr.String()))
+		return
+	}
 	_ = cmd.Run()
 }
 

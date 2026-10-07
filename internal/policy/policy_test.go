@@ -501,3 +501,68 @@ func TestSplitCommands(t *testing.T) {
 		}
 	}
 }
+
+// On Windows commands run in PowerShell (or cmd), where ( ), $( ), @( ), { }
+// run nested commands and %VAR% / ^ rewrite the line: an allow glob sees the
+// prefix only, so none of them is auto-allowed. The first case is Codex's.
+func TestWindowsAllowSeesNoNestedCommands(t *testing.T) {
+	defer func(w bool) { windowsShell = w }(windowsShell)
+	windowsShell = true
+	c := config.Default()
+	c.Run = config.RunPolicy{Default: "ask", Allow: []string{"echo *", "dir*"}}
+	e := eng(t, c)
+	for _, cmd := range []string{
+		"echo (Remove-Item victim -Recurse -Force)",
+		"echo $(Remove-Item victim)",
+		"echo @(Remove-Item victim)",
+		"echo {Remove-Item victim}.Invoke()",
+		"echo %PATH%",
+		"echo a^&del x",
+		"echo [IO.File]::Delete('x')",
+	} {
+		if got := e.Run(cmd); got == Allow {
+			t.Errorf("Run(%q) = Allow; a nested command must not ride an allow glob", cmd)
+		}
+	}
+	if got := e.Run("dir C:\\Users"); got != Allow {
+		t.Errorf("Run(dir C:\\Users) = %v, want Allow — a plain command still matches", got)
+	}
+}
+
+// The floor speaks Windows too: names without case or .exe, and the
+// PowerShell/cmd ways to delete a tree or wipe a disk.
+func TestWindowsFloor(t *testing.T) {
+	defer func(w bool) { windowsShell = w }(windowsShell)
+	windowsShell = true
+	c := config.Default()
+	c.Run = config.RunPolicy{Default: "allow"}
+	e := eng(t, c)
+	for _, cmd := range []string{
+		"Remove-Item C:\\work -Recurse -Force",
+		"remove-item -r x",
+		"ri x -rec",
+		"RM -R x",
+		"rd /s /q C:\\x",
+		"RMDIR /S x",
+		"del /s /q *.*",
+		"erase /S x",
+		"C:\\Windows\\System32\\format.com D:",
+		"Format-Volume -DriveLetter D",
+		"Clear-Disk -Number 1",
+		"diskpart.exe",
+		"Stop-Computer",
+		"shutdown.exe /s /t 0",
+		"echo x; Remove-Item y -Recurse",
+		"rm.exe -fr build",
+		"rm -Rf build",
+	} {
+		if got := e.Run(cmd); got != Deny {
+			t.Errorf("Run(%q) = %v, want Deny", cmd, got)
+		}
+	}
+	for _, cmd := range []string{"Remove-Item x -Force", "rm -Force x", "del x", "rd emptydir", "Get-ChildItem -Recurse"} {
+		if got := e.Run(cmd); got == Deny {
+			t.Errorf("Run(%q) = Deny; only a recursive delete is the floor", cmd)
+		}
+	}
+}

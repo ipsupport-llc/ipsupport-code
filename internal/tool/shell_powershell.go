@@ -2,6 +2,10 @@ package tool
 
 import (
 	"encoding/base64"
+	"html"
+	"regexp"
+	"strconv"
+	"strings"
 	"unicode/utf16"
 )
 
@@ -25,7 +29,9 @@ func powerShellScript(line string) string {
 	return "$ProgressPreference = 'SilentlyContinue'\n" +
 		"if ($PSStyle) { $PSStyle.OutputRendering = 'PlainText' }\n" +
 		"try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }\n" +
-		line + "\n" +
+		// A blank line after: a line ending in a backtick continues onto the
+		// next one, and must not continue into $__ok = $? below.
+		line + "\n\n" +
 		"$__ok = $?; $__code = $LASTEXITCODE\n" +
 		"if (-not $__ok) { if ($__code) { exit $__code } else { exit 1 } }\n" +
 		"exit 0\n"
@@ -41,4 +47,32 @@ func encodePowerShell(line string) string {
 		b[2*i], b[2*i+1] = byte(c), byte(c>>8)
 	}
 	return base64.StdEncoding.EncodeToString(b)
+}
+
+var (
+	cliXMLBlock  = regexp.MustCompile(`(?s)#< CLIXML\r?\n<Objs Version="[^"]*" xmlns="http://schemas\.microsoft\.com/powershell/2004/04">(.*?)</Objs>`)
+	cliXMLString = regexp.MustCompile(`(?s)<S S="[^"]*">(.*?)</S>`)
+	cliXMLEscape = regexp.MustCompile(`_x([0-9A-Fa-f]{4})_`)
+)
+
+// decodeCLIXML turns the CLIXML that Windows PowerShell 5.1 writes for its
+// error stream under -EncodedCommand back into the text it stands for: 5.1
+// ignores -OutputFormat Text there, and a model reading the XML has to dig
+// the error out of entities and _x000D__x000A_ escapes. Only a block behind
+// PowerShell's own "#< CLIXML" marker is decoded: a program that prints XML in
+// that namespace (a test fixture, say) keeps its output as printed.
+func decodeCLIXML(out string) string {
+	if !strings.Contains(out, "#< CLIXML") {
+		return out
+	}
+	return cliXMLBlock.ReplaceAllStringFunc(out, func(block string) string {
+		var b strings.Builder
+		for _, m := range cliXMLString.FindAllStringSubmatch(block, -1) {
+			b.WriteString(cliXMLEscape.ReplaceAllStringFunc(html.UnescapeString(m[1]), func(e string) string {
+				n, _ := strconv.ParseUint(e[2:6], 16, 16)
+				return string(rune(n))
+			}))
+		}
+		return strings.ReplaceAll(b.String(), "\r\n", "\n")
+	})
 }

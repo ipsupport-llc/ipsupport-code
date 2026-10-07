@@ -142,7 +142,7 @@ func (r *runTool) shell(ctx context.Context, a Args) Result {
 	cmd.Stderr = out
 	runErr := cmd.Run()
 
-	body := strings.TrimRight(out.String(), "\n")
+	body := strings.TrimRight(r.sh.CleanOutput(out.String()), "\n")
 	if out.Truncated {
 		body += "\n…[truncated]"
 	}

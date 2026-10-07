@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -30,6 +29,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/selfupdate"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
+	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 )
 
 type uiState int
@@ -1447,11 +1447,12 @@ func (m *tuiModel) runShellCmd(cmdline string) tea.Cmd {
 	}
 	m.push(cYou.Render("! ") + cmdline)
 	dir := m.app.workspace
+	shellName := m.app.cfg.Run.Shell
+	c := m.app.userShellCommand(context.Background(), cmdline) // built here: cfg is read on the UI goroutine
 	return func() tea.Msg {
-		c := m.app.userShellCommand(context.Background(), cmdline)
 		c.Dir = dir
 		out, _ := c.CombinedOutput()
-		return shellCmdMsg{out: strings.TrimRight(string(out), "\n")}
+		return shellCmdMsg{out: strings.TrimRight(tool.Shell(shellName).CleanOutput(string(out)), "\n")}
 	}
 }
 
@@ -1682,7 +1683,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		}
 	case "/shell", "/sh":
 		sh := m.app.shellPath()
-		c := exec.Command(sh)
+		c := tool.Shell(m.app.cfg.Run.Shell).InteractiveCommand(context.Background())
 		c.Dir = m.app.workspace
 		m.push(cDim.Render("  ⇲ dropping to " + sh + " — exit to return"))
 		return m, tea.ExecProcess(c, func(error) tea.Msg { return shellDoneMsg{} })
@@ -1841,6 +1842,7 @@ func (m *tuiModel) startUpdate(arg string) tea.Cmd {
 	if channel == "" {
 		channel = selfupdate.Stable
 	}
+	arg = strings.TrimLeft(arg, "-") // --nightly, as the CLI's update takes it
 	if arg == selfupdate.Stable || arg == selfupdate.Nightly {
 		channel = arg
 		_ = config.SaveChannel(channel)

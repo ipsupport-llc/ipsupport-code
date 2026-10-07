@@ -57,6 +57,7 @@ func OutputBudget(ctxWindow int) int {
 type CmdWrapper func(name string, args []string) (string, []string)
 
 type runTool struct {
+	sh      Shell // the shell commands run in (Windows; sh elsewhere)
 	pol     *policy.Engine
 	ap      Approver
 	timeout time.Duration // default per-command wall-clock limit
@@ -67,17 +68,17 @@ type runTool struct {
 // NewRun returns the run tool: a single `shell` action gated by the policy
 // engine, executed with a timeout and a jail-confined working directory. The
 // default timeout comes from config (run.timeout_seconds); 0 falls back to 60s.
-func NewRun(p *policy.Engine, ap Approver, defaultTimeout time.Duration, ctxWindow int, wrap ...CmdWrapper) Tool {
+func NewRun(p *policy.Engine, ap Approver, defaultTimeout time.Duration, ctxWindow int, shell Shell, wrap ...CmdWrapper) Tool {
 	if defaultTimeout <= 0 {
 		defaultTimeout = defaultRunTimeout
 	}
-	r := &runTool{pol: p, ap: ap, timeout: defaultTimeout, maxOut: OutputBudget(ctxWindow)}
+	r := &runTool{pol: p, ap: ap, timeout: defaultTimeout, maxOut: OutputBudget(ctxWindow), sh: shell}
 	if len(wrap) > 0 {
 		r.wrap = wrap[0]
 	}
 	return NewDomain(DomainSpec{
 		Name:    "run",
-		Summary: "Run a shell command (sh -c) in the workspace; returns combined stdout+stderr and the exit code. Gated by the workspace permission policy.",
+		Summary: "Run a shell command (" + shell.desc() + ") in the workspace; returns combined stdout+stderr and the exit code. Gated by the workspace permission policy.",
 		Details: "Use for builds, tests, package managers — anything not covered by the other tools.",
 		NotHere: "NOT here — read/write files → file; web/search/fetch → web; arithmetic → calc.",
 		Actions: []Action{{
@@ -123,11 +124,14 @@ func (r *runTool) shell(ctx context.Context, a Args) Result {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	name, args := "sh", []string{"-c", command}
+	name, args := r.sh.argv(command)
 	if r.wrap != nil { // wrap in the OS sandbox (confines writes to the workspace)
 		name, args = r.wrap(name, args)
 	}
 	cmd := exec.CommandContext(cctx, name, args...)
+	if r.wrap == nil { // a sandbox wrapper runs something else first; there is none on Windows
+		r.sh.prepare(cmd, command)
+	}
 	cmd.Dir = dir
 	// Kill the WHOLE process group on timeout/cancel, and bound Wait so a child
 	// that outlives the shell while holding the output pipe (a dev server, a

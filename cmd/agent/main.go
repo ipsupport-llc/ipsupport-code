@@ -68,6 +68,7 @@ func main() {
 	// sandbox, it re-runs THIS binary, which self-restricts and execs the real
 	// command. Must run first; a normal launch falls straight through.
 	sandbox.MaybeExecConfined()
+	selfupdate.RemoveOld() // the binary a Windows update moved aside, now no longer running
 	var (
 		workspace       string
 		doInit          bool
@@ -320,9 +321,9 @@ func runUpdate(args []string, client *http.Client) {
 		channel = selfupdate.Stable
 	}
 	if len(args) >= 1 {
-		switch args[0] {
+		switch arg := strings.TrimLeft(args[0], "-"); arg { // --nightly reads as naturally as nightly
 		case selfupdate.Stable, selfupdate.Nightly:
-			channel = args[0]
+			channel = arg
 			if err := config.SaveChannel(channel); err != nil {
 				fmt.Fprintln(os.Stderr, "warning: channel not saved:", err)
 			}
@@ -1045,7 +1046,7 @@ func (a *app) resolveSpawnDir(dir string) (string, error) {
 func (a *app) buildSubReg(pol *policy.Engine, root string) *tool.Registry {
 	tools := []tool.Tool{tool.NewFile(pol, gatedApprover{a}, a.snapFile)}
 	if a.cfg.Spawn.Exec {
-		tools = append(tools, tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, a.sandboxWrapperFor(root)))
+		tools = append(tools, tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, tool.Shell(a.cfg.Run.Shell), a.sandboxWrapperFor(root)))
 	}
 	tools = append(tools, tool.NewGitLive(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.offlineNow.Load), tool.NewWebLive(nil, a.offlineNow.Load), tool.NewCalc(), tool.NewDone())
 	if a.skills != nil && a.skills.HasEnabled() {
@@ -2825,7 +2826,7 @@ func (a *app) wire() error {
 	var reg *tool.Registry
 	tools := []tool.Tool{
 		tool.NewFile(pol, gatedApprover{a}, a.snapFile),
-		tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, a.sandboxWrapper()),
+		tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, tool.Shell(a.cfg.Run.Shell), a.sandboxWrapper()),
 		tool.NewGitLive(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.offlineNow.Load),
 		tool.NewWebLive(nil, a.offlineNow.Load), // nil → its own 30s-timeout client; task ctx has no deadline of its own
 		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),
@@ -5000,18 +5001,23 @@ func (a *app) permissionsSet(field *string, arg, label string) []string {
 	return []string{msg + " — saved to .agent/config.json"}
 }
 
-// shellPath is the user's interactive shell, falling back to /bin/sh.
-func shellPath() string {
-	if s := os.Getenv("SHELL"); s != "" {
-		return s
+// shellPath is the shell /shell opens: the user's own ($SHELL), or on Windows
+// the one run.shell names.
+func (a *app) shellPath() string { return tool.Shell(a.cfg.Run.Shell).Interactive() }
+
+// userShellCommand runs a line the user typed (!cmd): in their own shell, or
+// on Windows the one run.shell names.
+func (a *app) userShellCommand(ctx context.Context, line string) *exec.Cmd {
+	if runtime.GOOS == "windows" {
+		return tool.Shell(a.cfg.Run.Shell).Command(ctx, line)
 	}
-	return "/bin/sh"
+	return exec.CommandContext(ctx, a.shellPath(), "-c", line)
 }
 
 // runShell drops to an interactive shell in the workspace so the user can do
 // things by hand; control returns when they exit it.
 func (a *app) runShell(ctx context.Context) {
-	sh := shellPath()
+	sh := a.shellPath()
 	fmt.Printf("— %s (exit to return to ipsupport-code) —\n", sh)
 	cmd := exec.CommandContext(ctx, sh)
 	cmd.Dir = a.workspace
@@ -5025,7 +5031,7 @@ func (a *app) runShellLine(ctx context.Context, cmdline string) {
 	if strings.TrimSpace(cmdline) == "" {
 		return
 	}
-	cmd := exec.CommandContext(ctx, shellPath(), "-c", cmdline)
+	cmd := a.userShellCommand(ctx, cmdline)
 	cmd.Dir = a.workspace
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	_ = cmd.Run()

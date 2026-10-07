@@ -1448,7 +1448,7 @@ func (m *tuiModel) runShellCmd(cmdline string) tea.Cmd {
 	m.push(cYou.Render("! ") + cmdline)
 	dir := m.app.workspace
 	return func() tea.Msg {
-		c := exec.Command(shellPath(), "-c", cmdline)
+		c := m.app.userShellCommand(context.Background(), cmdline)
 		c.Dir = dir
 		out, _ := c.CombinedOutput()
 		return shellCmdMsg{out: strings.TrimRight(string(out), "\n")}
@@ -1681,7 +1681,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 			return modelsMsg{setTo: setTo, lines: lines}
 		}
 	case "/shell", "/sh":
-		sh := shellPath()
+		sh := m.app.shellPath()
 		c := exec.Command(sh)
 		c.Dir = m.app.workspace
 		m.push(cDim.Render("  ⇲ dropping to " + sh + " — exit to return"))

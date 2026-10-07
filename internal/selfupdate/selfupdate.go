@@ -7,6 +7,7 @@ package selfupdate
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -17,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -47,9 +49,6 @@ type Release struct {
 // Latest resolves the newest release on the channel and the asset for this
 // machine. A nil client uses http.DefaultClient.
 func Latest(ctx context.Context, repo, channel string, hc *http.Client) (Release, error) {
-	if goos == "windows" {
-		return Release{}, errWindows
-	}
 	if hc == nil {
 		hc = http.DefaultClient
 	}
@@ -71,16 +70,28 @@ func Latest(ctx context.Context, repo, channel string, hc *http.Client) (Release
 		return Release{}, err
 	}
 
-	suffix := "_" + osArch() + ".tar.gz"
+	// The machine's own build first: an x64 binary under emulation on ARM64
+	// moves to the native one. A release without it (older ones carry no
+	// windows-arm64) falls back to this binary's own.
+	ext := ".tar.gz"
+	if goos == "windows" {
+		ext = ".zip"
+	}
 	var rel Release
-	for _, a := range raw.Assets {
-		switch {
-		case a.Name == "checksums.txt":
-			rel.SumsURL = a.URL
-		case strings.HasSuffix(a.Name, suffix):
-			rel.AssetName = a.Name
-			rel.AssetURL = a.URL
-			rel.Version = strings.TrimPrefix(strings.TrimSuffix(a.Name, suffix), "ipsupport-code_")
+	for _, arch := range []string{nativeArch, runtime.GOARCH} {
+		suffix := "_" + goos + "-" + arch + ext
+		for _, a := range raw.Assets {
+			switch {
+			case a.Name == "checksums.txt":
+				rel.SumsURL = a.URL
+			case strings.HasSuffix(a.Name, suffix):
+				rel.AssetName = a.Name
+				rel.AssetURL = a.URL
+				rel.Version = strings.TrimPrefix(strings.TrimSuffix(a.Name, suffix), "ipsupport-code_")
+			}
+		}
+		if rel.AssetURL != "" {
+			break
 		}
 	}
 	if rel.AssetURL == "" {
@@ -94,9 +105,6 @@ func Latest(ctx context.Context, repo, channel string, hc *http.Client) (Release
 func Apply(ctx context.Context, rel Release, hc *http.Client) (string, error) {
 	if hc == nil {
 		hc = http.DefaultClient
-	}
-	if goos == "windows" {
-		return "", errWindows
 	}
 	if rel.SumsURL == "" {
 		return "", fmt.Errorf("release %s has no checksums.txt asset — refusing to install an unverified binary", rel.Version)
@@ -112,6 +120,17 @@ func Apply(ctx context.Context, rel Release, hc *http.Client) (string, error) {
 	if err := verifyChecksum(data, string(sums), rel.AssetName); err != nil {
 		return "", err
 	}
+	if goos == "windows" {
+		bin, err := extractZip(data, "ipsupport-code.exe")
+		if err != nil {
+			return "", err
+		}
+		exe, err := executable()
+		if err != nil {
+			return "", err
+		}
+		return exe, replaceInUse(exe, bin)
+	}
 	bin, err := extractBinary(data, "ipsupport-code")
 	if err != nil {
 		return "", err
@@ -124,10 +143,10 @@ func osArch() string { return goos + "-" + runtime.GOARCH }
 // goos is runtime.GOOS, a variable so a test can play Windows.
 var goos = runtime.GOOS
 
-// errWindows: a running .exe cannot be replaced in place, so on Windows the
-// installer is the update — and it picks the machine's native build (x64 or
-// ARM64), which a self-update from an emulated x64 binary could not see.
-var errWindows = fmt.Errorf("self-update isn't supported on Windows — re-run the installer to update:\n  iex (irm https://ipsupport-llc.github.io/ipsupport-code/install.ps1)")
+// nativeArch is the machine's own architecture, which differs from
+// runtime.GOARCH for an x64 binary under emulation on Windows on ARM (see
+// arch_windows.go). A variable so a test can play one.
+var nativeArch = runtime.GOARCH
 
 func get(ctx context.Context, hc *http.Client, url string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -205,16 +224,87 @@ func extractBinary(gzData []byte, name string) ([]byte, error) {
 	return nil, fmt.Errorf("%q not found in the archive", name)
 }
 
-// replaceExecutable writes the new binary next to the current one and renames it
-// over the top — atomic on the same filesystem, and safe while running on Unix
-// (the live process keeps the old inode until it exits).
-func replaceExecutable(bin []byte) (string, error) {
+// extractZip returns the named file from a .zip — the Windows archive — under
+// the same rules as extractBinary: a regular, non-empty file read whole.
+func extractZip(data []byte, name string) ([]byte, error) {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range zr.File {
+		if filepath.Base(f.Name) != name && path.Base(f.Name) != name {
+			continue
+		}
+		if !f.Mode().IsRegular() {
+			return nil, fmt.Errorf("%q in the archive is not a regular file", name)
+		}
+		if f.UncompressedSize64 == 0 || f.UncompressedSize64 > maxBinaryBytes {
+			return nil, fmt.Errorf("%q in the archive is %d bytes — refusing (limit %d MiB)", name, f.UncompressedSize64, maxBinaryBytes>>20)
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return nil, err
+		}
+		bin, err := io.ReadAll(io.LimitReader(rc, maxBinaryBytes))
+		rc.Close()
+		if err != nil {
+			return nil, err
+		}
+		if uint64(len(bin)) != f.UncompressedSize64 {
+			return nil, fmt.Errorf("%q in the archive is truncated (%d of %d bytes)", name, len(bin), f.UncompressedSize64)
+		}
+		return bin, nil
+	}
+	return nil, fmt.Errorf("%q not found in the archive", name)
+}
+
+// executable is the path of the running binary, symlinks resolved.
+func executable() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
 	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
 		exe = resolved
+	}
+	return exe, nil
+}
+
+// replaceInUse installs bin at exe while exe is running. Windows will not let a
+// running .exe be overwritten or replaced by a rename, but it will let it be
+// renamed: so the old one moves aside to exe.old, the new one is written in its
+// place, and RemoveOld deletes the old one on the next start. If the write
+// fails, the old one is moved back.
+func replaceInUse(exe string, bin []byte) error {
+	old := exe + ".old"
+	_ = os.Remove(old) // left by an earlier update
+	if err := os.Rename(exe, old); err != nil {
+		return fmt.Errorf("can't move the running %s aside: %w", exe, err)
+	}
+	if err := atomicfile.Write(exe, bin, 0o755); err != nil {
+		_ = os.Rename(old, exe)
+		return fmt.Errorf("can't write %s: %w", exe, err)
+	}
+	return nil
+}
+
+// RemoveOld deletes the binary an update on Windows moved aside, once it is no
+// longer running. Best effort; a no-op when there is none.
+func RemoveOld() {
+	if exe, err := executable(); err == nil {
+		removeOld(exe)
+	}
+}
+
+func removeOld(exe string) { _ = os.Remove(exe + ".old") }
+
+// replaceExecutable writes the new binary next to the current one and renames it
+// over the top — atomic on the same filesystem, and safe while running on Unix
+// (the live process keeps the old inode until it exits).
+func replaceExecutable(bin []byte) (string, error) {
+	exe, err := executable()
+	if err != nil {
+		return "", err
 	}
 	// Atomic temp+rename over the running exe (safe on Unix — the live process keeps
 	// the old inode until it exits); executable perms.

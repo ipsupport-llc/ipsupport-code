@@ -22,7 +22,7 @@ func runToolFor(t *testing.T, dir, def string, ap Approver, deny []string) Tool 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewRun(e, ap, 0, 0)
+	return NewRun(e, ap, 0, 0, "")
 }
 
 func TestRunEcho(t *testing.T) {
@@ -48,7 +48,7 @@ func TestRunAppliesCmdWrapper(t *testing.T) {
 		gotName, gotArgs = name, args
 		return "sh", []string{"-c", "echo WRAPPED"} // rewrite the command entirely
 	}
-	tl := NewRun(e, yes(), 0, 0, wrap)
+	tl := NewRun(e, yes(), 0, 0, "", wrap)
 	r := tl.Call(context.Background(), "shell", map[string]any{"command": "echo original"})
 	if r.IsError || !strings.Contains(r.Content, "WRAPPED") || strings.Contains(r.Content, "original") {
 		t.Errorf("wrapper not applied: %+v", r)
@@ -90,7 +90,7 @@ func TestRunConfigTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tl := NewRun(e, yes(), 1*time.Second, 0) // 1s default from config
+	tl := NewRun(e, yes(), 1*time.Second, 0, "") // 1s default from config
 	r := tl.Call(context.Background(), "shell", map[string]any{"command": "sleep 3"})
 	if !r.IsError || !strings.Contains(r.Content, "timed out") {
 		t.Errorf("sleep 3 with 1s default = %+v, want a timeout error", r)

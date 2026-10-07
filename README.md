@@ -859,6 +859,10 @@ that's about to bite you.
 `run.timeout_seconds` caps how long a shell command may run (default 60s); raise
 it for slow builds/test suites, or let the model pass a larger per-call `timeout`.
 
+On Windows, `run.shell` picks the shell commands run in: unset uses `pwsh` if
+installed, else Windows PowerShell; or set `pwsh`, `powershell` or `cmd`
+(`ipsupport-code config set run.shell cmd`). Elsewhere it is always `sh`.
+
 Cross-task memory: once the context window fills past `compact_threshold`
 (default `0.75`), the session is folded into an LLM-written recap to free
 headroom — `memory raw` turns that off entirely, keeping turns verbatim and

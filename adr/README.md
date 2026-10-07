@@ -24,3 +24,4 @@ How and why `ipsupport-code` is built the way it is. Format and rules:
 | [0015](0015-append-only-request-prefix.md) | Within a session, the request prefix only grows | Accepted |
 | [0016](0016-usage-statistics-and-rating.md) | Anonymous usage statistics, on for new installs, and an in-app rating | Accepted |
 | [0017](0017-git-hooks-stay-enabled.md) | The git tool runs the checkout's hooks and filters | Accepted |
+| [0018](0018-risk-dataset-and-honest-eval.md) | The risk model is measured on real commands, and its training data is generated from a grammar | Accepted |

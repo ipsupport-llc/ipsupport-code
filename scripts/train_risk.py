@@ -156,6 +156,56 @@ def report(title, rows, W, b):
         print(f"  {lab:22} precision {prec:.2f}  recall {rec:.2f}  (tp={tp} fp={fp} fn={fn})")
 
 
+def honest_eval(path, W, b, title):
+    """The number that decides whether a model ships (ADR-0018): real commands,
+    labelled by a person, never trained on. Reported as the log shows it — any
+    risky label at 0.5 or over is a warning — overall, per OS and per category,
+    so a regression in one corner is not averaged away by the rest."""
+    if not path.exists():
+        return
+    rows = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+    RISKY = [i for i, l in enumerate(LABELS) if l != "safe" and l not in INFORMATIONAL]
+    groups = {}
+    misses, alarms = [], []
+    data = []
+    for r in rows:
+        x = featurize(call_text(r["tool"], r.get("action", ""), r.get("params", {})))
+        y = [1.0 if l in r["labels"] else 0.0 for l in LABELS]
+        data.append((x, y))
+        top = 0.0
+        for li in RISKY:
+            z = b[li] + sum(W[li][j] * v for j, v in x.items())
+            top = max(top, 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z)))))
+        should = any(y[li] >= 0.5 for li in RISKY)
+        warned = top >= 0.5
+        for key in ("all", "os " + r.get("os", "?"), r.get("category", "?")):
+            g = groups.setdefault(key, [0, 0, 0, 0])  # rows, should warn, missed, false alarms
+            g[0] += 1
+            g[1] += should
+            g[2] += should and not warned
+            g[3] += warned and not should
+        cmd = r.get("params", {}).get("command", "")
+        if should and not warned:
+            misses.append((top, r.get("category", "?"), cmd))
+        if warned and not should:
+            alarms.append((top, r.get("category", "?"), cmd))
+    print(f"\n{title} — {path.name} ({len(rows)} real commands, never trained on):")
+    print(f"  {'group':24} {'rows':>5} {'risky':>6} {'missed':>7} {'false alarms':>13}")
+    order = ["all"] + sorted(k for k in groups if k.startswith("os ")) + sorted(k for k in groups if k != "all" and not k.startswith("os "))
+    for k in order:
+        n, sh, mi, fa = groups[k]
+        safe = n - sh
+        mis = f"{mi}/{sh}" if sh else "—"
+        fal = f"{fa}/{safe}" if safe else "—"
+        print(f"  {k:24} {n:5} {sh:6} {mis:>7} {fal:>13}")
+    for name, items in (("misses", misses), ("false alarms", alarms)):
+        if items:
+            print(f"  {name}:")
+            for sc, cat, cmd in sorted(items, reverse=(name == "false alarms"))[:12]:
+                print(f"    {sc:.2f}  {cat:20} {cmd[:70]}")
+    report(f"{title}, per label", data, W, b)
+
+
 def read_model(path):
     """Read a model file back, so training can CONTINUE from it instead of
     starting at zero. Mirrors Model.Write / Load (internal/risk/model.go).
@@ -206,6 +256,10 @@ def main():
     ap.add_argument("--from", dest="start", metavar="model.bin",
                     help="continue training from these weights instead of from zero")
     ap.add_argument("--epochs", type=int, default=EPOCHS)
+    ap.add_argument("--eval", metavar="model.bin",
+                    help="only evaluate these weights on the honest set(s), train nothing, write nothing")
+    ap.add_argument("--private", metavar="eval.jsonl",
+                    help="also evaluate on a private honest set kept outside the repository (ADR-0018)")
     ap.add_argument("extra", nargs="*", metavar="dataset.jsonl",
                     help="extra datasets to train on, e.g. a workspace's "
                          "risk-feedback.jsonl once you have labelled rows in it")
@@ -213,6 +267,12 @@ def main():
 
     check_vectors()
     here = pathlib.Path(__file__).parent
+    if args.eval:
+        W, b = read_model(pathlib.Path(args.eval))
+        honest_eval(here / "risk_eval.jsonl", W, b, f"honest set, {args.eval}")
+        if args.private:
+            honest_eval(pathlib.Path(args.private), W, b, f"private set, {args.eval}")
+        return
     rows = [json.loads(l) for l in (here / "risk_dataset.jsonl").read_text().splitlines() if l.strip()]
     base = len(rows)
     for extra in args.extra:
@@ -327,6 +387,9 @@ def main():
             print(f"    {sc:.2f}  {text[:76]}")
 
     report("held out", hold, W, b)
+    honest_eval(here / "risk_eval.jsonl", W, b, "honest set")
+    if args.private:
+        honest_eval(pathlib.Path(args.private), W, b, "private set")
     # Name the misses. A precision number says how often it cries wolf; the
     # actual wolves are what tells you whether the dataset or the model is wrong.
     holdrows = [r for r in rows if r.get("split") == "holdout"]

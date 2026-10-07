@@ -30,6 +30,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/selfupdate"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
+	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 )
 
 type uiState int
@@ -1447,11 +1448,12 @@ func (m *tuiModel) runShellCmd(cmdline string) tea.Cmd {
 	}
 	m.push(cYou.Render("! ") + cmdline)
 	dir := m.app.workspace
+	shellName := m.app.cfg.Run.Shell
+	c := m.app.userShellCommand(context.Background(), cmdline) // built here: cfg is read on the UI goroutine
 	return func() tea.Msg {
-		c := m.app.userShellCommand(context.Background(), cmdline)
 		c.Dir = dir
 		out, _ := c.CombinedOutput()
-		return shellCmdMsg{out: strings.TrimRight(string(out), "\n")}
+		return shellCmdMsg{out: strings.TrimRight(tool.Shell(shellName).CleanOutput(string(out)), "\n")}
 	}
 }
 

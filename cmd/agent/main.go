@@ -735,6 +735,7 @@ type spawnPlan struct {
 	tracer         trace.Tracer
 	priceOverrides map[string]usage.Price
 	goalMaxSteps   int
+	shell          tool.Shell // read here, not from a.cfg in the spawn's goroutine
 }
 
 // newSubAgent builds the delegate. Extracted so the wiring is assertable: a
@@ -743,7 +744,7 @@ type spawnPlan struct {
 // own tool call is recorded against the spawn, with the spawn's parameters.
 func (a *app) newSubAgent(plan spawnPlan, client *llm.OpenAIClient, id string) *agent.Agent {
 	sub := agent.New(client, plan.subReg, a.kb, plan.tracer,
-		a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt),
+		a.subAgentPrompt(plan.subWorkspace, plan.rolePrompt, plan.shell),
 		resolveStepBudget(plan.goalMaxSteps, plan.llmCfg))
 	sub.SetPlanMode(plan.planMode)
 	sub.SetLabel(id)
@@ -881,6 +882,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 		profile: profile, provider: provider, llmCfg: llmCfg, rolePrompt: p.Prompt,
 		subReg: subReg, subPol: planPol, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default, outsideJail: outsideJail,
 		tracer: tracer, priceOverrides: priceOverrides, goalMaxSteps: a.cfg.GoalMaxSteps,
+		shell: tool.Shell(a.cfg.Run.Shell),
 	}, false, p, nil
 }
 
@@ -1060,11 +1062,11 @@ func (a *app) buildSubReg(pol *policy.Engine, root string) *tool.Registry {
 // project instructions found there, the enabled-skills index, and the profile's
 // role. It does NOT inject the host's learned facts — those belong to the host
 // workspace, not the directory the sub-agent was pointed at.
-func (a *app) subAgentPrompt(workspace, role string) string {
+func (a *app) subAgentPrompt(workspace, role string, shell tool.Shell) string {
 	out := agent.SubAgentSystemPrompt()
 	out += fmt.Sprintf(
 		"\n\nToday is %s. Environment: you are running on %s; your working directory is %s. Use commands that exist on this OS. All file/run/git paths resolve in that directory.",
-		time.Now().Format("2006-01-02"), runtime.GOOS, workspace)
+		time.Now().Format("2006-01-02"), runtime.GOOS, workspace) + shell.PromptNote()
 	if text, src := loadInstructions(workspace); text != "" {
 		out += "\n\n## Project instructions (from " + src + ") — follow these:\n" + text
 	}
@@ -3671,7 +3673,7 @@ func (a *app) systemPrompt() string {
 	a.promptSrc = psrc
 	out := base + "\n\n" + agent.NotePreamble + fmt.Sprintf(
 		"\n\nToday is %s. Environment: you are running on %s; your working directory is %s. Relative paths resolve there — and by default this is a HARD JAIL: no tool (file, run's cwd, git) can reach a path outside it, an absolute path elsewhere is rejected, not silently redirected. If a task genuinely needs a different directory, say so — don't keep retrying different absolute paths or cwd values, they'll all fail the same way. Use commands that exist on this OS — on darwin prefer vm_stat/top/sw_vers over Linux-only tools like free.",
-		time.Now().Format("2006-01-02"), runtime.GOOS, a.effectiveDir())
+		time.Now().Format("2006-01-02"), runtime.GOOS, a.effectiveDir()) + tool.Shell(a.cfg.Run.Shell).PromptNote()
 	if text != "" {
 		out += "\n\n## Project instructions (from " + src + ") — follow these:\n" + text
 	}

@@ -187,7 +187,7 @@ func update(path string, f func(*State) bool) error {
 // Info describes the machine, as far as a report says anything about it.
 type Info struct {
 	OS        string // runtime.GOOS
-	Arch      string // runtime.GOARCH
+	Arch      string // the machine's, in GOARCH terms (hostarch.Native)
 	OSVersion string // macOS 15.1.1, a Linux kernel's 6.8.0, Windows 10.0.26100
 	Chip      string // "Apple M3 Pro" on Apple silicon, else ""
 	MemoryGB  int

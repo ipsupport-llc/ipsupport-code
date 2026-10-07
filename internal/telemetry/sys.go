@@ -6,12 +6,16 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+
+	"github.com/ipsupport-llc/ipsupport-code/internal/hostarch"
 )
 
 // CollectInfo describes this machine for a report. Every field is
 // best-effort: one the platform can't tell is left empty and not sent.
 func CollectInfo() Info {
-	info := Info{OS: runtime.GOOS, Arch: runtime.GOARCH, Locale: locale()}
+	// The machine's architecture, not the build's: an x64 build under
+	// emulation on ARM would otherwise count the machine as x64.
+	info := Info{OS: runtime.GOOS, Arch: hostarch.Native(), Locale: locale()}
 	info.OSVersion, info.Chip, info.MemoryGB = platformInfo()
 	return info
 }

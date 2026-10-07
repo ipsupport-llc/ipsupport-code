@@ -2,6 +2,7 @@ package selfupdate
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -11,6 +12,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -155,14 +159,91 @@ func TestExtractRefusesWhatIsNotAWholeBinary(t *testing.T) {
 	}
 }
 
-// On Windows there is no self-update: say so, and how to update, instead of
-// failing to find a .tar.gz that Windows releases never carry.
-func TestLatestOnWindowsPointsAtTheInstaller(t *testing.T) {
-	old := goos
+// On Windows the release is a .zip, and an x64 binary running under emulation
+// on an ARM64 machine moves to the native build when the release has one.
+func TestLatestOnWindowsPicksTheNativeZip(t *testing.T) {
+	oldOS, oldArch := goos, nativeArch
+	defer func() { goos, nativeArch = oldOS, oldArch }()
 	goos = "windows"
-	defer func() { goos = old }()
-	_, err := Latest(context.Background(), "o/r", Stable, http.DefaultClient)
-	if err == nil || !strings.Contains(err.Error(), "install.ps1") {
-		t.Fatalf("err = %v, want a pointer to the installer", err)
+	serve := func(names ...string) *httptest.Server {
+		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var as []string
+			for _, n := range append(names, "checksums.txt") {
+				as = append(as, fmt.Sprintf(`{"name":%q,"browser_download_url":"http://x/%s"}`, n, n))
+			}
+			fmt.Fprintf(w, `{"assets":[%s]}`, strings.Join(as, ","))
+		}))
+	}
+	for _, c := range []struct {
+		native string
+		assets []string
+		want   string
+	}{
+		{runtime.GOARCH, []string{"ipsupport-code_v1_windows-" + runtime.GOARCH + ".zip", "ipsupport-code_v1_linux-" + runtime.GOARCH + ".tar.gz"}, "ipsupport-code_v1_windows-" + runtime.GOARCH + ".zip"},
+		{"arm64", []string{"ipsupport-code_v1_windows-amd64.zip", "ipsupport-code_v1_windows-arm64.zip"}, "ipsupport-code_v1_windows-arm64.zip"},
+		{"arm64", []string{"ipsupport-code_v1_windows-" + runtime.GOARCH + ".zip"}, "ipsupport-code_v1_windows-" + runtime.GOARCH + ".zip"}, // older release: no arm64 build
+	} {
+		nativeArch = c.native
+		srv := serve(c.assets...)
+		old := apiBase
+		apiBase = srv.URL
+		rel, err := Latest(context.Background(), "o/r", Stable, srv.Client())
+		apiBase = old
+		srv.Close()
+		if err != nil || rel.AssetName != c.want || rel.Version != "v1" {
+			t.Errorf("native %s, assets %v: got %+v, %v; want %s", c.native, c.assets, rel, err, c.want)
+		}
+	}
+}
+
+func makeZip(t *testing.T, name string, data []byte) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.Create(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Write(data)
+	zw.Close()
+	return buf.Bytes()
+}
+
+// The Windows archive gives back the whole .exe, and nothing that is not one.
+func TestExtractFromAZip(t *testing.T) {
+	bin := []byte("MZ-FAKE-EXE")
+	got, err := extractZip(makeZip(t, "ipsupport-code.exe", bin), "ipsupport-code.exe")
+	if err != nil || string(got) != string(bin) {
+		t.Fatalf("got %q, %v", got, err)
+	}
+	if _, err := extractZip(makeZip(t, "ipsupport-code.exe/", nil), "ipsupport-code.exe"); err == nil {
+		t.Error("a directory entry was extracted")
+	}
+	if _, err := extractZip(makeZip(t, "ipsupport-code.exe", nil), "ipsupport-code.exe"); err == nil {
+		t.Error("an empty entry was extracted")
+	}
+	if _, err := extractZip(makeZip(t, "other.exe", bin), "ipsupport-code.exe"); err == nil {
+		t.Error("a missing binary was not reported")
+	}
+}
+
+// A running .exe cannot be overwritten on Windows, but it can be renamed: the
+// old one moves aside, the new one takes its name, and the next start removes
+// the old one.
+func TestReplaceInUseMovesTheOldOneAside(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "ipsupport-code.exe")
+	os.WriteFile(exe, []byte("old"), 0o755)
+	if err := replaceInUse(exe, []byte("new")); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(exe); string(b) != "new" {
+		t.Fatalf("exe holds %q, want the new build", b)
+	}
+	if b, _ := os.ReadFile(exe + ".old"); string(b) != "old" {
+		t.Fatalf(".old holds %q, want the previous build", b)
+	}
+	removeOld(exe)
+	if _, err := os.Stat(exe + ".old"); !os.IsNotExist(err) {
+		t.Fatalf(".old still there after cleanup: %v", err)
 	}
 }

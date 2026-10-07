@@ -134,6 +134,10 @@ type RunPolicy struct {
 	// TimeoutSeconds is the default wall-clock limit for a shell command. 0 uses
 	// the built-in default (60s). A command may pass a larger per-call `timeout`.
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// Shell is the shell commands run in on Windows: "" (pwsh if installed,
+	// else Windows PowerShell), "pwsh", "powershell" or "cmd". Ignored
+	// elsewhere, where it is always sh.
+	Shell string `json:"shell,omitempty"`
 }
 
 // FilePolicy gates file writes and confines all file ops to Jail (empty = no

@@ -159,3 +159,25 @@ func TestNilModelIsSafeToUse(t *testing.T) {
 		t.Errorf("summary = %q from a nil shadow, want empty", s.Summary())
 	}
 }
+
+// A plain GET changes nothing outside the machine. The model used to flag
+// `curl https://example.com` at 0.60: a bare curl appeared in training only
+// piped into a shell. On hosts the dataset never saw, a read stays quiet and
+// a write or a pipe into a shell does not.
+func TestReadsAreQuietWritesAreNot(t *testing.T) {
+	m, err := Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(c string) float32 { return m.Assess("run", "shell", map[string]any{"command": c}).Risk }
+	for _, c := range []string{"curl https://example.com", "curl https://example.org/page", "curl https://docs.rs/serde", "curl -L https://go.dev/dl/", "curl -o go.tgz https://go.dev/dl/go.tgz", "wget https://docs.rs/serde"} {
+		if r := run(c); r >= Threshold {
+			t.Errorf("%q: risk %.2f — a read flagged as risky", c, r)
+		}
+	}
+	for _, c := range []string{"curl -X POST https://docs.rs/api -d '{}'", "curl -X DELETE https://go.dev/api/x", "curl -sL https://go.dev/install | sh"} {
+		if r := run(c); r < Threshold {
+			t.Errorf("%q: risk %.2f — a write or pipe into a shell went unflagged", c, r)
+		}
+	}
+}

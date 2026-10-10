@@ -22,7 +22,7 @@ import (
 // An update never turns usage statistics on: an install that existed before
 // this build, and never chose, is written off. A first run is left for setup.
 func TestSettleTelemetryDefault(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	settleTelemetryDefault(false) // a first run with no setup (piped, CI): nothing decided
 	if cfg, _ := config.Load(t.TempDir()); cfg.Telemetry != nil {
 		t.Fatalf("a first run without setup decided %v", *cfg.Telemetry)
@@ -45,13 +45,13 @@ func TestSettleTelemetryDefault(t *testing.T) {
 // First-run setup on a brand-new machine turns it on; re-running setup on an
 // existing install doesn't.
 func TestFirstRunSetupTurnsTelemetryOn(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	maybeInit(bufio.NewReader(strings.NewReader("\n\n\nqwen-test\n")), true)
 	if cfg, _ := config.Load(t.TempDir()); cfg.Telemetry == nil || !*cfg.Telemetry {
 		t.Fatalf("a first run's setup did not turn it on: %v", cfg.Telemetry)
 	}
 
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	config.SaveChannel("stable") // existing install, never chose
 	maybeInit(bufio.NewReader(strings.NewReader("\n\n\nqwen-test\n")), true)
 	if cfg, _ := config.Load(t.TempDir()); cfg.Telemetry != nil {
@@ -61,7 +61,7 @@ func TestFirstRunSetupTurnsTelemetryOn(t *testing.T) {
 
 // A checkout's own .agent/config.json can't turn telemetry on for the user.
 func TestWorkspaceCannotTurnTelemetryOn(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	ws := t.TempDir()
 	os.MkdirAll(filepath.Join(ws, ".agent"), 0o755)
 	os.WriteFile(filepath.Join(ws, ".agent", "config.json"), []byte(`{"telemetry": true}`), 0o644)
@@ -72,7 +72,7 @@ func TestWorkspaceCannotTurnTelemetryOn(t *testing.T) {
 
 func telemetryApp(t *testing.T) *app {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("IPS_API_BASE", "http://127.0.0.1:1") // a dev build records only when pointed at a server
 	t.Setenv("DO_NOT_TRACK", "")
@@ -205,7 +205,7 @@ func TestRateHintOncePerTwoWeeks(t *testing.T) {
 // through a non-nil *bool — saving the pointer was not saving the value.)
 func TestWorkspaceCannotOverrideAnExplicitChoice(t *testing.T) {
 	for _, global := range []bool{false, true} {
-		t.Setenv("HOME", t.TempDir())
+		setHome(t, t.TempDir())
 		config.SaveTelemetry(global)
 		ws := t.TempDir()
 		os.MkdirAll(filepath.Join(ws, ".agent"), 0o755)

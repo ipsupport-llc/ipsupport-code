@@ -12,7 +12,7 @@ import (
 // user config.
 func snipHome(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 }
 
 func TestSnipSaveInlineRecallPersist(t *testing.T) {

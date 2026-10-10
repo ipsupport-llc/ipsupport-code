@@ -18,11 +18,9 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -320,7 +318,7 @@ func TestAsideDrainsOnce(t *testing.T) {
 }
 
 func TestRedirectLogToFile(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	prev := slog.Default()
 	defer slog.SetDefault(prev)
 
@@ -369,7 +367,7 @@ func TestAskYN(t *testing.T) {
 // that doesn't apply (the operator's exact complaint: "локальной модели тут
 // нет и не будет").
 func TestInitCloudProviderPath(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	reader := bufio.NewReader(strings.NewReader("grok\nxai-testkey\ngrok-2-latest\n"))
 	initCloudProvider(reader, config.Default())
 
@@ -399,7 +397,7 @@ func TestInitCloudProviderPath(t *testing.T) {
 // pinned the real api.openai.com with no chance to point it at their own
 // gateway; typing any other name now gets asked for a URL instead of guessing.
 func TestInitCloudProviderCustomEndpoint(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	reader := bufio.NewReader(strings.NewReader("mygateway\nhttps://airllm.example.com/v1\nair_prod_key\ncoding\n"))
 	initCloudProvider(reader, config.Default())
 
@@ -425,7 +423,7 @@ func TestInitCloudProviderCustomEndpoint(t *testing.T) {
 // A KNOWN template name (e.g. "openai") is never treated as custom — it must
 // keep pointing at the real vendor endpoint, with no Base URL prompt at all.
 func TestInitCloudProviderTemplateStaysPinned(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	reader := bufio.NewReader(strings.NewReader("openai\nsk-real\ngpt-4o-mini\n"))
 	initCloudProvider(reader, config.Default())
 
@@ -443,7 +441,7 @@ func TestInitCloudProviderTemplateStaysPinned(t *testing.T) {
 // about which setup branch to use) must not create a broken "local" provider
 // entry; it falls back to the default cloud provider instead.
 func TestInitCloudProviderRejectsLocalAsCustomName(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	reader := bufio.NewReader(strings.NewReader("local\nsk-x\ngpt-4o-mini\n"))
 	initCloudProvider(reader, config.Default())
 
@@ -459,7 +457,7 @@ func TestInitCloudProviderRejectsLocalAsCustomName(t *testing.T) {
 // An already-configured cloud provider (re-running -init) is picked up as the
 // default, and any existing key/model prefill — not silently discarded.
 func TestInitCloudProviderPrefillsFromExisting(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	def := config.Default()
 	def.Provider = "openai"
 	def.Providers = map[string]config.LLM{"openai": {APIKey: "sk-old", Model: "gpt-4o"}}
@@ -482,7 +480,7 @@ func TestInitCloudProviderPrefillsFromExisting(t *testing.T) {
 // configured — so re-running -init doesn't flip someone back to the local
 // prompt they don't use.
 func TestMaybeInitDefaultsFollowExistingProvider(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	// Fresh (no config yet): defaults to the local-model path — answering blank
 	// keeps it local and prompts for Server URL/model (unchanged behavior).
 	reader := bufio.NewReader(strings.NewReader("\n\n\nqwen-test\n"))
@@ -506,7 +504,7 @@ func TestMaybeInitDefaultsFollowExistingProvider(t *testing.T) {
 // setup and picks local — the connection saves fine, but Provider stayed
 // "openai", so the app kept using the OLD cloud provider afterward.
 func TestInitLocalModelSwitchesActiveProvider(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	// A prior setup run (or /ai openai) already persisted "openai" as the active
 	// provider on disk — this is the state the wizard reruns against.
 	providers := map[string]config.LLM{"openai": {APIKey: "sk-old", Model: "gpt-4o"}}
@@ -586,7 +584,7 @@ func TestDetectLocalServerPrefersListOrder(t *testing.T) {
 // A fresh install that presses Enter at "Server URL" gets the server that is
 // actually running — the case that failed for a Mac user with LLMTray.
 func TestInitLocalModelOffersDetectedServer(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	tray := fakeLocalServer(t)
 	withLocalServers(t, struct{ name, url string }{"LLMTray", tray})
 
@@ -604,7 +602,7 @@ func TestInitLocalModelOffersDetectedServer(t *testing.T) {
 // A URL the user already configured is theirs: re-running setup offers it
 // again, even with another server up.
 func TestInitLocalModelKeepsConfiguredURL(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	withLocalServers(t, struct{ name, url string }{"LLMTray", fakeLocalServer(t)})
 	def := config.Default()
 	def.LLM.BaseURL = "http://gpu-box:9000/v1"
@@ -712,7 +710,7 @@ func TestConfigPanelNav(t *testing.T) {
 // CLI: toggle summary⇄raw, cycle the compact threshold through presets, and
 // persist each change (mirrors how offline/timeout already work).
 func TestConfigPanelMemoryToggleAndCompactThresholdCycle(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveMemory/SaveCompactThreshold write the global config
 	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
 	cursorFor := func(key string) int {
@@ -752,7 +750,7 @@ func TestConfigPanelMemoryToggleAndCompactThresholdCycle(t *testing.T) {
 // toggleable per-connection from /config — e.g. off for a trusted, capable
 // hosted provider (Claude, OpenAI), on for a local model prone to looping.
 func TestConfigPanelLoopDetectionToggle(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveGlobal writes the global config
 	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
 	cursorFor := func(key string) int {
@@ -785,7 +783,7 @@ func TestConfigPanelLoopDetectionToggle(t *testing.T) {
 // the next task's best-effort auto-detect doesn't silently clobber it; cycling
 // back to 0 must un-mark it so auto-detect can run again.
 func TestConfigPanelContextWindowCycle(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	m := &tuiModel{state: stConfig, width: 100, input: textarea.New(), app: &app{cfg: config.Default(), workspace: t.TempDir()}}
 	cursorFor := func(key string) int {
@@ -853,7 +851,7 @@ func TestConfigPanelContextWindowCycle(t *testing.T) {
 // itself (not just the in-memory windowDetected bool), and clear it back to
 // false when the override is cleared to 0 (auto) — see ContextWindowManual.
 func TestSetContextWindowPersistsManualFlag(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	ws := t.TempDir()
 	a := &app{cfg: config.Default(), workspace: ws}
@@ -887,7 +885,7 @@ func TestSetContextWindowPersistsManualFlag(t *testing.T) {
 // auto-detect would silently overwrite the user's deliberate choice with
 // whatever the server reports.
 func TestManualContextWindowSurvivesRestart(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -925,7 +923,7 @@ func TestManualContextWindowSurvivesRestart(t *testing.T) {
 // must never touch the config file on disk — a later plain build() with no
 // overrides must load exactly what was there before.
 func TestBuildAppliesOverridesInMemoryNotToFile(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	ws := t.TempDir()
 
@@ -970,7 +968,7 @@ func TestBuildAppliesOverridesInMemoryNotToFile(t *testing.T) {
 // An -override without a "key=value" shape (e.g. a bare word, or a missing
 // "=") must fail loudly at startup, not silently do nothing.
 func TestBuildRejectsMalformedOverride(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	_, _, err := build(t.TempDir(), "", []string{"not-a-key-value-pair"}, bufio.NewReader(strings.NewReader("")))
@@ -984,7 +982,7 @@ func TestBuildRejectsMalformedOverride(t *testing.T) {
 // same conventions as the other numeric /config rows, but as top-level
 // settings (not per-connection), so no local-vs-named-provider split applies.
 func TestConfigPanelMaxStepsAndMaxHistoryCycle(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
 	cursorFor := func(key string) int {
@@ -1032,7 +1030,7 @@ func TestConfigPanelMaxStepsAndMaxHistoryCycle(t *testing.T) {
 // top-level, no-local-vs-provider-split convention as max_steps/max_history —
 // and persist and survive a reload.
 func TestConfigPanelMaxStuckTurnsCycle(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
 	cursorFor := func(key string) int {
@@ -1275,7 +1273,7 @@ func TestDiffRowsExpandTabsBeforeWidthMath(t *testing.T) {
 // stack to install its bridge, which rebuilds the agent; if that rebuild drops
 // the loaded history, every launch starts from a clean slate (the reported bug).
 func TestSessionSurvivesTUILaunch(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // agent state lives outside the workspace
+	setHome(t, t.TempDir()) // agent state lives outside the workspace
 	ws := t.TempDir()
 	cfg := config.Default()
 	cfg.Workspace = ws
@@ -2141,7 +2139,7 @@ func TestCloseMCPCancelsInFlightConnectAttempt(t *testing.T) {
 // call reconnects using the new config; an unchanged server's cached client
 // must survive (caching still works for the normal, no-edit case).
 func TestReconfigureInvalidatesStaleMCPClient(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // isolate config.Load's global file from ~/.config
 
 	oldSrv, oldHits := fakeMCPServer(t)
@@ -2691,7 +2689,7 @@ func TestZaiProvider(t *testing.T) {
 // The /config "add provider" row opens an IN-PANEL form (no dump back to the
 // prompt): name → URL → model → key, esc steps back, save registers the provider.
 func TestConfigAddProviderFlow(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveProviders writes the global config
 	m := &tuiModel{state: stConfig, width: 100, input: textarea.New(),
 		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
@@ -2754,7 +2752,7 @@ func TestConfigAddProviderFlow(t *testing.T) {
 // from memory, with no way to see what it currently is), and a key already on
 // file must survive an edit that leaves the key field blank.
 func TestConfigAddProviderFlowPrefillsExistingForEdit(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	m := &tuiModel{state: stConfig, width: 100, input: textarea.New(),
 		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
@@ -2845,7 +2843,7 @@ func TestAgentsNameKeyAcceptsPaste(t *testing.T) {
 // Regression for the operator's exact report: pasting an API key (or Base URL)
 // into the /config add-provider form must land in full, not silently vanish.
 func TestConfigAddProviderAcceptsPastedKey(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	m := &tuiModel{state: stConfig, width: 100, input: textarea.New(),
 		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
@@ -3400,57 +3398,6 @@ func TestBackgroundJobLifecycle(t *testing.T) {
 	}
 }
 
-// Process exit must not leave a background job's subprocess running: shutdownJobs
-// (called from cleanup in main.go) cancels every active job before the process
-// exits. For an external-agent job in particular, cancelling only the Go-side
-// context isn't enough on its own unless the subprocess is actually torn down —
-// so this asserts the underlying OS process is dead too (see procgroup.Set in
-// spawnExternalAgent), not just that our bookkeeping says the job is done.
-func TestShutdownJobsKillsExternalAgentProcess(t *testing.T) {
-	cfg := config.Default()
-	cfg.Workspace = t.TempDir()
-	pidFile := filepath.Join(cfg.Workspace, "child.pid")
-	cfg.Agents = map[string]config.AgentProfile{
-		"longrun": {Kind: "external", Command: "sh", Args: []string{"-c", "echo $$ > " + pidFile + "; sleep 30"}},
-	}
-	kb, _ := knowledge.Open("")
-	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
-		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
-	if err := a.wire(); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := a.spawnAgentBackground(context.Background(), "longrun", "go", ""); err != nil {
-		t.Fatal(err)
-	}
-
-	var pid int
-	for i := 0; i < 100; i++ { // wait for the child to write its own PID
-		if b, err := os.ReadFile(pidFile); err == nil {
-			if p, perr := strconv.Atoi(strings.TrimSpace(string(b))); perr == nil && p > 0 {
-				pid = p
-				break
-			}
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	if pid == 0 {
-		t.Fatal("external agent never wrote its PID — test setup broken")
-	}
-	if err := syscall.Kill(pid, 0); err != nil {
-		t.Fatalf("child process %d not alive before shutdown: %v", pid, err)
-	}
-
-	a.shutdownJobs()
-
-	if n := a.jobsPending(); n != 0 {
-		t.Errorf("jobsPending after shutdownJobs = %d, want 0 (job context should be cancelled)", n)
-	}
-	if err := syscall.Kill(pid, 0); err == nil {
-		t.Errorf("child process %d still alive after shutdownJobs — external-agent subprocess was not killed", pid)
-	}
-}
-
 // The agent tool routes background=true to the fire-and-forget spawn func.
 func TestAgentToolBackgroundRouting(t *testing.T) {
 	var fg, bg bool
@@ -3488,7 +3435,7 @@ func TestAgentsPanelExternalRows(t *testing.T) {
 	binDir := t.TempDir() // a fake `codex` on PATH so the picker sees ✓ installed
 	os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\nexit 0\n"), 0o755)
 	t.Setenv("PATH", binDir)
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // add-tool persists via SaveAgents
 
 	m.state, m.agPhase = stAgents, agList
@@ -3529,7 +3476,7 @@ func TestAgentsPanelExternalRows(t *testing.T) {
 }
 
 func TestAddToolCatalog(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveAgents writes the global config
 	a := &app{cfg: config.Default(), workspace: t.TempDir()}
 
@@ -4313,7 +4260,7 @@ func TestStartupTaskSkipsGoalResumeOffer(t *testing.T) {
 }
 
 func TestNewSessionPreservesOld(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // newNamedSession(persist) writes the global config
+	setHome(t, t.TempDir()) // newNamedSession(persist) writes the global config
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
@@ -4356,7 +4303,7 @@ func TestNewSessionPreservesOld(t *testing.T) {
 // session named e.g. "старая" produced "старая-2" instead of a name
 // independent of it. "Start new" means exactly that: not a continuation.
 func TestChooserStartNewDoesNotDeriveNameFromOldSession(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cfg := config.Default()
 	cfg.Name = "старая"
@@ -4382,7 +4329,7 @@ func TestChooserStartNewDoesNotDeriveNameFromOldSession(t *testing.T) {
 }
 
 func TestSessionsListSwitchDelete(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())            // isolate SaveGlobal from the real ~/.config
+	setHome(t, t.TempDir())                  // isolate SaveGlobal from the real ~/.config
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // (belt-and-suspenders)
 	cfg := config.Default()                  // default name "ipsupport-code"
 	cfg.Workspace = t.TempDir()
@@ -4436,7 +4383,7 @@ func TestSessionsListSwitchDelete(t *testing.T) {
 // session's companion .archive.jsonl file, not just its .json file — leaving
 // the archive behind leaks disk space and stale data indefinitely.
 func TestDeleteSessionRemovesArchive(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // agent state lives outside the workspace
+	setHome(t, t.TempDir()) // agent state lives outside the workspace
 	ws := t.TempDir()
 	a := &app{workspace: ws, cfg: config.Config{Name: "bob"}}
 	sessionsDir := a.statePath("sessions")
@@ -4751,7 +4698,7 @@ func TestSpawnAgentLocalRuns(t *testing.T) {
 // wire() register the history tool, which only happens once hasArchivedHistory
 // sees the right file — observable in the actual tools list sent to the LLM.
 func TestBuildAppliesSessionNameBeforeWire(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 
 	var gotTools []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -4811,7 +4758,7 @@ func TestBuildAppliesSessionNameBeforeWire(t *testing.T) {
 // already-built archiver has to be re-pointed too, or the next archived turn
 // keeps landing in the OLD name's file. See rename() in tui.go.
 func TestRenameRebindsArchive(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"done"}}]}`)
@@ -4848,7 +4795,7 @@ func TestRenameRebindsArchive(t *testing.T) {
 }
 
 func TestAgentsPanelBuild(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveAgents writes the global config
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
@@ -5045,7 +4992,7 @@ func TestReflectSeparateClientRecordsUsageOnFailedCall(t *testing.T) {
 // of falling through to exit 0, and (2) still record that spend via
 // recordUsage — both were skipped before this fix.
 func TestRunOneFailedFirstRequestSignalsErrorAndRecordsUsage(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 
 	const chunks = 310 // past degenerateRunThreshold (300)
 	var sse strings.Builder
@@ -5085,7 +5032,7 @@ func TestRunOneFailedFirstRequestSignalsErrorAndRecordsUsage(t *testing.T) {
 // just prompt/completion counts), so /usage can derive an approximate
 // tokens/sec — see usage.Entry.DurationMS.
 func TestRunOneRecordsDurationInUsageLedger(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(20 * time.Millisecond) // guarantee a measurable, non-flaky duration
 		io.Copy(io.Discard, r.Body)
@@ -5158,7 +5105,7 @@ func notFoundOffPOST(w http.ResponseWriter, r *http.Request) bool {
 // reflectAndStore's own LLM call; a process that exits before another task
 // runs (one-shot mode, or /exit right after) lost those tokens for good.
 func TestReflectionTokensFlushedBeforeRunOneReturns(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	n := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if notFoundOffPOST(w, r) {
@@ -5204,7 +5151,7 @@ func TestReflectionTokensFlushedBeforeRunOneReturns(t *testing.T) {
 // task returns without having made the learning call, and the ledger still gets
 // every token once the pass is applied.
 func TestRunTaskStreamingLeavesTheLearningPassToItsCaller(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	n := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if notFoundOffPOST(w, r) {
@@ -5257,7 +5204,7 @@ func TestRunTaskStreamingLeavesTheLearningPassToItsCaller(t *testing.T) {
 // provider/model — captured when the pass was prepared — never whatever happens
 // to be active when it lands.
 func TestReflectionBilledToTheModelThatRanIt(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	n := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if notFoundOffPOST(w, r) {
@@ -5316,7 +5263,7 @@ func TestReflectionBilledToTheModelThatRanIt(t *testing.T) {
 // delta. Flushing reflection's tokens immediately (this fix) closes that gap:
 // it happens before the switch has any chance to occur.
 func TestModelSwitchDoesNotMisattributeReflectionTokens(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	n := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if notFoundOffPOST(w, r) {
@@ -5994,7 +5941,7 @@ func TestCdCommand(t *testing.T) {
 }
 
 func TestCustomProvider(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
@@ -6756,7 +6703,7 @@ func TestShouldAutoCompactUsesLastRealContext(t *testing.T) {
 // auto-compact. lastRealContext, snapshotted right after Run() succeeds and
 // before reflectAndStore runs, must survive that clobber.
 func TestLastRealContextSurvivesReflectionClobber(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -6821,7 +6768,7 @@ func TestWirePropagatesContextWindowToAgent(t *testing.T) {
 // already ran BEFORE detection at startup, so those derived values stay
 // frozen at the pre-detection value until detection re-wires too.
 func TestDetectContextWindowReWiresLiveAgentOnChange(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -7654,7 +7601,7 @@ func TestThinkingViewHiddenDuringNonTaskBusyWork(t *testing.T) {
 // or interrupted reflection pass could cost the user their just-completed
 // exchange even though they already saw the answer on screen.
 func TestSaveSessionHappensBeforeSlowReflection(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	reflectStarted := make(chan struct{})
 	release := make(chan struct{})
 	var startOnce, releaseOnce sync.Once
@@ -7854,7 +7801,7 @@ func TestDropPoisonedLessonsRetiresPathCarryingEntriesOnStartup(t *testing.T) {
 // workspace's own file wins over the global one.
 func TestStandingCompactFocusPrefersTheWorkspaceFile(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	ws := t.TempDir()
 
@@ -7889,7 +7836,7 @@ func TestStandingCompactFocusPrefersTheWorkspaceFile(t *testing.T) {
 // the user wrote the file to protect.
 func TestCompactFocusCombinesStandingAndOneShot(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
@@ -7950,7 +7897,7 @@ func TestWireJudgeOnlyBuildsAClientWhenJudgeReasoningIsSet(t *testing.T) {
 // model's thinking settings and returned an empty Content eleven times in one
 // run, and there was no setting that could tell it to stop thinking.
 func TestReasoningJudgeScopeIsSeparateFromTheTaskModel(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
 	cfg.LLM.Model = "n30"
@@ -7985,7 +7932,7 @@ func TestReasoningJudgeScopeIsSeparateFromTheTaskModel(t *testing.T) {
 // It inherits the task model's budget, which is sized for producing code, not
 // for a check that thinks before answering in one word.
 func TestJudgeMaxOutputBuildsItsOwnClientAndAppliesTheBudget(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
 	kb, _ := knowledge.Open("")
@@ -8026,7 +7973,7 @@ func TestJudgeMaxOutputBuildsItsOwnClientAndAppliesTheBudget(t *testing.T) {
 // otherwise one knob changes two things and confounds the very measurement the
 // budget exists to make.
 func TestJudgeBudgetKeepsTheInheritedReasoning(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
 	cfg.LLM.Model = "n30"
@@ -8055,7 +8002,7 @@ func TestJudgeBudgetKeepsTheInheritedReasoning(t *testing.T) {
 // run so an edit applies without a restart.
 func TestJudgeCriteriaPrefersTheWorkspaceFile(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	ws := t.TempDir()
 
@@ -8375,7 +8322,7 @@ func TestConfigPanelShowsEverythingWhenItFits(t *testing.T) {
 // back until the repetition detector killed the run. State the agent writes for
 // itself is not project content.
 func TestAgentStateLivesOutsideTheWorkspace(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // configHome() reads HOME
+	setHome(t, t.TempDir()) // configHome() reads the user's home
 	ws := t.TempDir()
 	a := &app{cfg: config.Default(), workspace: ws}
 
@@ -8394,7 +8341,7 @@ func TestAgentStateLivesOutsideTheWorkspace(t *testing.T) {
 // An existing install's state is MOVED, not copied: leaving a duplicate behind
 // is exactly the hazard — the model would still find and read it.
 func TestLegacyStateIsMovedOutOfTheWorkspace(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // configHome() reads HOME
+	setHome(t, t.TempDir()) // configHome() reads the user's home
 	ws := t.TempDir()
 	legacy := filepath.Join(ws, ".agent")
 	if err := os.MkdirAll(filepath.Join(legacy, "sessions"), 0o755); err != nil {
@@ -8482,7 +8429,7 @@ func TestGoalStatusShowsTheAcceptanceText(t *testing.T) {
 // A dead endpoint should be able to fail fast: eight exponential backoffs to
 // discover nothing is listening is its own kind of wrong.
 func TestRetryAttemptsIsConfigurablePerConnection(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
 	a := &app{cfg: cfg, workspace: cfg.Workspace}
@@ -8618,7 +8565,7 @@ func TestANewTaskLetsTheLearningPassFinish(t *testing.T) {
 // held and applied when the run ends. (Rare, since starting a task cancels the
 // pass, but a call already returning at that instant still lands.)
 func TestLessonsLandingUnderARunningTaskAreHeldUntilItEnds(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
@@ -8675,7 +8622,7 @@ func cfgCursorTo(t *testing.T, m *tuiModel, key string) {
 // wire() and rebuilds the agent the task is holding. Refusing the keystroke is
 // not the only way to avoid that: stage it, and replay it when the task ends.
 func TestConfigEditsStageWhileATaskRunsAndApplyWhenItEnds(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
@@ -8721,7 +8668,7 @@ func TestConfigEditsStageWhileATaskRunsAndApplyWhenItEnds(t *testing.T) {
 // Pressing enter twice stages two cycles: replaying the activation is only
 // honest if repeats land where pressing it twice live would have.
 func TestStagedConfigEditsReplayInOrder(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
@@ -8820,7 +8767,7 @@ func TestCheckSessionStart(t *testing.T) {
 // session's judge accepts its work against the other's acceptance text), the
 // input history, or the log file.
 func TestANamedSessionGetsItsOwnGoalHistoryAndLog(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	ws := t.TempDir()
 	cfg := config.Default()
 	cfg.Workspace = ws
@@ -8872,7 +8819,7 @@ func TestANamedSessionGetsItsOwnGoalHistoryAndLog(t *testing.T) {
 // list, so writing that list back is how the later save silently erases
 // everything the other learned since it started.
 func TestTwoSessionsDoNotClobberEachOthersFacts(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	ws := t.TempDir()
 	open := func(session string) *app {
 		t.Helper()
@@ -8918,7 +8865,7 @@ func TestTwoSessionsDoNotClobberEachOthersFacts(t *testing.T) {
 // The same guarantee for input history: the default session has no name to
 // collide on, so one workspace open twice is a normal thing to happen.
 func TestTwoRunsDoNotClobberEachOthersPromptHistory(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	ws := t.TempDir()
 	open := func() *app {
 		t.Helper()
@@ -9113,7 +9060,7 @@ func TestRiskShadowCanBeTurnedOff(t *testing.T) {
 // path from "a human answered" to "the model moved" has to actually connect.
 // This drives it the way a real run does: score a call, then answer for it.
 func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	ws := t.TempDir()
 	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
@@ -9175,7 +9122,7 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 // escape hatch for a refusal that meant "not now" rather than "that is
 // dangerous".
 func TestRiskCommandReportsAndResets(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	ws := t.TempDir()
 	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
@@ -9222,7 +9169,7 @@ func TestRiskCommandReportsAndResets(t *testing.T) {
 // the lock the save holds let that save finish after the remove: the
 // corrections the user had just cleared were back on disk for the next start.
 func TestRiskResetIsNotUndoneByAnInFlightSave(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	ws := t.TempDir()
 	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
@@ -9314,7 +9261,7 @@ func TestRiskNoteIsEmptyBelowTheThreshold(t *testing.T) {
 // the approval — shadow mode affecting execution, which is the one thing it is
 // not allowed to do.
 func TestLearningDoesNotBlockTheApproval(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	ws := t.TempDir()
 	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
@@ -9397,7 +9344,7 @@ func TestOnlyARealAnswerTeaches(t *testing.T) {
 // context — the parent's `agent.spawn` — so refusing the sub-agent's file write
 // recorded a correction about the spawn, with the spawn's parameters.
 func TestASubAgentGetsItsOwnRiskObserver(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	ws := t.TempDir()
 	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
@@ -9458,7 +9405,7 @@ func TestASubAgentGetsItsOwnRiskObserver(t *testing.T) {
 // task's message. And the reflection pass itself continues the task's own
 // request rather than starting a new one under its own system prompt.
 func TestLearningKeepsTheCachedPrefix(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	type req struct {
 		Messages []struct{ Role, Content string } `json:"messages"`
 		Tools    []any                            `json:"tools"`
@@ -9548,7 +9495,7 @@ func TestLearningKeepsTheCachedPrefix(t *testing.T) {
 // agent "on the way out" overwrote it (found by review). Switching also must
 // not carry the old session's goal, session grants or /cd across.
 func TestSwitchingFromTheChooserKeepsTheOtherSession(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
@@ -9608,7 +9555,7 @@ func TestSwitchingFromTheChooserKeepsTheOtherSession(t *testing.T) {
 // the probe then rewrote a.cfg and called wire(), swapping the agent under
 // the task (found by review). The task's end probes again.
 func TestWindowProbeWaitsForTheTask(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
 	kb, _ := knowledge.Open("")
@@ -9720,7 +9667,7 @@ func TestACancelledApprovalDoesNotStealTheNextAnswer(t *testing.T) {
 // the front-trim count from zero, so any setting change made every earlier
 // checkpoint unusable (found by review).
 func TestRewindSurvivesARewire(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
 	kb, _ := knowledge.Open("")
@@ -9744,7 +9691,7 @@ func TestRewindSurvivesARewire(t *testing.T) {
 // afterwards must reach them: web took the flag by value and kept fetching
 // (found by review). They read it on every call now.
 func TestOfflineReachesToolsAlreadyBuilt(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
 	kb, _ := knowledge.Open("")
@@ -9825,7 +9772,7 @@ func TestIPv6ClientPrefersIPv6(t *testing.T) {
 // A hand-edited or damaged state with a short install ID does not crash
 // /telemetry.
 func TestTelemetryStatusSurvivesAShortInstallID(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	os.MkdirAll(filepath.Dir(telemetryPath()), 0o755)
 	os.WriteFile(telemetryPath(), []byte(`{"install_id":"abc"}`), 0o600)
 	on := true

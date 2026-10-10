@@ -16,7 +16,7 @@ import (
 
 func panelModel(t *testing.T) *tuiModel {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	return &tuiModel{state: stConfig, width: 120, input: textarea.New(),
 		app: &app{cfg: config.Default(), workspace: t.TempDir()}}
@@ -247,7 +247,7 @@ func TestQueuedKeyCommandIsShownMasked(t *testing.T) {
 // rest of the connection: it used to rebuild it and drop the server type,
 // sampling, timeouts and a context size set by hand.
 func TestSetupKeepsTheRestOfTheConnection(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	def := config.Default()
 	def.LLM.Type = "lmstudio"
@@ -382,7 +382,11 @@ func TestTuningValuesAreTyped(t *testing.T) {
 // parent is a file.
 func blockSaves(t *testing.T) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(os.Getenv("HOME"), ".config"), nil, 0o600); err != nil {
+	home, err := os.UserHomeDir() // USERPROFILE on Windows, not HOME
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".config"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -434,7 +438,7 @@ func TestAddFormDropsTheKeyWhenTheNameChanges(t *testing.T) {
 
 // Setup re-run on a configured machine: the saved key is neither shown nor lost.
 func TestSetupNeverEchoesASavedKey(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("OPENAI_API_KEY", "")
 	out := captureStdout(t, func() {
@@ -483,7 +487,7 @@ func captureStdout(t *testing.T, f func()) string {
 // A context size set by hand belongs to its model: setup answering another
 // model detects again; the same model keeps it.
 func TestSetupForgetsAHandSetWindowForANewModel(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	def := config.Default()
 	def.LLM.BaseURL, def.LLM.Model = "http://127.0.0.1:1/v1", "old-model"

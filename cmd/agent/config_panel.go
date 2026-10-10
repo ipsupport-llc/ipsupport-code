@@ -103,6 +103,7 @@ func (m *tuiModel) openConfig() {
 	m.cfgPhase = cfgPhaseList
 	m.cfgEdit = nil
 	m.cfgPick = nil
+	m.cfgNote = nil
 	m.cfgWSKeys = config.WorkspaceKeys(m.app.workspace)
 	m.state = stConfig
 }
@@ -313,9 +314,12 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 	act := m.app.activeLLM()
 	switch key {
 	case "provider":
-		extra := "enter: cycle"
+		extra := "enter: pick from the list"
 		if len(m.app.configuredProviderNames()) < 2 {
-			extra = "enter: cycle · use “add provider” below"
+			extra = "enter: pick · use “add provider” below to add one"
+			if m.cancel != nil {
+				extra = "enter: pick · adding one waits until the task ends"
+			}
 		}
 		return "provider", m.app.providerName(), extra
 	case "addprovider":
@@ -326,7 +330,7 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 	case "base_url":
 		return "address", act.BaseURL, "enter: edit host, port, path"
 	case "model":
-		return "model", act.Model, "enter: type an id, or empty enter to list"
+		return "model", act.Model, "enter: pick from the server's list (or type one it doesn't list)"
 	case "apikey":
 		v := "— none"
 		if act.APIKey != "" {
@@ -493,16 +497,28 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 // only print, so there is nothing to defer and nothing to race.
 var cfgLiveRows = map[string]bool{"judge_criteria": true, "knowledge": true}
 
-// cfgUnstageableRows are the rows that cannot be staged because activating them
-// needs the user right there: they open a form, or leave the panel with the input
-// prefilled, or need a list fetched from the server. Replaying one later would
-// pop a form out of nowhere after the task ended.
-var cfgUnstageableRows = map[string]bool{
-	"addprovider": true, "removeprovider": true, "model": true, "apikey": true,
-	"base_url": true, "context_window": true,
-	"temperature": true, "top_p": true, "max_output_tokens": true, "idle_timeout": true, "retry_attempts": true,
-	"judge_max_output_tokens": true,
-	"budget":                  true, "name": true, "agents": true,
+// handleConfigKey routes a key in the /config panel.
+func (m *tuiModel) handleConfigKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.cfgPhase != cfgPhaseList { // typing inside the add-provider form
+		return m.configAddKey(k)
+	}
+	if m.cfgEdit != nil { // typing a value in place on its row
+		return m.configEditKey(k)
+	}
+	if m.cfgPick != nil { // a list open on its row
+		return m.configPickKey(k)
+	}
+	switch k.String() {
+	case "up", "k":
+		m.configMove(-1)
+	case "down", "j":
+		m.configMove(1)
+	case "enter", "right", "l", " ":
+		return m.configActivate()
+	case "esc", "q":
+		return m.closePanel()
+	}
+	return m, nil
 }
 
 // configActivate handles Enter on the selected row. While a task is running,
@@ -513,54 +529,70 @@ var cfgUnstageableRows = map[string]bool{
 // where pressing it three times live would have.
 func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 	key := m.configKey()
-	if key == "provider" { // opens a list; the provider picked there is what stages
+	if key == "provider" || key == "model" || key == "removeprovider" { // open a list; what is picked there stages
 		return m.activateConfigRow(key)
 	}
-	if m.cancel != nil && liveTuneRows[key] { // into the running task at once
+	if m.cancel == nil || cfgLiveRows[key] {
+		return m.activateConfigRow(key)
+	}
+	// A task is running: see staging.go.
+	if liveTuneRows[key] {
 		return m.tuneLive(key)
 	}
-	if m.cancel != nil && !cfgLiveRows[key] {
-		if cfgUnstageableRows[key] {
-			m.push(cDim.Render("  " + key + " needs you at the keyboard — it waits until the task ends"))
-			return m, nil
-		}
-		m.cfgPending = append(m.cfgPending, key)
-		m.push(cDim.Render("  staged — " + key + " applies when the task finishes"))
+	if _, ok := cycleRows[key]; ok {
+		m.stageCycle(key)
 		return m, nil
 	}
-	return m.activateConfigRow(key)
+	label, _, _ := m.configRowView(key)
+	m.push(cDim.Render("  " + label + " can't change under a running task — set it once the task ends (esc goes back to it)"))
+	return m, nil
 }
 
-// applyPendingConfig replays the row activations staged while a task was running,
-// in the order they were pressed. Called once the task is over, from the one
-// goroutine allowed to re-wire the agent.
-// It returns what the replayed rows asked for — a provider switched while the
-// task ran needs its window probed, and dropping that left the old size.
+// applyPendingConfig saves what was staged in /config while a task ran (see
+// staging.go). Called once the task is over, from the one goroutine allowed
+// to re-wire the agent. It returns what the changes asked for — a provider or
+// model switched needs its window probed.
 func (m *tuiModel) applyPendingConfig() tea.Cmd {
 	if len(m.cfgPending) == 0 {
 		return nil
 	}
 	pending := m.cfgPending
 	m.cfgPending = nil
+	before := len(m.history)
 	var cmds []tea.Cmd
-	for _, key := range pending {
-		_, cmd := m.activateConfigRow(key)
+	rewire, saved := false, 0
+	for _, e := range pending {
+		cmd, rw, ok := m.applyStaged(e)
 		cmds = append(cmds, cmd)
+		rewire = rewire || rw
+		if ok {
+			saved++
+		}
+		if e.key == "provider" || e.key == "model" || e.key == "removeprovider" {
+			m.cfgPick = nil // a list open over the task was for the connection that just changed
+		}
 	}
-	m.push(cDim.Render(fmt.Sprintf("  applied %d staged setting change(s) from /config", len(pending))))
+	if rewire { // once, from what was saved: a failed save leaves no client tuned to it
+		if err := m.app.wire(); err != nil {
+			m.push(cErr.Render("  " + err.Error()))
+		}
+		cmds = append(cmds, m.detectWindowCmd())
+	}
+	msg := fmt.Sprintf("  saved %d staged /config change(s)", saved)
+	if failed := len(pending) - saved; failed > 0 {
+		msg += fmt.Sprintf(" · %d not saved — see above", failed)
+	}
+	m.push(cDim.Render(msg))
+	if m.state == stConfig && len(m.history) >= before { // the panel covers the log
+		said := m.history[before:]
+		m.cfgNote = said[max(len(said)-4, 0):]
+	}
 	return tea.Batch(cmds...)
 }
 
 // activateConfigRow performs a row's action for real. It assumes no task is
 // running: several branches re-wire the agent or leave the panel.
 func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
-	if e, ok := parseTune(key); ok { // changed while a task ran: saved now
-		return m.applyTune(e)
-	}
-	if name, ok := strings.CutPrefix(key, "provider="); ok { // picked while a task ran
-		m.pushLines(m.app.setProvider(name))
-		return m, m.detectWindowCmd()
-	}
 	if m.projectOverrides(key) {
 		m.push(cErr.Render("  note: this project's .agent/config.json sets " + cfgRowSetting[key] + " — this change lasts until the next start; edit that file to keep it"))
 	}
@@ -606,10 +638,11 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 		if m.app.cfg.Memory == "raw" {
 			next = ""
 		}
-		m.app.cfg.Memory = next
 		if err := config.SaveMemory(next); err != nil {
 			m.push(cErr.Render("  could not persist: " + err.Error()))
+			break
 		}
+		m.app.cfg.Memory = next
 		_ = m.app.wire() // raw needs a much higher history cap (see wire) — apply it now
 	case "compact_threshold":
 		m.cycleCompactThreshold()
@@ -622,7 +655,9 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 	case "reasoning": // cycle the active model's reasoning effort off→high
 		provider, model := m.app.providerName(), m.app.activeLLM().Model
 		next := nextReasoning(provider, m.app.reasoningLevel(provider, model))
-		if _, ok := m.app.applyReasoning(provider+"/"+model, provider, next); !ok {
+		if _, ok, err := m.app.applyReasoning(provider+"/"+model, provider, next); err != nil {
+			m.push(cErr.Render("  could not persist: " + err.Error()))
+		} else if !ok {
 			m.push(cDim.Render("  " + provider + " reasoning must be set raw in config.json (key " + provider + "/" + model + ")"))
 		}
 	case "temperature", "top_p", "max_output_tokens", "idle_timeout", "retry_attempts", "judge_max_output_tokens":
@@ -677,7 +712,7 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 	case "base_url":
 		m.cfgEdit = &cfgEditor{key: key, f: newTextField(m.app.activeLLM().BaseURL, false)}
 	case "model":
-		m.cfgPick = &cfgPicker{key: key, p: picker{loading: true, free: true}}
+		m.cfgPick = &cfgPicker{key: key, p: picker{loading: true, free: true}, epoch: m.app.modelEpoch.Load()}
 		return m, m.fetchModelsCmd()
 	case "apikey":
 		m.cfgEdit = &cfgEditor{key: key, f: newTextField("", true)}
@@ -724,6 +759,7 @@ type cfgEditor struct {
 type cfgPicker struct {
 	key     string
 	p       picker
+	epoch   int64  // model: the connection the list was fetched for
 	confirm string // removeprovider: the name awaiting a second enter
 	err     string
 }
@@ -731,6 +767,10 @@ type cfgPicker struct {
 // configPickKey moves through the open list; enter acts on the pick.
 func (m *tuiModel) configPickKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	cp := m.cfgPick
+	if k.String() == "enter" && cp.p.loading {
+		cp.err = "still loading the list…"
+		return m, nil
+	}
 	act := cp.p.key(k)
 	if act == pickNone { // moved or filtered: whatever was being confirmed is off
 		cp.confirm, cp.err = "", ""
@@ -740,18 +780,54 @@ func (m *tuiModel) configPickKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cfgPick = nil
 	case pickChose:
 		v, _ := cp.p.choice()
+		busy := m.cancel != nil
 		switch cp.key {
 		case "provider":
-			if m.cancel != nil { // a task is running: applies when it ends
-				m.cfgPending = append(m.cfgPending, "provider="+v)
-				m.push(cDim.Render("  staged — provider " + v + " applies when the task finishes"))
+			if v == m.app.providerName() {
+				m.unstage(stagedEdit{key: "provider"})
+				m.cfgPick = nil
+				m.push(cDim.Render("  already on " + v))
+				return m, nil
+			}
+			if busy {
+				if m.removalStaged(v) {
+					cp.err = v + " is staged for removal — it can't also be switched to"
+					return m, nil
+				}
+				m.stage(stagedEdit{key: "provider", value: v})
+				m.push(cDim.Render("  staged — provider " + v + " when the task finishes"))
 				m.cfgPick = nil
 				return m, nil
 			}
+			out := m.app.setProvider(v) // saves + re-wires; says so, or why not
+			if len(out) > 0 && !strings.HasPrefix(out[0], "→") {
+				cp.err = out[0] // stays open: pick another, or esc
+				return m, nil
+			}
 			m.cfgPick = nil
-			m.pushLines(m.app.setProvider(v)) // saves + re-wires; says so, or why not
+			m.pushLines(out)
 			return m, m.detectWindowCmd()
 		case "model":
+			if cp.epoch != m.app.modelEpoch.Load() {
+				cp.err = "the connection changed since this list — esc and open it again"
+				return m, nil
+			}
+			prov := m.app.providerName()
+			if busy && m.removalStaged(prov) {
+				cp.err = prov + " is staged for removal — its model can't change too"
+				return m, nil
+			}
+			if busy {
+				m.cfgPick = nil
+				if v == m.app.activeLLM().Model {
+					m.unstage(stagedEdit{key: "model", prov: prov})
+					m.push(cDim.Render("  already on " + v))
+					return m, nil
+				}
+				m.stage(stagedEdit{key: "model", value: v, prov: prov})
+				m.push(cDim.Render("  staged — model " + v + " on " + prov + " when the task finishes"))
+				return m, nil
+			}
 			out := m.app.setModel(v)
 			if len(out) > 0 && strings.HasPrefix(out[0], "error") {
 				cp.err = out[0]
@@ -761,8 +837,22 @@ func (m *tuiModel) configPickKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.pushLines(out)
 			return m, m.detectWindowCmd()
 		case "removeprovider":
+			if busy {
+				for _, e := range m.cfgPending {
+					if (e.key == "provider" && e.value == v) || (e.key != "removeprovider" && e.prov == v) {
+						cp.err = "changes to " + v + " are staged — it can't also be removed"
+						return m, nil
+					}
+				}
+			}
 			if cp.confirm != v { // first enter: ask again
 				cp.confirm = v
+				return m, nil
+			}
+			if busy {
+				m.stage(stagedEdit{key: "removeprovider", prov: v})
+				m.push(cDim.Render("  staged — " + v + " is removed when the task finishes"))
+				m.cfgPick = nil
 				return m, nil
 			}
 			msg, err := m.app.removeProvider(v)
@@ -776,6 +866,16 @@ func (m *tuiModel) configPickKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// removalStaged reports whether removing name waits for the task's end.
+func (m *tuiModel) removalStaged(name string) bool {
+	for _, e := range m.cfgPending {
+		if e.key == "removeprovider" && e.prov == name {
+			return true
+		}
+	}
+	return false
 }
 
 // pickerHint is what the open list offers, under it.
@@ -808,11 +908,15 @@ func (m *tuiModel) configEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cfgEdit = nil
 		return m, nil
 	case "ctrl+d":
-		if e.key == "apikey" {
+		if e.key == "apikey" && m.cancel == nil {
 			return m.finishEdit(m.app.setActiveKey("", true))
 		}
 	case "enter":
 		v := e.f.value()
+		if m.cancel != nil && !liveTuneRows[e.key] { // only a live tuning row's editor opens mid-task
+			e.err = "a task is running — this waits until it ends (esc)"
+			return m, nil
+		}
 		switch e.key {
 		case "base_url":
 			return m.finishEdit(m.app.setBaseURL(v))
@@ -932,8 +1036,10 @@ var compactThresholdCycle = []float64{0.5, 0.65, 0.75, 0.85, 0.95}
 // cycleCompactThreshold advances the auto-compact threshold through preset
 // fill levels, persists, and re-wires so autoCompactNeeded picks it up.
 func (m *tuiModel) cycleCompactThreshold() {
-	m.app.cfg.CompactThreshold = nextFloat(compactThreshold(m.app.cfg.CompactThreshold), compactThresholdCycle)
+	before := m.app.cfg.CompactThreshold
+	m.app.cfg.CompactThreshold = nextFloat(compactThreshold(before), compactThresholdCycle)
 	if err := config.SaveCompactThreshold(m.app.cfg.CompactThreshold); err != nil {
+		m.app.cfg.CompactThreshold = before // shown only once it is on disk
 		m.push(cErr.Render("  could not persist: " + err.Error()))
 	}
 }
@@ -946,8 +1052,10 @@ var maxStepsCycle = []int{0, 40, 80, 120, 200, 400}
 // cycleMaxSteps advances the manual GoalMaxSteps override through presets,
 // persists it, and re-wires so the rebuilt Agent picks up the new budget.
 func (m *tuiModel) cycleMaxSteps() {
-	m.app.cfg.GoalMaxSteps = nextInt(m.app.cfg.GoalMaxSteps, maxStepsCycle)
+	before := m.app.cfg.GoalMaxSteps
+	m.app.cfg.GoalMaxSteps = nextInt(before, maxStepsCycle)
 	if err := config.SaveGoalMaxSteps(m.app.cfg.GoalMaxSteps); err != nil {
+		m.app.cfg.GoalMaxSteps = before
 		m.push(cErr.Render("  could not persist: " + err.Error()))
 		return
 	}
@@ -962,8 +1070,10 @@ var maxHistoryCycle = []int{0, 16, 32, 64, 128, 256, rawMemoryMaxHistory}
 // cycleMaxHistory advances the manual Config.MaxHistory override through
 // presets, persists it, and re-wires so Agent.remember picks up the new cap.
 func (m *tuiModel) cycleMaxHistory() {
-	m.app.cfg.MaxHistory = nextInt(m.app.cfg.MaxHistory, maxHistoryCycle)
+	before := m.app.cfg.MaxHistory
+	m.app.cfg.MaxHistory = nextInt(before, maxHistoryCycle)
 	if err := config.SaveMaxHistory(m.app.cfg.MaxHistory); err != nil {
+		m.app.cfg.MaxHistory = before
 		m.push(cErr.Render("  could not persist: " + err.Error()))
 		return
 	}
@@ -978,8 +1088,10 @@ var maxStuckTurnsCycle = []int{0, 3, 5, 8, 15, 25}
 // through presets, persists it, and re-wires so the rebuilt Agent picks up
 // the new tolerance.
 func (m *tuiModel) cycleMaxStuckTurns() {
-	m.app.cfg.MaxStuckTurns = nextInt(m.app.cfg.MaxStuckTurns, maxStuckTurnsCycle)
+	before := m.app.cfg.MaxStuckTurns
+	m.app.cfg.MaxStuckTurns = nextInt(before, maxStuckTurnsCycle)
 	if err := config.SaveMaxStuckTurns(m.app.cfg.MaxStuckTurns); err != nil {
+		m.app.cfg.MaxStuckTurns = before
 		m.push(cErr.Render("  could not persist: " + err.Error()))
 		return
 	}
@@ -1029,17 +1141,6 @@ func (m *tuiModel) toggleChannel() {
 	m.app.cfg.Channel = next
 }
 
-// cfgPendingCount is how many times this row was activated while the task ran.
-func (m *tuiModel) cfgPendingCount(key string) int {
-	n := 0
-	for _, k := range m.cfgPending {
-		if k == key || strings.HasPrefix(k, key+"=") || strings.HasPrefix(k, tunePrefix+key+"=") {
-			n++
-		}
-	}
-	return n
-}
-
 // renderConfigPanel draws the boxed, sectioned settings screen.
 func (m *tuiModel) renderConfigPanel() string {
 	accent := lipgloss.NewStyle().Foreground(m.accent)
@@ -1078,18 +1179,9 @@ func (m *tuiModel) renderConfigPanel() string {
 		if m.projectOverrides(r.key) {
 			hint = "this project's .agent/config.json sets it — that value wins at the next start"
 		}
-		if v, ok := m.tunedValue(r.key); ok {
-			// Already in the running task's requests; a.cfg — what configRowView
-			// shows — gets it when the task ends.
-			value, hint = v, "in use now · saved when the task ends"
-		} else if n := m.cfgPendingCount(r.key); n > 0 {
-			// Say the change was taken and where it went — the value column still
-			// shows the LIVE setting, because that is what the running task is using.
-			hint = "staged"
-			if n > 1 {
-				hint = fmt.Sprintf("staged ×%d", n)
-			}
-			hint += " — applies when the task ends"
+		if v, h := m.stagedRowView(r.key, value); h != "" {
+			// a.cfg — what configRowView shows — gets it when the task ends.
+			value, hint = v, h
 		}
 		// Pad by DISPLAY width (values carry wide/ambiguous glyphs like ⏵⏵ / ● / ▮),
 		// so the hint column lines up cleanly instead of ragged.
@@ -1106,7 +1198,10 @@ func (m *tuiModel) renderConfigPanel() string {
 	}
 	footer := "  ↑↓ move · enter change · esc close"
 	if m.cancel != nil {
-		footer = "  ↑↓ move · enter stages a change (applies when the task ends) · esc back to it"
+		footer = "  ↑↓ move · enter: tuning applies now, the rest when the task ends · esc back to it"
+	}
+	for _, l := range m.cfgNote { // what the last key said — the log is behind the panel
+		lines = append(lines, l)
 	}
 	lines = append(lines, "", cDim.Render(footer))
 	lines = append(lines, cDim.Render("  saved privately to ~/.config/ipsupport-code/config.json · file writes, shell run, run timeout: this project's .agent/config.json"))
@@ -1148,7 +1243,12 @@ func (m *tuiModel) configWindow() ([]cfgRow, int) {
 	if m.cfgEdit != nil {
 		chrome++ // the editor's hint line under its row
 	}
+	chrome += len(m.cfgNote)
 	if m.cfgPick != nil {
+		// The list gets what is left after the panel's own lines, its filter,
+		// scroll markers and hint, and three rows of the panel — ten items on
+		// a 24-line terminal pushed the panel's top off the screen.
+		m.cfgPick.p.rows = min(max(m.viewportHeight()-chrome-4-3, 3), pickerRows)
 		chrome += m.cfgPick.p.height() + 1 // the list and its hint under its row
 	}
 	avail := m.viewportHeight() - chrome

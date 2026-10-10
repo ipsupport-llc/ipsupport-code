@@ -64,7 +64,7 @@ func TestConfigModelRowIsAList(t *testing.T) {
 	if m.cfgPick.p.loading || len(m.cfgPick.p.visible()) != 30 {
 		t.Fatalf("list not loaded: %+v", m.cfgPick.p)
 	}
-	m.width = 400
+	m.width, m.height = 400, 200
 	panel := m.renderConfigPanel()
 	if !strings.Contains(panel, "model-00") || !strings.Contains(panel, "↓ 20 more") {
 		t.Fatalf("the list is not shown on the row:\n%s", panel)

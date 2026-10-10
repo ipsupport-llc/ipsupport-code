@@ -9984,3 +9984,17 @@ func TestIPv6ClientPrefersIPv6(t *testing.T) {
 		}
 	}
 }
+
+// A hand-edited or damaged state with a short install ID does not crash
+// /telemetry.
+func TestTelemetryStatusSurvivesAShortInstallID(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	os.MkdirAll(filepath.Dir(telemetryPath()), 0o755)
+	os.WriteFile(telemetryPath(), []byte(`{"install_id":"abc"}`), 0o600)
+	on := true
+	a := &app{cfg: config.Config{Telemetry: &on}}
+	lines := a.telemetryStatusLines()
+	if !strings.Contains(strings.Join(lines, "\n"), "install ID  abc") {
+		t.Fatalf("lines = %q", lines)
+	}
+}

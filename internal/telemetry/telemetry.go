@@ -60,6 +60,32 @@ type State struct {
 	Days      map[string]*Day `json:"days,omitempty"`
 	// NextAttempt holds sends back after a 429 or a failed attempt.
 	NextAttempt time.Time `json:"next_attempt,omitempty"`
+	// Last is how the last send that had something to send went, for
+	// /telemetry: without it "on" said nothing about whether reports leave.
+	Last *Attempt `json:"last,omitempty"`
+}
+
+// Attempt is one send round's outcome.
+type Attempt struct {
+	Time time.Time `json:"time"`
+	Sent int       `json:"sent,omitempty"`
+	// Refused are days the server will never accept, as "day: error code";
+	// they are dropped, and this is the only trace of them.
+	Refused []string `json:"refused,omitempty"`
+	// Expired are days dropped unsent: older than the server takes, or after
+	// today (a clock set back).
+	Expired []string `json:"expired,omitempty"`
+	// Error is why the round stopped early: no answer, a server error, a
+	// rate limit, an answer that was not this server's. The days it did not
+	// get to stay and are tried again at a later launch.
+	Error string `json:"error,omitempty"`
+}
+
+// Sendable reports whether day can still be sent at now: finished, and not
+// older than the server takes — seven days counted from the UTC day, as the
+// server counts, so a machine behind UTC does not send a day it refuses.
+func Sendable(day string, now time.Time) bool {
+	return day < now.Format(time.DateOnly) && day >= now.UTC().AddDate(0, 0, -maxDays).Format(time.DateOnly)
 }
 
 // Day is one local day's counters.
@@ -260,12 +286,15 @@ type SendResult struct {
 	Deferred      bool // stopped early: rate limited, a server error or no answer
 }
 
-// Send reports every finished day, oldest first. Today waits until it ends,
-// so a user who turns telemetry off on the first day has sent nothing.
+// Send reports every finished day, oldest first; the program calls it once,
+// at launch. Today waits until it ends, so a user who turns telemetry off on
+// the first day has sent nothing.
 //
-// The answers mirror LLMTray's (its ADR 15): 204 sent; 429 waits for
-// Retry-After; 408, 5xx and no answer try again after an hour; any other
-// 4xx drops that day. A resend of a day replaces it on the server, so a
+// The answers mirror LLMTray's (its ADR 15): 2xx sent; 429 waits for
+// Retry-After; 408, 5xx and no answer wait an hour — either wait holds back
+// launches before it ends; this server's own 400 drops that day. Any other
+// answer is not this server's (a proxy, a captive portal) and waits an hour
+// too, keeping the day. A resend of a day replaces it on the server, so a
 // retry needs no idempotency key. The lock is not held across the network:
 // another session must not wait on it.
 func Send(ctx context.Context, o SendOptions) (SendResult, error) {
@@ -276,12 +305,9 @@ func Send(ctx context.Context, o SendOptions) (SendResult, error) {
 	}
 	t := now()
 	today := t.Format(time.DateOnly)
-	// Seven days back counted from the UTC day, as the server does: a machine
-	// behind UTC would otherwise send a day it refuses.
-	oldest := t.UTC().AddDate(0, 0, -maxDays).Format(time.DateOnly)
 
 	var s State
-	var due []string
+	var due, expired []string
 	err := update(o.Path, func(st *State) bool {
 		s = *st
 		if st.InstallID == "" || t.Before(st.NextAttempt) {
@@ -290,15 +316,22 @@ func Send(ctx context.Context, o SendOptions) (SendResult, error) {
 		changed := false
 		for day := range st.Days {
 			switch {
-			case day < oldest || day > today:
-				delete(st.Days, day) // too old for the server, or a clock set back
-				res.Dropped++
-				changed = true
-			case day < today:
+			case day == today:
+				// still being counted
+			case Sendable(day, t):
 				due = append(due, day)
+			default: // too old for the server, or after today (a clock set back)
+				delete(st.Days, day)
+				res.Dropped++
+				expired = append(expired, day)
+				changed = true
 			}
 		}
 		sort.Strings(due)
+		sort.Strings(expired)
+		if len(due) == 0 && len(expired) > 0 {
+			st.Last = &Attempt{Time: t, Expired: expired} // the only trace of them
+		}
 		s = *st
 		return changed
 	})
@@ -308,31 +341,55 @@ func Send(ctx context.Context, o SendOptions) (SendResult, error) {
 
 	done := map[string]bool{}
 	next := time.Time{}
+	last := &Attempt{Time: t, Expired: expired}
+	posted := false
+send:
 	for _, day := range due {
 		// Consent is checked again before every day, not once per round: the
 		// session may have gone offline, or the user turned reporting off —
-		// here or in another session, which deletes the state.
+		// here or in another session, which deletes the state. What was
+		// accepted before that is still written down below.
 		if o.Keep != nil && !o.Keep() {
-			return res, nil
+			break
 		}
 		if cur, err := Load(o.Path); err != nil || cur.InstallID != s.InstallID {
-			return res, nil
+			break
 		}
-		code, wait, err := post(ctx, o, BuildReport(s, day, o.Version, o.Info))
+		code, wait, why, err := post(ctx, o, BuildReport(s, day, o.Version, o.Info))
 		switch {
-		case err != nil || code == http.StatusRequestTimeout || code >= 500:
+		case err != nil && ctx.Err() != nil:
+			break send // the program is exiting: not a failure, and nothing to hold back
+		case err != nil:
 			next = t.Add(retryAfter)
+			last.Error = err.Error()
+		case code == http.StatusRequestTimeout || code >= 500:
+			next = t.Add(retryAfter)
+			last.Error = fmt.Sprintf("server answered %d", code)
 		case code == http.StatusTooManyRequests:
 			next = t.Add(wait)
-		case code == http.StatusNoContent || (code >= 200 && code < 300):
+			last.Error = "rate limited"
+		case code >= 200 && code < 300:
+			posted = true
 			done[day] = true
 			res.Sent++
+			last.Sent++
 			continue
-		default: // any other 4xx: this day will never be accepted
+		case code == http.StatusBadRequest && why != "":
+			// This server's own refusal names the field; the day will never
+			// be accepted.
+			posted = true
 			done[day] = true
 			res.Dropped++
+			last.Refused = append(last.Refused, day+": "+why)
 			continue
+		default:
+			// Not this server's answer — a proxy wanting a login (407), a
+			// captive portal (403), a redirect. The day is not at fault:
+			// keep it, try again later.
+			next = t.Add(retryAfter)
+			last.Error = fmt.Sprintf("unexpected answer: http %d", code)
 		}
+		posted = true
 		res.Deferred = true
 		break
 	}
@@ -348,22 +405,30 @@ func Send(ctx context.Context, o SendOptions) (SendResult, error) {
 				delete(st.Days, day)
 			}
 		}
-		st.NextAttempt = next
+		// A later wait wins: another session may have been told to back off
+		// (429) while this one was being accepted.
+		if next.After(st.NextAttempt) || !st.NextAttempt.After(t) {
+			st.NextAttempt = next
+		}
+		if posted || len(expired) > 0 {
+			st.Last = last
+		}
 		return true
 	})
 	return res, err
 }
 
-func post(ctx context.Context, o SendOptions, r Report) (code int, wait time.Duration, err error) {
+// post sends one report; why is the server's error code for a refusal.
+func post(ctx context.Context, o SendOptions, r Report) (code int, wait time.Duration, why string, err error) {
 	body, err := json.Marshal(r)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, "", err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.Endpoint, bytes.NewReader(body))
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if o.UserAgent != "" {
@@ -375,15 +440,36 @@ func post(ctx context.Context, o SendOptions, r Report) (code int, wait time.Dur
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, "", err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	var e struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(b, &e) == nil {
+		why = errorCode(e.Error)
+	}
 	wait = retryAfter
 	if s, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && s > 0 {
 		wait = time.Duration(s) * time.Second
 	}
-	return resp.StatusCode, wait, nil
+	return resp.StatusCode, wait, why, nil
+}
+
+// errorCode keeps a server's error code only in the shape this server sends
+// (invalid_day): it is stored and printed to the terminal, so nothing else —
+// escape sequences, newlines, a page of text — gets that far.
+func errorCode(s string) string {
+	if len(s) == 0 || len(s) > 40 {
+		return ""
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_') {
+			return ""
+		}
+	}
+	return s
 }
 
 // familyMarks map a model name onto the server's families. Order matters:

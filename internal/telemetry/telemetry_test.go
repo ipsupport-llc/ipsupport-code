@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -86,6 +87,12 @@ func (s *server) handler(w http.ResponseWriter, r *http.Request) {
 	if retry != "" {
 		w.Header().Set("Retry-After", retry)
 	}
+	if code == http.StatusBadRequest { // as ipsupport-api refuses: the field, by code
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		io.WriteString(w, `{"error":"invalid_day"}`)
+		return
+	}
 	w.WriteHeader(code)
 }
 
@@ -150,6 +157,9 @@ func TestSendAnswers(t *testing.T) {
 		{"rate limited", http.StatusTooManyRequests, "120", 2, 2 * time.Minute},
 		{"server error", http.StatusBadGateway, "", 2, time.Hour},
 		{"refused", http.StatusBadRequest, "", 0, 0},
+		// Not this server's answer: a proxy wanting a login. The days are
+		// not at fault — kept, and tried again later.
+		{"proxy", http.StatusProxyAuthRequired, "", 2, time.Hour},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "telemetry.json")
@@ -283,5 +293,88 @@ func TestARecordDuringTheSendIsKept(t *testing.T) {
 	s, _ := Load(path)
 	if d := s.Days["2026-10-03"]; d == nil || d.Features["tasks"] != 2 {
 		t.Fatalf("day after the send = %+v, want it kept with both tasks", d)
+	}
+}
+
+// The state remembers how the last send went, so /telemetry can say whether
+// reports actually leave — accepted, refused (and why), or failed.
+func TestSendRemembersTheLastAttempt(t *testing.T) {
+	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)
+	path := filepath.Join(t.TempDir(), "telemetry.json")
+	Enable(path)
+	Record(path, "2026-10-02", Counts{})
+	Record(path, "2026-10-03", Counts{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var rep Report
+		json.NewDecoder(r.Body).Decode(&rep)
+		if rep.Day == "2026-10-02" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"error":"invalid_day"}`)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	sendAt(t, path, ts.URL, now)
+	ts.Close()
+	s, _ := Load(path)
+	if s.Last == nil || !s.Last.Time.Equal(now) || s.Last.Sent != 1 || len(s.Last.Refused) != 1 || s.Last.Refused[0] != "2026-10-02: invalid_day" {
+		t.Fatalf("last = %+v, want 1 sent and 2026-10-02 refused as invalid_day at %v", s.Last, now)
+	}
+
+	// A send that cannot reach the server says so, and keeps the day.
+	Record(path, "2026-10-03", Counts{Features: map[string]int{"tasks": 1}})
+	sendAt(t, path, ts.URL, now.Add(2*time.Hour)) // ts is closed: connection refused
+	s, _ = Load(path)
+	if s.Last == nil || s.Last.Error == "" || s.Last.Sent != 0 || s.Days["2026-10-03"] == nil {
+		t.Fatalf("last = %+v, days %v; want the failure recorded and the day kept", s.Last, s.Days)
+	}
+}
+
+// Ctrl-C during the launch send is not a failure: no "failed" status, and
+// nothing holds back the next launch.
+func TestACancelledSendHoldsNothingBack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "telemetry.json")
+	Enable(path)
+	Record(path, "2026-10-03", Counts{})
+	ctx, cancel := context.WithCancel(context.Background())
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cancel() // Ctrl-C while the report is in flight
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusNoContent) // too late: the client has given up
+	}))
+	defer ts.Close()
+	_, err := Send(ctx, SendOptions{Path: path, Endpoint: ts.URL, Version: "v0.61.0",
+		Now: func() time.Time { return time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, _ := Load(path)
+	if !s.NextAttempt.IsZero() || s.Last != nil || s.Days["2026-10-03"] == nil {
+		t.Fatalf("next %v, last %+v, days %v; want nothing held back, no status, the day kept", s.NextAttempt, s.Last, s.Days)
+	}
+}
+
+// Days dropped for age leave a trace: they are the data a long gap loses.
+func TestExpiredDaysAreRecorded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "telemetry.json")
+	Enable(path)
+	Record(path, "2026-09-20", Counts{})
+	sendAt(t, path, "http://127.0.0.1:1", time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local))
+	s, _ := Load(path)
+	if s.Last == nil || len(s.Last.Expired) != 1 || s.Last.Expired[0] != "2026-09-20" {
+		t.Fatalf("last = %+v, want 2026-09-20 recorded as expired", s.Last)
+	}
+}
+
+// A server's error text reaches the terminal only as a plain code.
+func TestErrorCodeKeepsOnlyACode(t *testing.T) {
+	for in, want := range map[string]string{
+		"invalid_day": "invalid_day", "\x1b]0;pwned\x07\nfake": "", "Not Found": "",
+		strings.Repeat("a", 41): "",
+	} {
+		if got := errorCode(in); got != want {
+			t.Errorf("errorCode(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

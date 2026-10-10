@@ -27,7 +27,7 @@ import (
 // anything has been sent.
 
 // telemetryNotice is what first-run setup says, and /telemetry repeats.
-const telemetryNotice = "Anonymous usage statistics are on: once a day, the version, OS, and counts of what was used (tasks, tools, sub-agents) — never code, prompts, commands, file names or model names. Turn off: ipsupport-code config set telemetry false · details: /telemetry"
+const telemetryNotice = "Anonymous usage statistics are on: one report per day, sent at the next launch — the version, OS, and counts of what was used (tasks, tools, sub-agents) — never code, prompts, commands, file names or model names. Turn off: ipsupport-code config set telemetry false · details: /telemetry"
 
 func telemetryPath() string {
 	return filepath.Join(filepath.Dir(config.GlobalPath()), "telemetry.json")
@@ -108,7 +108,8 @@ func doNotTrack() bool {
 
 // startTelemetry runs at launch: it forgets everything when telemetry is
 // off, and otherwise records that the program ran today and sends finished
-// days — now, and every three hours while it keeps running.
+// days, once, at launch. A day is collected while it lasts and sent at the
+// first launch after it ends; nothing runs on a timer.
 func (a *app) startTelemetry(ctx context.Context) {
 	_, _ = feedback.UpdatePrompt(ratePath(), func(s *feedback.PromptState) {
 		if s.FirstLaunch.IsZero() {
@@ -161,22 +162,23 @@ func (a *app) applyTelemetry(create bool) {
 	ctx := a.telemetryCtx
 	a.telemetryWorker.Do(func() {
 		a.telemetryWG.Add(1)
-		go func() {
+		go func() { // off the launch path: a slow network must not hold the prompt
 			defer a.telemetryWG.Done()
-			t := time.NewTicker(3 * time.Hour)
-			defer t.Stop()
-			for {
-				if a.telemetryOn.Load() { // gone offline, or turned off, since the last round
-					a.sendTelemetry(ctx)
-				}
-				select {
-				case <-ctx.Done():
-					return
-				case <-t.C:
-				}
-			}
+			a.sendTelemetry(ctx)
 		}()
 	})
+}
+
+// waitTelemetry gives a send still in flight up to d to finish as the program
+// exits. Reports go only at launch, so a short run — one task, then exit —
+// would otherwise cut its own send off every time and never deliver a day.
+func (a *app) waitTelemetry(d time.Duration) {
+	done := make(chan struct{})
+	go func() { a.telemetryWG.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(d):
+	}
 }
 
 func (a *app) sendTelemetry(ctx context.Context) {
@@ -261,7 +263,7 @@ func (a *app) telemetryCommand(rest string) []string {
 		}
 		f := false
 		a.cfg.Telemetry = &f
-		a.refreshTelemetry() // the sender's next round sees it off
+		a.refreshTelemetry() // a send in flight sees it off before its next day
 		if err := telemetry.Disable(path); err != nil {
 			return []string{"error: " + err.Error()}
 		}
@@ -285,29 +287,83 @@ func (a *app) telemetryStatusLines() []string {
 			"  turn on: /telemetry on (anonymous: version, OS, counts of what was used — never code, prompts, commands, paths or model names)",
 		}
 	}
-	out := []string{"usage statistics: on — " + map[bool]string{true: "recording; finished days are sent once a day", false: "but paused: " + why}[active]}
+	out := []string{"usage statistics: on — " + map[bool]string{true: "recording; a day is sent at the first launch after it ends", false: "but paused: " + why}[active]}
 	s, err := telemetry.Load(telemetryPath())
 	if err != nil {
 		return append(out, "  error: "+err.Error())
 	}
-	if s.InstallID != "" {
-		out = append(out, "  install ID  "+s.InstallID[:8]+"… (random; /telemetry reset for a new one)")
+	if id := s.InstallID; id != "" {
+		if len(id) > 8 {
+			id = id[:8] + "…"
+		}
+		out = append(out, "  install ID  "+id+" (random; /telemetry reset for a new one)")
 	}
+	out = append(out, lastSendLines(s)...)
 	days := make([]string, 0, len(s.Days))
 	for d := range s.Days {
 		days = append(days, d)
 	}
 	sort.Strings(days)
 	if len(days) == 0 {
-		return append(out, "  nothing waiting to be sent")
+		return append(out, "  waiting     nothing")
 	}
+	now := time.Now()
+	today := now.Format(time.DateOnly)
+	marked := make([]string, len(days))
+	for i, d := range days {
+		switch {
+		case d == today:
+			marked[i] = d + " (today — goes at the first launch after it ends)"
+		case !telemetry.Sendable(d, now):
+			marked[i] = d + " (too old for the server — dropped at the next launch)"
+		default:
+			marked[i] = d
+		}
+	}
+	out = append(out, "  waiting     "+strings.Join(marked, ", "))
 	info := telemetry.CollectInfo()
-	out = append(out, "  waiting to be sent — exactly these reports (today's goes after today ends):")
+	out = append(out, "  exactly what each will send:")
 	for _, d := range days {
+		if d != today && !telemetry.Sendable(d, now) {
+			continue // will not be sent; the line above says so
+		}
 		b, _ := json.Marshal(telemetry.BuildReport(s, d, version, info))
 		out = append(out, "    "+string(b))
 	}
-	return append(out, "  never sent: code, prompts, commands, tool arguments or output, file names or paths, model names, keys, provider URLs")
+	return append(out, "  not part of any report: code, prompts, commands, tool arguments or output, file names or paths, model names, keys, provider URLs")
+}
+
+// lastSendLines says how the last send went: whether reports actually leave,
+// which the on/off setting alone never told.
+func lastSendLines(s telemetry.State) []string {
+	l := s.Last
+	if l == nil {
+		return []string{"  last send   none yet — a day is sent at the first launch after it ends"}
+	}
+	var parts []string
+	if l.Sent > 0 {
+		parts = append(parts, fmt.Sprintf("%d day(s) accepted", l.Sent))
+	}
+	if n := len(l.Refused); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d refused by the server and dropped", n))
+	}
+	if n := len(l.Expired); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d too old, dropped unsent", n))
+	}
+	if l.Error != "" {
+		parts = append(parts, "stopped: "+l.Error)
+	}
+	out := []string{"  last send   " + l.Time.Local().Format("2006-01-02 15:04") + " — " + strings.Join(parts, "; ")}
+	if len(l.Refused) > 0 {
+		out = append(out, "  ! refused: "+strings.Join(l.Refused, ", "))
+	}
+	if len(l.Expired) > 0 {
+		out = append(out, "  ! dropped unsent: "+strings.Join(l.Expired, ", "))
+	}
+	if s.NextAttempt.After(time.Now()) {
+		out = append(out, "  next try    at a launch after "+s.NextAttempt.Local().Format("2006-01-02 15:04"))
+	}
+	return out
 }
 
 // rateCommand backs /rate: "<1-5> <a few words> [--name <name>]", or

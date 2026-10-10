@@ -265,7 +265,8 @@ remote endpoint, that traffic still goes out. `/offline off` re-enables it.
 default for a new install** — first-run setup says so — and **an update never
 turns them on** for an install that existed before: it is written off.
 
-- **What is sent**, once a day, about the day before: the version, OS and its
+- **What is sent**: one report per day, at the first launch after that day
+  ends (nothing runs on a timer). It holds the version, OS and its
   version, CPU architecture, Apple chip (Apple silicon only), memory size,
   language, how many times each feature was used (`tasks`, `tool_calls`,
   `goals`, `subagents`, `external_agents`, `mcp`, `skills`, `plan_mode`,
@@ -273,7 +274,8 @@ turns them on** for an install that existed before: it is written off.
   `nemotron`, `claude`…) and a random install ID.
 - **Never sent:** code, prompts, commands, tool arguments or output, file names
   or paths, model names, API keys, provider URLs.
-- `/telemetry` shows exactly the reports waiting to be sent. `/telemetry off`
+- `/telemetry` shows how the last send went (accepted, refused and why, or
+  failed), the days waiting and exactly the reports they will send. `/telemetry off`
   (or `ipsupport-code config set telemetry false`) turns it off and deletes the
   install ID and every unsent counter; `/telemetry reset` makes a new ID.
 - Nothing is recorded under `DO_NOT_TRACK=1` or in `/offline` mode, from a

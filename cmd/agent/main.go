@@ -209,6 +209,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	app.startTelemetry(ctx)
+	defer app.waitTelemetry(3 * time.Second)
 
 	taskText := strings.TrimSpace(strings.Join(flag.Args(), " "))
 	switch {
@@ -547,8 +548,8 @@ type app struct {
 	riskSaves sync.WaitGroup
 	// telemetryOn is whether usage statistics are being recorded and sent right
 	// now. Set on the goroutine that owns a.cfg (refreshTelemetry, from wire and
-	// /telemetry); read by the sender's ticker and by task goroutines, which must
-	// never read a.cfg themselves.
+	// /telemetry); read by the launch-time sender and by task goroutines, which
+	// must never read a.cfg themselves.
 	telemetryOn atomic.Bool
 	// telemetryCtx is set once main has started telemetry; until then nothing
 	// touches the state file (a test that calls wire() must never delete or

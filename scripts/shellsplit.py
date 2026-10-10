@@ -92,6 +92,9 @@ class _Result:
         self.blocks = []
         self.feeding = []
         self.links = 0
+        self.input = []
+        self.func_name = False
+        self.untracked = False
         self.opens = []  # [start, end word, feeders], innermost last
         self.closed = None
         self.groups = []
@@ -107,6 +110,7 @@ class _Result:
             self.piped.append(pipe)
             self.pipe_to.append([])
             self.to_block.append([])
+            self.input.append(False)
             self.inner_code(s)
             if self.code:
                 self.code.append(" ")
@@ -145,12 +149,17 @@ class _Result:
                 feeders.append((len(self.cmds) - 1, len(self.cmds)))
             for f in feeders:
                 self.read_by(f[0], f[1], len(self.cmds))
-            if op == "(" and self.d == SH and _keyword(s) == "exec":
+            if op == "(" and self.d == SH and _execs(s):
                 self.incomplete = True
+        if self.d == SH:
+            k = _keyword(s)
+            if (self.func_name and op == ")" and s == "") or k in ("function", "coproc"):
+                self.untracked = True
+            self.func_name = op == "(" and len(_fields(s)) == 1 and not any(c in s for c in "<>=")
         pending = self.feeding
         self.feeding = []
         if op in ("(", "{"):
-            o = [len(self.cmds), ")", feeders]
+            o = [len(self.cmds), ")", feeders, op == "(" and s.endswith("<")]
             if not feeders and s == "":
                 o[2] = pending
             self.opens.append(o)
@@ -158,6 +167,9 @@ class _Result:
             o = self.opens.pop()
             self.closed = (o[0], len(self.cmds))
             self.blocks.append((o[0], len(self.cmds)))
+            if o[3] and self.link(len(self.cmds) - o[0]):
+                for j in range(o[0], len(self.cmds)):
+                    self.input[j] = True
             for f in o[2]:
                 if not self.link(f[1] - f[0] + len(self.cmds) - o[0]):
                     break
@@ -264,13 +276,24 @@ class _Result:
                 f |= into(t)
             for i in self.to_block[j]:
                 f |= into_block(i)
-            if j >= open_:
+            if j >= open_ or self.input[j] or self.untracked:
                 f |= _UNKNOWN
             fed[j - first] = f
         return fed
 
 
 _CLOSERS = {"case": "esac", "if": "fi", "for": "done", "while": "done", "until": "done", "select": "done"}
+
+
+def _execs(s):
+    """Mirrors execs: exec past !, time, assignments and command (-p, -v, -V)."""
+    for w in _fields(s):
+        if w == "exec":
+            return True
+        if w in ("!", "time", "command", "-p", "-v", "-V", "--") or _assignment(w):
+            continue
+        return False
+    return False
 
 
 def _keyword(s):

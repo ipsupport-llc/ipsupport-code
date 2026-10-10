@@ -106,6 +106,9 @@ type result struct {
 	closed     []int    // the block just closed, [start, end): sent on by the next cut, if it sends
 	feeding    [][2]int // what the last cut sent on, for a block opening next: | { …; }
 	links      int      // reader links made: bounded by maxLinks
+	input      []bool   // cmds[i] is in a <( … ): what it writes is read as a file
+	funcName   bool     // the last cut was a single word before (: name () …
+	untracked  bool     // a function or coproc was set up: a heredoc's output can reach a reader later, unseen
 	groups     []string
 	inner      []string // what a command runs inside it: sh -c '…', eval …
 	innerG     []string
@@ -126,6 +129,7 @@ func (r *result) cut(b *buf, op string) {
 		r.piped = append(r.piped, pipe)
 		r.pipeTo = append(r.pipeTo, nil)
 		r.toBlock = append(r.toBlock, nil)
+		r.input = append(r.input, false)
 		r.innerCode(s)
 		if r.code.Len() > 0 {
 			r.code.WriteString(" ")
@@ -158,6 +162,7 @@ type open struct {
 	start   int
 	end     string
 	feeders [][2]int // what is sent into a ( or {: read by every command in it
+	input   bool     // <( … ): what it writes is read as a file — by sh, source, python3 as well
 }
 
 // closers are the compound commands a keyword opens, by the word that ends
@@ -197,16 +202,25 @@ func (r *result) block(s, op string, pipe bool) {
 		for _, f := range feeders {
 			r.readBy(f[0], f[1], len(r.cmds))
 		}
-		if op == "(" && r.d == Sh && keyword(s) == "exec" {
+		if op == "(" && r.d == Sh && execs(s) {
 			r.incomplete = true // exec > >(sh): all written after it goes there
 		}
+	}
+	if r.d == Sh {
+		// f () { cat <<EOF; } … f | sh, coproc sh; cat <<EOF >&${COPROC[1]}: a
+		// heredoc reaches its reader through a name or a descriptor set up
+		// earlier, not through anything on its line.
+		if r.funcName && op == ")" && s == "" || keyword(s) == "function" || keyword(s) == "coproc" {
+			r.untracked = true
+		}
+		r.funcName = op == "(" && len(strings.Fields(s)) == 1 && !strings.ContainsAny(s, "<>=") // not arr=( )
 	}
 	pending := r.feeding
 	r.feeding = nil
 	n := len(r.opens)
 	switch {
 	case op == "(" || op == "{":
-		o := open{start: len(r.cmds), end: ")", feeders: feeders}
+		o := open{start: len(r.cmds), end: ")", feeders: feeders, input: op == "(" && strings.HasSuffix(s, "<")}
 		if feeders == nil && s == "" {
 			o.feeders = pending
 		}
@@ -216,6 +230,11 @@ func (r *result) block(s, op string, pipe bool) {
 		r.opens = r.opens[:n-1]
 		r.closed = []int{o.start, len(r.cmds)}
 		r.blocks = append(r.blocks, [2]int{o.start, len(r.cmds)})
+		if o.input && r.link(len(r.cmds)-o.start) { // sh <(cat <<EOF): read as a script, maybe
+			for j := o.start; j < len(r.cmds); j++ {
+				r.input[j] = true
+			}
+		}
 		for _, f := range o.feeders {
 			if !r.link(f[1] - f[0] + len(r.cmds) - o.start) { // readers reads the block through
 				break
@@ -251,6 +270,21 @@ func (r *result) link(n int) bool {
 		return false
 	}
 	return true
+}
+
+// execs: the command is exec — past !, time, assignments and command (-p, -v,
+// -V), all of which leave exec's redirections in place for what follows.
+func execs(s string) bool {
+	for _, w := range strings.Fields(s) {
+		switch {
+		case w == "exec":
+			return true
+		case w == "!" || w == "time" || w == "command" || w == "-p" || w == "-v" || w == "-V" || w == "--" || assignment(w):
+		default:
+			return false
+		}
+	}
+	return false
 }
 
 // readBy adds cmds[t] as a reader of cmds[from:to].
@@ -777,7 +811,10 @@ func (r *result) readers(first int) []feed {
 		for _, id := range r.toBlock[j] {
 			f |= intoBlock(id)
 		}
-		if j >= unclosed { // what is sent into an open block reaches its first command: unknown too
+		// Unknown: in a block still open (what is sent into one reaches its first
+		// command, so that too), in a <( … ) — read as a file by whatever is
+		// given it — or after a function or coproc is set up.
+		if j >= unclosed || r.input[j] || r.untracked {
 			f |= unknown
 		}
 		fed[j-first] = f

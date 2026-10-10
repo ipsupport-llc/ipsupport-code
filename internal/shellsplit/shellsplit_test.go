@@ -298,7 +298,9 @@ func TestAHeredocsReaderDecidesWhatItIs(t *testing.T) {
 		"cat <<EOF | grep x | sort\nbody\nEOF",
 		"2>/dev/null cat >f <<EOF\nbody\nEOF",
 		"LC_ALL=C sort <<EOF\nb\na\nEOF",
-		"timeout 5 sh <<EOF\nrm -rf x\nEOF", // a wrapper, but sh reads it, and it is scored
+		"echo $((1+2)); cat > f <<'EOF'\nx\nEOF", "arr=(); arr+=(x); cat > f <<'EOF'\nx\nEOF", // arithmetic defines no function
+		"exec >log; cat > f <<'EOF'\nx\nEOF", // exec to a file
+		"timeout 5 sh <<EOF\nrm -rf x\nEOF",  // a wrapper, but sh reads it, and it is scored
 		"sudo -u deploy bash <<EOF\nrm -rf x\nEOF",
 	} {
 		if p := Parse(Sh, line); p.Incomplete {
@@ -328,6 +330,12 @@ func TestAHeredocsReaderDecidesWhatItIs(t *testing.T) {
 		"for ((i=0;i<1;i++))\ndo\ncat <<'EOF'\nrm -rf x\nEOF\ndone | sh",
 		"cat <<'EOF' | { :;\nrm -rf x\nEOF\nsh; }", // piped into a block not closed on its line
 		"exec > >(sh); cat <<'EOF'\nrm -rf x\nEOF", // exec: all written after it goes there
+		"FOO=bar exec > >(sh); cat <<'EOF'\nrm -rf x\nEOF",
+		"command -p exec > >(sh); cat <<'EOF'\nrm -rf x\nEOF",
+		"coproc sh; cat <<'EOF' >&${COPROC[1]}\nrm -rf x\nEOF", // a descriptor set up earlier
+		"f () { cat <<'EOF'; }\nrm -rf x\nEOF\nf | sh",         // a function called later
+		"function f { cat <<'EOF'; }\nrm -rf x\nEOF\nf | sh",
+		"sh <(cat <<'EOF')\nrm -rf x\nEOF", // an input process substitution, read as a file
 	} {
 		if p := Parse(Sh, line); !p.Incomplete {
 			t.Errorf("Parse(%q) = %q: an unknown reader's heredoc marked complete", line, p.Commands)

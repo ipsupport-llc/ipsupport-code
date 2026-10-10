@@ -168,8 +168,12 @@ var casesForGolden = []string{
 	"{ cat <<'EOF'; } >> >(sh)\nrm -rf src/legacy\nEOF", "case x in x) cat <<'EOF';; esac &> >(sh)\nrm -rf src/legacy\nEOF",
 	"select x in a; do cat <<'EOF'; done | sh\nrm -rf src/legacy\nEOF", "if true; then cat <<'EOF'; fi |& sh\nrm -rf src/legacy\nEOF",
 	"cat <<'EOF' | { :;\nrm -rf x\nEOF\nsh; }", "exec > >(sh); cat <<'EOF'\nrm -rf x\nEOF", "cat <<'EOF' > >(grep x)\nrm -rf x\nEOF",
-	strings.Repeat("(", 400) + "cat <<'EOF'" + strings.Repeat(") | sh", 400) + "\nx\nEOF", // past maxLinks "cat 2>&- sh <<EOF\nrm -rf x\nEOF",
-	strings.Repeat("eval $(", 12) + "echo ok" + strings.Repeat(")", 12),                   // past the parse budget
+	strings.Repeat("(", 400) + "cat <<'EOF'" + strings.Repeat(") | sh", 400) + "\nx\nEOF", // past maxLinks
+	"cat 2>&- sh <<EOF\nrm -rf x\nEOF", "FOO=bar exec > >(sh); cat <<'EOF'\nrm -rf x\nEOF", "command -p exec > >(sh); cat <<'EOF'\nrm -rf x\nEOF",
+	"coproc sh; cat <<'EOF' >&${COPROC[1]}\nrm -rf x\nEOF", "f () { cat <<'EOF'; }\nrm -rf x\nEOF\nf | sh",
+	"function f { cat <<'EOF'; }\nrm -rf x\nEOF\nf | sh", "sh <(cat <<'EOF')\nrm -rf x\nEOF",
+	"echo $((1+2)); cat > f <<'EOF'\nx\nEOF", "arr=(); arr+=(x); cat > f <<'EOF'\nx\nEOF", "exec >log; cat > f <<'EOF'\nx\nEOF",
+	strings.Repeat("eval $(", 12) + "echo ok" + strings.Repeat(")", 12), // past the parse budget
 	"sh <<EOF\n# $(rm -rf src/legacy)\nEOF",
 	"timeout 5 sh <<EOF\nrm -rf x\nEOF", "ssh deploy@host <<'EOF'\nrm -rf /srv/app\nEOF",
 	"echo $(printf x)#not-comment; rm -rf src/legacy", "cat <<EO\\\nF\nbody\nEOF\nrm -rf victim",

@@ -128,7 +128,12 @@ writing anything synthetic:
   `observation {tool, action, is_error, content}`, `assistant {content,
   tool_calls}`, plus `final`/`nudge`/`continue`/`judge`/`goal`. This is
   already a real, already-correctly-parsed (tool, action, params) → (result)
-  log.
+  log. Credentials are masked as records are written (`internal/redact`:
+  `KEY=value` for token/secret/password/api-key names, `ghp_`/`sk-`/`xox?-`/
+  `AKIA` tokens, JWTs, `user:pass@` in URLs, `Authorization:` headers,
+  private-key blocks) — a recognisable secret shows as `<REDACTED>`. A bare
+  password with no marker is not recognisable, and lines written before the
+  masking existed are unchanged: read a trace before sharing it.
 - **Session files** (`.agent`/wherever `saveSession()` writes for your
   workspace) — full `llm.Message` history per saved session, including
   `ToolCalls` and tool-result messages, i.e. complete real multi-turn

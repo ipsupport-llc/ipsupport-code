@@ -5,8 +5,10 @@
 package trace
 
 import (
+	"bytes"
 	"encoding/json"
 	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
+	"github.com/ipsupport-llc/ipsupport-code/internal/redact"
 	"os"
 	"path/filepath"
 	"sync"
@@ -57,7 +59,9 @@ func NewFileTracer(path, runID string) (*FileTracer, error) {
 }
 
 // Emit writes one JSONL record: the standard time/run/kind fields plus the
-// caller's fields.
+// caller's fields, with credentials masked (internal/redact). The log keeps
+// every command and tool output, and outlives the session: a token that once
+// passed through the agent would otherwise go wherever the file goes next.
 func (t *FileTracer) Emit(kind string, fields map[string]any) {
 	if t == nil {
 		return
@@ -72,7 +76,25 @@ func (t *FileTracer) Emit(kind string, fields map[string]any) {
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	_ = t.enc.Encode(rec) // Encode appends the newline → JSONL
+	_ = t.enc.Encode(masked(rec)) // Encode appends the newline → JSONL
+}
+
+// masked is rec as plain JSON values with every string redacted. Going
+// through JSON first reaches strings inside any type a caller passes (a named
+// map, a struct), not only the ones a type switch knows; UseNumber keeps
+// numbers exact.
+func masked(rec map[string]any) any {
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return rec
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var plain any
+	if dec.Decode(&plain) != nil {
+		return rec
+	}
+	return redact.Value(plain)
 }
 
 // Close closes the underlying file.

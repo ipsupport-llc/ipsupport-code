@@ -146,12 +146,12 @@ var goos = runtime.GOOS
 var nativeArch = hostarch.Native()
 
 // assetSuffix must match the archive names `make archives` produces.
-func assetSuffix(goos, goarch string) string {
+func assetSuffix(osName, arch string) string {
 	ext := ".tar.gz"
-	if goos == "windows" {
+	if osName == "windows" {
 		ext = ".zip"
 	}
-	return "_" + goos + "-" + goarch + ext
+	return "_" + osName + "-" + arch + ext
 }
 
 func get(ctx context.Context, hc *http.Client, url string) ([]byte, error) {

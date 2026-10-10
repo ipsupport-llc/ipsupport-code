@@ -23,6 +23,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
@@ -2413,20 +2414,24 @@ func (m *tuiModel) thinkingView() []string {
 	if text == "" {
 		return []string{cDim.Render("  ◌ thinking (ctrl+t to hide) — nothing streamed yet")}
 	}
+	// Wrapped at the terminal's width (-4 for the "  │ " prefix), then the last
+	// lines of THAT. It used to keep each line's tail, so a long line being
+	// streamed slid sideways under the reader instead of flowing down.
 	const maxLines = 12
-	lines := strings.Split(text, "\n")
-	if len(lines) > maxLines {
-		lines = lines[len(lines)-maxLines:]
-	}
-	// -4 for the "  │ " prefix, -1 more for Tail's own "…" marker when it
-	// truncates, so the total never exceeds the terminal width.
-	maxWidth := m.width - 5
+	maxWidth := m.width - 4
 	if maxWidth < 20 {
 		maxWidth = 20
 	}
+	var lines []string
+	for _, l := range strings.Split(text, "\n") {
+		lines = append(lines, strings.Split(ansi.Wrap(l, maxWidth, ""), "\n")...)
+	}
+	if len(lines) > maxLines {
+		lines = lines[len(lines)-maxLines:]
+	}
 	out := []string{cDim.Render("  ◌ thinking (ctrl+t to hide):")}
 	for _, l := range lines {
-		out = append(out, cDim.Render("  │ "+textutil.Tail(l, maxWidth)))
+		out = append(out, cDim.Render("  │ "+l))
 	}
 	return out
 }

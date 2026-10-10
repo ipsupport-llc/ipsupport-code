@@ -33,6 +33,12 @@ jobs:
           # Pinned, because the claim "two training runs produce a byte-identical
           # model.bin" is only meaningful against a fixed interpreter.
           python-version: '3.12'
+      # The trainer cuts shell lines as the Go scorer does, checked against
+      # lines Go cut (internal/shellsplit/testdata/golden.jsonl) — a new
+      # dataset needs them recut.
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
 
       - name: fetch the vocabulary
         run: python3 scripts/fetch_risk_vocab.py
@@ -63,6 +69,7 @@ jobs:
         if: steps.changed.outputs.changed == 'true'
         run: |
           python3 scripts/gen_risk_dataset.py
+          go test ./internal/shellsplit -run TestGolden -update
           python3 scripts/train_risk.py 2>&1 | tee /tmp/after.txt
 
       - name: refuse a worse model
@@ -98,7 +105,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -b "$branch"
-          git add scripts/risk_vocab.json scripts/risk_dataset.jsonl internal/risk/model.bin
+          git add scripts/risk_vocab.json scripts/risk_dataset.jsonl internal/risk/model.bin internal/shellsplit/testdata/golden.jsonl
           git commit -m "Refresh the risk vocabulary from upstream
 
           scripts/fetch_risk_vocab.py re-fetched github/gitignore and the

@@ -14,6 +14,12 @@ holdout; a new model ships only if it is no worse here.
   (CC-BY-4.0, © the tldr-pages contributors). A program whose page is used here
   is never generator vocabulary.
 
+Each row names its `workspace` — `/app` for terminal-bench, the placeholder
+project (`~/project`, `C:\Users\dev\project`) for tldr — because the scorer
+reads a path into the workspace as the project's own (`risk.Localize`), and
+measuring without it would score `/app/data.csv` as a stranger's file when
+the agent never would.
+
 ## How a row is labelled
 
 A label says what the call does, not whether it was acceptable. A row may carry

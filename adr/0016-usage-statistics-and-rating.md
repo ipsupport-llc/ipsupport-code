@@ -34,12 +34,14 @@ ADR 12. LLMTray's ADR 15 settled the client behaviour, and this follows it.
   language. Never code, prompts, commands, tool arguments or output, paths,
   model names, keys or provider URLs.
 - **When.** Counters live in `telemetry.json` in the config directory, shared by
-  every session under a file lock. At launch and every three hours, finished
-  days are sent oldest first; today only after it ends. Days older than seven
+  every session under a file lock. A day is collected while it lasts and sent
+  at the first launch after it ends, oldest first; nothing runs on a timer. Days older than seven
   (counted from the UTC day, as the server does) or after today are dropped.
-  204 sent; 429 waits for `Retry-After`; 408, 5xx and no answer retry in an
-  hour; any other 4xx drops the day. The lock is not held across the network.
-- **`/telemetry`** shows the exact JSON of each waiting report.
+  204 sent; 429 waits for `Retry-After`; 408, 5xx and no answer wait an
+  hour; either wait holds back launches before it ends. Any other 4xx drops
+  the day. The lock is not held across the network.
+- **`/telemetry`** shows how the last send went (accepted, refused and why,
+  or failed), the days waiting, and the exact JSON of each waiting report.
 - **`/rate <1-5> <words> [--name <you>]`** submits a review with an
   `Idempotency-Key`, validated locally against the server's limits first. A
   dim one-line suggestion may follow a finished task — after the first day,

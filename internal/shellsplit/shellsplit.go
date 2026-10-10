@@ -98,10 +98,14 @@ type result struct {
 	budget     *int // parses left, shared by the whole line
 	incomplete bool
 	cmds       []string
-	piped      []bool  // cmds[i]'s output goes into cmds[i+1]: | or |&
-	pipeTo     [][]int // cmds[i] is in blocks whose output goes into each cmds[pipeTo[i][k]]
-	opens      []open  // the ( { and case … esac still open, innermost last
-	closed     []int   // the block just closed, [start, end): piped on if the next cut is a pipe
+	piped      []bool   // cmds[i]'s output goes into cmds[i+1]: | or |&
+	pipeTo     [][]int  // what cmds[i] sends on is read by each cmds[pipeTo[i][k]]
+	toBlock    [][]int  // … and by every command of each blocks[toBlock[i][k]]
+	opens      []open   // the blocks still open, innermost last
+	blocks     [][2]int // the ( … ) and { … } closed, [start, end)
+	closed     []int    // the block just closed, [start, end): sent on by the next cut, if it sends
+	feeding    [][2]int // what the last cut sent on, for a block opening next: | { …; }
+	links      int      // reader links made: bounded by maxLinks
 	groups     []string
 	inner      []string // what a command runs inside it: sh -c '…', eval …
 	innerG     []string
@@ -121,6 +125,7 @@ func (r *result) cut(b *buf, op string) {
 		r.cmds = append(r.cmds, s)
 		r.piped = append(r.piped, pipe)
 		r.pipeTo = append(r.pipeTo, nil)
+		r.toBlock = append(r.toBlock, nil)
 		r.innerCode(s)
 		if r.code.Len() > 0 {
 			r.code.WriteString(" ")
@@ -150,23 +155,27 @@ func (r *result) cut(b *buf, op string) {
 // what closes it — ) or }, esac (inside a case a ) ends a pattern, not a
 // block), fi, or done.
 type open struct {
-	start int
-	end   string
+	start   int
+	end     string
+	feeders [][2]int // what is sent into a ( or {: read by every command in it
 }
 
 // closers are the compound commands a keyword opens, by the word that ends
 // each.
 var closers = map[string]string{"case": "esac", "if": "fi", "for": "done", "while": "done", "until": "done", "select": "done"}
 
-// block keeps track of ( … ), { … }, case … esac, if … fi and loops' … done:
-// what a block writes is read by what it is piped into — (cat <<EOF) | sh,
-// { …; } | sh — so each command in it is read by that too (see readers),
-// whatever redirection comes between: (…) 2>/dev/null | sh still pipes its
-// output. Blocks nest, and each pipe out of one adds a reader:
-// ((cat <<EOF) | sh) | grep x is read by sh and by grep.
+// block keeps track of ( … ), { … }, case … esac, if … fi and loops' … done,
+// and of what each cut sends on — | and |& pipe it, > >(…) and >(…) write it
+// into a process substitution. What is sent on is read by the next command,
+// and by every command of a block opening next: cat <<EOF | { :; sh; },
+// (cat <<EOF) > >(sh). What a block writes is sent on by the cut after it,
+// whatever redirection comes between ((…) 2>/dev/null | sh); blocks nest, and
+// each one sending on adds readers: ((cat <<EOF) | sh) | grep x is read by sh
+// and by grep.
 func (r *result) block(s, op string, pipe bool) {
-	if r.closed != nil && pipe {
-		r.readBy(r.closed[0], r.closed[1], len(r.cmds))
+	var ended [][2]int // blocks whose output this cut sends on
+	if r.closed != nil {
+		ended = append(ended, [2]int{r.closed[0], r.closed[1]})
 	}
 	r.closed = nil
 	if s != "" && r.d == Sh {
@@ -175,19 +184,48 @@ func (r *result) block(s, op string, pipe bool) {
 		case closers[k] != "":
 			r.opens = append(r.opens, open{start: len(r.cmds) - 1, end: closers[k]})
 		case n > 0 && k == r.opens[n-1].end: // esac, fi, done
-			if pipe {
-				r.readBy(r.opens[n-1].start, len(r.cmds)-1, len(r.cmds))
-			}
+			ended = append(ended, [2]int{r.opens[n-1].start, len(r.cmds) - 1})
 			r.opens = r.opens[:n-1]
 		}
 	}
+	var feeders [][2]int
+	if pipe || op == "(" && strings.HasSuffix(s, ">") {
+		feeders = ended
+		if s != "" {
+			feeders = append(feeders, [2]int{len(r.cmds) - 1, len(r.cmds)})
+		}
+		for _, f := range feeders {
+			r.readBy(f[0], f[1], len(r.cmds))
+		}
+		if op == "(" && r.d == Sh && keyword(s) == "exec" {
+			r.incomplete = true // exec > >(sh): all written after it goes there
+		}
+	}
+	pending := r.feeding
+	r.feeding = nil
 	n := len(r.opens)
 	switch {
 	case op == "(" || op == "{":
-		r.opens = append(r.opens, open{start: len(r.cmds), end: ")"})
+		o := open{start: len(r.cmds), end: ")", feeders: feeders}
+		if feeders == nil && s == "" {
+			o.feeders = pending
+		}
+		r.opens = append(r.opens, o)
 	case (op == ")" || op == "}") && n > 0 && r.opens[n-1].end == ")":
-		r.closed = []int{r.opens[n-1].start, len(r.cmds)}
+		o := r.opens[n-1]
 		r.opens = r.opens[:n-1]
+		r.closed = []int{o.start, len(r.cmds)}
+		r.blocks = append(r.blocks, [2]int{o.start, len(r.cmds)})
+		for _, f := range o.feeders {
+			if !r.link(f[1] - f[0] + len(r.cmds) - o.start) { // readers reads the block through
+				break
+			}
+			for j := f[0]; j < f[1]; j++ {
+				r.toBlock[j] = append(r.toBlock[j], len(r.blocks)-1)
+			}
+		}
+	default:
+		r.feeding = feeders
 	}
 }
 
@@ -202,8 +240,24 @@ func keyword(s string) string {
 	return ""
 }
 
+// maxLinks bounds the reader links a line makes: ( ( … ) | sh ) | sh … nested
+// n deep makes n²/2 of them. Past it, the parse is incomplete.
+const maxLinks = 1 << 16
+
+// link counts n reader links; whether there is room for them.
+func (r *result) link(n int) bool {
+	if r.links += n; r.links > maxLinks {
+		r.incomplete = true
+		return false
+	}
+	return true
+}
+
 // readBy adds cmds[t] as a reader of cmds[from:to].
 func (r *result) readBy(from, to, t int) {
+	if !r.link(to - from) {
+		return
+	}
 	for j := from; j < to; j++ {
 		r.pipeTo[j] = append(r.pipeTo[j], t)
 	}
@@ -468,8 +522,8 @@ var dataReaders = map[string]bool{":": true, "cat": true, "tee": true, "git": tr
 // feeds is what cmd runs what it reads as: every interpreter among its words
 // counts (see runner) — a match adds what is scored, never takes it away —
 // and a program that is neither an interpreter nor a data reader makes it
-// unknown. So does a redirection left waiting for its operand: > >(sh) runs
-// what it writes.
+// unknown. (What it writes into a process substitution, > >(sh), is read by
+// that: see block.)
 func feeds(cmd string) feed {
 	var f feed
 	prog, found := "", false
@@ -491,7 +545,7 @@ func feeds(cmd string) feed {
 		}
 	}
 	switch {
-	case !found, len(ws) > 0 && operator(ws[len(ws)-1]): // > >(sh): its operand, a process substitution, runs what it writes
+	case !found:
 		f |= unknown
 	case prog == "git" && gitWrites(ws):
 		f |= unknown // the body names the files it changes
@@ -700,6 +754,18 @@ func (r *result) readers(first int) []feed {
 		}
 		return unknown
 	}
+	// A block reads as all its commands do; worked out once per block.
+	blockFed := map[int]feed{}
+	intoBlock := func(id int) feed {
+		f, ok := blockFed[id]
+		if !ok {
+			for t := r.blocks[id][0]; t < r.blocks[id][1]; t++ {
+				f |= into(t)
+			}
+			blockFed[id] = f
+		}
+		return f
+	}
 	for j := len(r.cmds) - 1; j >= first; j-- {
 		f := feeds(r.cmds[j])
 		if r.piped[j] {
@@ -708,7 +774,10 @@ func (r *result) readers(first int) []feed {
 		for _, t := range r.pipeTo[j] {
 			f |= into(t)
 		}
-		if j >= unclosed {
+		for _, id := range r.toBlock[j] {
+			f |= intoBlock(id)
+		}
+		if j >= unclosed { // what is sent into an open block reaches its first command: unknown too
 			f |= unknown
 		}
 		fed[j-first] = f

@@ -41,6 +41,7 @@ def trim(s):
 
 MAX_DEPTH = 32  # mirrors maxDepth
 MAX_PARSES = 1024  # mirrors maxParses
+MAX_LINKS = 1 << 16  # mirrors maxLinks
 
 
 def parse(dialect, line, depth=0, budget=None):
@@ -87,7 +88,11 @@ class _Result:
         self.cmds = []
         self.piped = []
         self.pipe_to = []
-        self.opens = []  # (start, end word), innermost last
+        self.to_block = []
+        self.blocks = []
+        self.feeding = []
+        self.links = 0
+        self.opens = []  # [start, end word, feeders], innermost last
         self.closed = None
         self.groups = []
         self.code = []  # pieces, joined once: += on a str is quadratic
@@ -101,6 +106,7 @@ class _Result:
             self.cmds.append(s)
             self.piped.append(pipe)
             self.pipe_to.append([])
+            self.to_block.append([])
             self.inner_code(s)
             if self.code:
                 self.code.append(" ")
@@ -120,25 +126,58 @@ class _Result:
         b.reset()
 
     def block(self, s, op, pipe):
-        """Mirrors block: ( … ), { … } and case … esac piped on, nested."""
-        if self.closed is not None and pipe:
-            self.read_by(self.closed[0], self.closed[1], len(self.cmds))
+        """Mirrors block: blocks, and what each cut sends on (| |& > >( >( )."""
+        ended = []
+        if self.closed is not None:
+            ended.append(self.closed)
         self.closed = None
         if s and self.d == SH:
             k = _keyword(s)
             if _CLOSERS.get(k):
-                self.opens.append((len(self.cmds) - 1, _CLOSERS[k]))
+                self.opens.append([len(self.cmds) - 1, _CLOSERS[k], []])
             elif self.opens and k == self.opens[-1][1]:
-                if pipe:
-                    self.read_by(self.opens[-1][0], len(self.cmds) - 1, len(self.cmds))
+                ended.append((self.opens[-1][0], len(self.cmds) - 1))
                 self.opens.pop()
+        feeders = []
+        if pipe or (op == "(" and s.endswith(">")):
+            feeders = list(ended)
+            if s:
+                feeders.append((len(self.cmds) - 1, len(self.cmds)))
+            for f in feeders:
+                self.read_by(f[0], f[1], len(self.cmds))
+            if op == "(" and self.d == SH and _keyword(s) == "exec":
+                self.incomplete = True
+        pending = self.feeding
+        self.feeding = []
         if op in ("(", "{"):
-            self.opens.append((len(self.cmds), ")"))
+            o = [len(self.cmds), ")", feeders]
+            if not feeders and s == "":
+                o[2] = pending
+            self.opens.append(o)
         elif op in (")", "}") and self.opens and self.opens[-1][1] == ")":
-            self.closed = (self.opens.pop()[0], len(self.cmds))
+            o = self.opens.pop()
+            self.closed = (o[0], len(self.cmds))
+            self.blocks.append((o[0], len(self.cmds)))
+            for f in o[2]:
+                if not self.link(f[1] - f[0] + len(self.cmds) - o[0]):
+                    break
+                for j in range(f[0], f[1]):
+                    self.to_block[j].append(len(self.blocks) - 1)
+        else:
+            self.feeding = feeders
+
+    def link(self, n):
+        """Mirrors link: room for n more reader links, under MAX_LINKS."""
+        self.links += n
+        if self.links > MAX_LINKS:
+            self.incomplete = True
+            return False
+        return True
 
     def read_by(self, frm, to, t):
         """Mirrors readBy."""
+        if not self.link(to - frm):
+            return
         for j in range(frm, to):
             self.pipe_to[j].append(t)
 
@@ -207,12 +246,24 @@ class _Result:
         def into(t):
             return fed[t - first] if t < n else _UNKNOWN
 
+        block_fed = {}
+
+        def into_block(i):
+            if i not in block_fed:
+                v = 0
+                for t in range(self.blocks[i][0], self.blocks[i][1]):
+                    v |= into(t)
+                block_fed[i] = v
+            return block_fed[i]
+
         for j in range(n - 1, first - 1, -1):
             f = _feeds(self.cmds[j])
             if self.piped[j]:
                 f |= into(j + 1)
             for t in self.pipe_to[j]:
                 f |= into(t)
+            for i in self.to_block[j]:
+                f |= into_block(i)
             if j >= open_:
                 f |= _UNKNOWN
             fed[j - first] = f
@@ -459,7 +510,7 @@ def _feeds(cmd):
         if not found and not _assignment(w):
             prog, found = _program(w)
         i += 1
-    if not found or (ws and _operator(ws[-1])):
+    if not found:
         f |= _UNKNOWN
     elif prog == "git" and _git_writes(ws):
         f |= _UNKNOWN

@@ -309,7 +309,6 @@ func TestAHeredocsReaderDecidesWhatItIs(t *testing.T) {
 		"psql mydb <<'EOF'\nDROP TABLE users;\nEOF",
 		"$SH <<'EOF'\nrm -rf x\nEOF",
 		"cat <<'EOF' | xargs rm -rf\nsrc\nEOF",
-		"cat <<'EOF' > >(sh)\nrm -rf x\nEOF",
 		"tee >(sh) <<'EOF'\nrm -rf x\nEOF",
 		"sudo -s <<'EOF'\nrm -rf x\nEOF",
 		"sed -f - x.txt <<'EOF'\ns/a/b/\nEOF",
@@ -326,6 +325,9 @@ func TestAHeredocsReaderDecidesWhatItIs(t *testing.T) {
 		"while true; do\ncat <<'EOF'\nrm -rf x\nEOF\ndone | sh",
 		"until false\ndo\ncat <<'EOF'\nrm -rf x\nEOF\ndone | sh",
 		"time if true\nthen\ncat <<'EOF'\nrm -rf x\nEOF\nfi | sh",
+		"for ((i=0;i<1;i++))\ndo\ncat <<'EOF'\nrm -rf x\nEOF\ndone | sh",
+		"cat <<'EOF' | { :;\nrm -rf x\nEOF\nsh; }", // piped into a block not closed on its line
+		"exec > >(sh); cat <<'EOF'\nrm -rf x\nEOF", // exec: all written after it goes there
 	} {
 		if p := Parse(Sh, line); !p.Incomplete {
 			t.Errorf("Parse(%q) = %q: an unknown reader's heredoc marked complete", line, p.Commands)
@@ -363,15 +365,41 @@ func TestAHeredocInABlockIsReadByWhatTheBlockIsPipedInto(t *testing.T) {
 		"{ case x in x) cat <<'EOF';; esac; } | sh\nrm -rf src/legacy\nEOF",
 		"! case x in x) cat <<'EOF';; esac | sh\nrm -rf src/legacy\nEOF", // past ! and time
 		"time -p case x in x) cat <<'EOF';; esac | sh\nrm -rf src/legacy\nEOF",
+		"cat <<'EOF' | { :; sh; }\nrm -rf src/legacy\nEOF", // piped into a block: every command in it reads
+		"cat <<'EOF' | (true; sh)\nrm -rf src/legacy\nEOF",
+		"cat <<'EOF' > >(sh)\nrm -rf src/legacy\nEOF", // written into a process substitution
+		"cat <<'EOF' > >(:; sh)\nrm -rf src/legacy\nEOF",
+		"(cat <<'EOF') > >(sh)\nrm -rf src/legacy\nEOF",
+		"{ cat <<'EOF'; } >> >(sh)\nrm -rf src/legacy\nEOF",
+		"case x in x) cat <<'EOF';; esac &> >(sh)\nrm -rf src/legacy\nEOF",
+		"select x in a; do cat <<'EOF'; done | sh\nrm -rf src/legacy\nEOF",
+		"if true; then cat <<'EOF'; fi |& sh\nrm -rf src/legacy\nEOF",
 	} {
 		if got := Split(Sh, line); !slices.Contains(got, "rm -rf src/legacy") {
 			t.Errorf("Split(%q) = %q", line, got)
 		}
 	}
-	for _, line := range []string{"(cat <<'EOF') > out.txt\nrm -rf x\nEOF", "{ cat <<'EOF'; } | grep x\nrm -rf x\nEOF"} {
+	for _, line := range []string{"(cat <<'EOF') > out.txt\nrm -rf x\nEOF", "{ cat <<'EOF'; } | grep x\nrm -rf x\nEOF", "cat <<'EOF' > >(grep x)\nrm -rf x\nEOF"} {
 		if p := Parse(Sh, line); slices.Contains(p.Commands, "rm -rf x") || p.Incomplete {
 			t.Errorf("Parse(%q) = %q, incomplete %v: data read as a script", line, p.Commands, p.Incomplete)
 		}
+	}
+}
+
+// Blocks nested n deep, each piped on, make n²/2 reader links: bounded, and
+// the parse says so.
+func TestNestedPipedBlocksAreBounded(t *testing.T) {
+	n := 20000
+	line := strings.Repeat("(", n) + "cat <<'EOF'" + strings.Repeat(") | sh", n) + "\nx\nEOF"
+	done := make(chan Parsed)
+	go func() { done <- Parse(Sh, line) }()
+	select {
+	case p := <-done:
+		if !p.Incomplete {
+			t.Fatal("past maxLinks, not marked incomplete")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("20000 nested piped blocks took over 5s")
 	}
 }
 

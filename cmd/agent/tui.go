@@ -93,11 +93,12 @@ type tuiModel struct {
 	preApprove    uiState         // state being interrupted when stApprove was entered — stRunning normally, or stIdle when a background job's approval is answered via ↑ while idle; restored when the approval is resolved
 	approveChoice bool            // selected Yes(true)/No(false) while answering an approval
 	cfgCursor     int             // selected row in the /config panel (stConfig)
-	cfgPending    []string        // rows activated in /config while a task ran; replayed when it ends
+	cfgPending    []stagedEdit    // /config changes made while a task ran; saved when it ends (staging.go)
 	cfgPhase      int             // stConfig sub-flow: cfgPhaseList, or an add-provider form field
 	cfgDraft      providerDraft   // the provider being added in the panel form
 	cfgEdit       *cfgEditor      // a /config value being typed in place on its row, or nil
 	cfgPick       *cfgPicker      // a /config list open on its row, or nil
+	cfgNote       []string        // what the last /config key said, shown under the rows
 	pick          *picker         // the list open in stPick (/model, /ai, /sessions)
 	pickKind      string          // what stPick's list is: "model", "provider" or "session"
 	agFromConfig  bool            // the profiles manager was opened from /config: esc returns there
@@ -197,6 +198,7 @@ type windowMsg struct {                   // re-detected context window for a pr
 type modelsMsg struct { // /model result: lines to show, or setTo to switch model
 	lines []string
 	setTo string
+	epoch int64 // the connection it was looked up on
 }
 type mcpMsg struct{ text string } // /mcp result: the server/tool catalog
 
@@ -852,6 +854,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pickListMsg:
 		if msg.epoch != m.app.modelEpoch.Load() { // the connection changed since — not its list
+			if m.cfgPick != nil && m.cfgPick.p.loading && m.cfgPick.epoch == msg.epoch {
+				m.cfgPick.p.load(nil, "the connection changed since — esc and open the list again", "")
+			}
+			if m.state == stPick && m.pick != nil && m.pick.loading {
+				m.pick.load(nil, "the connection changed since — esc and run /model again", "")
+			}
 			return m, nil
 		}
 		if m.cfgPick != nil && m.cfgPick.p.loading {
@@ -863,6 +871,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case modelsMsg:
+		if msg.setTo != "" && msg.epoch != m.app.modelEpoch.Load() {
+			// The connection changed while it was looked up (a /config switch):
+			// that id was found on the old one.
+			m.push(cDim.Render("  the connection changed during the lookup — /model " + msg.setTo + " again to use it here"))
+			return m.idleDrain()
+		}
 		if msg.setTo != "" { // resolved a /model arg to one model — switch (UI thread)
 			m.pushLines(m.app.setModel(msg.setTo))
 			model, cmd := m.idleDrain()
@@ -1014,26 +1028,19 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case stConfig:
-		if m.cfgPhase != cfgPhaseList { // typing inside the add-provider form
-			return m.configAddKey(k)
+		// What a key here says goes to the log — which the panel covers. It is
+		// shown under the rows too: a refusal, a "staged" or an error used to
+		// land out of sight, and enter looked like it did nothing at all.
+		before := len(m.history)
+		m.cfgNote = nil
+		model, cmd := m.handleConfigKey(k)
+		// Only while still in the panel: closing it can drain a queued /clear,
+		// which empties the log under this index.
+		if m.state == stConfig && len(m.history) > before {
+			said := m.history[before:]
+			m.cfgNote = said[max(len(said)-3, 0):]
 		}
-		if m.cfgEdit != nil { // typing a value in place on its row
-			return m.configEditKey(k)
-		}
-		if m.cfgPick != nil { // a list open on its row
-			return m.configPickKey(k)
-		}
-		switch k.String() {
-		case "up", "k":
-			m.configMove(-1)
-		case "down", "j":
-			m.configMove(1)
-		case "enter", "right", "l", " ":
-			return m.configActivate()
-		case "esc", "q":
-			return m.closePanel()
-		}
-		return m, nil
+		return model, cmd
 	case stAgents:
 		return m.agentsKey(k)
 	case stPick:
@@ -1549,7 +1556,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/sessions":
 		// Bare, it is the one form allowed over a running task (commandWhileBusy):
 		// there it stays a listing — a pick would switch the thread under the task.
-		if strings.TrimSpace(rest) == "" && m.cancel == nil {
+		if strings.TrimSpace(rest) == "" && m.cancel == nil && m.state == stIdle {
 			items := m.app.sessionPickItems()
 			if len(items) == 0 {
 				m.pushLines(m.app.listSessionsLines())
@@ -1724,7 +1731,9 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.pushLines(m.app.reasoningCommand(rest))
 		return m, nil
 	case "/ai":
-		if strings.TrimSpace(rest) == "" && m.cancel == nil { // over a running task: the listing, as for /sessions
+		// Over a running task, or behind other work (a /model lookup has no
+		// cancel), it stays the listing: a pick would switch under it.
+		if strings.TrimSpace(rest) == "" && m.cancel == nil && m.state == stIdle {
 			return m.openPick("provider", newPicker(m.app.providerPickItems(), m.app.providerName()))
 		}
 		m.pushLines(m.app.aiCommand(rest))
@@ -1747,7 +1756,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		}
 		m.busyMsg = verb
 		m.push(cDim.Render("  " + verb + "…"))
-		ctx := m.ctx
+		ctx, ep := m.ctx, m.app.modelEpoch.Load()
 		return m, func() tea.Msg {
 			c, cancel := context.WithTimeout(ctx, 8*time.Second)
 			defer cancel()
@@ -1755,7 +1764,7 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 				return modelsMsg{lines: modelLines(c, act, name)}
 			}
 			setTo, lines := resolveModelArg(listModelIDs(c, act), arg)
-			return modelsMsg{setTo: setTo, lines: lines}
+			return modelsMsg{setTo: setTo, lines: lines, epoch: ep}
 		}
 	case "/shell", "/sh":
 		sh := m.app.shellPath()
@@ -2150,7 +2159,7 @@ func (m *tuiModel) View() string {
 		case m.pending != nil:
 			status = m.attention("⚠ APPROVAL WAITING") + cDim.Render(" behind this panel — esc, then answer it")
 		case m.cancel != nil:
-			status = cDim.Render("settings — view-only while the task runs · esc back to it")
+			status = cDim.Render("settings — a task is running: tuning applies now, other changes when it ends · esc back to it")
 		default:
 			status = cDim.Render("settings — changes apply and save as you make them")
 		}

@@ -23,7 +23,8 @@ type picker struct {
 	filter  []rune
 	loading bool   // the list is still being fetched
 	err     string // why there is no list
-	free    bool   // enter with nothing matching takes the typed text (a model the server doesn't list)
+	free    bool   // what is typed can be picked too (a model the server doesn't list)
+	rows    int    // items shown at once; 0 = pickerRows (a panel sets fewer on a short terminal)
 }
 
 type pickItem struct {
@@ -69,12 +70,21 @@ func (p *picker) visible() []pickItem {
 	if len(p.filter) == 0 {
 		return p.items
 	}
-	q := strings.ToLower(string(p.filter))
+	typed := strings.TrimSpace(string(p.filter))
+	q := strings.ToLower(typed)
 	var out []pickItem
+	exact := false
 	for _, it := range p.items {
 		if strings.Contains(strings.ToLower(it.value), q) {
 			out = append(out, it)
+			exact = exact || it.value == typed
 		}
+	}
+	// What was typed, as typed — last, so enter still takes the first match.
+	// A server can accept an id it doesn't list ("foo" next to a listed
+	// "foo-large"), and the first match is not that id.
+	if p.free && typed != "" && !exact {
+		out = append(out, pickItem{value: typed, note: "as typed — not in the list"})
 	}
 	return out
 }
@@ -84,9 +94,6 @@ func (p *picker) visible() []pickItem {
 func (p *picker) choice() (string, bool) {
 	if v := p.visible(); len(v) > 0 {
 		return v[p.cursor].value, true
-	}
-	if t := strings.TrimSpace(string(p.filter)); p.free && t != "" {
-		return t, true
 	}
 	return "", false
 }
@@ -110,9 +117,9 @@ func (p *picker) key(k tea.KeyMsg) pickAction {
 			p.cursor = (p.cursor + 1) % n
 		}
 	case "pgup":
-		p.cursor = max(p.cursor-pickerRows, 0)
+		p.cursor = max(p.cursor-p.window(), 0)
 	case "pgdown":
-		p.cursor = max(min(p.cursor+pickerRows, n-1), 0)
+		p.cursor = max(min(p.cursor+p.window(), n-1), 0)
 	case "home":
 		p.cursor = 0
 	case "end":
@@ -153,13 +160,9 @@ func (p *picker) view(accent lipgloss.Style, spin string, indent string) []strin
 	}
 	v := p.visible()
 	if len(v) == 0 {
-		msg := "nothing matches — backspace to widen"
-		if p.free && len(p.filter) > 0 {
-			msg = "not listed — enter uses " + fmt.Sprintf("%q", string(p.filter))
-		}
-		return append(out, indent+cDim.Render(msg))
+		return append(out, indent+cDim.Render("nothing matches — backspace to widen"))
 	}
-	lo, hi := windowBounds(p.cursor, len(v), pickerRows)
+	lo, hi := windowBounds(p.cursor, len(v), p.window())
 	if lo > 0 {
 		out = append(out, indent+cDim.Render(fmt.Sprintf("  ↑ %d more", lo)))
 	}
@@ -178,6 +181,13 @@ func (p *picker) view(accent lipgloss.Style, spin string, indent string) []strin
 		out = append(out, indent+cDim.Render(fmt.Sprintf("  ↓ %d more", len(v)-hi)))
 	}
 	return out
+}
+
+func (p *picker) window() int {
+	if p.rows > 0 {
+		return p.rows
+	}
+	return pickerRows
 }
 
 // height is how many lines view draws, for the panels' height budgets.
@@ -325,10 +335,11 @@ func (m *tuiModel) pickKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "provider":
 			m.pushLines(m.app.setProvider(v))
 			detect = m.detectWindowCmd()
-		case "session":
-			lines, switched := m.app.sessionsCommand(v)
-			m.pushLines(lines)
-			if switched {
+		case "session": // by name, not through /sessions' parsing: a session can be called "delete"
+			if err := m.app.switchSession(v); err != nil {
+				m.push(cErr.Render("  switch failed: " + err.Error()))
+			} else {
+				m.push(cDim.Render("  switched to session " + m.app.cfg.Name))
 				m.push(m.sessionRecap()...)
 			}
 		}
@@ -342,6 +353,7 @@ func (m *tuiModel) pickKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *tuiModel) renderPickPanel() string {
 	accent := lipgloss.NewStyle().Foreground(m.accent)
 	lines := []string{accent.Bold(true).Render(m.pickTitle())}
+	m.pick.rows = min(max(m.viewportHeight()-2-4, 3), pickerRows) // the box, the filter, markers
 	lines = append(lines, m.pick.view(accent, m.spin.View(), "  ")...)
 	return m.panelBox(lines)
 }

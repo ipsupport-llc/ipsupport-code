@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"regexp"
@@ -140,17 +141,24 @@ type tuning struct {
 
 // SetTuning applies c's sampling, output cap, extra params (reasoning), retry
 // count and loop detection to the requests from now on — safe while a request
-// is in flight, which keeps what it started with. The address, model, key,
-// idle timeout and context window are fixed at construction.
+// is in flight, which keeps the request body it started with (loop detection
+// is read as the stream arrives, so a change reaches a reply mid-stream). The
+// address, model, key, idle timeout and context window are fixed at
+// construction.
 func (cl *OpenAIClient) SetTuning(c config.LLM) {
 	cl.tuning.Store(&tuning{
 		temp:                 c.Temperature,
 		topP:                 c.TopP,
 		maxOutputTok:         c.MaxOutputTokens,
-		extra:                c.Extra,
+		extra:                maps.Clone(c.Extra), // the caller's map may change; requests range over this one
 		retryAttempts:        retryAttempts(c.RetryAttempts),
 		disableLoopDetection: c.DisableLoopDetection,
 	})
+}
+
+func (c *OpenAIClient) loopDetectionOff() bool {
+	t := c.tuning.Load()
+	return t != nil && t.disableLoopDetection
 }
 
 // deadlineConn arms a fresh read deadline before every Read, so a single read
@@ -328,6 +336,9 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	// a 400; omitting the field lets the server use its default and keeps them
 	// working, while local models still honor a configured value.
 	t := c.tuning.Load()
+	if t == nil { // a client not made by NewOpenAIClient
+		t = &tuning{retryAttempts: retryAttempts(0)}
+	}
 	if t.temp > 0 {
 		body["temperature"] = t.temp
 	}
@@ -754,7 +765,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 				c.liveContent.WriteString(d.Content)
 				chanAll := c.liveContent.String()
 				c.mu.Unlock()
-				if !c.tuning.Load().disableLoopDetection {
+				if !c.loopDetectionOff() {
 					if err := checkDegenerate(d.Content); err != nil {
 						return Message{}, err
 					}
@@ -775,7 +786,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 				c.liveReasoning.WriteString(rc)
 				chanAll := c.liveReasoning.String()
 				c.mu.Unlock()
-				if !c.tuning.Load().disableLoopDetection {
+				if !c.loopDetectionOff() {
 					if err := checkDegenerate(rc); err != nil {
 						return Message{}, err
 					}
@@ -791,7 +802,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 				c.liveReasoning.WriteString(rc)
 				chanAll := c.liveReasoning.String()
 				c.mu.Unlock()
-				if !c.tuning.Load().disableLoopDetection {
+				if !c.loopDetectionOff() {
 					if err := checkDegenerate(rc); err != nil {
 						return Message{}, err
 					}

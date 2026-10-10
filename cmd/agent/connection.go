@@ -26,7 +26,14 @@ import (
 // write that fails takes the edit back, so the screen never shows a value that
 // is not on disk.
 func (a *app) updateActive(edit func(*config.LLM)) error {
-	if a.isLocal() {
+	return a.updateConnection(a.providerName(), edit)
+}
+
+// updateConnection is updateActive for a named connection — "local" or a
+// provider — whether or not it is the one in use: a change staged during a
+// task is saved to the connection it was made for.
+func (a *app) updateConnection(name string, edit func(*config.LLM)) error {
+	if name == "local" || name == "" {
 		before := a.cfg.LLM
 		edit(&a.cfg.LLM)
 		if err := config.SaveGlobal(a.cfg.Name, a.cfg.LLM); err != nil {
@@ -38,15 +45,15 @@ func (a *app) updateActive(edit func(*config.LLM)) error {
 	if a.cfg.Providers == nil {
 		a.cfg.Providers = map[string]config.LLM{}
 	}
-	before, had := a.cfg.Providers[a.cfg.Provider]
+	before, had := a.cfg.Providers[name]
 	p := before
 	edit(&p)
-	a.cfg.Providers[a.cfg.Provider] = p
+	a.cfg.Providers[name] = p
 	if err := config.SaveProviders(a.cfg.Provider, a.cfg.Providers); err != nil {
 		if had {
-			a.cfg.Providers[a.cfg.Provider] = before
+			a.cfg.Providers[name] = before
 		} else {
-			delete(a.cfg.Providers, a.cfg.Provider)
+			delete(a.cfg.Providers, name)
 		}
 		return err
 	}

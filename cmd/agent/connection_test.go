@@ -511,7 +511,7 @@ func TestStagedProviderSwitchProbesTheWindow(t *testing.T) {
 	m.configActivate() // the list opens even while the task runs
 	m.handleKey(tea.KeyMsg{Type: tea.KeyDown})
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	if len(m.cfgPending) != 1 || m.cfgPending[0] != "provider=mylab" {
+	if len(m.cfgPending) != 1 || m.cfgPending[0].key != "provider" || m.cfgPending[0].value != "mylab" {
 		t.Fatalf("pending = %v, want the switch staged", m.cfgPending)
 	}
 	m.cancel = nil

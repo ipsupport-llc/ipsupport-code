@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -1427,6 +1428,7 @@ func (a *app) cdCommand(arg string) []string {
 // (whether that's actually localhost or a remote endpoint you configured) is
 // untouched either way, so "offline" doesn't guarantee no network traffic at all.
 func (a *app) offlineCommand(arg string) []string {
+	before := a.cfg.Offline
 	switch strings.TrimSpace(arg) {
 	case "on", "yes", "true":
 		a.cfg.Offline = true
@@ -1439,6 +1441,7 @@ func (a *app) offlineCommand(arg string) []string {
 		return []string{"usage: /offline on|off"}
 	}
 	if err := config.SaveOffline(a.cfg.Offline); err != nil {
+		a.cfg.Offline = before // shown only once it is on disk
 		return []string{"warning: not persisted: " + err.Error()}
 	}
 	if err := a.wire(); err != nil { // rebuild the web tool with the new flag
@@ -1461,6 +1464,7 @@ func onOff(b bool) string {
 // configured profile (a capable model) instead of the current one.
 func (a *app) reflectCommand(arg string) []string {
 	arg = strings.TrimSpace(arg)
+	wasOff, wasProfile := a.cfg.ReflectDisabled, a.cfg.ReflectProfile
 	switch arg {
 	case "":
 		return []string{"reflection: " + onOff(!a.cfg.ReflectDisabled) + " · using " + a.reflectUsing(),
@@ -1478,6 +1482,7 @@ func (a *app) reflectCommand(arg string) []string {
 		a.cfg.ReflectProfile, a.cfg.ReflectDisabled = arg, false
 	}
 	if err := config.SaveReflectCfg(a.cfg.ReflectDisabled, a.cfg.ReflectProfile); err != nil {
+		a.cfg.ReflectDisabled, a.cfg.ReflectProfile = wasOff, wasProfile
 		return []string{"warning: not persisted: " + err.Error()}
 	}
 	return []string{"reflection → " + onOff(!a.cfg.ReflectDisabled) + " · using " + a.reflectUsing()}
@@ -1788,10 +1793,10 @@ func (a *app) goalTTL(verb string, fields []string) []string {
 		}
 		n = v
 	}
-	a.cfg.GoalMaxReturns = n // applied per goal run via goalLoopBudget
 	if err := config.SaveGoalMaxReturns(n); err != nil {
 		return []string{"warning: not persisted: " + err.Error()}
 	}
+	a.cfg.GoalMaxReturns = n // applied per goal run via goalLoopBudget
 	if n == 0 {
 		return []string{"goal loop → off (one run; the model decides when it's done)"}
 	}
@@ -1810,8 +1815,11 @@ func (a *app) goalTTLLabel() string {
 // setGoalNudge toggles the one push a re-fed goal gets when the model finishes
 // without doing any work, and persists it.
 func (a *app) setGoalNudge(on bool) error {
+	if err := config.SaveGoalNudge(on); err != nil {
+		return err
+	}
 	a.cfg.GoalNudge = on
-	return config.SaveGoalNudge(on)
+	return nil
 }
 
 // goalSetLine confirms a /goal launch actually registered. Without it, /goal's
@@ -2379,7 +2387,10 @@ func (a *app) reasoningCommand(arg string) []string {
 	default:
 		return []string{"usage: /reasoning off|minimal|low|medium|high"}
 	}
-	shape, ok := a.applyReasoning(key, provider, arg)
+	shape, ok, err := a.applyReasoning(key, provider, arg)
+	if err != nil {
+		return []string{"error: reasoning not saved: " + err.Error()}
+	}
 	if !ok {
 		return []string{
 			fmt.Sprintf("don't know %s's reasoning param — set it raw in config.json under", provider),
@@ -2429,24 +2440,26 @@ var reasoningLevels = []string{"off", "minimal", "low", "medium", "high"}
 // applyReasoning sets (or clears, for a portable "off") the reasoning override at
 // key to provider's shape for level, persists it, and re-wires. ok=false means the
 // provider has no known portable shape (set it raw in config.json instead).
-func (a *app) applyReasoning(key, provider, level string) (json.RawMessage, bool) {
+func (a *app) applyReasoning(key, provider, level string) (json.RawMessage, bool, error) {
 	shape, known := reasoningShape(provider, level)
 	if !known {
-		return nil, false
+		return nil, false, nil
 	}
-	if a.cfg.Reasoning == nil {
-		a.cfg.Reasoning = map[string]json.RawMessage{}
+	next := maps.Clone(a.cfg.Reasoning)
+	if next == nil {
+		next = map[string]json.RawMessage{}
 	}
 	if shape == nil { // "off" with no portable value → clear the override (server default)
-		delete(a.cfg.Reasoning, key)
+		delete(next, key)
 	} else {
-		a.cfg.Reasoning[key] = shape
+		next[key] = shape
 	}
-	if err := config.SaveReasoning(a.cfg.Reasoning); err != nil {
-		slog.Warn("reasoning not persisted", "err", err)
+	if err := config.SaveReasoning(next); err != nil { // shown only once it is on disk
+		return nil, true, err
 	}
+	a.cfg.Reasoning = next
 	_ = a.wire() // rebuild the client so the change takes effect
-	return shape, true
+	return shape, true, nil
 }
 
 // reasoningLevel reverse-maps the stored raw param back to a level name for display

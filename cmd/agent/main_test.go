@@ -8649,7 +8649,7 @@ func TestConfigEditsStageWhileATaskRunsAndApplyWhenItEnds(t *testing.T) {
 	cfgCursorTo(t, m, "goal_nudge")
 	m.configActivate()
 
-	if len(m.cfgPending) != 1 || m.cfgPending[0] != "goal_nudge" {
+	if len(m.cfgPending) != 1 || m.cfgPending[0].key != "goal_nudge" {
 		t.Fatalf("cfgPending = %v, want [goal_nudge] — the keystroke must be taken, not refused", m.cfgPending)
 	}
 	if a.cfg.GoalNudge != before {
@@ -8671,8 +8671,8 @@ func TestConfigEditsStageWhileATaskRunsAndApplyWhenItEnds(t *testing.T) {
 	}
 }
 
-// Pressing enter twice stages two cycles: replaying the activation is only
-// honest if repeats land where pressing it twice live would have.
+// Pressing enter twice stages where two presses land — one change, not two
+// keystrokes — and it lands where pressing it twice live would have.
 func TestStagedConfigEditsReplayInOrder(t *testing.T) {
 	setHome(t, t.TempDir())
 	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
@@ -8698,8 +8698,8 @@ func TestStagedConfigEditsReplayInOrder(t *testing.T) {
 	m.configActivate()
 	m.configActivate()
 
-	if n := len(m.cfgPending); n != 2 {
-		t.Fatalf("staged %d activations, want 2", n)
+	if n := len(m.cfgPending); n != 1 || m.cfgPending[0].value != fmt.Sprint(want) {
+		t.Fatalf("staged %v, want one change landing on %d", m.cfgPending, want)
 	}
 	m.cancel = nil
 	m.applyPendingConfig()
@@ -8709,8 +8709,8 @@ func TestStagedConfigEditsReplayInOrder(t *testing.T) {
 	}
 }
 
-// Rows that open a form or leave the panel with the input prefilled can't be
-// staged: replaying one would pop a form out of nowhere after the task ended.
+// Rows that change the connection itself, open a form or leave the panel
+// can't change under a running task — and say so where it can be seen.
 func TestUnstageableConfigRowsStillWaitForTheTask(t *testing.T) {
 	in := textarea.New()
 	in.SetWidth(76)
@@ -8722,11 +8722,14 @@ func TestUnstageableConfigRowsStillWaitForTheTask(t *testing.T) {
 	_, taskCancel := context.WithCancel(context.Background())
 	m.cancel = taskCancel
 
-	cfgCursorTo(t, m, "model")
-	m.configActivate()
+	cfgCursorTo(t, m, "base_url")
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 
-	if len(m.cfgPending) != 0 {
-		t.Errorf("cfgPending = %v, want empty — /model needs the live model list and the user at the keyboard", m.cfgPending)
+	if len(m.cfgPending) != 0 || m.cfgEdit != nil {
+		t.Errorf("cfgPending = %v, editor %v — the address can't change under a running task", m.cfgPending, m.cfgEdit)
+	}
+	if !strings.Contains(strings.Join(m.cfgNote, "\n"), "can't change under a running task") {
+		t.Errorf("the panel doesn't say why: note %q", m.cfgNote)
 	}
 	if m.state != stConfig {
 		t.Errorf("state = %v, want stConfig — an unstageable row must not leave the panel mid-task", m.state)

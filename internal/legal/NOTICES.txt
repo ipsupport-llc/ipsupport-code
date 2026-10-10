@@ -13,7 +13,7 @@ github.com/atotto/clipboard v0.1.4                     BSD-3-Clause
 github.com/aymanbagabas/go-osc52/v2 v2.0.1             MIT
 github.com/aymanbagabas/go-udiff v0.4.1                BSD-3-Clause AND MIT
 github.com/aymerick/douceur v0.2.0                     MIT
-github.com/bmatcuk/doublestar/v4 v4.10.0               MIT
+github.com/bmatcuk/doublestar/v4 v4.10.2               MIT
 github.com/charmbracelet/bubbles v1.0.0                MIT
 github.com/charmbracelet/bubbletea v1.3.10             MIT
 github.com/charmbracelet/colorprofile v0.4.1           MIT
@@ -416,7 +416,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----- github.com/bmatcuk/doublestar/v4 v4.10.0 (MIT) ----
+---- github.com/bmatcuk/doublestar/v4 v4.10.2 (MIT) ----
 
 The MIT License (MIT)
 

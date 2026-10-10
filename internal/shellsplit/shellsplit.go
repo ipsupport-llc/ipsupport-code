@@ -204,15 +204,18 @@ func (r *result) block(s, op string, pipe bool) {
 		for _, f := range feeders {
 			r.readBy(f[0], f[1], len(r.cmds))
 		}
-		if op == "(" && r.d == Sh && execs(s) {
+		if op == "(" && r.d == Sh && lead(s) == "exec" {
 			r.incomplete = true // exec > >(sh): all written after it goes there
 		}
 	}
 	if r.d == Sh {
-		// f () { cat <<EOF; } … f | sh, coproc sh; cat <<EOF >&${COPROC[1]}: a
-		// heredoc reaches its reader through a name or a descriptor set up
-		// earlier, not through anything on its line.
-		if r.funcName && op == ")" && s == "" || keyword(s) == "function" || keyword(s) == "coproc" || keyword(s) == "alias" {
+		// f () { cat <<EOF; } … f | sh, coproc sh; cat <<EOF >&${COPROC[1]},
+		// alias cat=sh, $e "$x": a heredoc reaches its reader through a name, a
+		// descriptor or a variable set up earlier, not through anything on its
+		// line. (A $( ) program, as eval $(…) runs, is the substitution's
+		// output: that substitution is scored.)
+		l := lead(s)
+		if r.funcName && op == ")" && s == "" || keyword(s) == "function" || keyword(s) == "coproc" || l == "alias" || expands(l) {
 			r.untracked = true
 		}
 		r.funcName = op == "(" && len(strings.Fields(s)) == 1 && !strings.ContainsAny(s, "<>=") // not arr=( )
@@ -285,20 +288,25 @@ func expands(s string) bool {
 	return false
 }
 
-// execs: the command is exec — past !, time, assignments and command (-p, -v,
-// -V), all of which leave exec's redirections in place for what follows.
-func execs(s string) bool {
-	for _, w := range words(s) { // "exec", \exec are exec
-
-		switch {
-		case w == "exec":
-			return true
-		case w == "!" || w == "time" || w == "command" || w == "-p" || w == "-v" || w == "-V" || w == "--" || assignment(w):
+// lead is the builtin a simple command runs: its first word past !, time,
+// assignments, redirections, and command or builtin with their flags —
+// quotes removed, and a redirection it carries (exec>log) left off. exec,
+// alias and a program named by a variable ($e "$x") are found however they
+// are written.
+func lead(s string) string {
+	ws := words(s)
+	for i := 0; i < len(ws); i++ {
+		switch w := ws[i]; {
+		case operator(w):
+			i++
+		case w == "!" || w == "time" || w == "command" || w == "builtin" || w == "-p" || w == "-v" || w == "-V" || w == "--" || assignment(w):
 		default:
-			return false
+			if p, ok := program(w); ok {
+				return p
+			}
 		}
 	}
-	return false
+	return ""
 }
 
 // readBy adds cmds[t] as a reader of cmds[from:to].

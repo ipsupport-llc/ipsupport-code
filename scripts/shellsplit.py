@@ -154,11 +154,12 @@ class _Result:
                 feeders.append((len(self.cmds) - 1, len(self.cmds)))
             for f in feeders:
                 self.read_by(f[0], f[1], len(self.cmds))
-            if op == "(" and self.d == SH and _execs(s):
+            if op == "(" and self.d == SH and _lead(s) == "exec":
                 self.incomplete = True
         if self.d == SH:
             k = _keyword(s)
-            if (self.func_name and op == ")" and s == "") or k in ("function", "coproc", "alias"):
+            lead = _lead(s)
+            if (self.func_name and op == ")" and s == "") or k in ("function", "coproc") or lead == "alias" or _expands(lead):
                 self.untracked = True
             self.func_name = op == "(" and len(_fields(s)) == 1 and not any(c in s for c in "<>=")
         pending = self.feeding
@@ -303,15 +304,23 @@ def _expands(s):
     return False
 
 
-def _execs(s):
-    """Mirrors execs: exec past !, time, assignments and command (-p, -v, -V)."""
-    for w in _words(s):
-        if w == "exec":
-            return True
-        if w in ("!", "time", "command", "-p", "-v", "-V", "--") or _assignment(w):
+def _lead(s):
+    """Mirrors lead: the builtin a simple command runs."""
+    ws = _words(s)
+    i = 0
+    while i < len(ws):
+        w = ws[i]
+        if _operator(w):
+            i += 2
             continue
-        return False
-    return False
+        if w in ("!", "time", "command", "builtin", "-p", "-v", "-V", "--") or _assignment(w):
+            i += 1
+            continue
+        p, ok = _program(w)
+        if ok:
+            return p
+        i += 1
+    return ""
 
 
 def _keyword(s):

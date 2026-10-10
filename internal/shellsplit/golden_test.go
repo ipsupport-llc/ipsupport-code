@@ -176,6 +176,9 @@ var casesForGolden = []string{
 	"\"exec\" > >(sh); cat <<'EOF'\nrm -rf x\nEOF", "\\exec > >(sh); cat <<'EOF'\nrm -rf x\nEOF", "command \"exec\" > >(sh); cat <<'EOF'\nrm -rf x\nEOF",
 	"eval 'coproc sh'; cat <<'EOF' >&${COPROC[1]}\nrm -rf x\nEOF", "read -r -d '' x <<'EOF'; eval \"$x\"\nrm -rf x\nEOF",
 	"alias cat=sh; cat <<'EOF'\nrm -rf x\nEOF", "eval $(ssh-agent -s); cat > f <<'EOF'\nx\nEOF", "sh -c 'coproc sh'; cat > f <<'EOF'\nx\nEOF",
+	"command alias cat=sh\ncat <<'EOF'\nrm -rf x\nEOF", "\"alias\" cat=sh\ncat <<'EOF'\nrm -rf x\nEOF", ">log alias cat=sh\ncat <<'EOF'\nrm -rf x\nEOF", "> log alias cat=sh\ncat <<'EOF'\nrm -rf x\nEOF",
+	">log exec > >(sh); cat <<'EOF'\nrm -rf x\nEOF", "exec> >(sh); cat <<'EOF'\nrm -rf x\nEOF",
+	"read -r -d '' x <<'EOF'; e=eval; $e \"$x\"\nrm -rf x\nEOF", "\"$PYTHON\" app.py; cat > f <<'EOF'\nx\nEOF",
 	strings.Repeat("eval $(", 12) + "echo ok" + strings.Repeat(")", 12), // past the parse budget
 	"sh <<EOF\n# $(rm -rf src/legacy)\nEOF",
 	"timeout 5 sh <<EOF\nrm -rf x\nEOF", "ssh deploy@host <<'EOF'\nrm -rf /srv/app\nEOF",

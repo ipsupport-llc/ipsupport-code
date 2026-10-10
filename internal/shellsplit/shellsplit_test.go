@@ -344,6 +344,13 @@ func TestAHeredocsReaderDecidesWhatItIs(t *testing.T) {
 		"eval 'coproc sh'; cat <<'EOF' >&${COPROC[1]}\nrm -rf x\nEOF", // eval sets it up in this shell
 		"read -r -d '' x <<'EOF'; eval \"$x\"\nrm -rf x\nEOF",         // eval runs a value not on the line
 		"alias cat=sh; cat <<'EOF'\nrm -rf x\nEOF",
+		"command alias cat=sh\ncat <<'EOF'\nrm -rf x\nEOF", // alias however it is written
+		"\"alias\" cat=sh\ncat <<'EOF'\nrm -rf x\nEOF",
+		">log alias cat=sh\ncat <<'EOF'\nrm -rf x\nEOF",
+		"> log alias cat=sh\ncat <<'EOF'\nrm -rf x\nEOF", // an operator and its operand before it
+		">log exec > >(sh); cat <<'EOF'\nrm -rf x\nEOF",  // exec past a redirection
+		"exec> >(sh); cat <<'EOF'\nrm -rf x\nEOF",
+		"read -r -d '' x <<'EOF'; e=eval; $e \"$x\"\nrm -rf x\nEOF", // eval named by a variable
 	} {
 		if p := Parse(Sh, line); !p.Incomplete {
 			t.Errorf("Parse(%q) = %q: an unknown reader's heredoc marked complete", line, p.Commands)

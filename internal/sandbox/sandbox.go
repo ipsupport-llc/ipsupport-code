@@ -100,6 +100,12 @@ func Wrap(mode string, spec Spec, name string, args []string) (string, []string,
 // Available reports whether the given mode can actually confine on this host.
 func Available(mode string) bool { return available(mode) }
 
+// Strict reports whether the given mode confines fully on this host: no
+// content written or truncated outside the writable roots, and, with the
+// network off, no TCP. Landlock does that from ABI 4 (truncation from 3, TCP
+// from 4); below, BestEffort leaves them open.
+func Strict(mode string) bool { return available(mode) && strict(resolveMode(mode)) }
+
 // SeatbeltProfile builds an SBPL profile that allows everything EXCEPT writes
 // outside the writable roots (plus the standard macOS temp dirs and dev nodes),
 // and denies the network when allowNetwork is false. This "write-jail" posture

@@ -116,6 +116,18 @@ func main() {
 		fmt.Println(agent.DefaultSystemPrompt())
 		return
 	}
+	if readOnly {
+		if err := checkReadOnly(flag.Args(), interactive, resumeSession, clearOnStart, sessionName); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		// Commands need no approval in read-only mode: the sandbox is what keeps
+		// them from changing anything. Rules the user wrote still apply.
+		overrides = append(overrides, "run.default=allow")
+		// git status refreshes the index when it can; nothing here may write.
+		_ = os.Setenv("GIT_OPTIONAL_LOCKS", "0")
+	}
+
 	// Subcommand dispatch — one clear surface for the non-task verbs, rather than
 	// ad-hoc arg checks. `init` needs the reader, so it's handled just below.
 	if args := flag.Args(); len(args) >= 1 {
@@ -163,18 +175,6 @@ func main() {
 	}
 	maybeInit(reader, doInit)
 	settleTelemetryDefault(existed)
-
-	if readOnly {
-		if err := checkReadOnly(flag.Args(), interactive, resumeSession, clearOnStart, sessionName); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			os.Exit(1)
-		}
-		// Commands need no approval in read-only mode: the sandbox is what keeps
-		// them from changing anything. Rules the user wrote still apply.
-		overrides = append(overrides, "run.default=allow")
-		// git status refreshes the index when it can; nothing here may write.
-		_ = os.Setenv("GIT_OPTIONAL_LOCKS", "0")
-	}
 
 	// -skip-permissions is just sugar for the two -override key=values it's
 	// documented as — expanding it here, before build(), means there's only
@@ -280,17 +280,53 @@ func main() {
 
 // checkReadOnly rejects what -read-only can't be combined with: it is a single
 // task run on a throwaway session, so there is no thread to name, resume or
-// clear, and no TUI to open.
+// clear, no TUI to open, and no command that changes things (update, config,
+// init) to run instead.
 func checkReadOnly(args []string, interactive, resume, clear bool, session string) error {
 	switch {
 	case strings.TrimSpace(strings.Join(args, " ")) == "":
 		return errors.New("-read-only needs a task: ipsupport-code -read-only \"your task\"")
+	case args[0] == "update" || args[0] == "update6" || args[0] == "config" || args[0] == "init":
+		return fmt.Errorf("-read-only answers a task — %s changes things; drop -read-only", args[0])
 	case interactive:
 		return errors.New("-read-only runs one task and exits — drop -it")
 	case resume || clear || session != "":
 		return errors.New("-read-only runs on a throwaway session — drop -resume, -clear and -session")
 	}
 	return nil
+}
+
+// checkReadOnlyPaths refuses a read-only run whose own stores — the trace, the
+// usage ledger, the skills, the lessons — would be written inside the
+// workspace: a repository's .agent/config.json can point them there.
+func checkReadOnlyPaths(cfg config.Config) error {
+	ws := realPath(cfg.Workspace)
+	for key, p := range map[string]string{"trace_path": cfg.TracePath, "usage_path": cfg.UsagePath, "skills_path": cfg.SkillsPath, "kb_path": cfg.KBPath} {
+		if p == "" {
+			continue
+		}
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(cfg.Workspace, p)
+		}
+		if rel, err := filepath.Rel(ws, realPath(p)); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("-read-only: %s points into the workspace (%s), where nothing may be written", key, p)
+		}
+	}
+	return nil
+}
+
+// realPath is p with its symlinks followed, as far as it exists.
+func realPath(p string) string {
+	for dir, rest := p, ""; ; {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(r, rest)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		dir, rest = parent, filepath.Join(filepath.Base(dir), rest)
+	}
 }
 
 // checkSessionStart applies the launch rules for a NAMED session and returns the
@@ -643,6 +679,11 @@ func build(workspace, sessionName string, overrides []string, readOnly bool, rea
 	if err := checkActiveProvider(cfg); err != nil {
 		return nil, nil, err
 	}
+	if readOnly {
+		if err := checkReadOnlyPaths(cfg); err != nil {
+			return nil, nil, err
+		}
+	}
 	if sessionName != "" { // must land before wire() — see the call site in main()
 		cfg.Name = sessionName
 	}
@@ -669,9 +710,11 @@ func build(workspace, sessionName string, overrides []string, readOnly bool, rea
 	// they were moved off the approval path so a slow disk can't stall a tool, and
 	// this is where that debt is settled.
 	cleanup := func() { a.shutdownJobs(); a.closeMCP(); a.waitRiskSaves() }
-	a.applyUsageRetention()     // honor usage_retention_days on startup
-	a.applyKnowledgeRetention() // honor knowledge_retention_days on startup
-	a.dropPoisonedLessons()     // retire lessons quoting a path from the run that taught them
+	if !readOnly { // a read-only run rewrites none of the stores
+		a.applyUsageRetention()     // honor usage_retention_days on startup
+		a.applyKnowledgeRetention() // honor knowledge_retention_days on startup
+		a.dropPoisonedLessons()     // retire lessons quoting a path from the run that taught them
+	}
 	if ft, err := trace.NewFileTracer(cfg.TracePath, newRunID()); err != nil {
 		slog.Warn("trace disabled", "err", err)
 	} else {
@@ -1124,7 +1167,7 @@ func (a *app) buildSubReg(pol *policy.Engine, root string) *tool.Registry {
 	if a.cfg.Spawn.Exec {
 		tools = append(tools, tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, tool.Shell(a.cfg.Run.Shell), a.sandboxWrapperFor(root)))
 	}
-	tools = append(tools, tool.NewGitLive(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.offlineNow.Load), tool.NewWebLive(nil, a.offlineNow.Load), tool.NewCalc(), tool.NewDone())
+	tools = append(tools, tool.NewGitLive(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.offlineNow.Load, a.gitWrapperFor(root)), tool.NewWebLive(nil, a.offlineNow.Load), tool.NewCalc(), tool.NewDone())
 	if a.skills != nil && a.skills.HasEnabled() {
 		tools = append(tools, tool.NewSkill(a.skills))
 	}
@@ -2979,15 +3022,37 @@ func (a *app) sandboxSpec(root string) (string, sandbox.Spec) {
 func (a *app) readOnlyRun() (ok bool, why string) {
 	root := a.hostSandboxRoot()
 	mode, spec := a.sandboxSpec(root)
-	if !sandbox.Available(mode) {
-		return false, "this host has no OS sandbox for them (sandbox: " + mode + ")"
+	if !sandbox.Strict(mode) {
+		return false, "this host has no OS sandbox that keeps them from writing (sandbox: " + mode + "; Landlock needs ABI 4, Linux 6.7)"
 	}
-	for _, p := range []string{a.cfg.Workspace, root} {
+	// The repository too: a worktree's .git, or a --separate-git-dir, can be
+	// anywhere — in a temp dir, say — and git update-ref there rewrites history.
+	for _, p := range append([]string{a.cfg.Workspace, root}, gitDirs(root)...) {
 		if sandbox.Reaches(mode, spec, p) {
 			return false, p + " is in or holds a temp or cache dir, which sandboxed commands may write"
 		}
 	}
 	return true, ""
+}
+
+// gitWrapperFor confines the git tool's own git in read-only mode, as run's
+// commands are: a status or diff runs the clean filters and textconv the
+// repository's config names. Nil otherwise — git runs as it always has.
+func (a *app) gitWrapperFor(root string) tool.CmdWrapper {
+	if !a.readOnly {
+		return nil
+	}
+	return a.sandboxWrapperFor(root)
+}
+
+// gitDirs is the git directory and common directory of the repository dir is
+// in, nil when it isn't in one (or git can't say).
+func gitDirs(dir string) []string {
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir").Output()
+	if err != nil {
+		return nil
+	}
+	return strings.Fields(string(out))
 }
 
 func (a *app) wire() error {
@@ -3004,7 +3069,7 @@ func (a *app) wire() error {
 	tools := []tool.Tool{
 		tool.NewFile(pol, gatedApprover{a}, a.snapFile),
 		tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, tool.Shell(a.cfg.Run.Shell), a.sandboxWrapper()),
-		tool.NewGitLive(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.offlineNow.Load),
+		tool.NewGitLive(pol, gatedApprover{a}, a.activeLLM().ContextWindow, a.offlineNow.Load, a.gitWrapperFor(a.hostSandboxRoot())),
 		tool.NewWebLive(nil, a.offlineNow.Load), // nil → its own 30s-timeout client; task ctx has no deadline of its own
 		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),
 		tool.NewCalc(),
@@ -3025,7 +3090,7 @@ func (a *app) wire() error {
 	}
 	// One proxy tool fronts every configured MCP server, so the catalog grows by a
 	// single tool — not by every server's schemas. Only when servers are set.
-	if len(a.cfg.McpServers) > 0 {
+	if len(a.cfg.McpServers) > 0 && !a.readOnly { // listing a server starts it: a process no sandbox holds
 		tools = append(tools, tool.NewMCP(func(ctx context.Context) string {
 			return a.mcpList(ctx, a.cfg.McpServers)
 		}, a.mcpCall, a.mcpSchema))

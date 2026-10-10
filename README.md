@@ -390,13 +390,17 @@ allowed to change:
 ./ipsupport-code -read-only "review the diff against main"
 ```
 
-File writes and git changes are refused. Commands run without asking, inside the
-OS sandbox (Landlock on Linux, Seatbelt on macOS, whatever `sandbox` is set to)
-with the workspace read-only like the rest of the disk: only temp dirs and the
-user cache dir are writable, and there is no network. Where there is no such
-sandbox, or the workspace sits in a temp or cache dir, commands are refused too,
-and the run says why. The session is neither restored nor saved, and nothing is
-learned from it.
+File writes, git changes and MCP servers are refused. Commands run without
+asking, inside the OS sandbox (Landlock on Linux 6.7 or later, Seatbelt on macOS,
+whatever `sandbox` is set to) with the workspace read-only like the rest of the
+disk: only temp dirs and the user cache dir are writable, and there is no
+network. The git tool's own git runs there too, since a status or diff runs the
+filters the repository's config names. Where there is no such sandbox, or the
+workspace or its repository sits in a temp or cache dir, commands are refused
+too, and the run says why. The session is neither restored nor saved, and
+nothing is learned from it — not even from an approval answer. On Linux a
+command can still change a file's mode and times (Landlock doesn't cover them),
+never its contents.
 
 Each named session keeps its own saved thread, its own **standing goal** and its
 own input history, so two of them can work the same checkout at once — a local

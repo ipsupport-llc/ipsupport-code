@@ -40,9 +40,17 @@ func available(mode string) bool {
 
 // kernelHasLandlock probes the Landlock ABI version (>=1 means the LSM is
 // enabled and usable). A raw syscall probe, so no ruleset is ever created.
-func kernelHasLandlock() bool {
+func kernelHasLandlock() bool { return landlockABI() >= 1 }
+
+func strict(mode string) bool { return mode == Landlock && landlockABI() >= 4 }
+
+// landlockABI is the kernel's Landlock ABI version, 0 without Landlock.
+func landlockABI() int {
 	v, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, 1 /* LANDLOCK_CREATE_RULESET_VERSION */)
-	return errno == 0 && int(v) >= 1
+	if errno != 0 {
+		return 0
+	}
+	return int(v)
 }
 
 // MaybeExecConfined handles the re-exec leg: if argv says we're the sandbox

@@ -1,0 +1,34 @@
+{
+  "debug-systematically": {
+    "enabled": false,
+    "source": "built-in"
+  },
+  "git-flow": {
+    "enabled": false,
+    "source": "built-in"
+  },
+  "minimal-code": {
+    "enabled": false,
+    "source": "built-in"
+  },
+  "plan": {
+    "enabled": false,
+    "source": "built-in"
+  },
+  "research-first": {
+    "enabled": false,
+    "source": "built-in"
+  },
+  "review": {
+    "enabled": false,
+    "source": "built-in"
+  },
+  "subagents": {
+    "enabled": false,
+    "source": "built-in"
+  },
+  "test-first": {
+    "enabled": false,
+    "source": "built-in"
+  }
+}

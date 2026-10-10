@@ -9807,6 +9807,9 @@ func TestCheckReadOnly(t *testing.T) {
 		{name: "-resume", args: []string{"x"}, res: true},
 		{name: "-clear", args: []string{"x"}, clr: true},
 		{name: "-session", args: []string{"x"}, session: "review"},
+		{name: "config set", args: []string{"config", "set", "run.default", "allow"}},
+		{name: "update", args: []string{"update"}},
+		{name: "a task that starts with a command's word", args: []string{"configure", "nothing"}, ok: true},
 	} {
 		if err := checkReadOnly(c.args, c.interactive, c.res, c.clr, c.session); (err == nil) != c.ok {
 			t.Errorf("%s: err = %v, want ok=%v", c.name, err, c.ok)
@@ -9910,5 +9913,143 @@ func TestReadOnlyRunsCommandsWhereTheSandboxHoldsTheWorkspace(t *testing.T) {
 	}
 	if _, run := a.ag.ReadOnly(); !run {
 		t.Error("the agent does not let run through")
+	}
+}
+
+// A read-only run starts no MCP server — listing one launches it, outside any
+// sandbox — and learns nothing from an approval answer.
+func TestReadOnlyStartsNoServerAndLearnsNothing(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	hasMCP := func(a *app) bool {
+		for _, s := range a.ag.ToolSchemas() {
+			if fn, _ := s["function"].(map[string]any); fn != nil && fn["name"] == "mcp" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, readOnly := range []bool{false, true} {
+		a, cleanup, err := build(t.TempDir(), "", nil, readOnly, bufio.NewReader(strings.NewReader("")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		a.cfg.McpServers = map[string]mcp.Server{"test": {URL: "http://mcp.invalid"}}
+		if err := a.wire(); err != nil {
+			t.Fatal(err)
+		}
+		if hasMCP(a) == readOnly {
+			t.Errorf("readOnly=%v: the mcp tool registered = %v", readOnly, hasMCP(a))
+		}
+		if a.shadow == nil {
+			continue
+		}
+		params := map[string]any{"command": "truncate -s 0 install_manifest.txt"}
+		as := a.shadow.Model().Assess("run", "shell", params)
+		if as.Risk < risk.Threshold {
+			t.Skipf("the shipped model no longer flags %v — pick another false alarm", params)
+		}
+		a.learnFromApproval(risk.WithAssessment(context.Background(), "run", "shell", params, as), true)
+		a.waitRiskSaves()
+		if learned := a.shadow.Learned() > 0; learned == readOnly {
+			t.Errorf("readOnly=%v: learned from an approval = %v", readOnly, learned)
+		}
+	}
+}
+
+// A worktree whose repository lives in a temp dir: commands could rewrite its
+// history there, so read-only refuses them.
+func TestReadOnlyRefusesCommandsWhereTheRepositoryIsWritable(t *testing.T) {
+	if !sandbox.Strict(sandbox.Auto) {
+		t.Skip("no strict OS sandbox on this host")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	parent, err := os.MkdirTemp(home, ".ipsupport-read-only-test-")
+	if err != nil {
+		t.Skipf("cannot create a dir in home: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(parent) })
+	repo, ws := t.TempDir(), filepath.Join(parent, "wt")
+	for _, args := range [][]string{
+		{"-C", repo, "init", "-q"},
+		{"-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x"},
+		{"-C", repo, "worktree", "add", "-q", ws},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	a, cleanup, err := build(ws, "", nil, true, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if ok, why := a.readOnlyRun(); ok || !strings.Contains(why, ".git") {
+		t.Errorf("readOnlyRun = %v %q, want refused over the repository in a temp dir", ok, why)
+	}
+}
+
+// A read-only run rewrites none of the stores on its way in: an expired usage
+// entry stays until a run that may change things purges it. And its git, like
+// its commands, runs in the sandbox.
+func TestReadOnlyLeavesTheStoresAndSandboxesGit(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ws := t.TempDir()
+	seed, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed.usage.Add("2001-01-01", "local", "m", 10, 10, 0)
+	if err := seed.usage.Save(); err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	for _, readOnly := range []bool{true, false} {
+		a, cleanup, err := build(ws, "", []string{"usage_retention_days=1"}, readOnly, bufio.NewReader(strings.NewReader("")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		if kept := a.usage.Total().Tokens() > 0; kept != readOnly {
+			t.Errorf("readOnly=%v: the expired entry kept = %v", readOnly, kept)
+		}
+		if wrapped := a.gitWrapperFor(a.hostSandboxRoot()) != nil; wrapped != (readOnly && sandbox.Available(sandbox.Auto)) {
+			t.Errorf("readOnly=%v: git wrapped = %v", readOnly, wrapped)
+		}
+	}
+}
+
+// A store a repository's config points into the workspace is refused: a
+// read-only run would otherwise write it there.
+func TestReadOnlyRefusesStoresInTheWorkspace(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ws := t.TempDir()
+	for _, kv := range []string{"trace_path=.agent/trace.jsonl", "usage_path=" + filepath.Join(ws, "u.json"), "skills_path=skills", "kb_path=./kb.json"} {
+		if _, _, err := build(ws, "", []string{kv}, true, bufio.NewReader(strings.NewReader(""))); err == nil {
+			t.Errorf("%s: a read-only build started", kv)
+		}
+		_, cleanup, err := build(ws, "", []string{kv}, false, bufio.NewReader(strings.NewReader("")))
+		if err != nil {
+			t.Errorf("%s: a plain build failed: %v", kv, err)
+			continue
+		}
+		cleanup()
+	}
+	if _, cleanup, err := build(ws, "", []string{"trace_path=" + filepath.Join(t.TempDir(), "t.jsonl")}, true, bufio.NewReader(strings.NewReader(""))); err != nil {
+		t.Errorf("a store outside the workspace was refused: %v", err)
+	} else {
+		cleanup()
 	}
 }

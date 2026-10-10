@@ -9,3 +9,5 @@ func wrap(_ string, _ Spec, name string, args []string) (string, []string, bool)
 }
 
 func available(string) bool { return false }
+
+func strict(string) bool { return false }

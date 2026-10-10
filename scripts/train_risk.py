@@ -131,7 +131,10 @@ def go_sprint(v):
     if v is None:
         return "<nil>"
     if isinstance(v, (int, float)):
-        return _go_float(float(v))
+        try:
+            return _go_float(float(v))
+        except OverflowError:
+            raise ValueError(f"{v} is out of float64's range — Go's JSON decoder rejects it") from None
     if isinstance(v, list):
         return "[" + " ".join(go_sprint(x) for x in v) + "]"
     if isinstance(v, dict):
@@ -142,6 +145,10 @@ def go_sprint(v):
 def _go_float(f):
     """strconv.FormatFloat(f, 'g', -1, 64) as %v uses it: shortest digits, an
     exponent below 1e-4 or from 1e6 (fmt's precision 6 for that choice)."""
+    if math.isnan(f):
+        return "NaN"
+    if math.isinf(f):
+        return "+Inf" if f > 0 else "-Inf"
     if f == 0:
         return "-0" if math.copysign(1, f) < 0 else "0"
     d = decimal.Decimal(repr(abs(f))).normalize()

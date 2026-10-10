@@ -314,6 +314,11 @@ func TestAHeredocsReaderDecidesWhatItIs(t *testing.T) {
 		"sudo -s <<'EOF'\nrm -rf x\nEOF",
 		"sed -f - x.txt <<'EOF'\ns/a/b/\nEOF",
 		"while read l; do :; done <<'EOF'\nx\nEOF",
+		"awk '{ system($0) }' <<'EOF'\nrm -rf x\nEOF", // awk runs lines: system
+		"sed 's/.*/&/e' <<'EOF'\nrm -rf x\nEOF",       // sed runs lines: e
+		"patch -p1 <<'EOF'\n--- /dev/null\n+++ b/x\nEOF",
+		"git apply <<'EOF'\n--- a/x\n+++ b/x\nEOF",
+		"(\ncat <<'EOF'\nrm -rf x\nEOF\n) | sh", // a block still open: its reader isn't known yet
 	} {
 		if p := Parse(Sh, line); !p.Incomplete {
 			t.Errorf("Parse(%q) = %q: an unknown reader's heredoc marked complete", line, p.Commands)
@@ -330,6 +335,27 @@ func TestAHeredocsReaderDecidesWhatItIs(t *testing.T) {
 	}
 	if got := Split(Cmd, `"powershell" /e `+encoded); !slices.Contains(got, `Remove-Item -Recurse -Force C:\src\app`) {
 		t.Errorf("a quoted program in cmd: %q", got)
+	}
+}
+
+// A block's output piped into a shell runs the heredocs read inside it.
+func TestAHeredocInABlockIsReadByWhatTheBlockIsPipedInto(t *testing.T) {
+	for _, line := range []string{
+		"(cat <<'EOF') | sh\nrm -rf src/legacy\nEOF",
+		"{ cat <<'EOF'; } | sh\nrm -rf src/legacy\nEOF",
+		"(cat <<'EOF'; echo hi) | sh\nrm -rf src/legacy\nEOF",
+		"case x in x) cat <<'EOF';; esac | sh\nrm -rf src/legacy\nEOF",
+		"( (cat <<'EOF') ) |& bash\nrm -rf src/legacy\nEOF",
+		"(cat <<'EOF') 2>/dev/null | sh\nrm -rf src/legacy\nEOF", // a redirection between
+	} {
+		if got := Split(Sh, line); !slices.Contains(got, "rm -rf src/legacy") {
+			t.Errorf("Split(%q) = %q", line, got)
+		}
+	}
+	for _, line := range []string{"(cat <<'EOF') > out.txt\nrm -rf x\nEOF", "{ cat <<'EOF'; } | grep x\nrm -rf x\nEOF"} {
+		if p := Parse(Sh, line); slices.Contains(p.Commands, "rm -rf x") || p.Incomplete {
+			t.Errorf("Parse(%q) = %q, incomplete %v: data read as a script", line, p.Commands, p.Incomplete)
+		}
 	}
 }
 

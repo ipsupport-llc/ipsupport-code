@@ -147,7 +147,12 @@ var casesForGolden = []string{
 	"cat <<'EOF' | xargs rm -rf\nsrc\nEOF", "cat <<'EOF' > >(sh)\nrm -rf x\nEOF", "tee >(sh) <<'EOF'\nrm -rf x\nEOF",
 	"sudo -s <<'EOF'\nrm -rf x\nEOF", "sed -f - x.txt <<'EOF'\ns/a/b/\nEOF", "while read l; do :; done <<'EOF'\nx\nEOF",
 	"python3.11 <<'EOF'\nimport shutil; shutil.rmtree('x')\nEOF", "ksh93 <<'EOF'\nrm -rf x\nEOF",
-	"/usr/bin/perl5.38 - <<'EOF'\nunlink 'x';\nEOF", "\"powershell\" /e UgBlAG0AbwB2AGUA", "cat 2>&- sh <<EOF\nrm -rf x\nEOF",
+	"/usr/bin/perl5.38 - <<'EOF'\nunlink 'x';\nEOF", "\"powershell\" /e UgBlAG0AbwB2AGUA",
+	"awk '{ system($0) }' <<'EOF'\nrm -rf x\nEOF", "sed 's/.*/&/e' <<'EOF'\nrm -rf x\nEOF", "patch -p1 <<'EOF'\n--- /dev/null\n+++ b/x\nEOF",
+	"git apply <<'EOF'\n--- a/x\n+++ b/x\nEOF", "(\ncat <<'EOF'\nrm -rf x\nEOF\n) | sh", "(cat <<'EOF') | sh\nrm -rf src/legacy\nEOF",
+	"{ cat <<'EOF'; } | sh\nrm -rf src/legacy\nEOF", "(cat <<'EOF'; echo hi) | sh\nrm -rf src/legacy\nEOF",
+	"case x in x) cat <<'EOF';; esac | sh\nrm -rf src/legacy\nEOF", "( (cat <<'EOF') ) |& bash\nrm -rf src/legacy\nEOF",
+	"(cat <<'EOF') > out.txt\nrm -rf x\nEOF", "{ cat <<'EOF'; } | grep x\nrm -rf x\nEOF", "(cat <<'EOF') 2>/dev/null | sh\nrm -rf src/legacy\nEOF", "cat 2>&- sh <<EOF\nrm -rf x\nEOF",
 	strings.Repeat("eval $(", 12) + "echo ok" + strings.Repeat(")", 12), // past the parse budget
 	"sh <<EOF\n# $(rm -rf src/legacy)\nEOF",
 	"timeout 5 sh <<EOF\nrm -rf x\nEOF", "ssh deploy@host <<'EOF'\nrm -rf /srv/app\nEOF",

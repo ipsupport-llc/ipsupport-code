@@ -99,6 +99,10 @@ type result struct {
 	incomplete bool
 	cmds       []string
 	piped      []bool // cmds[i]'s output goes into cmds[i+1]: | or |&
+	pipeTo     []int  // cmds[i] is in a block whose output goes into cmds[pipeTo[i]]; -1 if not
+	blocks     []int  // where each ( or { still open started: an index into cmds
+	cases      []int  // where each case … esac still open started
+	closed     []int  // the block just closed, [start, end): piped on if the next cut is a pipe
 	groups     []string
 	inner      []string // what a command runs inside it: sh -c '…', eval …
 	innerG     []string
@@ -112,9 +116,12 @@ var joins = map[string]bool{"|": true, "||": true, "&&": true, "|&": true}
 
 // cut ends the command being read at an operator.
 func (r *result) cut(b *buf, op string) {
-	if s := Trim(b.String()); s != "" {
+	s := Trim(b.String())
+	pipe := op == "|" || op == "|&"
+	if s != "" {
 		r.cmds = append(r.cmds, s)
-		r.piped = append(r.piped, op == "|" || op == "|&")
+		r.piped = append(r.piped, pipe)
+		r.pipeTo = append(r.pipeTo, -1)
 		r.innerCode(s)
 		if r.code.Len() > 0 {
 			r.code.WriteString(" ")
@@ -136,7 +143,46 @@ func (r *result) cut(b *buf, op string) {
 	} else {
 		r.endGroup()
 	}
+	r.block(s, op, pipe)
 	b.reset()
+}
+
+// block keeps track of ( … ), { … } and case … esac: what a block writes is
+// read by what it is piped into — (cat <<EOF) | sh, { …; } | sh — so each
+// command in it is read by that too (see readers) — whatever redirection
+// comes between: (…) 2>/dev/null | sh still pipes its output.
+func (r *result) block(s, op string, pipe bool) {
+	if r.closed != nil && pipe {
+		for j := r.closed[0]; j < r.closed[1]; j++ {
+			r.pipeTo[j] = len(r.cmds)
+		}
+	}
+	r.closed = nil
+	switch op {
+	case "(", "{":
+		r.blocks = append(r.blocks, len(r.cmds))
+	case ")", "}":
+		if n := len(r.blocks); n > 0 {
+			r.closed = []int{r.blocks[n-1], len(r.cmds)}
+			r.blocks = r.blocks[:n-1]
+		}
+	}
+	if s == "" || r.d != Sh {
+		return
+	}
+	switch strings.Fields(s)[0] {
+	case "case":
+		r.cases = append(r.cases, len(r.cmds)-1)
+	case "esac":
+		if n := len(r.cases); n > 0 {
+			if pipe {
+				for j := r.cases[n-1]; j < len(r.cmds)-1; j++ {
+					r.pipeTo[j] = len(r.cmds)
+				}
+			}
+			r.cases = r.cases[:n-1]
+		}
+	}
 }
 
 func (r *result) endGroup() {
@@ -382,16 +428,18 @@ const (
 )
 
 // dataReaders are programs that read a heredoc as data: they store, show,
-// search or transform it, and run none of it. A heredoc is data only for one
+// search or transform it, and run none of it. Not sed (its e command runs
+// lines), awk (system), patch (writes the files the body names), less
+// (LESSOPEN); git, but not git apply, am or fast-import. A heredoc is data only for one
 // of them; any other reader — sudo, xargs, psql, docker, $SH — is unknown, and
 // the parse incomplete: the list of what runs its input is never complete,
 // the list of what doesn't can be.
 var dataReaders = map[string]bool{":": true, "cat": true, "tee": true, "git": true, "gh": true, "grep": true,
 	"egrep": true, "fgrep": true, "rg": true, "sort": true, "uniq": true, "wc": true, "head": true, "tail": true,
-	"cut": true, "tr": true, "base64": true, "jq": true, "yq": true, "diff": true, "cmp": true, "patch": true,
-	"column": true, "fold": true, "nl": true, "od": true, "xxd": true, "hexdump": true, "less": true, "more": true,
+	"cut": true, "tr": true, "base64": true, "jq": true, "yq": true, "diff": true, "cmp": true,
+	"column": true, "fold": true, "nl": true, "od": true, "xxd": true, "hexdump": true, "more": true,
 	"read": true, "echo": true, "printf": true, "tac": true, "rev": true, "paste": true, "envsubst": true,
-	"md5sum": true, "sha256sum": true, "shasum": true, "sed": true, "awk": true}
+	"md5sum": true, "sha256sum": true, "shasum": true}
 
 // feeds is what cmd runs what it reads as: every interpreter among its words
 // counts (see runner) — a match adds what is scored, never takes it away —
@@ -421,8 +469,8 @@ func feeds(cmd string) feed {
 	switch {
 	case !found, len(ws) > 0 && operator(ws[len(ws)-1]): // > >(sh): its operand, a process substitution, runs what it writes
 		f |= unknown
-	case dataReaders[prog] && (prog == "sed" || prog == "awk") && scriptFile(ws):
-		f |= unknown // sed -f -, awk -f -: their program comes from it
+	case prog == "git" && gitWrites(ws):
+		f |= unknown // the body names the files it changes
 	case dataReaders[prog], wordRunner(prog) != "":
 	default:
 		f |= unknown
@@ -456,10 +504,10 @@ func assignment(w string) bool {
 	return true
 }
 
-// scriptFile: sed's or awk's -f, which reads its program from a file.
-func scriptFile(ws []string) bool {
+// gitWrites: git apply, am, fast-import — the heredoc says what they change.
+func gitWrites(ws []string) bool {
 	for _, w := range ws {
-		if strings.HasPrefix(w, "--file") || strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.Contains(w, "f") {
+		if w == "apply" || w == "am" || w == "fast-import" {
 			return true
 		}
 	}
@@ -604,21 +652,38 @@ func splitSh(line string, out *result) {
 }
 
 // readers is, for each command from the first on, what reads its heredoc:
-// the command, and every command its output is piped into (cat <<EOF | sh).
-// A pipe that goes on past the line leaves the reader unknown: incomplete.
+// the command, every command its output is piped into (cat <<EOF | sh), and
+// what the output of a block it is in is piped into ((cat <<EOF) | sh). A
+// pipe that goes on past the line, or a block still open at its end, leaves
+// the reader unknown.
 func (r *result) readers(first int) []feed {
 	if first >= len(r.cmds) {
 		return nil
 	}
+	open := len(r.cmds) // from here on, commands are in a block not yet closed
+	if len(r.blocks) > 0 {
+		open = r.blocks[0]
+	}
+	if len(r.cases) > 0 {
+		open = min(open, r.cases[0])
+	}
 	fed := make([]feed, len(r.cmds)-first)
+	into := func(t int) feed {
+		if t < len(r.cmds) {
+			return fed[t-first]
+		}
+		return unknown
+	}
 	for j := len(r.cmds) - 1; j >= first; j-- {
 		f := feeds(r.cmds[j])
-		switch {
-		case !r.piped[j]:
-		case j+1 < len(r.cmds):
-			f |= fed[j+1-first]
-		default:
-			r.incomplete = true
+		if r.piped[j] {
+			f |= into(j + 1)
+		}
+		if t := r.pipeTo[j]; t >= 0 {
+			f |= into(t)
+		}
+		if j >= open {
+			f |= unknown
 		}
 		fed[j-first] = f
 	}

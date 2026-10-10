@@ -86,6 +86,10 @@ class _Result:
         self.inner_g = []
         self.cmds = []
         self.piped = []
+        self.pipe_to = []
+        self.blocks = []
+        self.cases = []
+        self.closed = None
         self.groups = []
         self.code = []  # pieces, joined once: += on a str is quadratic
         self.group = []
@@ -93,9 +97,11 @@ class _Result:
 
     def cut(self, b, op):
         s = trim(b.text())
+        pipe = op in ("|", "|&")
         if s:
             self.cmds.append(s)
-            self.piped.append(op in ("|", "|&"))
+            self.piped.append(pipe)
+            self.pipe_to.append(-1)
             self.inner_code(s)
             if self.code:
                 self.code.append(" ")
@@ -111,7 +117,30 @@ class _Result:
                 self.gtext.append(" " + op)
         else:
             self.end_group()
+        self.block(s, op, pipe)
         b.reset()
+
+    def block(self, s, op, pipe):
+        """Mirrors block: ( … ), { … } and case … esac piped on."""
+        if self.closed is not None and pipe:
+            for j in range(self.closed[0], self.closed[1]):
+                self.pipe_to[j] = len(self.cmds)
+        self.closed = None
+        if op in ("(", "{"):
+            self.blocks.append(len(self.cmds))
+        elif op in (")", "}"):
+            if self.blocks:
+                self.closed = (self.blocks.pop(), len(self.cmds))
+        if s == "" or self.d != SH:
+            return
+        first = _fields(s)[0]
+        if first == "case":
+            self.cases.append(len(self.cmds) - 1)
+        elif first == "esac" and self.cases:
+            start = self.cases.pop()
+            if pipe:
+                for j in range(start, len(self.cmds) - 1):
+                    self.pipe_to[j] = len(self.cmds)
 
     def end_group(self):
         if len(self.group) > 1:
@@ -168,17 +197,28 @@ class _Result:
         return True
 
     def readers(self, first):
-        """Mirrors readers: what reads each command's heredoc, through pipes."""
+        """Mirrors readers: through pipes and piped blocks; open ones are unknown."""
         if first >= len(self.cmds):
             return []
-        fed = [0] * (len(self.cmds) - first)
-        for j in range(len(self.cmds) - 1, first - 1, -1):
+        n = len(self.cmds)
+        open_ = n
+        if self.blocks:
+            open_ = self.blocks[0]
+        if self.cases:
+            open_ = min(open_, self.cases[0])
+        fed = [0] * (n - first)
+
+        def into(t):
+            return fed[t - first] if t < n else _UNKNOWN
+
+        for j in range(n - 1, first - 1, -1):
             f = _feeds(self.cmds[j])
             if self.piped[j]:
-                if j + 1 < len(self.cmds):
-                    f |= fed[j + 1 - first]
-                else:
-                    self.incomplete = True
+                f |= into(j + 1)
+            if self.pipe_to[j] >= 0:
+                f |= into(self.pipe_to[j])
+            if j >= open_:
+                f |= _UNKNOWN
             fed[j - first] = f
         return fed
 
@@ -387,9 +427,9 @@ _SCRIPT, _CODE, _UNKNOWN = 1, 2, 4
 
 # Mirrors dataReaders.
 _DATA_READERS = {":", "cat", "tee", "git", "gh", "grep", "egrep", "fgrep", "rg", "sort", "uniq", "wc", "head",
-                 "tail", "cut", "tr", "base64", "jq", "yq", "diff", "cmp", "patch", "column", "fold", "nl", "od",
-                 "xxd", "hexdump", "less", "more", "read", "echo", "printf", "tac", "rev", "paste", "envsubst",
-                 "md5sum", "sha256sum", "shasum", "sed", "awk"}
+                 "tail", "cut", "tr", "base64", "jq", "yq", "diff", "cmp", "column", "fold", "nl", "od",
+                 "xxd", "hexdump", "more", "read", "echo", "printf", "tac", "rev", "paste", "envsubst",
+                 "md5sum", "sha256sum", "shasum"}
 
 
 def _feeds(cmd):
@@ -414,7 +454,7 @@ def _feeds(cmd):
         i += 1
     if not found or (ws and _operator(ws[-1])):
         f |= _UNKNOWN
-    elif prog in _DATA_READERS and prog in ("sed", "awk") and _script_file(ws):
+    elif prog == "git" and _git_writes(ws):
         f |= _UNKNOWN
     elif prog in _DATA_READERS or _word_runner(prog):
         pass
@@ -445,9 +485,9 @@ def _assignment(w):
     return True
 
 
-def _script_file(ws):
-    """Mirrors scriptFile."""
-    return any(w.startswith("--file") or (w.startswith("-") and not w.startswith("--") and "f" in w) for w in ws)
+def _git_writes(ws):
+    """Mirrors gitWrites."""
+    return any(w in ("apply", "am", "fast-import") for w in ws)
 
 
 def _split_sh(line, out):

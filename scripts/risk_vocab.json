@@ -1,12 +1,12 @@
 {
  "_": "Vendored vocabulary for scripts/gen_risk_dataset.py. Regenerate with scripts/fetch_risk_vocab.py; everything downstream is offline and deterministic.",
- "fetched": "2026-09-21",
+ "fetched": "2026-10-01",
  "sources": [
   {
    "url": "https://codeload.github.com/github/gitignore/tar.gz/refs/heads/main",
    "license": "CC0-1.0",
    "used_for": "build-output names",
-   "templates": 309,
+   "templates": 308,
    "filter": "ignore patterns appearing in 2 or more templates, plain names only"
   },
   {

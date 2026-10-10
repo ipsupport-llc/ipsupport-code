@@ -86,6 +86,7 @@ func main() {
 		clearOnStart    bool
 		interactive     bool
 		showThinking    bool
+		readOnly        bool
 	)
 	flag.StringVar(&workspace, "C", ".", "workspace directory")
 	flag.BoolVar(&doInit, "init", false, "re-run first-time setup (server URL, API key, model)")
@@ -100,6 +101,7 @@ func main() {
 	flag.BoolVar(&clearOnStart, "clear", false, "wipe this thread's history, learned facts and lessons, and session permissions before starting (like /clear, but at launch)")
 	flag.BoolVar(&interactive, "it", false, "with a [task] argument, open the interactive TUI and auto-submit it instead of one-shot mode (same dispatch as typing it in — a /command or !shell line works too)")
 	flag.BoolVar(&showThinking, "show-thinking", false, "start with the live reasoning view on (same as pressing ctrl+t once a task is running)")
+	flag.BoolVar(&readOnly, "read-only", false, "with a [task] argument, answer it without changing anything: file writes and git changes are refused, commands run without asking inside an OS sandbox where the workspace is read-only and there is no network (refused where there is no such sandbox), and the session is neither restored nor saved")
 	flag.Usage = printUsage
 	flag.Parse()
 	if showVersion {
@@ -162,6 +164,18 @@ func main() {
 	maybeInit(reader, doInit)
 	settleTelemetryDefault(existed)
 
+	if readOnly {
+		if err := checkReadOnly(flag.Args(), interactive, resumeSession, clearOnStart, sessionName); err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		// Commands need no approval in read-only mode: the sandbox is what keeps
+		// them from changing anything. Rules the user wrote still apply.
+		overrides = append(overrides, "run.default=allow")
+		// git status refreshes the index when it can; nothing here may write.
+		_ = os.Setenv("GIT_OPTIONAL_LOCKS", "0")
+	}
+
 	// -skip-permissions is just sugar for the two -override key=values it's
 	// documented as — expanding it here, before build(), means there's only
 	// ONE application path (build()'s override loop) to keep correct, not two.
@@ -175,7 +189,7 @@ func main() {
 	// construction time, so applying it after wire() (as a prior version of
 	// this code did) left those two pointed at the previous name's archive for
 	// the whole run even though the session file itself picked up the change.
-	app, cleanup, err := build(workspace, sessionName, []string(overrides), reader)
+	app, cleanup, err := build(workspace, sessionName, []string(overrides), readOnly, reader)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -191,6 +205,11 @@ func main() {
 		app.clearSession()
 	}
 	app.startupShowThinking = showThinking
+	if readOnly {
+		if ok, why := app.readOnlyRun(); !ok {
+			fmt.Fprintln(os.Stderr, "read-only: commands are blocked — "+why)
+		}
+	}
 
 	// A NAMED session is an explicit choice, so a collision is an error rather
 	// than a decision made silently on the user's behalf. -session is how you run
@@ -215,7 +234,7 @@ func main() {
 	taskText := strings.TrimSpace(strings.Join(flag.Args(), " "))
 	switch {
 	case taskText != "" && !(interactive && isTTY()):
-		if !newSession {
+		if !newSession && !readOnly {
 			app.loadSession() // one-shot: silently continue the saved session
 		}
 		if err := app.runOne(ctx, taskText); err != nil {
@@ -257,6 +276,21 @@ func main() {
 		}
 		app.repl(ctx)
 	}
+}
+
+// checkReadOnly rejects what -read-only can't be combined with: it is a single
+// task run on a throwaway session, so there is no thread to name, resume or
+// clear, and no TUI to open.
+func checkReadOnly(args []string, interactive, resume, clear bool, session string) error {
+	switch {
+	case strings.TrimSpace(strings.Join(args, " ")) == "":
+		return errors.New("-read-only needs a task: ipsupport-code -read-only \"your task\"")
+	case interactive:
+		return errors.New("-read-only runs one task and exits — drop -it")
+	case resume || clear || session != "":
+		return errors.New("-read-only runs on a throwaway session — drop -resume, -clear and -session")
+	}
+	return nil
 }
 
 // checkSessionStart applies the launch rules for a NAMED session and returns the
@@ -514,6 +548,7 @@ type app struct {
 	promptSrc       string                     // "built-in" or the system.md override path
 	facts           []string                   // durable project facts learned over time (per workspace)
 	planMode        bool                       // plan (propose) vs auto (execute); survives re-wire
+	readOnly        bool                       // -read-only: answer one task, change nothing, keep no session
 	goal            goalState                  // standing goal pursued by the judge loop (per workspace)
 	windowDetected  bool                       // got the real loaded context window (vs a default/guess)
 	sessionRestored bool                       // a saved session was restored at startup (TUI renders a recap)
@@ -578,7 +613,7 @@ type app struct {
 	offlineNow atomic.Bool
 }
 
-func build(workspace, sessionName string, overrides []string, reader *bufio.Reader) (*app, func(), error) {
+func build(workspace, sessionName string, overrides []string, readOnly bool, reader *bufio.Reader) (*app, func(), error) {
 	cfg, err := config.Load(workspace)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load config: %w", err)
@@ -626,7 +661,7 @@ func build(workspace, sessionName string, overrides []string, reader *bufio.Read
 		usageStore, _ = usage.Open("")
 	}
 
-	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader}
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader, readOnly: readOnly, planMode: readOnly}
 	a.stdin = newStdinOwner(reader)                     // sole reader of `reader`'s actual bytes from here on (see stdinOwner)
 	a.approver = &stdinApprover{stdin: a.stdin, app: a} // set after: it references the app for session-allow
 	// Cancel background jobs (killing external-agent subprocesses too), shut down
@@ -643,11 +678,13 @@ func build(workspace, sessionName string, overrides []string, reader *bufio.Read
 		a.fileTracer = ft
 		cleanup = func() { a.shutdownJobs(); a.closeMCP(); a.waitRiskSaves(); _ = ft.Close() }
 	}
-	a.migrateLegacyState() // move an older install's state out of the workspace, once
-	a.loadFacts()          // learned project facts → folded into the prompt by wire()
-	a.loadGoal()           // standing goal (if any) → resumable across restarts
-	a.loadPromptHist()     // ↑ recall spans past runs (persisted per workspace)
-	a.loadSnippets()       // /snip prompt templates (persisted globally)
+	if !readOnly {
+		a.migrateLegacyState() // move an older install's state out of the workspace, once
+	}
+	a.loadFacts()      // learned project facts → folded into the prompt by wire()
+	a.loadGoal()       // standing goal (if any) → resumable across restarts
+	a.loadPromptHist() // ↑ recall spans past runs (persisted per workspace)
+	a.loadSnippets()   // /snip prompt templates (persisted globally)
 	if err := a.wire(); err != nil {
 		return nil, nil, err
 	}
@@ -2902,7 +2939,7 @@ func (a *app) hostSandboxRoot() string {
 // hand an unconfined sub-agent the run tool. The network follows offline mode
 // either way, since that's a whole-process setting, not per-jail.
 func (a *app) sandboxWrapperFor(root string) tool.CmdWrapper {
-	mode := a.cfg.Sandbox
+	mode, spec := a.sandboxSpec(root)
 	if mode == "" || mode == sandbox.Off {
 		return nil
 	}
@@ -2910,18 +2947,47 @@ func (a *app) sandboxWrapperFor(root string) tool.CmdWrapper {
 		slog.Warn("sandbox not available on this platform — running commands unconfined", "mode", mode)
 		return nil
 	}
-	roots := []string{root}
+	return func(name string, args []string) (string, []string) {
+		n, out, _ := sandbox.Wrap(mode, spec, name, args)
+		return n, out
+	}
+}
+
+// sandboxSpec is the sandbox mode and confinement for commands run in root. In
+// read-only mode the sandbox is on whatever the setting, root stays read-only
+// like the rest of the disk, and there is no network.
+func (a *app) sandboxSpec(root string) (string, sandbox.Spec) {
+	mode := a.cfg.Sandbox
+	if a.readOnly && (mode == "" || mode == sandbox.Off) {
+		mode = sandbox.Auto
+	}
+	var roots []string
+	if !a.readOnly {
+		roots = append(roots, root)
+	}
 	// Build tooling writes caches outside the workspace (go → ~/.cache/go-build,
 	// linters, etc.). Allow the user cache dir so `go build` / `go test` work
 	// under the sandbox; it's tool scratch, not user data.
 	if cache, err := os.UserCacheDir(); err == nil {
 		roots = append(roots, cache)
 	}
-	spec := sandbox.Spec{WritableRoots: roots, AllowNetwork: !a.cfg.Offline}
-	return func(name string, args []string) (string, []string) {
-		n, out, _ := sandbox.Wrap(mode, spec, name, args)
-		return n, out
+	return mode, sandbox.Spec{WritableRoots: roots, AllowNetwork: !a.cfg.Offline && !a.readOnly}
+}
+
+// readOnlyRun reports whether read-only mode can let commands run: only inside
+// a sandbox that keeps them from writing the workspace. why says what stops it.
+func (a *app) readOnlyRun() (ok bool, why string) {
+	root := a.hostSandboxRoot()
+	mode, spec := a.sandboxSpec(root)
+	if !sandbox.Available(mode) {
+		return false, "this host has no OS sandbox for them (sandbox: " + mode + ")"
 	}
+	for _, p := range []string{a.cfg.Workspace, root} {
+		if sandbox.Reaches(mode, spec, p) {
+			return false, p + " is in or holds a temp or cache dir, which sandboxed commands may write"
+		}
+	}
+	return true, ""
 }
 
 func (a *app) wire() error {
@@ -3007,10 +3073,16 @@ func (a *app) wire() error {
 	a.ag.SetHistory(prior)
 	a.ag.SeedHistoryGen(priorGen)
 	a.ag.SeedFrontTrim(priorTrim)
-	a.ag.SetPlanMode(a.planMode)     // carry the mode into the rebuilt agent
+	a.ag.SetPlanMode(a.planMode) // carry the mode into the rebuilt agent
+	if a.readOnly {
+		run, _ := a.readOnlyRun()
+		a.ag.SetReadOnly(run)
+	}
 	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
-	a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
+	if !a.readOnly {                 // a throwaway session leaves nothing behind
+		a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
+	}
 	a.ensureShadow()                                           // once per process, here on the wiring goroutine
 	a.ag.SetRiskObserver(a.riskObserver(pol, a.cfg.Run.Shell)) // shadow-mode risk scoring: logs, blocks nothing
 	a.ag.SetContextWindow(a.activeLLM().ContextWindow)         // so a single long task can watch its OWN growing trail mid-run
@@ -3304,6 +3376,9 @@ func humanizeAgo(t time.Time) string {
 }
 
 func (a *app) saveSession() {
+	if a.readOnly {
+		return // a throwaway session
+	}
 	sf := sessionFile{History: a.ag.History(), Workdir: a.workdirRel()}
 	if data, err := json.Marshal(sf); err == nil {
 		_ = writeShared(a.sessionPath(), data, 0o644)
@@ -4165,7 +4240,9 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	}
 	a.lastRealContext = tr.PromptTokens // snapshot the real fullness before reflectAndStore (below) can clobber the shared client's own Context()
 	a.recordRun(tr)
-	a.finishGoal(tr)
+	if !a.readOnly { // a read-only task isn't working on the standing goal
+		a.finishGoal(tr)
+	}
 	a.recordUsage(dur)
 	a.saveSession() // the conversation is decided now — save it before the slower,
 	// best-effort reflection pass below, which the process could be interrupted
@@ -4180,7 +4257,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	// that whole lesson kind unreachable (internal/reflect takes a deliberately
 	// narrower pass on those). Cancellation stays excluded — esc means the user
 	// wants control back, not two more model calls.
-	if !tr.Cancelled {
+	if !tr.Cancelled && !a.readOnly { // nothing learned is kept from a throwaway session
 		reflStart := time.Now()
 		learned := a.reflectAndStore(ctx, tr)
 		// Reflection is itself a real LLM call (or two, on a dedicated client) —

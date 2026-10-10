@@ -89,6 +89,10 @@ type Agent struct {
 	history    []llm.Message
 	maxHistory int
 	planMode   bool
+	// readOnly is plan mode that answers the task instead of proposing a plan;
+	// readOnlyRun lets the run tool through, its commands confined to a sandbox
+	// where nothing they could change is writable.
+	readOnly, readOnlyRun bool
 	// notes wait for the next task's user message (see AddNote), so an update
 	// to what the model knows never rewrites the prefix the server has cached.
 	// sentNotes is how many of them the running task's message carries: they
@@ -299,6 +303,12 @@ func (a *Agent) turnNote(hist []llm.Message) string {
 	a.sentNotes = len(parts)
 	a.notesMu.Unlock()
 	switch {
+	case a.readOnly:
+		if a.readOnlyRun {
+			parts = append(parts, readOnlyDirective+readOnlyRunNote)
+		} else {
+			parts = append(parts, readOnlyDirective+readOnlyNoRunNote)
+		}
 	case a.planMode:
 		// Every task while it is on, not once: the directive must survive the
 		// history trimming its first mention away.
@@ -500,6 +510,17 @@ func (a *Agent) HasRiskObserver() bool { return a.riskObserver != nil }
 // read-only tools and proposes a plan; mutating tool calls are refused, so it
 // can't change anything until switched back to auto.
 func (a *Agent) SetPlanMode(on bool) { a.planMode = on }
+
+// SetReadOnly turns read-only mode on: plan mode's refusal of every call that
+// changes state, but the task is answered rather than planned. With run, the
+// run tool is let through: the caller has confined its commands to an OS
+// sandbox where the workspace is read-only.
+func (a *Agent) SetReadOnly(run bool) {
+	a.planMode, a.readOnly, a.readOnlyRun = true, true, run
+}
+
+// ReadOnly reports whether read-only mode is on, and whether it lets run through.
+func (a *Agent) ReadOnly() (on, run bool) { return a.readOnly, a.readOnlyRun }
 
 // PlanMode reports whether plan mode is on.
 func (a *Agent) PlanMode() bool { return a.planMode }
@@ -1063,6 +1084,14 @@ func SubAgentSystemPrompt() string {
 // planDirective rides in each plan-mode task's agent-note (see turnNote). Kept
 // short — it ships in every plan-mode request to a small local model.
 const planDirective = `PLAN MODE is ON. Do NOT change anything. You may investigate with read-only tools (file.read, file.list, web, calc), then present a concise, numbered plan of what you WOULD do, and stop with no tool call. Any tool that writes files, runs commands, or changes git is blocked right now.`
+
+// readOnlyDirective is plan mode's for a task answered without changing
+// anything — a review, a question about the code.
+const readOnlyDirective = `READ-ONLY MODE: do NOT change anything. Investigate with read-only tools (file.read, file.list, git's read actions, web, calc), then answer the task and stop with no tool call. Anything that writes files or changes git is blocked.`
+
+const readOnlyRunNote = ` run.shell works: commands run in a sandbox where the workspace and the rest of the disk are read-only, only temp dirs are writable, and there is no network.`
+
+const readOnlyNoRunNote = ` Commands (run) are blocked too.`
 
 // planOffNote is said once, on the first task after plan mode is turned off —
 // the ON directive is still in an earlier message of the history.
@@ -2427,8 +2456,11 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool)
 
 	// Plan mode backstop: refuse mutating calls even if the model ignores the
 	// directive, so a weak model can't change anything while planning.
-	if a.planMode && a.reg.Mutates(c.Name, action) {
+	if a.planMode && a.reg.Mutates(c.Name, action) && !(a.readOnlyRun && c.Name == "run") {
 		msg := fmt.Sprintf("plan mode is ON — %s.%s was NOT run. Don't retry it; list it as a step in your plan, then finish.", c.Name, action)
+		if a.readOnly {
+			msg = fmt.Sprintf("read-only mode — %s.%s was NOT run: nothing may be changed. Don't retry it; say in your answer what you would change.", c.Name, action)
+		}
 		a.emit("observation", map[string]any{"tool": c.Name, "action": action, "is_error": true, "content": msg})
 		return llm.ToolResult(c.ID, c.Name, msg), true
 	}

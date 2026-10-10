@@ -10,6 +10,7 @@ package sandbox
 
 import (
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"strings"
 )
@@ -27,6 +28,49 @@ const (
 type Spec struct {
 	WritableRoots []string
 	AllowNetwork  bool
+}
+
+// scratchDirs are writable under every spec, beside its roots: the temp dirs
+// commands expect to write to.
+var scratchDirs = map[string][]string{
+	Seatbelt: {"/tmp", "/private/tmp", "/private/var/folders", "/private/var/tmp"},
+	Landlock: {"/tmp", "/var/tmp", "/dev/shm"},
+}
+
+// Reaches reports whether a command confined by spec could write anywhere in
+// path's tree: through a writable dir holding path, or one inside it. A mode
+// this host can't confine reaches everything.
+func Reaches(mode string, spec Spec, path string) bool {
+	return !Available(mode) || reaches(resolveMode(mode), spec, path)
+}
+
+func reaches(mode string, spec Spec, path string) bool {
+	p := resolved(path)
+	for _, d := range append(append([]string(nil), scratchDirs[mode]...), spec.WritableRoots...) {
+		if d := resolved(d); within(p, d) || within(d, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolved is path made absolute, its symlinks followed (/tmp is /private/tmp
+// on macOS) as far as it exists.
+func resolved(path string) string {
+	p, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
+}
+
+// within reports whether p is dir or inside it.
+func within(p, dir string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // resolveMode maps "auto" to the current platform's mechanism; other modes pass
@@ -68,7 +112,7 @@ func SeatbeltProfile(writableRoots []string, allowNetwork bool) string {
 	b.WriteString("(deny file-write*)\n")
 	b.WriteString("(allow file-write*\n")
 	// Standard macOS temp/scratch locations, then the caller's workspace roots.
-	roots := append([]string{"/tmp", "/private/tmp", "/private/var/folders", "/private/var/tmp"}, writableRoots...)
+	roots := append(append([]string(nil), scratchDirs[Seatbelt]...), writableRoots...)
 	for _, r := range roots {
 		fmt.Fprintf(&b, "    (subpath %s)\n", sbplString(r))
 	}

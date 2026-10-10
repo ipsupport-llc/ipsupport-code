@@ -65,7 +65,7 @@ func MaybeExecConfined() {
 	// write only inside the writable roots (plus temp scratch and dev sinks).
 	rw := []landlock.Rule{}
 	var rwDirs []string
-	for _, d := range append([]string{"/tmp", "/var/tmp", "/dev/shm"}, spec.WritableRoots...) {
+	for _, d := range append(append([]string(nil), scratchDirs[Landlock]...), spec.WritableRoots...) {
 		if fi, err := os.Stat(d); err == nil && fi.IsDir() {
 			rwDirs = append(rwDirs, d)
 		}

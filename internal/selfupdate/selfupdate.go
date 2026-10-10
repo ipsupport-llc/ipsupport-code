@@ -272,15 +272,25 @@ func extractZip(data []byte, name string) ([]byte, error) {
 // file in its Cellar behind its back leaves brew believing in a version that
 // is no longer there.
 func BrewUpgrade() string {
-	exe, err := executable()
+	exe, err := os.Executable()
 	if err != nil {
 		return ""
 	}
-	return brewUpgrade(exe)
+	return brewUpgradeFor(exe)
 }
 
-func brewUpgrade(exe string) string {
-	if strings.Contains(filepath.ToSlash(exe), "/Cellar/ipsupport-code/") {
+// brewUpgradeFor resolves exe's links (brew's bin/ and opt/ links, ipco)
+// into the Cellar. A link that can't be resolved still counts when it sits
+// under a Homebrew prefix that only brew writes to: missing it would replace
+// brew's link with a plain file.
+func brewUpgradeFor(exe string) string {
+	path := exe
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		path = resolved
+	}
+	p := filepath.ToSlash(path)
+	if strings.Contains(p, "/Cellar/ipsupport-code/") ||
+		strings.HasPrefix(p, "/opt/homebrew/") || strings.Contains(p, "/.linuxbrew/") {
 		return "brew upgrade ipsupport-code"
 	}
 	return ""

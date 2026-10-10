@@ -271,13 +271,39 @@ func TestReplaceInUseMovesTheOldOneAside(t *testing.T) {
 // A binary Homebrew installed is updated by brew, not by replacing it.
 func TestBrewInstallIsUpdatedByBrew(t *testing.T) {
 	for _, c := range []struct{ exe, want string }{
-		{"/opt/homebrew/Cellar/ipsupport-code/0.62.21/bin/ipsupport-code", "brew upgrade ipsupport-code"},
+		{"/opt/homebrew/Cellar/ipsupport-code/0.62.21/bin/ipsupport-code", "brew upgrade ipsupport-code"}, // Apple Silicon
+		{"/usr/local/Cellar/ipsupport-code/0.62.21/bin/ipsupport-code", "brew upgrade ipsupport-code"},    // Intel
 		{"/home/linuxbrew/.linuxbrew/Cellar/ipsupport-code/0.62.21/bin/ipsupport-code", "brew upgrade ipsupport-code"},
-		{"/usr/local/bin/ipsupport-code", ""},
+		{"/opt/homebrew/bin/ipco", "brew upgrade ipsupport-code"}, // a brew link that didn't resolve
+		{"/usr/local/bin/ipsupport-code", ""},                     // a plain file the installer put there
 		{"/home/me/.local/bin/ipsupport-code", ""},
 	} {
-		if got := brewUpgrade(c.exe); got != c.want {
-			t.Errorf("brewUpgrade(%q) = %q, want %q", c.exe, got, c.want)
+		if got := brewUpgradeFor(c.exe); got != c.want {
+			t.Errorf("brewUpgradeFor(%q) = %q, want %q", c.exe, got, c.want)
+		}
+	}
+}
+
+// Through brew's links — bin/ipco → Cellar, opt/ → Cellar — the install is
+// still brew's.
+func TestBrewInstallIsFoundThroughItsLinks(t *testing.T) {
+	root := t.TempDir()
+	cellar := filepath.Join(root, "Cellar", "ipsupport-code", "0.62.22", "bin")
+	if err := os.MkdirAll(cellar, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	bin := filepath.Join(cellar, "ipsupport-code")
+	os.WriteFile(bin, []byte("x"), 0o755)
+	if err := os.Symlink("ipsupport-code", filepath.Join(cellar, "ipco")); err != nil {
+		t.Skipf("no symlinks here: %v", err) // Windows without the privilege
+	}
+	os.MkdirAll(filepath.Join(root, "bin"), 0o755)
+	os.Symlink(filepath.Join(cellar, "ipco"), filepath.Join(root, "bin", "ipco"))
+	os.MkdirAll(filepath.Join(root, "opt"), 0o755)
+	os.Symlink(filepath.Join(root, "Cellar", "ipsupport-code", "0.62.22"), filepath.Join(root, "opt", "ipsupport-code"))
+	for _, p := range []string{filepath.Join(root, "bin", "ipco"), filepath.Join(root, "opt", "ipsupport-code", "bin", "ipsupport-code")} {
+		if got := brewUpgradeFor(p); got == "" {
+			t.Errorf("%s: not recognised as a brew install", p)
 		}
 	}
 }

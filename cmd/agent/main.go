@@ -420,13 +420,15 @@ func (a *app) freshnessNotice(ctx context.Context) string {
 	if channel == "" {
 		channel = selfupdate.Stable
 	}
+	how := "run `update`"
+	if cmd := selfupdate.BrewUpgrade(); cmd != "" {
+		// The formula follows stable releases: a saved nightly channel would
+		// nag about builds brew never installs.
+		how, channel = "run `"+cmd+"`", selfupdate.Stable
+	}
 	rel, err := selfupdate.Latest(ctx, selfupdate.Repo, channel, http.DefaultClient)
 	if err != nil || rel.Version == "" || rel.Version == version {
 		return ""
-	}
-	how := "run `update`"
-	if cmd := selfupdate.BrewUpgrade(); cmd != "" {
-		how = "run `" + cmd + "`"
 	}
 	return fmt.Sprintf("a newer %s build is available: %s (you're on %s) — %s", channel, rel.Version, version, how)
 }

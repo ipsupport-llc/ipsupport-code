@@ -173,6 +173,23 @@ func TestTheEndOfALongPartIsRead(t *testing.T) {
 	}
 }
 
+// A command longer than a value's cap is scored by its head and tail; what is
+// in its middle is unread, and the assessment says so.
+func TestALongCommandIsIncomplete(t *testing.T) {
+	m := NewTuned(DefaultOrNil(), nil)
+	line := "python3 -c '" + strings.Repeat("print(1);", 25) + `import shutil; shutil.rmtree("src/legacy");` + strings.Repeat("print(1);", 40) + "'"
+	if a := m.Assess("run", "shell", shellCall(line)); !a.Incomplete {
+		t.Fatal("a 600-character command scored as if read whole")
+	}
+	short := "python3 -c 'import shutil; print(shutil.which(\"go\"))'"
+	if a := m.Assess("run", "shell", shellCall(short)); a.Incomplete {
+		t.Fatal("a short command marked incomplete")
+	}
+	if a := m.Assess("file", "write", map[string]any{"path": "a.txt", "content": strings.Repeat("x", 5000)}); a.Incomplete {
+		t.Fatal("a long file write marked incomplete: its content runs nothing")
+	}
+}
+
 // More parts than maxParts: not silently cut — the assessment says it is
 // incomplete.
 func TestTooManyPartsIsIncomplete(t *testing.T) {

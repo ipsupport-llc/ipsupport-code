@@ -123,13 +123,24 @@ def head_tail(s, cap):
     return s[:h] + " … " + s[len(s) - (cap - 3 - h):]
 
 
+def go_sprint(v):
+    """fmt.Sprint for a JSON value: true not True, 5 not 5.0, <nil> not None."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if v is None:
+        return "<nil>"
+    if isinstance(v, float) and v.is_integer() and abs(v) < 1e21:
+        return str(int(v))
+    return str(v)
+
+
 def call_text(tool, action, params):
     """Mirrors CallText: sorted params, values and the whole capped head+tail,
     trimmed as Go's TrimSpace trims."""
     parts = [tool] + ([action] if action else [])
     s = " ".join(parts)
     for k in sorted(params):
-        v = shellsplit.trim(str(params[k]))
+        v = shellsplit.trim(go_sprint(params[k]))
         if not v:
             continue
         s += " " + k + "=" + head_tail(v, MAX_VALUE)
@@ -159,6 +170,8 @@ LOCALIZE_VECTORS = [
     ("cat é/a", "é", "cat é/a"),
     ('rm "/app"x', "/app", 'rm "/app"x'),
     ('echo "a\\"" /app/b', "/app", 'echo "a\\"" ./b'),
+    ("rm \"/app\"' backup/data'", "/app", "rm \"/app\"' backup/data'"),
+    ('type "C:\\app\\" "C:\\app backup\\data"', "C:\\app", 'type ".\\" "C:\\app backup\\data"'),
 ]
 
 
@@ -175,7 +188,8 @@ def localize(text, workspace):
     if ws in ("", ".", "~") or len(ws) < 2:
         return text
     hay, needle = text, ws
-    if "\\" in ws or (len(ws) >= 2 and ws[1] == ":"):
+    win = "\\" in ws or (len(ws) >= 2 and ws[1] == ":")
+    if win:
         hay, needle = _fold_windows(text), _fold_windows(ws)
     out, quote, i = [], "", 0
     while i < len(text):
@@ -184,13 +198,13 @@ def localize(text, workspace):
             start_ok = i == 0 or text[i - 1] not in _PATH_CHARS
             end_ok = (end == len(text) or text[end] in "/\\" or
                       (not quote and text[end] in " \t\n;&|)<>") or
-                      (quote and text[end] == quote and (end + 1 == len(text) or text[end + 1] not in _PATH_CHARS)))
+                      (quote and text[end] == quote and (end + 1 == len(text) or (text[end + 1] not in _PATH_CHARS and text[end + 1] not in "'\""))))
             if start_ok and end_ok:
                 out.append(".")
                 i = end
                 continue
         c = text[i]
-        if c == "\\" and quote != "'" and i + 1 < len(text):
+        if c == "\\" and not win and quote != "'" and i + 1 < len(text):
             out.append(c)
             out.append(text[i + 1])
             i += 2

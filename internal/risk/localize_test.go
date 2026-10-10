@@ -20,8 +20,10 @@ var localizeVectors = []struct{ text, ws, want string }{
 	{`cd "/app" && ls`, "/app", `cd "." && ls`},
 	{`type c:/USERS/dev/project/a.txt`, `C:\Users\dev\project`, `type ./a.txt`}, // Windows: case and / don't matter
 	{"cat é/a", "é", "cat é/a"},
-	{`rm "/app"x`, "/app", `rm "/app"x`},            // the word is /appx: outside
-	{`echo "a\"" /app/b`, "/app", `echo "a\"" ./b`}, // an escaped quote doesn't end the string                                                 // too short to be a workspace
+	{`rm "/app"x`, "/app", `rm "/app"x`},                                                // the word is /appx: outside
+	{`echo "a\"" /app/b`, "/app", `echo "a\"" ./b`},                                     // an escaped quote doesn't end the string
+	{`rm "/app"' backup/data'`, "/app", `rm "/app"' backup/data'`},                      // the word goes on past the quote
+	{`type "C:\app\" "C:\app backup\data"`, `C:\app`, `type ".\" "C:\app backup\data"`}, // on Windows \ escapes nothing
 }
 
 func TestLocalize(t *testing.T) {

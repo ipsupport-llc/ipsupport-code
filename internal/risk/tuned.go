@@ -12,6 +12,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
@@ -171,6 +172,10 @@ const maxParts = 256
 // The line is cut as written and each part then localized: localizing first
 // rewrote a heredoc's word and the cut swallowed what followed. Every part is
 // a copy: what Assess hands back must not change with the caller's map.
+//
+// incomplete: some of the line went unscored — more parts than maxParts, code
+// nested past what the cut reads, or a command or group longer than maxValue,
+// whose middle the text scored leaves out (CallText keeps head and tail).
 func (t *Tuned) parts(sc Scope, tool, action string, params map[string]any) (out []map[string]any, incomplete bool) {
 	with := func(c string, set bool) map[string]any {
 		p := make(map[string]any, len(params))
@@ -194,7 +199,9 @@ func (t *Tuned) parts(sc Scope, tool, action string, params map[string]any) (out
 	// empty and scored as such, not as the comment's words.
 	out = []map[string]any{with(parsed.Code, true)}
 	seen := map[string]bool{parsed.Code: true}
+	incomplete = parsed.Incomplete
 	for _, c := range append(append([]string{}, parsed.Groups...), parsed.Commands...) {
+		incomplete = incomplete || utf8.RuneCountInString(Localize(c, sc.Workspace)) > maxValue
 		if seen[c] {
 			continue
 		}
@@ -204,7 +211,7 @@ func (t *Tuned) parts(sc Scope, tool, action string, params map[string]any) (out
 		seen[c] = true
 		out = append(out, with(c, true))
 	}
-	return out, parsed.Incomplete
+	return out, incomplete
 }
 
 // Base is the underlying model — its labels, config and informational flags.

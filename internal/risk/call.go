@@ -101,7 +101,8 @@ type Assessment struct {
 	// recorded correction is retrained under the same rules.
 	Shell string
 	// Incomplete: not every part of the call was scored — more than maxParts
-	// commands, or code nested past the splitter's depth. A gate must not
+	// commands, code nested past what the splitter reads, or a command longer
+	// than maxValue, whose middle the scored text leaves out. A gate must not
 	// read the score as clearance.
 	Incomplete bool
 }

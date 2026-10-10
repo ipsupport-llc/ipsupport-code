@@ -38,14 +38,18 @@ def trim(s):
 
 
 MAX_DEPTH = 32  # mirrors maxDepth
+MAX_PARSES = 1024  # mirrors maxParses
 
 
-def parse(dialect, line, depth=0):
+def parse(dialect, line, depth=0, budget=None):
     """(commands, groups, code, incomplete) — see internal/shellsplit.Parse."""
-    if depth >= MAX_DEPTH:
+    if budget is None:
+        budget = [MAX_PARSES]
+    budget[0] -= 1
+    if depth >= MAX_DEPTH or budget[0] < 0:
         s = trim(line)
         return ([s] if s else []), [], trim(line), True
-    r = _Result(dialect, depth)
+    r = _Result(dialect, depth, budget)
     if dialect == POWERSHELL:
         _split_powershell(line, r)
     elif dialect == CMD:
@@ -53,7 +57,7 @@ def parse(dialect, line, depth=0):
     else:
         _split_sh(line, r)
     r.end_group()
-    c = r.code
+    c = "".join(r.code)
     if c.endswith(" ;"):
         c = c[:-2]
     return r.cmds + r.inner, r.groups + r.inner_g, trim(c), r.incomplete
@@ -71,17 +75,18 @@ _JOINS = {"|", "||", "&&", "|&"}
 
 
 class _Result:
-    def __init__(self, dialect=SH, depth=0):
+    def __init__(self, dialect=SH, depth=0, budget=None):
         self.d = dialect
         self.depth = depth
+        self.budget = budget if budget is not None else [MAX_PARSES]
         self.incomplete = False
         self.inner = []
         self.inner_g = []
         self.cmds = []
         self.groups = []
-        self.code = ""
+        self.code = []  # pieces, joined once: += on a str is quadratic
         self.group = []
-        self.gtext = ""
+        self.gtext = []
 
     def cut(self, b, op):
         s = trim(b.text())
@@ -89,29 +94,29 @@ class _Result:
             self.cmds.append(s)
             self.inner_code(s)
             if self.code:
-                self.code += " "
-            self.code += s
+                self.code.append(" ")
+            self.code.append(s)
             if self.group:
-                self.gtext += " "
-            self.gtext += s
+                self.gtext.append(" ")
+            self.gtext.append(s)
             self.group.append(s)
         if op and self.code:
-            self.code += " " + op
+            self.code.append(" " + op)
         if op in _JOINS:
             if self.group:
-                self.gtext += " " + op
+                self.gtext.append(" " + op)
         else:
             self.end_group()
         b.reset()
 
     def end_group(self):
         if len(self.group) > 1:
-            self.groups.append(trim(trim(self.gtext).rstrip("|&")))
+            self.groups.append(trim(trim("".join(self.gtext)).rstrip("|&")))
         self.group = []
-        self.gtext = ""
+        self.gtext = []
 
     def nest(self, nested, ngroups, dialect, code_):
-        c, g, _, inc = parse(dialect, code_, self.depth + 1)
+        c, g, _, inc = parse(dialect, code_, self.depth + 1, self.budget)
         nested += c
         ngroups += g
         self.incomplete = self.incomplete or inc
@@ -120,39 +125,49 @@ class _Result:
         """Mirrors innerCode: sh -c '…', pwsh -Command "…", cmd /c …, python -c '…', eval …"""
         if self.d == CMD:
             ws = _fields(cmd)
+            is_cmd = False
             for i, w in enumerate(ws):
-                if w.lower() in ("/c", "/k") and i > 0 and _go_path_base(ws[i - 1].replace("\\", "/")).lower() == "cmd":
+                if not is_cmd:
+                    is_cmd = _runner(w) == "cmd"
+                elif w.lower() in ("/c", "/k"):
                     self.nest(self.inner, self.inner_g, CMD, " ".join(ws[i + 1:]))
                     return
             return
         ws = _words(cmd)
-        at = _program_at(ws)
-        if at < 0:
-            return
-        prog, rest = ws[at], ws[at + 1:]
+        i = 0
+        while i < len(ws):
+            if _operator(ws[i]):
+                i += 2
+                continue
+            prog = _runner(ws[i])
+            if prog and self.hand_off(prog, ws[i + 1:]):
+                return
+            i += 1
+
+    def hand_off(self, prog, rest):
+        """Mirrors handOff."""
         if prog == "eval":
             self.nest(self.inner, self.inner_g, self.d, " ".join(rest))
-            return
-        if not (prog in _SHELLS or prog in ("pwsh", "powershell", "cmd") or prog in _INTERPRETERS):
-            return
+            return True
         for i, w in enumerate(rest):
             if i + 1 >= len(rest):
                 break
             body = rest[i + 1]
             if prog in _SHELLS and w.startswith("-") and not w.startswith("--") and "c" in w:
                 self.nest(self.inner, self.inner_g, SH, body)
-                return
+                return True
             if prog in ("pwsh", "powershell") and w.lower() in ("-c", "-command"):
                 self.nest(self.inner, self.inner_g, POWERSHELL, " ".join(rest[i + 1:]))
-                return
+                return True
             if prog == "cmd" and w.lower() in ("/c", "/k"):
                 self.nest(self.inner, self.inner_g, CMD, " ".join(rest[i + 1:]))
-                return
+                return True
             if prog in _INTERPRETERS and w in ("-c", "-e", "--eval"):
                 t = trim(body)
                 if t:
                     self.inner.append(t)
-                return
+                return True
+        return False
 
 
 class _Buf:
@@ -234,8 +249,6 @@ def _close_brace(rs, i):
 _SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "ssh", "su"}
 _INTERPRETERS = {"python", "python3", "python2", "perl", "ruby", "node", "php", "lua", "deno", "bun",
                  "osascript", "tclsh", "Rscript"}
-_WRAPPERS = {"sudo", "env", "exec", "nohup", "time", "command", "doas",
-             "timeout", "nice", "ionice", "stdbuf", "setsid", "xargs", "builtin"}
 
 
 def _fields(s):
@@ -254,7 +267,9 @@ def _fields(s):
 
 
 def _go_path_base(f):
-    """path.Base for a non-empty field."""
+    """path.Base."""
+    if f == "":
+        return "."
     f = f.rstrip("/")
     if f == "":
         return "/"
@@ -299,41 +314,43 @@ def _words(cmd):
     return out
 
 
-def _redirection(w):
-    i = 0
-    while i < len(w) and "0" <= w[i] <= "9":
-        i += 1
-    return 0 < i < len(w) and w[i] in "<>"
+def _runner(w):
+    """Mirrors runner: the interpreter a word names, by base name, or ""."""
+    b = _go_path_base(w.replace("\\", "/"))
+    l = b.lower()
+    if l.endswith(".exe"):
+        l = l[:-4]
+    if l in ("pwsh", "powershell", "cmd"):
+        return l
+    if b == "eval" or b in _SHELLS or b in _INTERPRETERS:
+        return b
+    return ""
 
 
-def _duration(w):
-    t = w.rstrip("smhd")
-    return t != "" and all(("0" <= c <= "9") or c == "." for c in t)
+def _operator(w):
+    """Mirrors operator: a redirection operator alone, its operand the next word."""
+    return any(c in "<>" for c in w) and w.strip("0123456789&<>-|") == ""
 
 
-def _program_at(ws):
+_DATA, _SCRIPT, _CODE = 0, 1, 2
+
+
+def _feeds(cmd):
+    """Mirrors feeds: what a heredoc's command does with it."""
+    f = _DATA
+    ws = _words(cmd)
     i = 0
     while i < len(ws):
-        w = ws[i]
-        if w in ("<<", "<<-", "<", ">", ">>", "2>", "&>"):
+        if _operator(ws[i]):
             i += 2
             continue
-        if w.startswith("<") or w.startswith(">") or _redirection(w) or w.startswith("-") or "=" in w or _duration(w):
-            i += 1
-            continue
-        base = _go_path_base(w)
-        if base in _WRAPPERS:
-            i += 1
-            continue
-        ws[i] = base
-        return i
-    return -1
-
-
-def _program(cmd):
-    ws = _words(cmd)
-    at = _program_at(ws)
-    return ws[at] if at >= 0 else ""
+        w = _runner(ws[i])
+        if w in _SHELLS:
+            return _SCRIPT
+        if w in _INTERPRETERS:
+            f = _CODE
+        i += 1
+    return f
 
 
 def _split_sh(line, out):
@@ -406,25 +423,25 @@ def _split_sh(line, out):
             b.write_str(rs[i:nxt])
             i = nxt - 1
         elif r == "\n":
-            progs = {}
+            fed = {}
             if heredocs:
-                progs[len(out.cmds)] = _program(b.text())
+                fed[len(out.cmds)] = _feeds(b.text())
             cut(";")
             for h in heredocs:
-                if h["cmd"] in progs:
-                    prog = progs[h["cmd"]]
+                if h["cmd"] in fed:
+                    f = fed[h["cmd"]]
                 elif h["cmd"] < len(out.cmds):
-                    prog = progs[h["cmd"]] = _program(out.cmds[h["cmd"]])
+                    f = fed[h["cmd"]] = _feeds(out.cmds[h["cmd"]])
                 else:
-                    prog = ""
+                    f = _DATA
                 start = i + 1
                 end, nxt = _heredoc_body(rs, start, h)
                 body = rs[start:end]
                 if not h["quoted"]:
                     _substitutions(body, out, nested, ngroups)
-                if prog in _SHELLS:
+                if f == _SCRIPT:
                     out.nest(nested, ngroups, SH, body)
-                elif prog in _INTERPRETERS:
+                elif f == _CODE:
                     s = trim(body)
                     if s:
                         nested.append(s)
@@ -493,6 +510,9 @@ def _read_heredoc(rs, i):
             h["quoted"] = True
             i += 1
             while i < len(rs) and rs[i] != '"':
+                if rs[i] == "\\" and i + 1 < len(rs) and rs[i + 1] == "\n":
+                    i += 2
+                    continue
                 if rs[i] == "\\" and i + 1 < len(rs) and rs[i + 1] in "\"\\$`":
                     i += 1
                 w.append(rs[i])
@@ -517,7 +537,7 @@ def _heredoc_body(rs, i, h):
     while i < len(rs):
         e = _index_from(rs, i, "\n")
         l = rs[i:e]
-        while not h["quoted"] and l.endswith("\\") and e < len(rs):
+        while not h["quoted"] and (len(l) - len(l.rstrip("\\"))) % 2 == 1 and e < len(rs):
             n = _index_from(rs, e + 1, "\n")
             l = l[:-1] + rs[e + 1:n]
             e = n
@@ -705,15 +725,15 @@ def check_golden(lines=(), path=GOLDEN, extra=()):
         known.update(_load(pathlib.Path(p)))
     bad = []
     for g in known.values():
-        c, gr, co, _ = parse(g["dialect"], g["line"])
-        if c != g["parts"] or gr != g.get("groups", []) or co != g["code"]:
-            bad.append((g, {"parts": c, "groups": gr, "code": co}))
+        c, gr, co, inc = parse(g["dialect"], g["line"])
+        if c != g["parts"] or gr != g.get("groups", []) or co != g["code"] or inc != g.get("incomplete", False):
+            bad.append((g, {"parts": c, "groups": gr, "code": co, "incomplete": inc}))
     for d, line in lines:
         if (d, line) in known:
             continue
         s = trim(line)
-        c, gr, co, _ = parse(d, line)
-        if c != [s] or gr or co != s:
+        c, gr, co, inc = parse(d, line)
+        if c != [s] or gr or co != s or inc:
             bad.append(({"dialect": d, "line": line, "parts": "[not in a golden file: trivial in Go]", "code": ""},
                         {"parts": c, "groups": gr, "code": co}))
     if bad:

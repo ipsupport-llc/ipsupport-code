@@ -1923,11 +1923,14 @@ func (m *tuiModel) startUpdate(arg string) tea.Cmd {
 	}
 	arg = strings.TrimLeft(arg, "-") // --nightly, as the CLI's update takes it
 	if arg == selfupdate.Stable || arg == selfupdate.Nightly {
-		channel = arg
-		if err := config.SaveChannel(channel); err != nil {
-			m.push(cErr.Render("  channel not saved (this update still uses " + channel + "): " + err.Error()))
-		} else {
-			m.app.cfg.Channel = channel
+		if arg != channel {
+			channel = arg
+			if err := config.SaveChannel(channel); err != nil {
+				m.push(cErr.Render("  channel not saved (this update still uses " + channel + "): " + err.Error()))
+			} else {
+				m.app.cfg.Channel = channel
+				m.push(cDim.Render("  channel set to " + channel))
+			}
 		}
 	} else if arg != "" {
 		m.push(cDim.Render("usage: /update [stable|nightly]"))

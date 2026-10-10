@@ -44,10 +44,7 @@ func CallText(tool, action string, params map[string]any) string {
 		if v == "" {
 			continue
 		}
-		r := []rune(v)
-		if len(r) > maxValue {
-			r = r[:maxValue]
-		}
+		r := headTail([]rune(v), maxValue)
 		b = append(b, ' ')
 		b = append(b, []rune(k)...)
 		b = append(b, '=')
@@ -56,10 +53,20 @@ func CallText(tool, action string, params map[string]any) string {
 			break
 		}
 	}
-	if len(b) > maxText {
-		b = b[:maxText]
+	return string(headTail(b, maxText))
+}
+
+// headTail keeps the first and last halves of what is too long, joined by
+// " … ": a cap that kept only the head let a long harmless start hide what
+// came last (`sh -c 'echo <400 chars>; rm -rf x'`).
+func headTail(r []rune, max int) []rune {
+	if len(r) <= max {
+		return r
 	}
-	return string(b)
+	h := (max - 3) / 2
+	out := append([]rune{}, r[:h]...)
+	out = append(out, []rune(" … ")...)
+	return append(out, r[len(r)-(max-3-h):]...)
 }
 
 // LabelSafe is the label that means "none of the risky ones". It is scored like
@@ -82,6 +89,21 @@ type Assessment struct {
 	Top      string             // the label that produced Risk ("" if the model has only "safe")
 	BaseRisk float32            // Risk as the base model alone put it
 	Scores   map[string]float32 // every label the model carries, as the base model scored it
+	// Params is the part of the call that produced Risk: the call's own
+	// parameters, or — for a shell line of several commands — the call with
+	// "command" set to the one that scored highest. A correction teaches
+	// that part, the one the score was about.
+	Params map[string]any
+	// PartScores are that part's own label scores: a correction names the
+	// labels that fired on the text it teaches, not ones another part raised.
+	PartScores map[string]float32
+	// Shell is the dialect a shell line was cut by ("" for other calls), so a
+	// recorded correction is retrained under the same rules.
+	Shell string
+	// Incomplete: not every part of the call was scored — more than maxParts
+	// commands, or code nested past the splitter's depth. A gate must not
+	// read the score as clearance.
+	Incomplete bool
 }
 
 // Assess scores one tool call.

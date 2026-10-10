@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
+	"github.com/ipsupport-llc/ipsupport-code/internal/shellsplit"
 )
 
 // EnvRiskOff turns shadow scoring off for a run. Shadow mode blocks nothing, so
@@ -56,6 +58,19 @@ func (a *app) ensureShadow() {
 	a.shadow = risk.NewShadow(risk.NewTuned(base, d))
 }
 
+// shellDialect is the shell run.shell commands are written for: sh off
+// Windows; on Windows PowerShell, or cmd.exe when run.shell is exactly "cmd"
+// — the same test tool.Shell runs commands by, or the two would disagree.
+func shellDialect(goos, shell string) shellsplit.Dialect {
+	switch {
+	case goos != "windows":
+		return shellsplit.Sh
+	case shell == "cmd":
+		return shellsplit.Cmd
+	}
+	return shellsplit.PowerShell
+}
+
 // riskObserver returns the shadow-mode hook for an agent, scoring against the
 // policy engine THAT agent runs under. Every agent gets its own: a sub-agent
 // has its own workspace and its own policy, and — the part that was actually
@@ -64,13 +79,17 @@ func (a *app) ensureShadow() {
 // sub-agent's file write recorded a correction about the spawn, with the
 // spawn's parameters. Wrong call, wrong label, written to the feedback log that
 // later fine-tunes the base.
-func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
+func (a *app) riskObserver(pol *policy.Engine, shell string) func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
 	sh := a.shadow
 	if sh == nil {
 		return nil
 	}
+	// shell is the run.shell this agent's tool registry got, passed in rather
+	// than read from a.cfg: a delegate is built on its spawn's goroutine, and it
+	// keeps the shell it runs in when the host's run.shell changes later.
+	sc := risk.Scope{Workspace: pol.Workdir(), Shell: shellDialect(runtime.GOOS, shell)}
 	return func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
-		as := sh.Observe(tool, action, params, policyVerdict(pol, tool, action, params))
+		as := sh.Observe(sc, tool, action, params, policyVerdict(pol, tool, action, params))
 		// Hand the score down to the approval prompt, which is where a human
 		// answers for this call and so the only place ground truth appears — and
 		// back up as a note, so the call's own line can carry it.

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
+	"github.com/ipsupport-llc/ipsupport-code/internal/shellsplit"
 )
 
 // Learning from real use, rather than from scripts/risk_dataset.jsonl.
@@ -144,15 +146,113 @@ func (m *Model) Fingerprint() [8]byte {
 	return fp
 }
 
+// Scope is where a call is made: the workspace whose paths are the project's
+// own, and the shell its run.shell commands are cut by. It belongs to the
+// observer of one agent — a delegate keeps the shell it was started with
+// when the host's run.shell changes.
+type Scope struct {
+	Workspace string
+	Shell     shellsplit.Dialect
+}
+
+// maxParts bounds what one call costs to score. Past it the rest is not
+// scored, and the assessment says so (Incomplete).
+const maxParts = 256
+
+// parts is what a call is scored as. A shell line is a program of several
+// commands, and scored as one text a long harmless tail dilutes a destructive
+// head: `rm -rf x && cat > report.md <<EOF …` came out at 0.07, `rm -rf x`
+// alone at 0.88. So the line's code (its commands and operators, without
+// heredoc bodies, here-strings or comments — data, not commands) is scored,
+// each group of commands joined by | && || (a pipeline's danger can be in the
+// joining: `curl … | sh`, whatever comes before it), and each command on its
+// own; the call's risk is the highest.
+//
+// The line is cut as written and each part then localized: localizing first
+// rewrote a heredoc's word and the cut swallowed what followed. Every part is
+// a copy: what Assess hands back must not change with the caller's map.
+func (t *Tuned) parts(sc Scope, tool, action string, params map[string]any) (out []map[string]any, incomplete bool) {
+	with := func(c string, set bool) map[string]any {
+		p := make(map[string]any, len(params))
+		for k, v := range params {
+			if s, ok := v.(string); ok {
+				v = LocalizePath(s, sc.Workspace)
+			}
+			p[k] = v
+		}
+		if set {
+			p["command"] = Localize(c, sc.Workspace)
+		}
+		return p
+	}
+	cmd, ok := params["command"].(string)
+	if tool != "run" || action != "shell" || !ok {
+		return []map[string]any{with("", false)}, false
+	}
+	parsed := shellsplit.Parse(sc.Shell, cmd)
+	// The whole, as code. A line that is all comment runs nothing: its code is
+	// empty and scored as such, not as the comment's words.
+	out = []map[string]any{with(parsed.Code, true)}
+	seen := map[string]bool{parsed.Code: true}
+	for _, c := range append(append([]string{}, parsed.Groups...), parsed.Commands...) {
+		if seen[c] {
+			continue
+		}
+		if len(out) == maxParts {
+			return out, true
+		}
+		seen[c] = true
+		out = append(out, with(c, true))
+	}
+	return out, parsed.Incomplete
+}
+
 // Base is the underlying model — its labels, config and informational flags.
 func (t *Tuned) Base() *Model { return t.base }
 
-// Assess scores a call through the base model plus the local corrections.
+// Assess scores a call through the base model plus the local corrections —
+// each of its parts (see parts), the call's risk being the highest. No
+// workspace, and sh: see AssessIn.
 func (t *Tuned) Assess(tool, action string, params map[string]any) Assessment {
+	return t.AssessIn(Scope{}, tool, action, params)
+}
+
+// AssessIn is Assess for a call made in sc: its shell cuts the line, and
+// paths into its workspace are read as the project's own (see Localize).
+func (t *Tuned) AssessIn(sc Scope, tool, action string, params map[string]any) Assessment {
 	if t == nil {
 		return Assessment{}
 	}
-	text := CallText(tool, action, params)
+	parts, incomplete := t.parts(sc, tool, action, params)
+	var out Assessment
+	for i, p := range parts {
+		a := t.assessText(CallText(tool, action, p))
+		a.Params, a.PartScores = p, a.Scores
+		if i == 0 {
+			out = a
+			out.Scores = maps.Clone(a.Scores) // pooled below; PartScores keeps the part's own
+			continue
+		}
+		for l, v := range a.Scores { // what the call does: the most any part does —
+			// and it is safe only as far as every part is
+			if (l == LabelSafe) == (v < out.Scores[l]) {
+				out.Scores[l] = v
+			}
+		}
+		out.BaseRisk = max(out.BaseRisk, a.BaseRisk)
+		if a.Risk > out.Risk {
+			out.Risk, out.Top, out.Params, out.PartScores = a.Risk, a.Top, p, a.PartScores
+		}
+	}
+	if tool == "run" && action == "shell" {
+		out.Shell = sc.Shell.String()
+	}
+	out.Incomplete = incomplete
+	return out
+}
+
+// assessText scores one rendered call.
+func (t *Tuned) assessText(text string) Assessment {
 	vec := Featurize(t.base.Cfg, text)
 	dim := int(t.base.Cfg.Dim)
 
@@ -203,6 +303,8 @@ type Correction struct {
 	// Risky is the human's verdict: true when they refused a call the model had
 	// not flagged, false when they approved one it had.
 	Risky bool
+	// Shell is the dialect the call's shell line was cut by (see Assessment).
+	Shell string
 	// Labels are the model's own labels being corrected. On a false alarm these
 	// are the ones that fired, which is exactly known. On a miss the fact of risk
 	// comes from the human but the KIND does not, so this carries the model's own
@@ -520,6 +622,7 @@ type FeedbackRow struct {
 	Action  string         `json:"action,omitempty"`
 	Params  map[string]any `json:"params,omitempty"`
 	Labels  []string       `json:"labels,omitempty"`
+	Shell   string         `json:"shell,omitempty"`  // sh, powershell or cmd: how the trainer cuts it
 	Verdict string         `json:"verdict"`          // "approved" or "refused"
 	Scored  []string       `json:"scored,omitempty"` // the labels the model put on it — its claim, not the answer
 	Source  string         `json:"source"`
@@ -533,7 +636,7 @@ func AppendFeedback(path string, c Correction) error {
 		verdict = "refused"
 	}
 	row := FeedbackRow{
-		Tool: c.Tool, Action: c.Action, Params: c.Params, Verdict: verdict, Scored: c.Labels,
+		Tool: c.Tool, Action: c.Action, Params: c.Params, Shell: c.Shell, Verdict: verdict, Scored: c.Labels,
 		Source: "approval", When: time.Now().UTC().Format(time.RFC3339),
 	}
 	data, err := json.Marshal(row)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
+	"github.com/ipsupport-llc/ipsupport-code/internal/shellsplit"
 )
 
 func busyPanel(t *testing.T) *tuiModel {
@@ -333,5 +334,22 @@ func TestAFailureIsNotPushedOutOfTheNote(t *testing.T) {
 	m.applyPendingConfig()
 	if p := panelText(m); !strings.Contains(p, "mylab not removed") {
 		t.Fatalf("the failure was pushed out of the note:\n%s", p)
+	}
+}
+
+// The scorer cuts by the shell run uses: cmd only for exactly "cmd", as
+// tool.Shell decides; anything else on Windows runs PowerShell.
+func TestTheScorerUsesTheShellRunUses(t *testing.T) {
+	for _, c := range []struct {
+		goos, shell string
+		want        shellsplit.Dialect
+	}{
+		{"linux", "cmd", shellsplit.Sh}, {"darwin", "", shellsplit.Sh},
+		{"windows", "", shellsplit.PowerShell}, {"windows", "pwsh", shellsplit.PowerShell},
+		{"windows", "cmd", shellsplit.Cmd}, {"windows", "CMD", shellsplit.PowerShell},
+	} {
+		if got := shellDialect(c.goos, c.shell); got != c.want {
+			t.Errorf("shellDialect(%q, %q) = %v, want %v", c.goos, c.shell, got, c.want)
+		}
 	}
 }

@@ -165,6 +165,10 @@ func (m *tuiModel) tuneNow(key, value string) {
 	e := stagedEdit{key: key, value: value}
 	if connectionBound[key] {
 		e.prov, e.model = m.app.providerName(), m.app.activeLLM().Model
+		if m.removalStaged(e.prov) { // saved after the removal, it would bring back a broken stub
+			m.push(cErr.Render("  " + e.prov + " is staged for removal — its settings can't change too"))
+			return
+		}
 	}
 	m.stage(e)
 	judgeToo := m.pushTuning()
@@ -353,21 +357,28 @@ func (m *tuiModel) stageCycle(key string) {
 }
 
 // applyStaged saves one staged edit once the task is over. It reports
-// whether the connection must be rebuilt for the change to take.
-func (m *tuiModel) applyStaged(e stagedEdit) (cmd tea.Cmd, rewire bool) {
+// whether the connection must be rebuilt for the change to take, and whether
+// it was saved.
+func (m *tuiModel) applyStaged(e stagedEdit) (cmd tea.Cmd, rewire, ok bool) {
 	a := m.app
-	fail := func(err error) { m.push(cErr.Render("  " + e.key + " not saved: " + err.Error())) }
+	ok = true
+	fail := func(err error) {
+		ok = false
+		m.push(cErr.Render("  " + e.key + " not saved: " + err.Error()))
+	}
 	switch e.key {
 	case "provider":
-		m.pushLines(a.setProvider(e.value))
-		return m.detectWindowCmd(), false
+		out := a.setProvider(e.value)
+		m.pushLines(out)
+		return m.detectWindowCmd(), false, len(out) > 0 && strings.HasPrefix(out[0], "→")
 	case "removeprovider":
-		if msg, err := a.removeProvider(e.prov); err != nil {
+		msg, err := a.removeProvider(e.prov)
+		if err != nil {
 			m.push(cErr.Render("  " + e.prov + " not removed: " + err.Error()))
 		} else {
 			m.push(cDim.Render("  " + msg))
 		}
-		return m.detectWindowCmd(), false
+		return m.detectWindowCmd(), false, err == nil
 	case "model":
 		if err := a.updateConnection(e.prov, func(l *config.LLM) {
 			if l.Model != e.value {
@@ -376,14 +387,14 @@ func (m *tuiModel) applyStaged(e stagedEdit) (cmd tea.Cmd, rewire bool) {
 			l.Model = e.value
 		}); err != nil {
 			fail(err)
-			return nil, true
+			return nil, true, ok
 		}
 		if e.prov == a.providerName() {
 			a.windowDetected = false
 			a.modelEpoch.Add(1)
 		}
 		m.push(cDim.Render("  model → " + e.value + " (" + e.prov + ")"))
-		return nil, true
+		return nil, true, ok
 	case "reasoning", "judge_reasoning":
 		k := e.prov + "/" + e.model
 		if e.key == "judge_reasoning" {
@@ -396,18 +407,18 @@ func (m *tuiModel) applyStaged(e stagedEdit) (cmd tea.Cmd, rewire bool) {
 		} else {
 			m.push(cDim.Render("  " + e.key + " → " + e.value + " (" + e.prov + " · " + e.model + ")"))
 		}
-		return nil, true
+		return nil, true, ok
 	case "loop_detection":
 		if err := a.updateConnection(e.prov, func(l *config.LLM) { l.DisableLoopDetection = e.value == "off" }); err != nil {
 			fail(err)
 		}
-		return nil, true
+		return nil, true, ok
 	case "judge_max_output_tokens":
 		n, _ := strconv.Atoi(e.value)
 		if err := a.setJudgeMaxOutput(n); err != nil {
 			fail(err)
 		}
-		return nil, true
+		return nil, true, ok
 	case "temperature", "top_p", "max_output_tokens", "retry_attempts":
 		f, _ := strconv.ParseFloat(e.value, 64)
 		if err := a.updateConnection(e.prov, func(l *config.LLM) {
@@ -426,16 +437,16 @@ func (m *tuiModel) applyStaged(e stagedEdit) (cmd tea.Cmd, rewire bool) {
 		} else {
 			m.push(cDim.Render("  " + e.key + " → " + e.value + " (" + e.prov + " · " + e.model + ")"))
 		}
-		return nil, true
+		return nil, true, ok
 	}
 	if c, ok := cycleRows[e.key]; ok {
-		// The row's own activation, pressed until it lands — it saves, says
-		// what it did, and rolls back on a failed save (then it stops: no
-		// progress).
+		// The row's own activation, pressed until it lands: each press saves
+		// and says what it did (a few saves for a row several steps away),
+		// and a failed save rolls back — no progress, so it stops.
 		for range len(colorCycle) + 8 {
 			s := m.liveShadow()
 			if c.get(&s) == e.value {
-				return cmd, false
+				return cmd, false, true
 			}
 			_, cmd = m.activateConfigRow(e.key)
 			if after := m.liveShadow(); c.get(&after) == c.get(&s) {
@@ -443,9 +454,9 @@ func (m *tuiModel) applyStaged(e stagedEdit) (cmd tea.Cmd, rewire bool) {
 			}
 		}
 		m.push(cErr.Render("  " + e.key + " did not reach the staged value — see above"))
-		return cmd, false
+		return cmd, false, false
 	}
-	return nil, false
+	return nil, false, false
 }
 
 // stagedRowView is how a row with a staged change shows it: the value it

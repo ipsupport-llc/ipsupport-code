@@ -317,6 +317,9 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		extra := "enter: pick from the list"
 		if len(m.app.configuredProviderNames()) < 2 {
 			extra = "enter: pick · use “add provider” below to add one"
+			if m.cancel != nil {
+				extra = "enter: pick · adding one waits until the task ends"
+			}
 		}
 		return "provider", m.app.providerName(), extra
 	case "addprovider":
@@ -555,14 +558,19 @@ func (m *tuiModel) applyPendingConfig() tea.Cmd {
 	}
 	pending := m.cfgPending
 	m.cfgPending = nil
-	m.cfgPick = nil // a list open over the task may be for a connection that just changed
 	before := len(m.history)
 	var cmds []tea.Cmd
-	rewire := false
+	rewire, saved := false, 0
 	for _, e := range pending {
-		cmd, rw := m.applyStaged(e)
+		cmd, rw, ok := m.applyStaged(e)
 		cmds = append(cmds, cmd)
 		rewire = rewire || rw
+		if ok {
+			saved++
+		}
+		if e.key == "provider" || e.key == "model" || e.key == "removeprovider" {
+			m.cfgPick = nil // a list open over the task was for the connection that just changed
+		}
 	}
 	if rewire { // once, from what was saved: a failed save leaves no client tuned to it
 		if err := m.app.wire(); err != nil {
@@ -570,7 +578,11 @@ func (m *tuiModel) applyPendingConfig() tea.Cmd {
 		}
 		cmds = append(cmds, m.detectWindowCmd())
 	}
-	m.push(cDim.Render(fmt.Sprintf("  the task ended — saved %d staged /config change(s)", len(pending))))
+	msg := fmt.Sprintf("  saved %d staged /config change(s)", saved)
+	if failed := len(pending) - saved; failed > 0 {
+		msg += fmt.Sprintf(" · %d not saved — see above", failed)
+	}
+	m.push(cDim.Render(msg))
 	if m.state == stConfig && len(m.history) >= before { // the panel covers the log
 		said := m.history[before:]
 		m.cfgNote = said[max(len(said)-4, 0):]
@@ -801,6 +813,10 @@ func (m *tuiModel) configPickKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			prov := m.app.providerName()
+			if busy && m.removalStaged(prov) {
+				cp.err = prov + " is staged for removal — its model can't change too"
+				return m, nil
+			}
 			if busy {
 				m.cfgPick = nil
 				if v == m.app.activeLLM().Model {
@@ -822,9 +838,11 @@ func (m *tuiModel) configPickKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.detectWindowCmd()
 		case "removeprovider":
 			if busy {
-				if e, ok := m.staged("provider"); ok && e.value == v {
-					cp.err = "a switch to " + v + " is staged — it can't also be removed"
-					return m, nil
+				for _, e := range m.cfgPending {
+					if (e.key == "provider" && e.value == v) || (e.key != "removeprovider" && e.prov == v) {
+						cp.err = "changes to " + v + " are staged — it can't also be removed"
+						return m, nil
+					}
 				}
 			}
 			if cp.confirm != v { // first enter: ask again
@@ -890,7 +908,7 @@ func (m *tuiModel) configEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cfgEdit = nil
 		return m, nil
 	case "ctrl+d":
-		if e.key == "apikey" {
+		if e.key == "apikey" && m.cancel == nil {
 			return m.finishEdit(m.app.setActiveKey("", true))
 		}
 	case "enter":

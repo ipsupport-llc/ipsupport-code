@@ -1310,6 +1310,7 @@ func (a *app) agentsRemove(name string) []string {
 
 // agentsExec toggles whether sub-agents get the run (shell) tool.
 func (a *app) agentsExec(arg string) []string {
+	before := a.cfg.Spawn
 	switch strings.TrimSpace(arg) {
 	case "on", "yes", "true":
 		a.cfg.Spawn.Exec = true
@@ -1319,6 +1320,7 @@ func (a *app) agentsExec(arg string) []string {
 		return []string{"usage: /agents exec on|off"}
 	}
 	if err := config.SaveSpawn(a.cfg.Spawn); err != nil {
+		a.cfg.Spawn = before // shown only once it is on disk
 		return []string{"warning: not persisted: " + err.Error()}
 	}
 	_ = a.wire()
@@ -3905,6 +3907,7 @@ func (a *app) budgetMsg() string {
 
 // budgetCommand shows or sets the per-session spend cap (USD).
 func (a *app) budgetCommand(arg string) []string {
+	before := a.cfg.SessionBudgetUSD
 	arg = strings.TrimSpace(arg)
 	switch arg {
 	case "":
@@ -3924,6 +3927,7 @@ func (a *app) budgetCommand(arg string) []string {
 		a.cfg.SessionBudgetUSD = v
 	}
 	if err := config.SaveSessionBudget(a.cfg.SessionBudgetUSD); err != nil {
+		a.cfg.SessionBudgetUSD = before // shown only once it is on disk
 		return []string{"warning: not persisted: " + err.Error()}
 	}
 	if a.cfg.SessionBudgetUSD == 0 {
@@ -4980,6 +4984,7 @@ func (a *app) permissionsCommand(rest string) []string {
 // permissionsSetSpawn relaxes (on) or restores (off) the spawn-approval prompt
 // for the agent tool, and persists it globally (profiles live there too).
 func (a *app) permissionsSetSpawn(arg string) []string {
+	before := a.cfg.Spawn
 	switch strings.TrimSpace(arg) {
 	case "on", "allow", "yes":
 		a.cfg.Spawn.Default = "allow"
@@ -4989,6 +4994,7 @@ func (a *app) permissionsSetSpawn(arg string) []string {
 		return []string{"usage: on (spawn without asking) | off (ask each spawn)"}
 	}
 	if err := config.SaveSpawn(a.cfg.Spawn); err != nil {
+		a.cfg.Spawn = before // shown only once it is on disk
 		return []string{"warning: not persisted: " + err.Error()}
 	}
 	return []string{fmt.Sprintf("sub-agent spawns → %s — saved", a.cfg.Spawn.Default)}

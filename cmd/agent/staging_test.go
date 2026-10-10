@@ -29,7 +29,7 @@ func enterOn(m *tuiModel, key string) {
 }
 
 // Reported: "knowledge retention off (kept forever) — staged ×34". Presses
-// during a task stage where the row lands, shown on the row, applied once.
+// during a task stage one change — where the row lands — shown on the row.
 func TestCyclePressesDuringATaskStageWhereTheyLand(t *testing.T) {
 	m := busyPanel(t)
 	for range 34 { // 0 → 7 → 30 → 90 → 180 → 0 …: 34 presses land on 180
@@ -210,5 +210,80 @@ func TestOfflineRollsBackOnAFailedSave(t *testing.T) {
 	m.app.offlineCommand("on")
 	if m.app.cfg.Offline {
 		t.Fatal("offline is on in memory after a failed save")
+	}
+}
+
+// A provider staged for removal can't have its settings or model staged too
+// (saved after the removal, they brought back a broken stub), and the reverse.
+func TestRemovalAndChangesToTheSameProviderAreRefused(t *testing.T) {
+	m := busyPanel(t)
+	enterOn(m, "removeprovider") // nothing saved: the row says so and stages nothing
+	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://lab.example.com/v1"}}
+	m.app.cfg.Provider = "mylab"
+	_ = m.app.wire()
+	editRow(t, m, "temperature", "0.5") // mylab's
+	enterOn(m, "removeprovider")
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.cfgPick == nil || !strings.Contains(m.cfgPick.err, "staged") {
+		t.Fatalf("removal over a staged change was not refused: %+v", m.cfgPick)
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+
+	m2 := busyPanel(t)
+	m2.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://lab.example.com/v1"}}
+	m2.app.cfg.Provider = "mylab"
+	_ = m2.app.wire()
+	enterOn(m2, "removeprovider")
+	m2.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m2.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) // removal staged
+	editRow(t, m2, "temperature", "0.5")
+	if len(m2.cfgPending) != 1 {
+		t.Fatalf("pending %+v: tuning a provider staged for removal must be refused", m2.cfgPending)
+	}
+	m2.cancel = nil
+	m2.applyPendingConfig()
+	if _, back := m2.app.cfg.Providers["mylab"]; back {
+		t.Fatal("the removed provider came back")
+	}
+}
+
+// A failed save during replay is counted as not saved, and the row's value
+// stays what is on disk.
+func TestAFailedReplayIsNotCountedAsSaved(t *testing.T) {
+	m := busyPanel(t)
+	enterOn(m, "spawn")
+	blockSaves(t)
+	was := m.app.cfg.Spawn.Default
+	m.cancel = nil
+	m.applyPendingConfig()
+	if m.app.cfg.Spawn.Default != was {
+		t.Fatalf("spawn %q in memory after a failed save, want %q", m.app.cfg.Spawn.Default, was)
+	}
+	if h := strings.Join(m.history, "\n"); !strings.Contains(h, "saved 0 staged") || !strings.Contains(h, "1 not saved") {
+		t.Fatalf("the failure isn't counted:\n%s", h)
+	}
+}
+
+// A list left open over the task stays open when nothing about the
+// connection changed.
+func TestAnOpenListSurvivesAnUnrelatedReplay(t *testing.T) {
+	m := busyPanel(t)
+	enterOn(m, "goal_nudge")
+	enterOn(m, "provider")
+	m.cancel = nil
+	m.applyPendingConfig()
+	if m.cfgPick == nil {
+		t.Fatal("the provider list was closed by a goal-nudge change")
+	}
+}
+
+// A stale reply to an earlier /model doesn't spoil the list now open.
+func TestAStaleReplyDoesNotSpoilTheModelList(t *testing.T) {
+	m := panelModel(t)
+	m.state = stIdle
+	m.runCommand("/model")
+	m.Update(pickListMsg{err: "old", epoch: m.app.modelEpoch.Load() - 1})
+	if !m.pick.loading || m.pick.err != "" {
+		t.Fatalf("list %+v: a stale reply loaded into it", m.pick)
 	}
 }

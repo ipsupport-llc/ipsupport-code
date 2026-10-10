@@ -854,11 +854,11 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case pickListMsg:
 		if msg.epoch != m.app.modelEpoch.Load() { // the connection changed since — not its list
+			// Only the /config list can be open across a connection change; a
+			// /model list is modal, so a stale reply there is an earlier fetch —
+			// the list's own is still on its way.
 			if m.cfgPick != nil && m.cfgPick.p.loading && m.cfgPick.epoch == msg.epoch {
 				m.cfgPick.p.load(nil, "the connection changed since — esc and open the list again", "")
-			}
-			if m.state == stPick && m.pick != nil && m.pick.loading {
-				m.pick.load(nil, "the connection changed since — esc and run /model again", "")
 			}
 			return m, nil
 		}
@@ -2331,6 +2331,7 @@ func (m *tuiModel) topRule(frame lipgloss.Style) string {
 // setColor changes the frame accent: a name, a raw 0-255 code, or cycle on empty.
 func (m *tuiModel) setColor(arg string) {
 	arg = strings.ToLower(strings.TrimSpace(arg))
+	wasAccent, wasIdx := m.accent, m.accentIdx
 	switch {
 	case arg == "":
 		m.accentIdx = (m.accentIdx + 1) % len(colorCycle)
@@ -2341,7 +2342,9 @@ func (m *tuiModel) setColor(arg string) {
 		m.accent = lipgloss.Color(arg) // raw ANSI 256 code
 	}
 	if err := config.SaveColor(string(m.accent)); err != nil {
+		m.accent, m.accentIdx = wasAccent, wasIdx // shown only once it is on disk
 		m.push(cErr.Render("  could not persist: " + err.Error()))
+		return
 	}
 	m.push(lipgloss.NewStyle().Foreground(m.accent).Render("frame color → " + string(m.accent)))
 }

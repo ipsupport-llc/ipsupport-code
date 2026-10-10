@@ -100,6 +100,9 @@ func Latest(ctx context.Context, repo, channel string, hc *http.Client) (Release
 // Apply downloads the release asset, verifies its checksum, and replaces the
 // running executable. It returns the path of the replaced binary.
 func Apply(ctx context.Context, rel Release, hc *http.Client) (string, error) {
+	if cmd := BrewUpgrade(); cmd != "" {
+		return "", fmt.Errorf("installed with Homebrew — update it with: %s", cmd)
+	}
 	if hc == nil {
 		hc = http.DefaultClient
 	}
@@ -262,6 +265,35 @@ func extractZip(data []byte, name string) ([]byte, error) {
 		return bin, nil
 	}
 	return nil, fmt.Errorf("%q not found in the archive", name)
+}
+
+// BrewUpgrade is the command that updates this binary when Homebrew installed
+// it, or "" when Homebrew didn't. Homebrew owns that install: replacing the
+// file in its Cellar behind its back leaves brew believing in a version that
+// is no longer there.
+func BrewUpgrade() string {
+	exe, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	return brewUpgradeFor(exe)
+}
+
+// brewUpgradeFor resolves exe's links (brew's bin/ and opt/ links, ipco)
+// into the Cellar. A link that can't be resolved still counts when it sits
+// under a Homebrew prefix that only brew writes to: missing it would replace
+// brew's link with a plain file.
+func brewUpgradeFor(exe string) string {
+	path := exe
+	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+		path = resolved
+	}
+	p := filepath.ToSlash(path)
+	if strings.Contains(p, "/Cellar/ipsupport-code/") ||
+		strings.HasPrefix(p, "/opt/homebrew/") || strings.Contains(p, "/.linuxbrew/") {
+		return "brew upgrade ipsupport-code"
+	}
+	return ""
 }
 
 // executable is the path of the running binary, symlinks resolved.

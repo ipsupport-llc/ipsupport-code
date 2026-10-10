@@ -1927,6 +1927,10 @@ func (m *tuiModel) setSuggestion(text string) {
 // "stable"/"nightly" arg switches and saves the channel. The binary is replaced
 // in place; a restart picks it up.
 func (m *tuiModel) startUpdate(arg string) tea.Cmd {
+	if cmd := selfupdate.BrewUpgrade(); cmd != "" {
+		m.push(cDim.Render("  installed with Homebrew — update it with: " + cmd))
+		return nil
+	}
 	channel := m.app.cfg.Channel
 	if channel == "" {
 		channel = selfupdate.Stable

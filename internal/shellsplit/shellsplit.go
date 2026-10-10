@@ -44,6 +44,8 @@ type Parsed struct {
 	// Incomplete: code nested deeper than maxDepth, or past maxParses, was
 	// kept as text, not cut.
 	Incomplete bool
+
+	untracked bool // see result.untracked: eval hands it on
 }
 
 // maxDepth bounds nesting — $( $( $( … ) ) ), script blocks, heredocs fed to
@@ -85,7 +87,7 @@ func parse(d Dialect, line string, depth int, budget *int) Parsed {
 	}
 	r.endGroup()
 	code := strings.TrimSuffix(r.code.String(), " ;")
-	return Parsed{Commands: append(r.cmds, r.inner...), Groups: append(r.groups, r.innerG...), Code: Trim(code), Incomplete: r.incomplete}
+	return Parsed{Commands: append(r.cmds, r.inner...), Groups: append(r.groups, r.innerG...), Code: Trim(code), Incomplete: r.incomplete, untracked: r.untracked}
 }
 
 // Trim is strings.TrimSpace — named so the Python port can match it exactly
@@ -108,7 +110,7 @@ type result struct {
 	links      int      // reader links made: bounded by maxLinks
 	input      []bool   // cmds[i] is in a <( … ): what it writes is read as a file
 	funcName   bool     // the last cut was a single word before (: name () …
-	untracked  bool     // a function or coproc was set up: a heredoc's output can reach a reader later, unseen
+	untracked  bool     // a function, coproc or alias was set up: a heredoc's output can reach a reader later, unseen
 	groups     []string
 	inner      []string // what a command runs inside it: sh -c '…', eval …
 	innerG     []string
@@ -210,7 +212,7 @@ func (r *result) block(s, op string, pipe bool) {
 		// f () { cat <<EOF; } … f | sh, coproc sh; cat <<EOF >&${COPROC[1]}: a
 		// heredoc reaches its reader through a name or a descriptor set up
 		// earlier, not through anything on its line.
-		if r.funcName && op == ")" && s == "" || keyword(s) == "function" || keyword(s) == "coproc" {
+		if r.funcName && op == ")" && s == "" || keyword(s) == "function" || keyword(s) == "coproc" || keyword(s) == "alias" {
 			r.untracked = true
 		}
 		r.funcName = op == "(" && len(strings.Fields(s)) == 1 && !strings.ContainsAny(s, "<>=") // not arr=( )
@@ -272,10 +274,22 @@ func (r *result) link(n int) bool {
 	return true
 }
 
+// expands: s holds a $ that isn't a $( … ) substitution — a variable, ${ },
+// $(( )) — whose value eval would run.
+func expands(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] == '$' && !(i+1 < len(s) && s[i+1] == '(' && !(i+2 < len(s) && s[i+2] == '(')) {
+			return true
+		}
+	}
+	return false
+}
+
 // execs: the command is exec — past !, time, assignments and command (-p, -v,
 // -V), all of which leave exec's redirections in place for what follows.
 func execs(s string) bool {
-	for _, w := range strings.Fields(s) {
+	for _, w := range words(s) { // "exec", \exec are exec
+
 		switch {
 		case w == "exec":
 			return true
@@ -306,11 +320,12 @@ func (r *result) endGroup() {
 }
 
 // nest adds what a nested piece of code holds, after the line's own.
-func (r *result) nest(n *[]string, ng *[]string, d Dialect, code string) {
+func (r *result) nest(n *[]string, ng *[]string, d Dialect, code string) Parsed {
 	p := parse(d, code, r.depth+1, r.budget)
 	*n = append(*n, p.Commands...)
 	*ng = append(*ng, p.Groups...)
 	r.incomplete = r.incomplete || p.Incomplete
+	return p
 }
 
 // innerCode adds the code a command hands to another interpreter as an
@@ -329,7 +344,15 @@ func (r *result) innerCode(cmd string) {
 		case operator(w):
 			i++ // its operand: << sh is a heredoc's word, > sh a file
 		case wordRunner(w) == "eval":
-			r.nest(&r.inner, &r.innerG, r.d, strings.Join(ws[i+1:], " "))
+			arg := strings.Join(ws[i+1:], " ")
+			// eval runs in this shell: a coproc, function or alias it sets up
+			// stays — and eval "$x" runs a value that isn't on the line.
+			if p := r.nest(&r.inner, &r.innerG, r.d, arg); p.untracked {
+				r.untracked = true
+			}
+			if r.d == Sh && expands(arg) {
+				r.incomplete = true
+			}
 			return
 		case wordRunner(w) != "":
 			prog = wordRunner(w)

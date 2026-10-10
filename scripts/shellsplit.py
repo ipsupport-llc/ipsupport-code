@@ -46,12 +46,17 @@ MAX_LINKS = 1 << 16  # mirrors maxLinks
 
 def parse(dialect, line, depth=0, budget=None):
     """(commands, groups, code, incomplete) — see internal/shellsplit.Parse."""
+    return _parse(dialect, line, depth, budget)[:4]
+
+
+def _parse(dialect, line, depth=0, budget=None):
+    """parse, and whether a coproc, function or alias was set up (untracked)."""
     if budget is None:
         budget = [MAX_PARSES]
     budget[0] -= 1
     if depth >= MAX_DEPTH or budget[0] < 0:
         s = trim(line)
-        return ([s] if s else []), [], trim(line), True
+        return ([s] if s else []), [], trim(line), True, False
     r = _Result(dialect, depth, budget)
     if dialect == POWERSHELL:
         _split_powershell(line, r)
@@ -63,7 +68,7 @@ def parse(dialect, line, depth=0, budget=None):
     c = "".join(r.code)
     if c.endswith(" ;"):
         c = c[:-2]
-    return r.cmds + r.inner, r.groups + r.inner_g, trim(c), r.incomplete
+    return r.cmds + r.inner, r.groups + r.inner_g, trim(c), r.incomplete, r.untracked
 
 
 def split(dialect, line):
@@ -153,7 +158,7 @@ class _Result:
                 self.incomplete = True
         if self.d == SH:
             k = _keyword(s)
-            if (self.func_name and op == ")" and s == "") or k in ("function", "coproc"):
+            if (self.func_name and op == ")" and s == "") or k in ("function", "coproc", "alias"):
                 self.untracked = True
             self.func_name = op == "(" and len(_fields(s)) == 1 and not any(c in s for c in "<>=")
         pending = self.feeding
@@ -200,10 +205,11 @@ class _Result:
         self.gtext = []
 
     def nest(self, nested, ngroups, dialect, code_):
-        c, g, _, inc = parse(dialect, code_, self.depth + 1, self.budget)
+        c, g, _, inc, untracked = _parse(dialect, code_, self.depth + 1, self.budget)
         nested += c
         ngroups += g
         self.incomplete = self.incomplete or inc
+        return untracked
 
     def inner_code(self, cmd):
         """Mirrors innerCode: one pass; a flag belongs to the latest interpreter named."""
@@ -216,7 +222,11 @@ class _Result:
             if _operator(w):
                 i += 1
             elif run == "eval":
-                self.nest(self.inner, self.inner_g, self.d, " ".join(ws[i + 1:]))
+                arg = " ".join(ws[i + 1:])
+                if self.nest(self.inner, self.inner_g, self.d, arg):
+                    self.untracked = True
+                if self.d == SH and _expands(arg):
+                    self.incomplete = True
                 return
             elif run:
                 prog = run
@@ -285,9 +295,17 @@ class _Result:
 _CLOSERS = {"case": "esac", "if": "fi", "for": "done", "while": "done", "until": "done", "select": "done"}
 
 
+def _expands(s):
+    """Mirrors expands: a $ that isn't a $( ) substitution."""
+    for i, c in enumerate(s):
+        if c == "$" and not (i + 1 < len(s) and s[i + 1] == "(" and not (i + 2 < len(s) and s[i + 2] == "(")):
+            return True
+    return False
+
+
 def _execs(s):
     """Mirrors execs: exec past !, time, assignments and command (-p, -v, -V)."""
-    for w in _fields(s):
+    for w in _words(s):
         if w == "exec":
             return True
         if w in ("!", "time", "command", "-p", "-v", "-V", "--") or _assignment(w):

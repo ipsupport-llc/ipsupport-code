@@ -173,6 +173,9 @@ var casesForGolden = []string{
 	"coproc sh; cat <<'EOF' >&${COPROC[1]}\nrm -rf x\nEOF", "f () { cat <<'EOF'; }\nrm -rf x\nEOF\nf | sh",
 	"function f { cat <<'EOF'; }\nrm -rf x\nEOF\nf | sh", "sh <(cat <<'EOF')\nrm -rf x\nEOF",
 	"echo $((1+2)); cat > f <<'EOF'\nx\nEOF", "arr=(); arr+=(x); cat > f <<'EOF'\nx\nEOF", "exec >log; cat > f <<'EOF'\nx\nEOF",
+	"\"exec\" > >(sh); cat <<'EOF'\nrm -rf x\nEOF", "\\exec > >(sh); cat <<'EOF'\nrm -rf x\nEOF", "command \"exec\" > >(sh); cat <<'EOF'\nrm -rf x\nEOF",
+	"eval 'coproc sh'; cat <<'EOF' >&${COPROC[1]}\nrm -rf x\nEOF", "read -r -d '' x <<'EOF'; eval \"$x\"\nrm -rf x\nEOF",
+	"alias cat=sh; cat <<'EOF'\nrm -rf x\nEOF", "eval $(ssh-agent -s); cat > f <<'EOF'\nx\nEOF", "sh -c 'coproc sh'; cat > f <<'EOF'\nx\nEOF",
 	strings.Repeat("eval $(", 12) + "echo ok" + strings.Repeat(")", 12), // past the parse budget
 	"sh <<EOF\n# $(rm -rf src/legacy)\nEOF",
 	"timeout 5 sh <<EOF\nrm -rf x\nEOF", "ssh deploy@host <<'EOF'\nrm -rf /srv/app\nEOF",

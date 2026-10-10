@@ -102,6 +102,7 @@ func (m *tuiModel) openConfig() {
 	m.cfgCursor = 0
 	m.cfgPhase = cfgPhaseList
 	m.cfgEdit = nil
+	m.cfgPick = nil
 	m.cfgWSKeys = config.WorkspaceKeys(m.app.workspace)
 	m.state = stConfig
 }
@@ -397,7 +398,7 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		prov := m.app.providerName()
 		v := "same as the task model"
 		if m.app.judgeScoped(prov, act.Model) {
-			v = m.app.reasoningLevel("judge:"+prov, act.Model)
+			v, _ = m.app.scopedReasoningLevel("judge:", prov, act.Model)
 		}
 		return "judge reasoning", v, "enter: cycle (a yes/no check shouldn't be a thinking task — minimal suits it)"
 	case "reflection":
@@ -512,6 +513,12 @@ var cfgUnstageableRows = map[string]bool{
 // where pressing it three times live would have.
 func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 	key := m.configKey()
+	if key == "provider" { // opens a list; the provider picked there is what stages
+		return m.activateConfigRow(key)
+	}
+	if m.cancel != nil && liveTuneRows[key] { // into the running task at once
+		return m.tuneLive(key)
+	}
 	if m.cancel != nil && !cfgLiveRows[key] {
 		if cfgUnstageableRows[key] {
 			m.push(cDim.Render("  " + key + " needs you at the keyboard — it waits until the task ends"))
@@ -547,13 +554,19 @@ func (m *tuiModel) applyPendingConfig() tea.Cmd {
 // activateConfigRow performs a row's action for real. It assumes no task is
 // running: several branches re-wire the agent or leave the panel.
 func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
+	if e, ok := parseTune(key); ok { // changed while a task ran: saved now
+		return m.applyTune(e)
+	}
+	if name, ok := strings.CutPrefix(key, "provider="); ok { // picked while a task ran
+		m.pushLines(m.app.setProvider(name))
+		return m, m.detectWindowCmd()
+	}
 	if m.projectOverrides(key) {
 		m.push(cErr.Render("  note: this project's .agent/config.json sets " + cfgRowSetting[key] + " — this change lasts until the next start; edit that file to keep it"))
 	}
 	switch key {
 	case "provider":
-		m.cycleProvider()
-		return m, m.detectWindowCmd() // the new connection's size, not the old one's
+		m.cfgPick = &cfgPicker{key: key, p: newPicker(m.app.providerPickItems(), m.app.providerName())}
 	case "mode":
 		m.app.setMode(!m.app.planMode)
 	case "perm_files":
@@ -623,7 +636,11 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 			m.push(cDim.Render("  idle nudge → " + onOff(m.app.cfg.GoalNudge)))
 		}
 	case "judge_reasoning":
-		m.pushLines(m.app.reasoningCommand("judge " + nextLevel(m.app.reasoningLevel("judge:"+m.app.providerName(), m.app.activeLLM().Model))))
+		cur, set := m.app.scopedReasoningLevel("judge:", m.app.providerName(), m.app.activeLLM().Model)
+		if !set {
+			cur = "default"
+		}
+		m.pushLines(m.app.reasoningCommand("judge " + nextLevel(cur)))
 	case "reflection":
 		m.pushLines(m.app.reflectCommand(map[bool]string{true: "on", false: "off"}[m.app.cfg.ReflectDisabled]))
 	case "knowledge_retention":
@@ -660,7 +677,8 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 	case "base_url":
 		m.cfgEdit = &cfgEditor{key: key, f: newTextField(m.app.activeLLM().BaseURL, false)}
 	case "model":
-		m.cfgEdit = &cfgEditor{key: key, f: newTextField(m.app.activeLLM().Model, false)}
+		m.cfgPick = &cfgPicker{key: key, p: picker{loading: true, free: true}}
+		return m, m.fetchModelsCmd()
 	case "apikey":
 		m.cfgEdit = &cfgEditor{key: key, f: newTextField("", true)}
 	case "context_window":
@@ -670,7 +688,11 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 			m.push(cDim.Render("  no saved providers to remove"))
 			break
 		}
-		m.cfgEdit = &cfgEditor{key: key}
+		var items []pickItem
+		for _, n := range m.app.savedProviderNames() {
+			items = append(items, pickItem{value: n})
+		}
+		m.cfgPick = &cfgPicker{key: key, p: newPicker(items, "")}
 	case "conn_type":
 		if msg, err := m.app.cycleLocalType(); err != nil {
 			m.push(cErr.Render("  " + err.Error()))
@@ -690,12 +712,91 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 }
 
 // cfgEditor is a value being typed in place on its row: the active
-// connection's address, model, key or context size, or the provider to remove.
+// connection's address, key or context size, or a tuning number.
 type cfgEditor struct {
+	key string
+	f   textField
+	err string
+}
+
+// cfgPicker is a list opened on its row: the provider to use, the model, or
+// the provider to remove.
+type cfgPicker struct {
 	key     string
-	f       textField
-	err     string
+	p       picker
 	confirm string // removeprovider: the name awaiting a second enter
+	err     string
+}
+
+// configPickKey moves through the open list; enter acts on the pick.
+func (m *tuiModel) configPickKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	cp := m.cfgPick
+	act := cp.p.key(k)
+	if act == pickNone { // moved or filtered: whatever was being confirmed is off
+		cp.confirm, cp.err = "", ""
+	}
+	switch act {
+	case pickCancel:
+		m.cfgPick = nil
+	case pickChose:
+		v, _ := cp.p.choice()
+		switch cp.key {
+		case "provider":
+			if m.cancel != nil { // a task is running: applies when it ends
+				m.cfgPending = append(m.cfgPending, "provider="+v)
+				m.push(cDim.Render("  staged — provider " + v + " applies when the task finishes"))
+				m.cfgPick = nil
+				return m, nil
+			}
+			m.cfgPick = nil
+			m.pushLines(m.app.setProvider(v)) // saves + re-wires; says so, or why not
+			return m, m.detectWindowCmd()
+		case "model":
+			out := m.app.setModel(v)
+			if len(out) > 0 && strings.HasPrefix(out[0], "error") {
+				cp.err = out[0]
+				return m, nil
+			}
+			m.cfgPick = nil
+			m.pushLines(out)
+			return m, m.detectWindowCmd()
+		case "removeprovider":
+			if cp.confirm != v { // first enter: ask again
+				cp.confirm = v
+				return m, nil
+			}
+			msg, err := m.app.removeProvider(v)
+			if err != nil {
+				cp.confirm, cp.err = "", err.Error()
+				return m, nil
+			}
+			m.cfgPick = nil
+			m.push(cDim.Render("  " + msg))
+			return m, m.detectWindowCmd()
+		}
+	}
+	return m, nil
+}
+
+// pickerHint is what the open list offers, under it.
+func (m *tuiModel) pickerHint() string {
+	cp := m.cfgPick
+	switch {
+	case cp.err != "":
+		return cErr.Render("     " + cp.err)
+	case cp.confirm != "":
+		return cErr.Render(fmt.Sprintf("     enter again to remove %q · esc keeps it", cp.confirm))
+	}
+	h := "↑↓ move · type to filter · enter pick · esc cancel"
+	switch cp.key {
+	case "model":
+		h = "↑↓ move · type to filter (or a model the server doesn't list) · enter pick · esc cancel"
+	case "provider":
+		if m.cancel != nil {
+			h += " · applies when the task ends"
+		}
+	}
+	return cDim.Render("     " + h)
 }
 
 // configEditKey types into the open editor: enter saves (or says why not and
@@ -720,41 +821,15 @@ func (m *tuiModel) configEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "context_window":
 			return m.finishEdit(m.app.setContextWindowValue(v))
 		case "temperature", "top_p", "max_output_tokens", "idle_timeout", "retry_attempts", "judge_max_output_tokens":
+			if m.cancel != nil && liveTuneRows[e.key] {
+				return m.tuneTyped(e.key, v)
+			}
 			return m.finishEdit(m.app.setNumber(e.key, v))
-		case "model":
-			if strings.TrimSpace(v) == "" { // nothing typed: list the server's models
-				m.cfgEdit = nil
-				m.state = stIdle
-				return m.runCommand("/model")
-			}
-			out := m.app.setModel(strings.TrimSpace(v))
-			if len(out) > 0 && strings.HasPrefix(out[0], "error") {
-				e.err = out[0]
-				return m, nil
-			}
-			m.pushLines(out)
-			m.cfgEdit = nil
-			return m, m.detectWindowCmd()
-		case "removeprovider":
-			name := strings.TrimSpace(v)
-			if name == "" {
-				e.err = "type the name of a saved provider: " + strings.Join(m.app.savedProviderNames(), ", ")
-				return m, nil
-			}
-			if e.confirm != name { // first enter: name it, ask again
-				if _, saved := m.app.cfg.Providers[name]; !saved {
-					e.err = fmt.Sprintf("no saved provider %q — saved: %s", name, strings.Join(m.app.savedProviderNames(), ", "))
-					return m, nil
-				}
-				e.confirm, e.err = name, ""
-				return m, nil
-			}
-			return m.finishEdit(m.app.removeProvider(name))
 		}
 		return m, nil
 	}
 	if e.f.key(k) {
-		e.err, e.confirm = "", ""
+		e.err = ""
 	}
 	return m, nil
 }
@@ -773,18 +848,13 @@ func (m *tuiModel) finishEdit(msg string, err error) (tea.Model, tea.Cmd) {
 // editorHint is what the open editor offers, under its row.
 func (m *tuiModel) editorHint() string {
 	e := m.cfgEdit
-	switch {
-	case e.err != "":
+	if e.err != "" {
 		return cErr.Render("     " + e.err)
-	case e.confirm != "":
-		return cErr.Render(fmt.Sprintf("     enter again to remove %q · esc keeps it", e.confirm))
 	}
 	h := map[string]string{
 		"base_url":       "host, port and path — e.g. http://localhost:8080/v1",
-		"model":          "a model id · empty enter lists the server's models",
 		"apikey":         "type or paste · empty enter keeps the saved key · ctrl+d removes it",
 		"context_window": "tokens, e.g. 32768 · 0 = auto-detect",
-		"removeprovider": "saved: " + strings.Join(m.app.savedProviderNames(), ", "),
 	}[e.key]
 	if spec, ok := numberRows[e.key]; ok {
 		h = fmt.Sprintf("%g to %g, e.g. %s · 0 = server default", spec.min, spec.max, spec.example)
@@ -793,23 +863,6 @@ func (m *tuiModel) editorHint() string {
 		h += " · empty = its default"
 	}
 	return cDim.Render("     " + h + " · enter save · esc cancel")
-}
-
-// cycleProvider switches to the next configured provider and re-wires.
-func (m *tuiModel) cycleProvider() {
-	provs := m.app.configuredProviderNames()
-	if len(provs) < 2 {
-		return
-	}
-	cur := m.app.providerName()
-	idx := 0
-	for i, p := range provs {
-		if p == cur {
-			idx = i
-			break
-		}
-	}
-	m.pushLines(m.app.setProvider(provs[(idx+1)%len(provs)])) // saves + re-wires; says so, or why not
 }
 
 var permCycle = []string{"ask", "allow", "deny"}
@@ -980,7 +1033,7 @@ func (m *tuiModel) toggleChannel() {
 func (m *tuiModel) cfgPendingCount(key string) int {
 	n := 0
 	for _, k := range m.cfgPending {
-		if k == key {
+		if k == key || strings.HasPrefix(k, key+"=") || strings.HasPrefix(k, tunePrefix+key+"=") {
 			n++
 		}
 	}
@@ -1016,10 +1069,20 @@ func (m *tuiModel) renderConfigPanel() string {
 			lines = append(lines, accent.Render(" ▸ ")+accent.Bold(true).Render(padVis(label, 15))+" "+m.cfgEdit.f.view(), m.editorHint())
 			continue
 		}
+		if r.key == cur && m.cfgPick != nil { // the list to pick from, under its row
+			lines = append(lines, accent.Render(" ▸ ")+accent.Bold(true).Render(padVis(label, 15))+" "+value)
+			lines = append(lines, m.cfgPick.p.view(accent, m.spin.View(), "     ")...)
+			lines = append(lines, m.pickerHint())
+			continue
+		}
 		if m.projectOverrides(r.key) {
 			hint = "this project's .agent/config.json sets it — that value wins at the next start"
 		}
-		if n := m.cfgPendingCount(r.key); n > 0 {
+		if v, ok := m.tunedValue(r.key); ok {
+			// Already in the running task's requests; a.cfg — what configRowView
+			// shows — gets it when the task ends.
+			value, hint = v, "in use now · saved when the task ends"
+		} else if n := m.cfgPendingCount(r.key); n > 0 {
 			// Say the change was taken and where it went — the value column still
 			// shows the LIVE setting, because that is what the running task is using.
 			hint = "staged"
@@ -1084,6 +1147,9 @@ func (m *tuiModel) configWindow() ([]cfgRow, int) {
 	chrome := 8
 	if m.cfgEdit != nil {
 		chrome++ // the editor's hint line under its row
+	}
+	if m.cfgPick != nil {
+		chrome += m.cfgPick.p.height() + 1 // the list and its hint under its row
 	}
 	avail := m.viewportHeight() - chrome
 	if avail < 3 {

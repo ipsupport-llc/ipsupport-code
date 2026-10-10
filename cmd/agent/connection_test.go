@@ -128,27 +128,27 @@ func TestABuiltInProvidersAddressCanBeOverridden(t *testing.T) {
 	}
 }
 
-// Removing asks twice, and the provider in use falls back to local.
+// Removing is picked from the saved providers, asks twice, and the provider in
+// use falls back to local.
 func TestRemovingAProviderConfirmsAndFallsBack(t *testing.T) {
 	m := panelModel(t)
-	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://lab.example.com/v1"}}
+	m.app.cfg.Providers = map[string]config.LLM{"airllm": {BaseURL: "https://a.example.com/v1"}, "mylab": {BaseURL: "https://lab.example.com/v1"}}
 	m.app.cfg.Provider = "mylab"
-	for i, k := range cfgKeys() {
-		if k == "removeprovider" {
-			m.cfgCursor = i
-		}
-	}
+	cursorOn(m, "removeprovider")
 	m.configActivate()
-	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("mylab")})
+	if m.cfgPick == nil || len(m.cfgPick.p.visible()) != 2 {
+		t.Fatalf("no list of the saved providers: %+v", m.cfgPick)
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyDown}) // airllm → mylab
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	if _, still := m.app.cfg.Providers["mylab"]; !still || m.cfgEdit == nil || m.cfgEdit.confirm != "mylab" {
+	if _, still := m.app.cfg.Providers["mylab"]; !still || m.cfgPick == nil || m.cfgPick.confirm != "mylab" {
 		t.Fatal("the first enter must only ask for confirmation")
 	}
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	if _, still := m.app.cfg.Providers["mylab"]; still || m.app.cfg.Provider != "local" {
 		t.Fatalf("providers %v, active %q; want mylab gone and local in use", m.app.cfg.Providers, m.app.cfg.Provider)
 	}
-	if c := reload(t); c.Provider != "local" || len(c.Providers) != 0 {
+	if c := reload(t); c.Provider != "local" || len(c.Providers) != 1 {
 		t.Fatalf("saved: provider %q, providers %v", c.Provider, c.Providers)
 	}
 }
@@ -504,15 +504,17 @@ func TestStagedProviderSwitchProbesTheWindow(t *testing.T) {
 	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://lab.example.com/v1", APIKey: "k"}}
 	m.cancel = func() {}
 	cursorOn(m, "provider")
-	m.configActivate()
-	if len(m.cfgPending) != 1 {
+	m.configActivate() // the list opens even while the task runs
+	m.handleKey(tea.KeyMsg{Type: tea.KeyDown})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if len(m.cfgPending) != 1 || m.cfgPending[0] != "provider=mylab" {
 		t.Fatalf("pending = %v, want the switch staged", m.cfgPending)
 	}
 	m.cancel = nil
 	if cmd := m.applyPendingConfig(); cmd == nil {
 		t.Fatal("the staged switch did not ask for the window to be probed")
 	}
-	if m.app.cfg.Provider == "local" {
+	if m.app.cfg.Provider != "mylab" {
 		t.Fatal("the staged switch did not apply")
 	}
 }
@@ -620,14 +622,20 @@ func TestAProjectPinnedProviderIsNotRemoved(t *testing.T) {
 	}
 }
 
-func TestRemoveProviderAsksForAName(t *testing.T) {
+// Moving off the name awaiting its second enter cancels the removal.
+func TestRemoveProviderConfirmIsForTheHighlightedName(t *testing.T) {
 	m := panelModel(t)
-	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://lab.example.com/v1"}}
+	m.app.cfg.Providers = map[string]config.LLM{"airllm": {BaseURL: "https://a.example.com/v1"}, "mylab": {BaseURL: "https://lab.example.com/v1"}}
 	cursorOn(m, "removeprovider")
 	m.configActivate()
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) // airllm: asks
+	m.handleKey(tea.KeyMsg{Type: tea.KeyDown})  // now on mylab
+	if m.cfgPick.confirm != "" {
+		t.Fatalf("still asking about %q after moving off it", m.cfgPick.confirm)
+	}
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.cfgEdit == nil || !strings.Contains(m.cfgEdit.err, "mylab") || m.cfgEdit.confirm != "" {
-		t.Fatalf("empty enter: %+v, want a prompt naming the saved providers", m.cfgEdit)
+	if len(m.app.cfg.Providers) != 2 || m.cfgPick.confirm != "mylab" {
+		t.Fatalf("providers %v, confirm %q; want nothing removed and mylab asked about", m.app.cfg.Providers, m.cfgPick.confirm)
 	}
 }
 

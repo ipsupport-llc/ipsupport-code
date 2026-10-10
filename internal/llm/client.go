@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
@@ -76,14 +77,14 @@ func ToolResult(callID, name, content string) Message {
 
 // OpenAIClient talks to an OpenAI-compatible /chat/completions endpoint.
 type OpenAIClient struct {
-	baseURL      string
-	model        string
-	apiKey       string
-	temp         float64
-	topP         float64
-	maxOutputTok int            // request's max_tokens; 0 = omit, server's own default
-	extra        map[string]any // extra top-level request params (per-model reasoning, etc.)
-	hc           *http.Client
+	baseURL string
+	model   string
+	apiKey  string
+	// tuning is what each request is sent with that may change while a task
+	// runs (SetTuning): swapped whole, read once per request, so a change
+	// applies from the model's next turn without rebuilding the client.
+	tuning atomic.Pointer[tuning]
+	hc     *http.Client
 
 	// OnRetry, if set, is called before each backoff so the UI can show that
 	// we're retrying/backing off (e.g. while LM Studio reloads an unloaded
@@ -101,20 +102,7 @@ type OpenAIClient struct {
 	// producing far more than the context window has stopped making progress —
 	// usually a reasoning model looping in its own monologue — and would otherwise
 	// stream for many minutes. Derived from the context window at construction.
-	maxRespTk int
-	// retryAttempts bounds the transient-failure retry loop in Chat. Configurable
-	// because the right answer differs sharply: a local server reloading a model
-	// wants patience, while an endpoint that simply is not running wants to fail
-	// fast — waiting out eight exponential backoffs to discover nothing is
-	// listening is its own kind of wrong.
-	retryAttempts int
-
-	// disableLoopDetection turns off the degenerate-repetition detectors
-	// (config.LLM.DisableLoopDetection) — set once at construction. The
-	// token-count runaway cap (maxRespTk) is unaffected; this only covers the
-	// character- and phrase-repetition checks.
-	disableLoopDetection bool
-
+	maxRespTk    int
 	mu           sync.Mutex
 	promptTk     int
 	complTk      int
@@ -129,6 +117,40 @@ type OpenAIClient struct {
 	// pattern), which is not a repetition loop.
 	liveReasoning strings.Builder
 	liveContent   strings.Builder
+}
+
+// tuning is the per-request part of a connection's settings.
+type tuning struct {
+	temp         float64
+	topP         float64
+	maxOutputTok int            // request's max_tokens; 0 = omit, server's own default
+	extra        map[string]any // extra top-level request params (per-model reasoning, etc.)
+	// retryAttempts bounds the transient-failure retry loop in Chat. Configurable
+	// because the right answer differs sharply: a local server reloading a model
+	// wants patience, while an endpoint that simply is not running wants to fail
+	// fast — waiting out eight exponential backoffs to discover nothing is
+	// listening is its own kind of wrong.
+	retryAttempts int
+	// disableLoopDetection turns off the degenerate-repetition detectors
+	// (config.LLM.DisableLoopDetection). The token-count runaway cap
+	// (maxRespTk) is unaffected; this only covers the character- and
+	// phrase-repetition checks.
+	disableLoopDetection bool
+}
+
+// SetTuning applies c's sampling, output cap, extra params (reasoning), retry
+// count and loop detection to the requests from now on — safe while a request
+// is in flight, which keeps what it started with. The address, model, key,
+// idle timeout and context window are fixed at construction.
+func (cl *OpenAIClient) SetTuning(c config.LLM) {
+	cl.tuning.Store(&tuning{
+		temp:                 c.Temperature,
+		topP:                 c.TopP,
+		maxOutputTok:         c.MaxOutputTokens,
+		extra:                c.Extra,
+		retryAttempts:        retryAttempts(c.RetryAttempts),
+		disableLoopDetection: c.DisableLoopDetection,
+	})
 }
 
 // deadlineConn arms a fresh read deadline before every Read, so a single read
@@ -158,14 +180,10 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 	if c.IdleTimeoutSeconds > 0 {
 		idle = time.Duration(c.IdleTimeoutSeconds) * time.Second
 	}
-	return &OpenAIClient{
-		baseURL:      strings.TrimRight(c.BaseURL, "/"),
-		model:        c.Model,
-		apiKey:       c.APIKey,
-		temp:         c.Temperature,
-		topP:         c.TopP,
-		maxOutputTok: c.MaxOutputTokens,
-		extra:        c.Extra,
+	cl := &OpenAIClient{
+		baseURL: strings.TrimRight(c.BaseURL, "/"),
+		model:   c.Model,
+		apiKey:  c.APIKey,
 		hc: &http.Client{
 			Transport: &http.Transport{
 				Proxy: http.ProxyFromEnvironment,
@@ -189,11 +207,11 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 				ResponseHeaderTimeout: idle, // no response headers within the idle window → abort
 			},
 		},
-		idle:                 idle,
-		maxRespTk:            maxResponseTokens(c.ContextWindow),
-		retryAttempts:        retryAttempts(c.RetryAttempts),
-		disableLoopDetection: c.DisableLoopDetection,
+		idle:      idle,
+		maxRespTk: maxResponseTokens(c.ContextWindow),
 	}
+	cl.SetTuning(c)
+	return cl
 }
 
 // maxResponseTokens is the per-turn generation cap: a generous 32k floor, or 4×
@@ -309,19 +327,20 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	// (e.g. OpenAI gpt-5.x / chat-latest) reject any non-default temperature with
 	// a 400; omitting the field lets the server use its default and keeps them
 	// working, while local models still honor a configured value.
-	if c.temp > 0 {
-		body["temperature"] = c.temp
+	t := c.tuning.Load()
+	if t.temp > 0 {
+		body["temperature"] = t.temp
 	}
 	// Same "only send when explicitly set" convention as temperature above.
-	if c.topP > 0 {
-		body["top_p"] = c.topP
+	if t.topP > 0 {
+		body["top_p"] = t.topP
 	}
-	if c.maxOutputTok > 0 {
-		body["max_tokens"] = c.maxOutputTok
+	if t.maxOutputTok > 0 {
+		body["max_tokens"] = t.maxOutputTok
 	}
 	// Per-model reasoning controls (and any other extra params) — the user supplies
 	// the provider's own shape; we just merge it in. Doesn't clobber core fields.
-	for k, v := range c.extra {
+	for k, v := range t.extra {
 		if _, core := body[k]; !core {
 			body[k] = v
 		}
@@ -338,7 +357,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	// Local servers (LM Studio) hiccup with transient 5xx and need time to
 	// reload a model unloaded by the idle timeout. Retry those (and network
 	// errors) with exponential backoff instead of failing the whole task.
-	maxAttempts := c.retryAttempts // ride out a network glitch before giving up
+	maxAttempts := t.retryAttempts // ride out a network glitch before giving up
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		// reqCompl counts THIS attempt's own live per-delta bumps (c.bumpToken),
@@ -735,7 +754,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 				c.liveContent.WriteString(d.Content)
 				chanAll := c.liveContent.String()
 				c.mu.Unlock()
-				if !c.disableLoopDetection {
+				if !c.tuning.Load().disableLoopDetection {
 					if err := checkDegenerate(d.Content); err != nil {
 						return Message{}, err
 					}
@@ -756,7 +775,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 				c.liveReasoning.WriteString(rc)
 				chanAll := c.liveReasoning.String()
 				c.mu.Unlock()
-				if !c.disableLoopDetection {
+				if !c.tuning.Load().disableLoopDetection {
 					if err := checkDegenerate(rc); err != nil {
 						return Message{}, err
 					}
@@ -772,7 +791,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 				c.liveReasoning.WriteString(rc)
 				chanAll := c.liveReasoning.String()
 				c.mu.Unlock()
-				if !c.disableLoopDetection {
+				if !c.tuning.Load().disableLoopDetection {
 					if err := checkDegenerate(rc); err != nil {
 						return Message{}, err
 					}

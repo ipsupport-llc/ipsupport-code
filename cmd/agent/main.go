@@ -2265,12 +2265,18 @@ func (a *app) setJudgeMaxOutput(v int) error {
 // reflect-prefixed keys first (a separate setting for the learning pass), then
 // falls back to the normal ones.
 func (a *app) reasoningParams(provider, model, scope string) map[string]any {
+	return reasoningParamsIn(a.cfg.Reasoning, provider, model, scope)
+}
+
+// reasoningParamsIn is reasoningParams over a given map — a copy with changes
+// staged during a task, which a.cfg must not see until it ends.
+func reasoningParamsIn(reasoning map[string]json.RawMessage, provider, model, scope string) map[string]any {
 	keys := []string{provider + "/" + model, provider}
 	if scope != "" {
 		keys = append([]string{scope + ":" + provider + "/" + model, scope + ":" + provider}, keys...)
 	}
 	for _, k := range keys {
-		if raw, ok := a.cfg.Reasoning[k]; ok {
+		if raw, ok := reasoning[k]; ok {
 			var m map[string]any
 			if json.Unmarshal(raw, &m) == nil {
 				return m
@@ -2346,6 +2352,9 @@ func (a *app) reasoningCommand(arg string) []string {
 	case "judge:":
 		label = "goal judge · " + label
 	}
+	if arg == "" && scope == "" { // every setting at once, then how to change them
+		return a.reasoningOverview(key)
+	}
 	if arg == "" {
 		cur := "default"
 		if raw, ok := a.cfg.Reasoning[key]; ok {
@@ -2379,6 +2388,37 @@ func (a *app) reasoningCommand(arg string) []string {
 	return []string{fmt.Sprintf("reasoning → %s for %s · %s  %s", arg, provider, model, string(shape))}
 }
 
+// reasoningOverview is bare /reasoning: what the task, the learning pass and
+// the goal judge each use now, then how to change them.
+func (a *app) reasoningOverview(key string) []string {
+	prov, model := a.providerName(), a.activeLLM().Model
+	task := a.reasoningLevel(prov, model)
+	reflect := "same as the task"
+	_, _, rp, rm := a.reflectTarget()
+	if lvl, ok := a.scopedReasoningLevel("reflect:", rp, rm); ok {
+		reflect = lvl
+	} else if rp != prov || rm != model {
+		reflect = a.reasoningLevel(rp, rm)
+	}
+	if rp != prov || rm != model {
+		reflect += " (" + rp + " · " + rm + ")"
+	}
+	judge := "same as the task"
+	if lvl, ok := a.scopedReasoningLevel("judge:", prov, model); ok {
+		judge = lvl
+	}
+	return []string{
+		fmt.Sprintf("reasoning · %s · %s", prov, model),
+		"  task:          " + task,
+		"  learning pass: " + reflect,
+		"  goal judge:    " + judge,
+		"  /reasoning off|minimal|low|medium|high — set it for this model",
+		"  /reasoning reflect <level> — a separate setting for the learning pass",
+		"  /reasoning judge <level>   — a separate setting for the goal judge (minimal suits it)",
+		"  custom shapes: edit \"reasoning\" in config.json (key " + key + ")",
+	}
+}
+
 // reasoningLevels is the cycle order shared by /reasoning and the /config row.
 var reasoningLevels = []string{"off", "minimal", "low", "medium", "high"}
 
@@ -2408,19 +2448,34 @@ func (a *app) applyReasoning(key, provider, level string) (json.RawMessage, bool
 // reasoningLevel reverse-maps the stored raw param back to a level name for display
 // ("default" if none is set, "custom" if it doesn't match a known level).
 func (a *app) reasoningLevel(provider, model string) string {
-	raw, ok := a.cfg.Reasoning[provider+"/"+model]
+	if lvl, ok := a.scopedReasoningLevel("", provider, model); ok {
+		return lvl
+	}
+	return "default"
+}
+
+// scopedReasoningLevel is the level set under scope ("", "reflect:" or
+// "judge:") for provider/model, or its provider default; ok=false when none
+// is. The shape is matched against the PROVIDER's: matched against
+// "judge:local" it never was, and a judge set to minimal showed as "custom".
+func (a *app) scopedReasoningLevel(scope, provider, model string) (string, bool) {
+	return scopedLevelIn(a.cfg.Reasoning, scope, provider, model)
+}
+
+func scopedLevelIn(reasoning map[string]json.RawMessage, scope, provider, model string) (string, bool) {
+	raw, ok := reasoning[scope+provider+"/"+model]
 	if !ok {
-		raw, ok = a.cfg.Reasoning[provider] // provider default
+		raw, ok = reasoning[scope+provider] // provider default
 	}
 	if !ok {
-		return "default"
+		return "", false
 	}
 	for _, lvl := range reasoningLevels {
 		if shape, known := reasoningShape(provider, lvl); known && shape != nil && string(shape) == string(raw) {
-			return lvl
+			return lvl, true
 		}
 	}
-	return "custom"
+	return "custom", true
 }
 
 // nextReasoning returns the next level in the cycle after cur (wrapping) for

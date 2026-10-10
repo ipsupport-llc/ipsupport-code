@@ -1132,3 +1132,23 @@ func TestALongPrefillWithKeepalivesIsNotCutOff(t *testing.T) {
 		t.Errorf("%d requests, want 1 — a retry restarts the prefill", n)
 	}
 }
+
+// SetTuning changes what the next request is sent with, on the same client.
+func TestSetTuningAppliesToTheNextRequest(t *testing.T) {
+	var body map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		json.Unmarshal(b, &body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	t.Cleanup(srv.Close)
+	c := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "m", Temperature: 0.2})
+	c.SetTuning(config.LLM{Temperature: 0.7, MaxOutputTokens: 500, Extra: map[string]any{"reasoning_effort": "low"}})
+	if _, err := c.Chat(context.Background(), []Message{User("hi")}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if body["temperature"] != 0.7 || body["max_tokens"] != float64(500) || body["reasoning_effort"] != "low" {
+		t.Fatalf("request body %v", body)
+	}
+}

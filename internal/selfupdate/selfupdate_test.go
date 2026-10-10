@@ -274,7 +274,7 @@ func TestBrewInstallIsUpdatedByBrew(t *testing.T) {
 		{"/opt/homebrew/Cellar/ipsupport-code/0.62.21/bin/ipsupport-code", "brew upgrade ipsupport-code"}, // Apple Silicon
 		{"/usr/local/Cellar/ipsupport-code/0.62.21/bin/ipsupport-code", "brew upgrade ipsupport-code"},    // Intel
 		{"/home/linuxbrew/.linuxbrew/Cellar/ipsupport-code/0.62.21/bin/ipsupport-code", "brew upgrade ipsupport-code"},
-		{"/opt/homebrew/bin/ipco", "brew upgrade ipsupport-code"}, // a brew link that didn't resolve
+		{"/opt/homebrew/bin/ipco", "brew upgrade ipsupport-code"}, // a brew link that didn't resolve (no such file here)
 		{"/usr/local/bin/ipsupport-code", ""},                     // a plain file the installer put there
 		{"/home/me/.local/bin/ipsupport-code", ""},
 	} {
@@ -305,5 +305,16 @@ func TestBrewInstallIsFoundThroughItsLinks(t *testing.T) {
 		if got := brewUpgradeFor(p); got == "" {
 			t.Errorf("%s: not recognised as a brew install", p)
 		}
+	}
+}
+
+// A plain binary someone copied under brew's prefix resolves to itself, not
+// into the Cellar: it isn't brew's, and brew can't update it.
+func TestAPlainFileUnderBrewsPrefixIsNotBrews(t *testing.T) {
+	bin := filepath.Join(t.TempDir(), "opt", "homebrew", "bin", "ipsupport-code")
+	os.MkdirAll(filepath.Dir(bin), 0o755)
+	os.WriteFile(bin, []byte("x"), 0o755)
+	if got := brewUpgradeFor(bin); got != "" {
+		t.Fatalf("brewUpgradeFor(%q) = %q, want \"\"", bin, got)
 	}
 }

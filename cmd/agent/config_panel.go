@@ -561,15 +561,21 @@ func (m *tuiModel) applyPendingConfig() tea.Cmd {
 	before := len(m.history)
 	var cmds []tea.Cmd
 	rewire, saved := false, 0
+	var failed []string // what went wrong, kept whole for the panel
 	for _, e := range pending {
+		at := len(m.history)
 		cmd, rw, ok := m.applyStaged(e)
 		cmds = append(cmds, cmd)
 		rewire = rewire || rw
 		if ok {
 			saved++
+		} else if len(m.history) >= at {
+			failed = append(failed, m.history[at:]...)
 		}
 		if e.key == "provider" || e.key == "model" || e.key == "removeprovider" {
-			m.cfgPick = nil // a list open over the task was for the connection that just changed
+			// A list or a value being typed was for the connection that just
+			// changed: committed now, it would land on the new one.
+			m.cfgPick, m.cfgEdit = nil, nil
 		}
 	}
 	if rewire { // once, from what was saved: a failed save leaves no client tuned to it
@@ -584,8 +590,7 @@ func (m *tuiModel) applyPendingConfig() tea.Cmd {
 	}
 	m.push(cDim.Render(msg))
 	if m.state == stConfig && len(m.history) >= before { // the panel covers the log
-		said := m.history[before:]
-		m.cfgNote = said[max(len(said)-4, 0):]
+		m.cfgNote = append(failed, m.history[len(m.history)-1]) // the failures, then the count
 	}
 	return tea.Batch(cmds...)
 }
@@ -1248,7 +1253,7 @@ func (m *tuiModel) configWindow() ([]cfgRow, int) {
 		// The list gets what is left after the panel's own lines, its filter,
 		// scroll markers and hint, and three rows of the panel — ten items on
 		// a 24-line terminal pushed the panel's top off the screen.
-		m.cfgPick.p.rows = min(max(m.viewportHeight()-chrome-4-3, 3), pickerRows)
+		m.cfgPick.p.rows = min(max(m.viewportHeight()-chrome-4-3, 1), pickerRows)
 		chrome += m.cfgPick.p.height() + 1 // the list and its hint under its row
 	}
 	avail := m.viewportHeight() - chrome

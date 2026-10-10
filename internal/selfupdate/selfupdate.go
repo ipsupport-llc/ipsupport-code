@@ -284,12 +284,14 @@ func BrewUpgrade() string {
 // under a Homebrew prefix that only brew writes to: missing it would replace
 // brew's link with a plain file.
 func brewUpgradeFor(exe string) string {
-	path := exe
-	if resolved, err := filepath.EvalSymlinks(exe); err == nil {
-		path = resolved
+	resolved, err := filepath.EvalSymlinks(exe)
+	if err == nil { // resolved: the Cellar is the only sign — a plain file copied under brew's prefix isn't brew's
+		if strings.Contains(filepath.ToSlash(resolved), "/Cellar/ipsupport-code/") {
+			return "brew upgrade ipsupport-code"
+		}
+		return ""
 	}
-	p := filepath.ToSlash(path)
-	if strings.Contains(p, "/Cellar/ipsupport-code/") ||
+	if p := filepath.ToSlash(exe); strings.Contains(p, "/Cellar/ipsupport-code/") ||
 		strings.HasPrefix(p, "/opt/homebrew/") || strings.Contains(p, "/.linuxbrew/") {
 		return "brew upgrade ipsupport-code"
 	}

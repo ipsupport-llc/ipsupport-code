@@ -871,6 +871,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case modelsMsg:
+		if msg.setTo != "" && m.cancel != nil {
+			// A task started while it was looked up (/config, then esc, then a
+			// task): switching now would re-wire under it.
+			m.push(cDim.Render("  a task is running — /model " + msg.setTo + " again when it ends"))
+			return m, nil
+		}
 		if msg.setTo != "" && msg.epoch != m.app.modelEpoch.Load() {
 			// The connection changed while it was looked up (a /config switch):
 			// that id was found on the old one.

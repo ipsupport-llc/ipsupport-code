@@ -287,3 +287,51 @@ func TestAStaleReplyDoesNotSpoilTheModelList(t *testing.T) {
 		t.Fatalf("list %+v: a stale reply loaded into it", m.pick)
 	}
 }
+
+// A /model lookup that resolves after a task started doesn't switch under it.
+func TestAModelLookupDoesNotSwitchUnderATask(t *testing.T) {
+	m := panelModel(t)
+	m.state, m.cancel = stRunning, func() {}
+	was := m.app.cfg.LLM.Model
+	m.Update(modelsMsg{setTo: "other-model", epoch: m.app.modelEpoch.Load()})
+	if m.app.cfg.LLM.Model != was {
+		t.Fatalf("model %q: switched under the running task", m.app.cfg.LLM.Model)
+	}
+}
+
+// A value being typed when the task ends is for the connection it was
+// opened on: a staged switch closes it rather than let it land on the new one.
+func TestAnOpenEditorClosesWhenTheConnectionChanges(t *testing.T) {
+	m := busyPanel(t)
+	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://lab.example.com/v1", APIKey: "k"}}
+	enterOn(m, "provider")
+	m.handleKey(tea.KeyMsg{Type: tea.KeyDown})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) // switch to mylab staged
+	enterOn(m, "temperature")                   // editor open, for local
+	m.cancel = nil
+	m.applyPendingConfig()
+	if m.cfgEdit != nil {
+		t.Fatal("the temperature editor stayed open across the switch")
+	}
+}
+
+// A failure stays in the panel's note even when later changes succeed.
+func TestAFailureIsNotPushedOutOfTheNote(t *testing.T) {
+	m := busyPanel(t)
+	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://lab.example.com/v1"}}
+	m.app.cfg.Provider = "mylab"
+	enterOn(m, "removeprovider")
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) // removal staged first
+	for _, k := range []string{"goal_nudge", "offline", "reflection", "subexec"} {
+		enterOn(m, k) // then four that will be saved
+	}
+	dir := filepath.Join(m.app.workspace, ".agent") // the removal will fail: the project pins it
+	os.MkdirAll(dir, 0o700)
+	os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"provider":"mylab"}`), 0o600)
+	m.cancel = nil
+	m.applyPendingConfig()
+	if p := panelText(m); !strings.Contains(p, "mylab not removed") {
+		t.Fatalf("the failure was pushed out of the note:\n%s", p)
+	}
+}

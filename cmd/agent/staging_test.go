@@ -307,7 +307,7 @@ func TestAnOpenEditorClosesWhenTheConnectionChanges(t *testing.T) {
 	enterOn(m, "provider")
 	m.handleKey(tea.KeyMsg{Type: tea.KeyDown})
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter}) // switch to mylab staged
-	enterOn(m, "temperature")                    // editor open, for local
+	enterOn(m, "temperature")                   // editor open, for local
 	m.cancel = nil
 	m.applyPendingConfig()
 	if m.cfgEdit != nil {

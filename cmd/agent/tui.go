@@ -88,14 +88,17 @@ type tuiModel struct {
 	searchQuery   string   // Ctrl+R reverse-search query (stHistSearch)
 	searchIdx     int      // index into app.promptHist of the current match; -1 = none
 	pending       *approvalReq
-	preApprove    uiState       // state being interrupted when stApprove was entered — stRunning normally, or stIdle when a background job's approval is answered via ↑ while idle; restored when the approval is resolved
-	approveChoice bool          // selected Yes(true)/No(false) while answering an approval
-	cfgCursor     int           // selected row in the /config panel (stConfig)
-	cfgPending    []string      // rows activated in /config while a task ran; replayed when it ends
-	cfgPhase      int           // stConfig sub-flow: cfgPhaseList, or an add-provider form field
-	cfgDraft      providerDraft // the provider being added in the panel form
-	chooseRows    []sessionMeta // saved sessions offered by the startup chooser (stChooseSession)
-	chooseCursor  int           // selected row (0..len = the "new session" row)
+	preApprove    uiState         // state being interrupted when stApprove was entered — stRunning normally, or stIdle when a background job's approval is answered via ↑ while idle; restored when the approval is resolved
+	approveChoice bool            // selected Yes(true)/No(false) while answering an approval
+	cfgCursor     int             // selected row in the /config panel (stConfig)
+	cfgPending    []string        // rows activated in /config while a task ran; replayed when it ends
+	cfgPhase      int             // stConfig sub-flow: cfgPhaseList, or an add-provider form field
+	cfgDraft      providerDraft   // the provider being added in the panel form
+	cfgEdit       *cfgEditor      // a /config value being typed in place on its row, or nil
+	agFromConfig  bool            // the profiles manager was opened from /config: esc returns there
+	cfgWSKeys     map[string]bool // settings this project's .agent/config.json sets (they win over the panel's global saves)
+	chooseRows    []sessionMeta   // saved sessions offered by the startup chooser (stChooseSession)
+	chooseCursor  int             // selected row (0..len = the "new session" row)
 	cancel        context.CancelFunc
 	learning      bool           // a learning pass is running in the background — shown in the status line
 	heldLessons   *reflectResult // a pass that landed while a task was running; applied when that task ends
@@ -670,10 +673,10 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.cancel = nil
 		m.retry = nil
-		m.steer = nil                 // steering notes belonged to the run that just ended
-		m.applyPendingMode()          // a shift+tab during the task takes effect now, before the next one
-		detect := m.detectWindowCmd() // model is loaded now — confirm the real window
-		m.applyPendingConfig()        // settings staged in /config while this task was running
+		m.steer = nil                                      // steering notes belonged to the run that just ended
+		m.applyPendingMode()                               // a shift+tab during the task takes effect now, before the next one
+		detect := m.detectWindowCmd()                      // model is loaded now — confirm the real window
+		detect = tea.Batch(detect, m.applyPendingConfig()) // settings staged in /config while this task was running
 		if held := m.heldLessons; held != nil {
 			// A pass from the PREVIOUS task finished under this one — apply it now
 			// that nothing is reading the stores (see the reflectDoneMsg handler).
@@ -810,6 +813,11 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cancel != nil {
 			return m, nil
 		}
+		// A size set by hand is never replaced by a probe — not even one that
+		// left before it was set.
+		if m.app.activeLLM().ContextWindowManual {
+			return m, nil
+		}
 		if msg.tokens > 0 {
 			changed := m.app.applyWindow(msg.provider, msg.tokens)
 			if msg.provider == m.app.providerName() {
@@ -921,7 +929,11 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.ClearScreen
 	case "ctrl+u":
 		// Nuke the whole input — fast recovery from a bad clipboard paste. (In the
-		// profile builder's name step it clears that field instead.)
+		// profile builder's name step it clears that field instead; in a /config
+		// field it is that field's own edit key.)
+		if m.state == stConfig && (m.cfgEdit != nil || m.cfgPhase != cfgPhaseList) {
+			break
+		}
 		if m.state == stAgents && m.agPhase == agName {
 			m.agDraft.name = ""
 		} else {
@@ -987,6 +999,9 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case stConfig:
 		if m.cfgPhase != cfgPhaseList { // typing inside the add-provider form
 			return m.configAddKey(k)
+		}
+		if m.cfgEdit != nil { // typing a value in place on its row
+			return m.configEditKey(k)
 		}
 		switch k.String() {
 		case "up", "k":
@@ -1189,6 +1204,11 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(m.input.Value()) == "" && len(m.queued) > 0 {
 				last := m.queued[len(m.queued)-1]
 				m.queued = m.queued[:len(m.queued)-1]
+				if redactSecrets(last) != last { // masked in the queue — don't unmask it into the input
+					m.push(cDim.Render("  dropped the queued " + redactSecrets(last) + " — retype it to keep it"))
+					m.syncViewport()
+					return m, nil
+				}
 				m.input.SetValue(last)
 				m.input.CursorEnd()
 				m.syncViewport() // the pinned queue shrank
@@ -1391,11 +1411,25 @@ func (m *tuiModel) historyNext() {
 // same finalization taskDoneMsg does. Without this, a type-ahead submitted during
 // such an op sat in the queue until the NEXT task finished (or forever).
 func (m *tuiModel) idleDrain() (tea.Model, tea.Cmd) {
+	// The background work is over: settings staged in /config while it ran
+	// apply now. Only a task's end used to do this, so a change staged during
+	// /compact or a skill install stayed "staged" for good.
+	var staged tea.Cmd
+	if m.cancel == nil {
+		staged = m.applyPendingConfig()
+	}
+	// A panel open over that work stays open — a /model listing or an update
+	// landing used to close /config mid-edit. Closing the panel drains.
+	if m.state == stConfig || m.state == stAgents {
+		m.taskDoneAway = true
+		return m, staged
+	}
 	m.state = stIdle
 	if len(m.queued) > 0 {
-		return m.drainQueue()
+		model, cmd := m.drainQueue()
+		return model, tea.Batch(staged, cmd)
 	}
-	return m, m.input.Focus()
+	return m, tea.Batch(staged, m.input.Focus())
 }
 
 // drainQueue runs the next pending messages: it executes queued /commands in place
@@ -1405,8 +1439,8 @@ func (m *tuiModel) drainQueue() (tea.Model, tea.Cmd) {
 	for len(m.queued) > 0 {
 		next := m.queued[0]
 		m.queued = m.queued[1:]
-		m.syncViewport() // it left the pinned queue
-		m.push(cYou.Render("❯ ") + next)
+		m.syncViewport()                                // it left the pinned queue
+		m.push(cYou.Render("❯ ") + redactSecrets(next)) // a queued /ai key carries its token
 		if isCommandLine(next) {
 			model, cmd := m.runCommand(next)
 			m = model.(*tuiModel)
@@ -1848,8 +1882,11 @@ func (m *tuiModel) startUpdate(arg string) tea.Cmd {
 	arg = strings.TrimLeft(arg, "-") // --nightly, as the CLI's update takes it
 	if arg == selfupdate.Stable || arg == selfupdate.Nightly {
 		channel = arg
-		_ = config.SaveChannel(channel)
-		m.app.cfg.Channel = channel
+		if err := config.SaveChannel(channel); err != nil {
+			m.push(cErr.Render("  channel not saved (this update still uses " + channel + "): " + err.Error()))
+		} else {
+			m.app.cfg.Channel = channel
+		}
 	} else if arg != "" {
 		m.push(cDim.Render("usage: /update [stable|nightly]"))
 		return nil
@@ -1953,9 +1990,10 @@ func (m *tuiModel) forceDetach() (tea.Model, tea.Cmd) {
 	m.steer = nil
 	m.busyMsg = ""
 	m.taskCancelled = false
-	m.applyPendingConfig() // a detached run emits no taskDoneMsg — don't strand staged settings
+	staged := m.applyPendingConfig() // a detached run emits no taskDoneMsg — don't strand staged settings
 	m.push(cErr.Render("  ⚠ force-detached") + cDim.Render(" — abandoned the stuck request; you're clear to work."))
-	return m.drainQueue() // run anything queued, on the fresh agent
+	model, cmd := m.drainQueue() // run anything queued, on the fresh agent
+	return model, tea.Batch(staged, cmd)
 }
 
 // runTask runs a single goal in the background, streaming via the bridge and
@@ -2371,7 +2409,7 @@ func (m *tuiModel) queuedView() []string {
 			out = append(out, cDim.Render(fmt.Sprintf("  … +%d more", len(m.queued)-max)))
 			break
 		}
-		out = append(out, cYou.Render("  ▹ ")+q) // NOT ⟳ — that's the live network-retry status; a queued item isn't retrying anything
+		out = append(out, cYou.Render("  ▹ ")+redactSecrets(q)) // NOT ⟳ — that's the live network-retry status; a queued item isn't retrying anything
 	}
 	return out
 }

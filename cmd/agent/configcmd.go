@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 )
@@ -103,6 +104,10 @@ func runConfig(workspace string, args []string) {
 			fatal(err)
 		}
 		for _, line := range config.Flatten(cfg) {
+			// Keys stay out of the terminal and its scrollback: listed as set.
+			if k, v, ok := strings.Cut(line, "\t"); ok && strings.HasSuffix(k, "api_key") && v != `""` {
+				line = k + "\t" + `"● set"`
+			}
 			fmt.Println(line)
 		}
 

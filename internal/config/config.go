@@ -558,6 +558,35 @@ func SaveLocalModel(name string, l LLM) error {
 	return mergeGlobalKeys(map[string]any{"name": name, "llm": l, "provider": "local"})
 }
 
+// WorkspaceKeys names the top-level settings this workspace's own config file
+// sets — the ones that win over the global file on every load. The panel says
+// so on those rows: a change saved globally there is undone at the next start.
+// The connection (llm, providers) and telemetry are not among them: Load pins
+// those to the global file whatever the workspace says.
+func WorkspaceKeys(workspace string) map[string]bool {
+	abs, err := filepath.Abs(workspace)
+	if err != nil {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(abs, ".agent", "config.json"))
+	if err != nil {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(data, &m) != nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for k := range m {
+		switch k {
+		case "llm", "providers", "telemetry":
+		default:
+			out[k] = true
+		}
+	}
+	return out
+}
+
 // SaveWorkspacePolicy persists the run/file permission policy to the workspace
 // config (<workspace>/.agent/config.json) so /permissions changes survive a
 // restart. Any other keys already in that file are preserved.

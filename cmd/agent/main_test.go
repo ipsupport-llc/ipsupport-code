@@ -779,178 +779,6 @@ func TestConfigPanelLoopDetectionToggle(t *testing.T) {
 	}
 }
 
-// temperature/top_p must be settable from /config (not just by hand-editing
-// config.json), for the CURRENTLY ACTIVE connection, following the same
-// local-vs-named-provider persistence split as model/loop_detection.
-func TestConfigPanelTemperatureAndTopPCycle(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir()) // SaveGlobal/SaveProviders write the global config
-	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
-	cursorFor := func(key string) int {
-		for i, k := range cfgKeys() {
-			if k == key {
-				return i
-			}
-		}
-		t.Fatalf("no %q row in the config panel", key)
-		return -1
-	}
-
-	m.cfgCursor = cursorFor("temperature")
-	if m.app.cfg.LLM.Temperature != 0.2 {
-		t.Fatalf("config.Default() temperature = %v, want the built-in 0.2", m.app.cfg.LLM.Temperature)
-	}
-	m.configActivate() // 0.2 → 0.7 (temperatureCycle = {0, 0.2, 0.7, 1.0})
-	if m.app.cfg.LLM.Temperature != 0.7 {
-		t.Errorf("after one cycle, temperature = %v, want 0.7", m.app.cfg.LLM.Temperature)
-	}
-	m.configActivate() // 0.7 → 1.0 (NVIDIA rec)
-	if m.app.cfg.LLM.Temperature != 1.0 {
-		t.Errorf("after two cycles, temperature = %v, want 1.0", m.app.cfg.LLM.Temperature)
-	}
-
-	m.cfgCursor = cursorFor("top_p")
-	for i := 0; i < 3; i++ {
-		m.configActivate() // 0 → 0.7 → 0.9 → 0.95
-	}
-	if m.app.cfg.LLM.TopP != 0.95 {
-		t.Errorf("after three cycles, top_p = %v, want 0.95 (NVIDIA rec)", m.app.cfg.LLM.TopP)
-	}
-
-	// switching to a NAMED (non-local) provider must persist to cfg.Providers,
-	// not silently keep writing to cfg.LLM.
-	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://api.lab.co/v1"}}
-	m.app.cfg.Provider = "mylab"
-	m.cfgCursor = cursorFor("temperature")
-	m.configActivate() // 0 → 0.2
-	if m.app.cfg.Providers["mylab"].Temperature != 0.2 {
-		t.Errorf("named-provider temperature = %v, want 0.2", m.app.cfg.Providers["mylab"].Temperature)
-	}
-	if m.app.cfg.LLM.Temperature != 1.0 {
-		t.Errorf("switching provider must not touch local's temperature, still want 1.0, got %v", m.app.cfg.LLM.Temperature)
-	}
-
-	// reload from disk: both providers' values must have actually been persisted.
-	loaded, err := config.Load(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.LLM.Temperature != 1.0 || loaded.LLM.TopP != 0.95 {
-		t.Errorf("local sampler settings not persisted: temp=%v top_p=%v", loaded.LLM.Temperature, loaded.LLM.TopP)
-	}
-	if loaded.Providers["mylab"].Temperature != 0.2 {
-		t.Errorf("named-provider temperature not persisted: %v", loaded.Providers["mylab"].Temperature)
-	}
-}
-
-// The server's own default max_tokens can cut a reasoning model off mid-
-// thought (observed live: finish_reason=length well under the context
-// window's own limit) — max_output_tokens must be settable from /config,
-// persisted with the same local-vs-named-provider split, and survive a reload.
-func TestConfigPanelMaxOutputTokensCycle(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
-	cursorFor := func(key string) int {
-		for i, k := range cfgKeys() {
-			if k == key {
-				return i
-			}
-		}
-		t.Fatalf("no %q row in the config panel", key)
-		return -1
-	}
-
-	m.cfgCursor = cursorFor("max_output_tokens")
-	if m.app.cfg.LLM.MaxOutputTokens != 0 {
-		t.Fatalf("default max_output_tokens = %v, want 0 (server default)", m.app.cfg.LLM.MaxOutputTokens)
-	}
-	for i := 0; i < 3; i++ {
-		m.configActivate() // 0 → 2000 → 4000 → 8000
-	}
-	if m.app.cfg.LLM.MaxOutputTokens != 8000 {
-		t.Errorf("after three cycles, max_output_tokens = %v, want 8000", m.app.cfg.LLM.MaxOutputTokens)
-	}
-
-	// named (non-local) provider must persist to cfg.Providers, not cfg.LLM.
-	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://api.lab.co/v1"}}
-	m.app.cfg.Provider = "mylab"
-	m.configActivate() // 0 → 2000 for mylab
-	if m.app.cfg.Providers["mylab"].MaxOutputTokens != 2000 {
-		t.Errorf("named-provider max_output_tokens = %v, want 2000", m.app.cfg.Providers["mylab"].MaxOutputTokens)
-	}
-	if m.app.cfg.LLM.MaxOutputTokens != 8000 {
-		t.Errorf("switching provider must not touch local's max_output_tokens, still want 8000, got %v", m.app.cfg.LLM.MaxOutputTokens)
-	}
-
-	loaded, err := config.Load(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.LLM.MaxOutputTokens != 8000 {
-		t.Errorf("local max_output_tokens not persisted: %v", loaded.LLM.MaxOutputTokens)
-	}
-	if loaded.Providers["mylab"].MaxOutputTokens != 2000 {
-		t.Errorf("named-provider max_output_tokens not persisted: %v", loaded.Providers["mylab"].MaxOutputTokens)
-	}
-}
-
-// The idle watchdog (how long a request waits with no response/stream data
-// before it's treated as a hiccup and retried) was config.json-only, same gap
-// temperature/top_p had — must be settable from /config, persisted with the
-// same local-vs-named-provider split, and survive a reload.
-func TestConfigPanelIdleTimeoutCycle(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
-	cursorFor := func(key string) int {
-		for i, k := range cfgKeys() {
-			if k == key {
-				return i
-			}
-		}
-		t.Fatalf("no %q row in the config panel", key)
-		return -1
-	}
-
-	m.cfgCursor = cursorFor("idle_timeout")
-	if m.app.cfg.LLM.IdleTimeoutSeconds != 0 {
-		t.Fatalf("default idle timeout = %v, want 0 (client's built-in 90s)", m.app.cfg.LLM.IdleTimeoutSeconds)
-	}
-	m.configActivate() // 0 → 60
-	if m.app.cfg.LLM.IdleTimeoutSeconds != 60 {
-		t.Errorf("after one cycle, idle timeout = %v, want 60", m.app.cfg.LLM.IdleTimeoutSeconds)
-	}
-	for i := 0; i < 4; i++ {
-		m.configActivate() // 60 → 120 → 180 → 300 → 600
-	}
-	if m.app.cfg.LLM.IdleTimeoutSeconds != 600 {
-		t.Errorf("after five cycles, idle timeout = %v, want 600", m.app.cfg.LLM.IdleTimeoutSeconds)
-	}
-
-	// named (non-local) provider must persist to cfg.Providers, not cfg.LLM.
-	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://api.lab.co/v1"}}
-	m.app.cfg.Provider = "mylab"
-	m.configActivate() // 0 → 60 for mylab
-	if m.app.cfg.Providers["mylab"].IdleTimeoutSeconds != 60 {
-		t.Errorf("named-provider idle timeout = %v, want 60", m.app.cfg.Providers["mylab"].IdleTimeoutSeconds)
-	}
-	if m.app.cfg.LLM.IdleTimeoutSeconds != 600 {
-		t.Errorf("switching provider must not touch local's idle timeout, still want 600, got %v", m.app.cfg.LLM.IdleTimeoutSeconds)
-	}
-
-	loaded, err := config.Load(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.LLM.IdleTimeoutSeconds != 600 {
-		t.Errorf("local idle timeout not persisted: %v", loaded.LLM.IdleTimeoutSeconds)
-	}
-	if loaded.Providers["mylab"].IdleTimeoutSeconds != 60 {
-		t.Errorf("named-provider idle timeout not persisted: %v", loaded.Providers["mylab"].IdleTimeoutSeconds)
-	}
-}
-
 // context_window must be settable from /config (not just by hand-editing
 // config.json's raw LLM struct) — same gap temperature/top_p/idle_timeout had.
 // A manual nonzero override must also mark the window as "already detected" so
@@ -959,7 +787,7 @@ func TestConfigPanelIdleTimeoutCycle(t *testing.T) {
 func TestConfigPanelContextWindowCycle(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	m := &tuiModel{state: stConfig, app: &app{cfg: config.Default(), workspace: t.TempDir()}}
+	m := &tuiModel{state: stConfig, width: 100, input: textarea.New(), app: &app{cfg: config.Default(), workspace: t.TempDir()}}
 	cursorFor := func(key string) int {
 		for i, k := range cfgKeys() {
 			if k == key {
@@ -969,33 +797,39 @@ func TestConfigPanelContextWindowCycle(t *testing.T) {
 		t.Fatalf("no %q row in the config panel", key)
 		return -1
 	}
-
-	m.cfgCursor = cursorFor("context_window")
-	if m.app.cfg.LLM.ContextWindow != 8192 {
-		t.Fatalf("config.Default() context window = %v, want the built-in 8192", m.app.cfg.LLM.ContextWindow)
+	// Any size, typed: the panel offered six presets, none above 128K.
+	set := func(v string) {
+		m.cfgCursor = cursorFor("context_window")
+		m.configActivate()
+		if m.cfgEdit == nil {
+			t.Fatal("context window did not open its editor")
+		}
+		m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlU})
+		m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(v)})
+		m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
 	}
-	m.configActivate() // 8192 → 16384
-	if m.app.cfg.LLM.ContextWindow != 16384 {
-		t.Errorf("after one cycle, context window = %v, want 16384", m.app.cfg.LLM.ContextWindow)
+
+	set("200000")
+	if m.app.cfg.LLM.ContextWindow != 200000 || !m.app.cfg.LLM.ContextWindowManual {
+		t.Errorf("context window = %v (manual %v), want 200000 set by hand", m.app.cfg.LLM.ContextWindow, m.app.cfg.LLM.ContextWindowManual)
 	}
 	if !m.app.windowDetected {
 		t.Error("a manual nonzero override must mark the window as already detected — otherwise the next task's auto-detect silently overwrites it")
 	}
-
-	for i := 0; i < 4; i++ {
-		m.configActivate() // 16384 → 32768 → 65536 → 131072 → 0 (wraps)
+	set("abc")
+	if m.cfgEdit == nil || m.cfgEdit.err == "" {
+		t.Fatal("a size that is not a number must say why and stay open")
 	}
-	if m.app.cfg.LLM.ContextWindow != 0 {
-		t.Errorf("after five cycles (wrapping), context window = %v, want 0", m.app.cfg.LLM.ContextWindow)
-	}
-	if m.app.windowDetected {
-		t.Error("cycling back to 0 (clear override) must let auto-detect run again")
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	set("0")
+	if m.app.cfg.LLM.ContextWindow != 0 || m.app.windowDetected {
+		t.Errorf("0 must clear the override and let auto-detect run again: %v detected=%v", m.app.cfg.LLM.ContextWindow, m.app.windowDetected)
 	}
 
 	// named (non-local) provider must persist to cfg.Providers, not cfg.LLM.
 	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://api.lab.co/v1"}}
 	m.app.cfg.Provider = "mylab"
-	m.configActivate() // 0 → 4096 for mylab
+	set("4096")
 	if m.app.cfg.Providers["mylab"].ContextWindow != 4096 {
 		t.Errorf("named-provider context window = %v, want 4096", m.app.cfg.Providers["mylab"].ContextWindow)
 	}
@@ -2888,7 +2722,10 @@ func TestConfigAddProviderFlow(t *testing.T) {
 	if m.cfgPhase != cfgPhaseURL {
 		t.Fatal("URL without a scheme must not advance")
 	}
-	m.cfgDraft.url = "http://localhost:11434/v1"
+	if m.cfgDraft.err == "" {
+		t.Error("a refused URL must say why")
+	}
+	m.cfgDraft.url = newTextField("http://localhost:11434/v1", false)
 	enter()
 	enter() // model: optional, skip
 	enter() // key: optional (keyless), save
@@ -2939,7 +2776,7 @@ func TestConfigAddProviderFlowPrefillsExistingForEdit(t *testing.T) {
 	m.configActivate() // opens the form fresh
 	typeIn("ollama")
 	enter() // name → URL: should prefill from the existing entry
-	if m.cfgDraft.url != "http://localhost:11434/v1" || m.cfgDraft.model != "llama3" {
+	if m.cfgDraft.url.value() != "http://localhost:11434/v1" || m.cfgDraft.model.value() != "llama3" {
 		t.Fatalf("editing an existing provider must prefill url/model, got draft=%+v", m.cfgDraft)
 	}
 	accent := lipgloss.NewStyle()

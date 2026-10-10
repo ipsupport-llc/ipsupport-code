@@ -7470,6 +7470,12 @@ func TestPushDoesNotRewrapEntireLogEveryTime(t *testing.T) {
 // input's wrap boundary back and forth, to force syncInputHeight's row-count
 // branch repeatedly) against a large pre-existing log, and checks it costs
 // about the same as typing into an empty one.
+//
+// "Costs" is bytes allocated, not wall time: timed, the test failed on a
+// loaded CI runner with the fix in place (a 200ms spread between two runs).
+// A rescan re-splits the whole log on every height change — ~120MB more over
+// this text against 100,000 lines — while the fixed path adds 2MB (10MB under
+// -race), and those counts don't depend on how busy the machine is.
 func TestSyncViewportDoesNotRescanLogOnInputHeightChange(t *testing.T) {
 	newModel := func(historyLines int) *tuiModel {
 		cfg := config.Default()
@@ -7496,8 +7502,9 @@ func TestSyncViewportDoesNotRescanLogOnInputHeightChange(t *testing.T) {
 	// boundary many times as it's typed in, then backspaced back out.
 	text := strings.Repeat("some words to type ", 10)
 
-	typeAndErase := func(m *tuiModel) time.Duration {
-		start := time.Now()
+	typeAndErase := func(m *tuiModel) uint64 {
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
 		for _, r := range text {
 			model, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
 			m = model.(*tuiModel)
@@ -7508,22 +7515,21 @@ func TestSyncViewportDoesNotRescanLogOnInputHeightChange(t *testing.T) {
 			m = model.(*tuiModel)
 			_ = m.View()
 		}
-		return time.Since(start)
+		runtime.ReadMemStats(&after)
+		return after.TotalAlloc - before.TotalAlloc
 	}
 
 	baseline := typeAndErase(newModel(0))
-	loadedElapsed := typeAndErase(newModel(100000))
+	loadedBytes := typeAndErase(newModel(100000))
 
-	// A per-keystroke cost unrelated to log size (textarea/lipgloss internals)
-	// dominates the baseline itself, so compare the DELTA against the log size
-	// rather than a multiplier of that noisy baseline. If syncViewport still
-	// rescanned the whole log on every input-height change, the delta here
-	// measures in the hundreds of milliseconds (~450ms at 100,000 lines);
-	// fixed, it's noise (a few ms). 150ms leaves a wide margin either way.
-	if delta := loadedElapsed - baseline; delta > 150*time.Millisecond {
-		t.Errorf("typing+erasing %d chars against a 100,000-line log took %v longer than against an empty one (%v vs %v) — "+
+	// What the typing itself allocates (textarea/lipgloss internals) is the
+	// same against either log, so compare the DIFFERENCE: 2MB fixed (10MB under
+	// -race), ~120MB with the rescan back in. 32MB is at least 3x from either.
+	t.Logf("allocated: %dKB against an empty log, %dKB against 100,000 lines", baseline>>10, loadedBytes>>10)
+	if loadedBytes > baseline && loadedBytes-baseline > 32<<20 {
+		t.Errorf("typing+erasing %d chars against a 100,000-line log allocated %dMB more than against an empty one (%dMB vs %dMB) — "+
 			"syncViewport looks like it's rescanning the whole log on every input-height change",
-			len(text), delta, loadedElapsed, baseline)
+			len(text), (loadedBytes-baseline)>>20, loadedBytes>>20, baseline>>20)
 	}
 }
 

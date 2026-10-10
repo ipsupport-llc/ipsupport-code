@@ -87,7 +87,7 @@ class _Result:
         self.cmds = []
         self.piped = []
         self.pipe_to = []
-        self.opens = []  # (start, is_case), innermost last
+        self.opens = []  # (start, end word), innermost last
         self.closed = None
         self.groups = []
         self.code = []  # pieces, joined once: += on a str is quadratic
@@ -125,16 +125,16 @@ class _Result:
             self.read_by(self.closed[0], self.closed[1], len(self.cmds))
         self.closed = None
         if s and self.d == SH:
-            first = _fields(s)[0]
-            if first == "case":
-                self.opens.append((len(self.cmds) - 1, True))
-            elif first == "esac" and self.opens and self.opens[-1][1]:
+            k = _keyword(s)
+            if _CLOSERS.get(k):
+                self.opens.append((len(self.cmds) - 1, _CLOSERS[k]))
+            elif self.opens and k == self.opens[-1][1]:
                 if pipe:
                     self.read_by(self.opens[-1][0], len(self.cmds) - 1, len(self.cmds))
                 self.opens.pop()
         if op in ("(", "{"):
-            self.opens.append((len(self.cmds), False))
-        elif op in (")", "}") and self.opens and not self.opens[-1][1]:
+            self.opens.append((len(self.cmds), ")"))
+        elif op in (")", "}") and self.opens and self.opens[-1][1] == ")":
             self.closed = (self.opens.pop()[0], len(self.cmds))
 
     def read_by(self, frm, to, t):
@@ -217,6 +217,17 @@ class _Result:
                 f |= _UNKNOWN
             fed[j - first] = f
         return fed
+
+
+_CLOSERS = {"case": "esac", "if": "fi", "for": "done", "while": "done", "until": "done", "select": "done"}
+
+
+def _keyword(s):
+    """Mirrors keyword: the first word past ! and time (-p, --)."""
+    for w in _fields(s):
+        if w not in ("!", "time", "-p", "--"):
+            return w
+    return ""
 
 
 def _encoded_flag(w):

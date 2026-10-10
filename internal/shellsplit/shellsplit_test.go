@@ -321,6 +321,11 @@ func TestAHeredocsReaderDecidesWhatItIs(t *testing.T) {
 		"git apply<<'EOF'\n--- a/x\n+++ b/x\nEOF",
 		"git update-ref --stdin <<'EOF'\nupdate refs/heads/main 0000\nEOF",
 		"(\ncat <<'EOF'\nrm -rf x\nEOF\n) | sh", // a block still open: its reader isn't known yet
+		"if true\nthen\ncat <<'EOF'\nrm -rf x\nEOF\nfi | sh",
+		"for i in 1\ndo\ncat <<'EOF'\nrm -rf x\nEOF\ndone | sh",
+		"while true; do\ncat <<'EOF'\nrm -rf x\nEOF\ndone | sh",
+		"until false\ndo\ncat <<'EOF'\nrm -rf x\nEOF\ndone | sh",
+		"time if true\nthen\ncat <<'EOF'\nrm -rf x\nEOF\nfi | sh",
 	} {
 		if p := Parse(Sh, line); !p.Incomplete {
 			t.Errorf("Parse(%q) = %q: an unknown reader's heredoc marked complete", line, p.Commands)
@@ -356,6 +361,8 @@ func TestAHeredocInABlockIsReadByWhatTheBlockIsPipedInto(t *testing.T) {
 		"case x in x) (cat <<'EOF') | sh;; esac | grep x\nrm -rf src/legacy\nEOF",
 		"(case x in x) cat <<'EOF';; esac) | sh\nrm -rf src/legacy\nEOF", // a pattern's ) closes no block
 		"{ case x in x) cat <<'EOF';; esac; } | sh\nrm -rf src/legacy\nEOF",
+		"! case x in x) cat <<'EOF';; esac | sh\nrm -rf src/legacy\nEOF", // past ! and time
+		"time -p case x in x) cat <<'EOF';; esac | sh\nrm -rf src/legacy\nEOF",
 	} {
 		if got := Split(Sh, line); !slices.Contains(got, "rm -rf src/legacy") {
 			t.Errorf("Split(%q) = %q", line, got)

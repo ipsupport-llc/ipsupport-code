@@ -147,44 +147,59 @@ func (r *result) cut(b *buf, op string) {
 }
 
 // open is a block not yet closed: where it started (an index into cmds), and
-// whether it is a case … esac — inside which a ) ends a pattern, not a block.
+// what closes it — ) or }, esac (inside a case a ) ends a pattern, not a
+// block), fi, or done.
 type open struct {
-	start  int
-	isCase bool
+	start int
+	end   string
 }
 
-// block keeps track of ( … ), { … } and case … esac: what a block writes is
-// read by what it is piped into — (cat <<EOF) | sh, { …; } | sh — so each
-// command in it is read by that too (see readers) — whatever redirection
-// comes between: (…) 2>/dev/null | sh still pipes its output. Blocks nest,
-// and each pipe out of one adds a reader: ((cat <<EOF) | sh) | grep x is
-// read by sh and by grep.
+// closers are the compound commands a keyword opens, by the word that ends
+// each.
+var closers = map[string]string{"case": "esac", "if": "fi", "for": "done", "while": "done", "until": "done", "select": "done"}
+
+// block keeps track of ( … ), { … }, case … esac, if … fi and loops' … done:
+// what a block writes is read by what it is piped into — (cat <<EOF) | sh,
+// { …; } | sh — so each command in it is read by that too (see readers),
+// whatever redirection comes between: (…) 2>/dev/null | sh still pipes its
+// output. Blocks nest, and each pipe out of one adds a reader:
+// ((cat <<EOF) | sh) | grep x is read by sh and by grep.
 func (r *result) block(s, op string, pipe bool) {
 	if r.closed != nil && pipe {
 		r.readBy(r.closed[0], r.closed[1], len(r.cmds))
 	}
 	r.closed = nil
 	if s != "" && r.d == Sh {
-		switch strings.Fields(s)[0] {
-		case "case":
-			r.opens = append(r.opens, open{start: len(r.cmds) - 1, isCase: true})
-		case "esac":
-			if n := len(r.opens); n > 0 && r.opens[n-1].isCase {
-				if pipe {
-					r.readBy(r.opens[n-1].start, len(r.cmds)-1, len(r.cmds))
-				}
-				r.opens = r.opens[:n-1]
+		k, n := keyword(s), len(r.opens)
+		switch {
+		case closers[k] != "":
+			r.opens = append(r.opens, open{start: len(r.cmds) - 1, end: closers[k]})
+		case n > 0 && k == r.opens[n-1].end: // esac, fi, done
+			if pipe {
+				r.readBy(r.opens[n-1].start, len(r.cmds)-1, len(r.cmds))
 			}
+			r.opens = r.opens[:n-1]
 		}
 	}
 	n := len(r.opens)
 	switch {
 	case op == "(" || op == "{":
-		r.opens = append(r.opens, open{start: len(r.cmds)})
-	case (op == ")" || op == "}") && n > 0 && !r.opens[n-1].isCase:
+		r.opens = append(r.opens, open{start: len(r.cmds), end: ")"})
+	case (op == ")" || op == "}") && n > 0 && r.opens[n-1].end == ")":
 		r.closed = []int{r.opens[n-1].start, len(r.cmds)}
 		r.opens = r.opens[:n-1]
 	}
+}
+
+// keyword is a command's first word past the ! and time (-p, --) that may
+// come before a compound command: ! case …, time -p for ….
+func keyword(s string) string {
+	for _, w := range strings.Fields(s) {
+		if w != "!" && w != "time" && w != "-p" && w != "--" {
+			return w
+		}
+	}
+	return ""
 }
 
 // readBy adds cmds[t] as a reader of cmds[from:to].

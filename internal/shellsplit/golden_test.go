@@ -157,7 +157,12 @@ var casesForGolden = []string{
 	"{ { cat <<'EOF'; } | sh; } | grep x\nrm -rf src/legacy\nEOF", "case a in a) case b in b) cat <<'EOF';; esac | sh;; esac | grep x\nrm -rf src/legacy\nEOF",
 	"case x in x) (cat <<'EOF') | sh;; esac | grep x\nrm -rf src/legacy\nEOF", "(case x in x) cat <<'EOF';; esac) | sh\nrm -rf src/legacy\nEOF",
 	"{ case x in x) cat <<'EOF';; esac; } | sh\nrm -rf src/legacy\nEOF", "git apply<<'EOF'\n--- a/x\n+++ b/x\nEOF",
-	"git update-ref --stdin <<'EOF'\nupdate refs/heads/main 0000\nEOF", "case x in (a) cat <<'EOF';; esac | sh\nrm -rf src/legacy\nEOF", "cat 2>&- sh <<EOF\nrm -rf x\nEOF",
+	"git update-ref --stdin <<'EOF'\nupdate refs/heads/main 0000\nEOF", "case x in (a) cat <<'EOF';; esac | sh\nrm -rf src/legacy\nEOF",
+	"! case x in x) cat <<'EOF';; esac | sh\nrm -rf src/legacy\nEOF", "time -p case x in x) cat <<'EOF';; esac | sh\nrm -rf src/legacy\nEOF",
+	"if true\nthen\ncat <<'EOF'\nrm -rf x\nEOF\nfi | sh", "for i in 1\ndo\ncat <<'EOF'\nrm -rf x\nEOF\ndone | sh",
+	"while true; do\ncat <<'EOF'\nrm -rf x\nEOF\ndone | sh", "until false\ndo\ncat <<'EOF'\nrm -rf x\nEOF\ndone | sh",
+	"time if true\nthen\ncat <<'EOF'\nrm -rf x\nEOF\nfi | sh", "for ((i=0;i<1;i++))\ndo\ncat <<'EOF'\nrm -rf x\nEOF\ndone | sh",
+	"if true; then echo a; fi; cat <<'EOF' | sh\nrm -rf src/legacy\nEOF", "cat 2>&- sh <<EOF\nrm -rf x\nEOF",
 	strings.Repeat("eval $(", 12) + "echo ok" + strings.Repeat(")", 12), // past the parse budget
 	"sh <<EOF\n# $(rm -rf src/legacy)\nEOF",
 	"timeout 5 sh <<EOF\nrm -rf x\nEOF", "ssh deploy@host <<'EOF'\nrm -rf /srv/app\nEOF",

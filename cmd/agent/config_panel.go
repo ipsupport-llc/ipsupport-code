@@ -8,6 +8,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
@@ -26,12 +27,20 @@ type cfgRow struct {
 }
 
 var configRows = []cfgRow{
-	{header: "Model & provider"},
+	// The connection in use, every part of it editable here: where it points,
+	// which model, its key. The local server's address and key had no row at
+	// all, and the hint that sent people here for them led nowhere.
+	{header: "Connection"},
 	{key: "provider"},
-	{key: "addprovider"},
+	{key: "base_url"},
 	{key: "model"},
 	{key: "apikey"},
+	{key: "conn_type"},
 	{key: "context_window"},
+	{header: "Providers"},
+	{key: "addprovider"},
+	{key: "removeprovider"},
+	{header: "Model tuning"},
 	{key: "reasoning"},
 	{key: "temperature"},
 	{key: "top_p"},
@@ -92,7 +101,29 @@ func cfgKeys() []string {
 func (m *tuiModel) openConfig() {
 	m.cfgCursor = 0
 	m.cfgPhase = cfgPhaseList
+	m.cfgEdit = nil
+	m.cfgWSKeys = config.WorkspaceKeys(m.app.workspace)
 	m.state = stConfig
+}
+
+// cfgRowSetting is the config key a global-saved row writes, for the rows a
+// workspace's own config file can override.
+var cfgRowSetting = map[string]string{
+	"provider": "provider", "reasoning": "reasoning", "judge_reasoning": "reasoning",
+	"budget": "session_budget_usd", "offline": "offline", "memory": "memory",
+	"compact_threshold": "compact_threshold", "max_steps": "goal_max_steps",
+	"max_history": "max_history", "max_stuck_turns": "max_stuck_turns",
+	"goal_ttl": "goal_max_returns", "goal_nudge": "goal_nudge",
+	"judge_max_output_tokens": "judge_max_output_tokens", "reflection": "reflect_disabled",
+	"knowledge_retention": "knowledge_retention_days", "agents": "agents",
+	"spawn": "spawn", "subexec": "spawn", "color": "color", "channel": "channel", "name": "name",
+}
+
+// projectOverrides reports whether this project's .agent/config.json sets the
+// row's setting — then a change saved here (globally) does not survive a restart.
+func (m *tuiModel) projectOverrides(key string) bool {
+	k, ok := cfgRowSetting[key]
+	return ok && m.cfgWSKeys[k]
 }
 
 // The add-provider form lives INSIDE the panel (no hand-off that dumps the user
@@ -105,13 +136,22 @@ const (
 	cfgPhaseKey
 )
 
-// providerDraft is the provider being added via the panel form.
+// providerDraft is the provider being added via the panel form. prefilled is
+// the name whose saved values the URL and model fields hold, so a name changed
+// after stepping back reloads them instead of saving one provider's address
+// under another's name.
 type providerDraft struct {
-	name, url, model, key string
+	name, url, model, key textField
+	prefilled             string
+	err                   string
+}
+
+func newProviderDraft() providerDraft {
+	return providerDraft{key: newTextField("", true)}
 }
 
 // cfgAddField returns the form field being edited for the current phase.
-func (m *tuiModel) cfgAddField() *string {
+func (m *tuiModel) cfgAddField() *textField {
 	switch m.cfgPhase {
 	case cfgPhaseName:
 		return &m.cfgDraft.name
@@ -125,100 +165,99 @@ func (m *tuiModel) cfgAddField() *string {
 }
 
 // configAddKey handles typing in the add-provider form: enter advances (saving on
-// the last field), esc steps back (to the list from the first).
+// the last field), esc steps back (to the list from the first). A field that
+// cannot be accepted says why, and keeps what was typed.
 func (m *tuiModel) configAddKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	field := m.cfgAddField()
+	d := &m.cfgDraft
 	switch k.String() {
 	case "enter":
+		d.err = ""
 		switch m.cfgPhase {
 		case cfgPhaseName:
-			name := strings.TrimSpace(m.cfgDraft.name)
-			if name == "" {
-				return m, nil // a name is required
+			name := strings.TrimSpace(d.name.value())
+			if err := validProviderName(name); err != nil {
+				d.err = err.Error()
+				return m, nil
 			}
-			// Editing an already-added provider: prefill its current URL/model so
-			// the form shows what's on file instead of forcing a blank retype of
-			// the exact original values (the key is deliberately left blank —
-			// configAddSave only touches it when something new is typed).
-			if config.IsCustomProvider(m.app.cfg, name) && m.cfgDraft.url == "" {
-				p := m.app.cfg.Providers[name]
-				m.cfgDraft.url = p.BaseURL
-				m.cfgDraft.model = p.Model
+			if _, ok := config.ProviderTemplates[name]; ok {
+				d.err = fmt.Sprintf("%q is built in — select it as the provider; its key and address are under Connection", name)
+				return m, nil
+			}
+			// Editing a provider already added: its saved address and model,
+			// reloaded whenever the name changes (the key is never shown — an
+			// empty key field keeps the one on file).
+			if name != d.prefilled {
+				p, saved := m.app.cfg.Providers[name]
+				if saved {
+					d.url, d.model = newTextField(p.BaseURL, false), newTextField(p.Model, false)
+				} else if d.prefilled != "" {
+					d.url, d.model = textField{}, textField{}
+				}
+				d.prefilled = name
 			}
 			m.cfgPhase = cfgPhaseURL
 		case cfgPhaseURL:
-			if u := strings.TrimSpace(m.cfgDraft.url); !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
-				return m, nil // a real URL is required
+			if _, err := parseBaseURL(d.url.value()); err != nil {
+				d.err = err.Error()
+				return m, nil
 			}
 			m.cfgPhase = cfgPhaseModel
 		case cfgPhaseModel: // optional — empty means "pick one later with /model"
 			m.cfgPhase = cfgPhaseKey
 		default: // key (optional — empty = keyless, e.g. Ollama/vLLM): save
-			m.configAddSave()
+			msg, err := m.app.addProviderFields(d.name.value(), d.url.value(), d.model.value(), d.key.value())
+			if err != nil {
+				d.err = err.Error()
+				return m, nil
+			}
+			m.push(cDim.Render("  " + msg))
+			m.cfgPhase = cfgPhaseList
+			m.cfgDraft = newProviderDraft()
 		}
 	case "esc":
+		d.err = ""
 		if m.cfgPhase == cfgPhaseName {
 			m.cfgPhase = cfgPhaseList
 		} else {
 			m.cfgPhase--
 		}
-	case "backspace":
-		if r := []rune(*field); len(r) > 0 {
-			*field = string(r[:len(r)-1])
-		}
 	default:
-		if s, ok := insertedText(k); ok { // typed or pasted
-			*field += s
-		}
+		m.cfgAddField().key(k)
 	}
 	return m, nil
 }
 
-// configAddSave registers the drafted provider (reusing the /ai add validation)
-// and, when a key was given, stores it too — then returns to the panel list.
-func (m *tuiModel) configAddSave() {
-	d := m.cfgDraft
-	name := strings.TrimSpace(d.name)
-	arg := strings.TrimSpace(name + " " + strings.TrimSpace(d.url) + " " + strings.TrimSpace(d.model))
-	lines := m.app.addProvider(arg)
-	// Check the REAL outcome (did addProvider actually create the entry) rather
-	// than string-matching its human-readable message — that broke silently
-	// once addProvider's wording changed to "added" (it used to say "saved").
-	if key := strings.TrimSpace(d.key); key != "" {
-		if _, ok := m.app.cfg.Providers[name]; ok {
-			lines = append(lines, m.app.setProviderKey(name, key)...)
-		}
-	}
-	m.pushLines(lines)
-	m.cfgPhase = cfgPhaseList
-	m.cfgDraft = providerDraft{}
-}
-
 // renderAddProviderForm draws the in-panel add-provider form.
 func (m *tuiModel) renderAddProviderForm(accent lipgloss.Style) []string {
-	row := func(phase int, label, val, hint string) string {
-		line := fmt.Sprintf("  %-9s %s", label, val)
+	d := m.cfgDraft
+	row := func(phase int, label string, f textField, hint string) string {
 		if m.cfgPhase == phase {
-			return accent.Render(" ▸") + accent.Bold(true).Render(line[2:]) + cDim.Render("▏ "+hint)
+			return accent.Render(" ▸ ") + accent.Bold(true).Render(padVis(label, 9)) + " " + f.view() + cDim.Render("  "+hint)
 		}
-		return "  " + line
+		shown := f.value()
+		if f.masked {
+			shown = strings.Repeat("●", len([]rune(shown)))
+		}
+		return "   " + padVis(label, 9) + " " + shown
 	}
 	header := "add provider — any OpenAI-compatible endpoint"
 	keyHint := "optional — empty = keyless (Ollama/vLLM)"
-	if name := strings.TrimSpace(m.cfgDraft.name); config.IsCustomProvider(m.app.cfg, name) {
-		header = fmt.Sprintf("edit provider %q — current values prefilled", name)
-		keyHint = "optional — leave blank to keep the current key"
+	if name := strings.TrimSpace(d.name.value()); config.IsCustomProvider(m.app.cfg, name) {
+		header = fmt.Sprintf("edit provider %q — saved values loaded", name)
+		keyHint = "optional — leave empty to keep the saved key"
 	}
-	return []string{
+	lines := []string{
 		accent.Bold(true).Render(header),
 		"",
-		row(cfgPhaseName, "name", m.cfgDraft.name, "e.g. ollama · enter next"),
-		row(cfgPhaseURL, "base URL", m.cfgDraft.url, "e.g. http://localhost:11434/v1"),
-		row(cfgPhaseModel, "model", m.cfgDraft.model, "optional — /model lists them later"),
-		row(cfgPhaseKey, "api key", m.cfgDraft.key, keyHint),
-		"",
-		cDim.Render("  enter next/save · esc back"),
+		row(cfgPhaseName, "name", d.name, "e.g. ollama · letters, digits, - _ ."),
+		row(cfgPhaseURL, "base URL", d.url, "e.g. http://localhost:11434/v1"),
+		row(cfgPhaseModel, "model", d.model, "optional — /model lists them later"),
+		row(cfgPhaseKey, "api key", d.key, keyHint),
 	}
+	if d.err != "" {
+		lines = append(lines, "", cErr.Render("  "+d.err))
+	}
+	return append(lines, "", cDim.Render("  enter next/save · esc back · ←→ home end ctrl+u edit"))
 }
 
 // finalizeTaskDoneAway drains a task that finished while a modal (a /config-style
@@ -273,37 +312,55 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		}
 		return "provider", m.app.providerName(), extra
 	case "addprovider":
-		return "add provider", "＋", "enter: any OpenAI-compatible endpoint"
+		return "add provider", "＋", "enter: any OpenAI-compatible endpoint (or edit one you added)"
+	case "removeprovider":
+		n := len(m.app.savedProviderNames())
+		return "remove provider", fmt.Sprintf("%d saved", n), "enter: forget a saved provider (a built-in one: its key and overrides)"
+	case "base_url":
+		return "address", act.BaseURL, "enter: edit host, port, path"
 	case "model":
-		return "model", act.Model, "enter: choose"
+		return "model", act.Model, "enter: type an id, or empty enter to list"
 	case "apikey":
 		v := "— none"
 		if act.APIKey != "" {
 			v = "● set"
 		}
-		return "api key", v, "enter: add/set a provider key"
+		return "api key", v, "enter: set or replace (masked) · ctrl+d in it removes"
+	case "conn_type":
+		if !m.app.isLocal() {
+			return "type", "OpenAI-compatible", "fixed for " + m.app.providerName()
+		}
+		return "type", localTypeLabel(m.app.cfg.LLM.Type), "enter: LM Studio ⇄ OpenAI-compatible"
 	case "context_window":
-		return "context window", ctxLabel(act.ContextWindow), "enter: cycle (0 = auto-detect / provider default)"
+		v := ctxLabel(act.ContextWindow)
+		if act.ContextWindowManual {
+			v += " (set)"
+		}
+		return "context window", v, "enter: type a size · 0 = auto-detect"
 	case "reasoning":
-		return "reasoning", m.app.reasoningLevel(m.app.providerName(), act.Model), "enter: cycle off→high (trims a thinking model)"
+		hint := "enter: cycle off→high (trims a thinking model)"
+		if _, ok := reasoningShape(m.app.providerName(), "high"); !ok {
+			hint = "not settable here for " + m.app.providerName() + " — enter shows the config.json key"
+		}
+		return "reasoning", m.app.reasoningLevel(m.app.providerName(), act.Model), hint
 	case "temperature":
 		v := "server default"
 		if act.Temperature > 0 {
 			v = fmt.Sprintf("%g", act.Temperature)
 		}
-		return "temperature", v, "enter: cycle sampling temperature"
+		return "temperature", v, "enter: type a value (0 = server default)"
 	case "top_p":
 		v := "server default"
 		if act.TopP > 0 {
 			v = fmt.Sprintf("%g", act.TopP)
 		}
-		return "top_p", v, "enter: cycle nucleus sampling (0.95 · 1.0 = NVIDIA rec pair)"
+		return "top_p", v, "enter: type a value (0.95 · 1.0 = NVIDIA rec pair)"
 	case "max_output_tokens":
 		v := "server default"
 		if act.MaxOutputTokens > 0 {
 			v = fmt.Sprintf("%d", act.MaxOutputTokens)
 		}
-		return "max output", v, "enter: cycle (server's own cap can cut a reasoning model off early)"
+		return "max output", v, "enter: type tokens (server's own cap can cut a reasoning model off early)"
 	case "judge_max_output_tokens":
 		v := "same as the task model"
 		if m.app.cfg.JudgeMaxOutputTokens > 0 {
@@ -321,7 +378,7 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		if act.RetryAttempts > 0 {
 			v = fmt.Sprintf("%d", act.RetryAttempts)
 		}
-		return "retry attempts", v, "enter: cycle (transient failures; 1 = fail fast when the server is simply down)"
+		return "retry attempts", v, "enter: type a count (transient failures; 1 = fail fast when the server is down)"
 	case "goal_ttl":
 		v := "off — the model's own finish stands"
 		if m.app.cfg.GoalMaxReturns > 0 {
@@ -357,13 +414,13 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 	case "loop_detection":
 		return "loop detection", onOff(!act.DisableLoopDetection), "enter: toggle (aborts a model stuck repeating itself)"
 	case "idle_timeout":
-		return "idle timeout", idleTimeoutLabel(act.IdleTimeoutSeconds), "enter: cycle (no response/stream data → retry)"
+		return "idle timeout", idleTimeoutLabel(act.IdleTimeoutSeconds), "enter: type seconds (no response/stream data → retry)"
 	case "mode":
 		v := "⏵⏵ auto"
 		if m.app.planMode {
 			v = "⏸ plan"
 		}
-		return "mode", v, "enter: toggle"
+		return "mode", v, "enter: toggle · this session only (shift+tab does the same)"
 	case "perm_files":
 		return "file writes", m.app.cfg.File.Default, "enter: ask/allow/deny"
 	case "perm_run":
@@ -434,7 +491,9 @@ var cfgLiveRows = map[string]bool{"judge_criteria": true, "knowledge": true}
 // prefilled, or need a list fetched from the server. Replaying one later would
 // pop a form out of nowhere after the task ended.
 var cfgUnstageableRows = map[string]bool{
-	"addprovider": true, "model": true, "apikey": true,
+	"addprovider": true, "removeprovider": true, "model": true, "apikey": true,
+	"base_url": true, "context_window": true,
+	"temperature": true, "top_p": true, "max_output_tokens": true, "idle_timeout": true, "retry_attempts": true,
 	"budget": true, "name": true, "agents": true,
 }
 
@@ -476,9 +535,13 @@ func (m *tuiModel) applyPendingConfig() {
 // activateConfigRow performs a row's action for real. It assumes no task is
 // running: several branches re-wire the agent or leave the panel.
 func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
+	if m.projectOverrides(key) {
+		m.push(cErr.Render("  note: this project's .agent/config.json sets " + cfgRowSetting[key] + " — this change lasts until the next start; edit that file to keep it"))
+	}
 	switch key {
 	case "provider":
 		m.cycleProvider()
+		return m, m.detectWindowCmd() // the new connection's size, not the old one's
 	case "mode":
 		m.app.setMode(!m.app.planMode)
 	case "perm_files":
@@ -505,6 +568,7 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 		m.app.agentsExec(arg)
 	case "agents": // open the interactive profile manager (provider → model → name)
 		m.openAgents()
+		m.agFromConfig = true // esc comes back here, not to the prompt
 	case "budget": // needs a number — hand off to /budget with the flow prefilled
 		m.state = stIdle
 		m.push(cDim.Render("  /budget <usd> caps estimated spend per run · /budget off disables"))
@@ -536,12 +600,8 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 		if _, ok := m.app.applyReasoning(provider+"/"+model, provider, next); !ok {
 			m.push(cDim.Render("  " + provider + " reasoning must be set raw in config.json (key " + provider + "/" + model + ")"))
 		}
-	case "temperature":
-		m.cycleTemperature()
-	case "top_p":
-		m.cycleTopP()
-	case "max_output_tokens":
-		m.cycleMaxOutputTokens()
+	case "temperature", "top_p", "max_output_tokens", "idle_timeout", "retry_attempts":
+		m.cfgEdit = &cfgEditor{key: key, f: newTextField(m.app.numberValue(key), false)}
 	case "judge_max_output_tokens":
 		m.cycleJudgeMaxOutput()
 	case "goal_ttl":
@@ -557,7 +617,20 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 	case "reflection":
 		m.pushLines(m.app.reflectCommand(map[bool]string{true: "on", false: "off"}[m.app.cfg.ReflectDisabled]))
 	case "knowledge_retention":
-		m.pushLines(m.app.knowledgeCommand(fmt.Sprintf("retain %d", nextInt(m.app.cfg.KnowledgeRetentionDays, knowledgeRetentionCycle))))
+		// The setting only: stepping 0 → 7 → 30 → 90 must not purge at each
+		// stop on the way, as /knowledge retain does — passing 7 deleted every
+		// lesson older than a week. The purge happens at the next launch.
+		before := m.app.cfg.KnowledgeRetentionDays
+		next := nextInt(before, knowledgeRetentionCycle)
+		m.app.cfg.KnowledgeRetentionDays = next
+		if err := config.SaveKnowledgeRetention(next); err != nil {
+			m.app.cfg.KnowledgeRetentionDays = before
+			m.push(cErr.Render("  could not persist: " + err.Error()))
+		} else if next == 0 {
+			m.push(cDim.Render("  knowledge retention → off (lessons kept forever)"))
+		} else {
+			m.push(cDim.Render(fmt.Sprintf("  knowledge retention → %d days — older lessons go at the next launch (/knowledge retain %d drops them now)", next, next)))
+		}
 	case "knowledge":
 		m.pushLines(m.app.knowledgeCommand("list"))
 	case "judge_criteria":
@@ -574,33 +647,137 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 		} else if err := m.app.wire(); err != nil {
 			m.push(cErr.Render("  " + err.Error()))
 		}
-	case "idle_timeout":
-		m.cycleIdleTimeout()
-	case "retry_attempts":
-		next := nextInt(m.app.activeLLM().RetryAttempts, retryAttemptsCycle)
-		if err := m.app.setRetryAttempts(next); err != nil {
-			m.push(cErr.Render("  could not persist: " + err.Error()))
-		} else {
-			_ = m.app.wire()
+	case "base_url":
+		m.cfgEdit = &cfgEditor{key: key, f: newTextField(m.app.activeLLM().BaseURL, false)}
+	case "model":
+		m.cfgEdit = &cfgEditor{key: key, f: newTextField(m.app.activeLLM().Model, false)}
+	case "apikey":
+		m.cfgEdit = &cfgEditor{key: key, f: newTextField("", true)}
+	case "context_window":
+		m.cfgEdit = &cfgEditor{key: key, f: newTextField(fmt.Sprint(m.app.activeLLM().ContextWindow), false)}
+	case "removeprovider":
+		if len(m.app.savedProviderNames()) == 0 {
+			m.push(cDim.Render("  no saved providers to remove"))
+			break
 		}
-	case "model": // needs the live model list — hand off to /model
-		m.state = stIdle
-		return m.runCommand("/model")
+		m.cfgEdit = &cfgEditor{key: key}
+	case "conn_type":
+		if msg, err := m.app.cycleLocalType(); err != nil {
+			m.push(cErr.Render("  " + err.Error()))
+		} else {
+			m.push(cDim.Render("  " + msg))
+		}
 	case "addprovider": // open the in-panel form (name → URL → model → key)
 		m.cfgPhase = cfgPhaseName
-		m.cfgDraft = providerDraft{}
-	case "apikey": // add or set a provider key — prefill; pick provider (Tab) + paste token
-		m.state = stIdle
-		m.input.SetValue("/ai key ")
-		m.input.CursorEnd()
-	case "context_window":
-		m.cycleContextWindow()
+		m.cfgDraft = newProviderDraft()
 	case "name":
 		m.state = stIdle
 		m.input.SetValue("/rename ")
 		m.input.CursorEnd()
 	}
 	return m, nil
+}
+
+// cfgEditor is a value being typed in place on its row: the active
+// connection's address, model, key or context size, or the provider to remove.
+type cfgEditor struct {
+	key     string
+	f       textField
+	err     string
+	confirm string // removeprovider: the name awaiting a second enter
+}
+
+// configEditKey types into the open editor: enter saves (or says why not and
+// stays open), esc cancels, ctrl+d on the key removes it.
+func (m *tuiModel) configEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	e := m.cfgEdit
+	switch k.String() {
+	case "esc":
+		m.cfgEdit = nil
+		return m, nil
+	case "ctrl+d":
+		if e.key == "apikey" {
+			return m.finishEdit(m.app.setActiveKey("", true))
+		}
+	case "enter":
+		v := e.f.value()
+		switch e.key {
+		case "base_url":
+			return m.finishEdit(m.app.setBaseURL(v))
+		case "apikey":
+			return m.finishEdit(m.app.setActiveKey(v, false))
+		case "context_window":
+			return m.finishEdit(m.app.setContextWindowValue(v))
+		case "temperature", "top_p", "max_output_tokens", "idle_timeout", "retry_attempts":
+			return m.finishEdit(m.app.setNumber(e.key, v))
+		case "model":
+			if strings.TrimSpace(v) == "" { // nothing typed: list the server's models
+				m.cfgEdit = nil
+				m.state = stIdle
+				return m.runCommand("/model")
+			}
+			out := m.app.setModel(strings.TrimSpace(v))
+			if len(out) > 0 && strings.HasPrefix(out[0], "error") {
+				e.err = out[0]
+				return m, nil
+			}
+			m.pushLines(out)
+			m.cfgEdit = nil
+			return m, m.detectWindowCmd()
+		case "removeprovider":
+			name := strings.TrimSpace(v)
+			if e.confirm != name { // first enter: name it, ask again
+				if _, saved := m.app.cfg.Providers[name]; !saved {
+					e.err = fmt.Sprintf("no saved provider %q — saved: %s", name, strings.Join(m.app.savedProviderNames(), ", "))
+					return m, nil
+				}
+				e.confirm, e.err = name, ""
+				return m, nil
+			}
+			return m.finishEdit(m.app.removeProvider(name))
+		}
+		return m, nil
+	}
+	if e.f.key(k) {
+		e.err, e.confirm = "", ""
+	}
+	return m, nil
+}
+
+// finishEdit closes the editor on success, or keeps it open with the reason.
+func (m *tuiModel) finishEdit(msg string, err error) (tea.Model, tea.Cmd) {
+	if err != nil {
+		m.cfgEdit.err = err.Error()
+		return m, nil
+	}
+	m.cfgEdit = nil
+	m.push(cDim.Render("  " + msg))
+	return m, m.detectWindowCmd()
+}
+
+// editorHint is what the open editor offers, under its row.
+func (m *tuiModel) editorHint() string {
+	e := m.cfgEdit
+	switch {
+	case e.err != "":
+		return cErr.Render("     " + e.err)
+	case e.confirm != "":
+		return cErr.Render(fmt.Sprintf("     enter again to remove %q · esc keeps it", e.confirm))
+	}
+	h := map[string]string{
+		"base_url":       "host, port and path — e.g. http://localhost:8080/v1",
+		"model":          "a model id · empty enter lists the server's models",
+		"apikey":         "type or paste · empty enter keeps the saved key · ctrl+d removes it",
+		"context_window": "tokens, e.g. 32768 · 0 = auto-detect",
+		"removeprovider": "saved: " + strings.Join(m.app.savedProviderNames(), ", "),
+	}[e.key]
+	if spec, ok := numberRows[e.key]; ok {
+		h = fmt.Sprintf("%g to %g, e.g. %s · 0 = server default", spec.min, spec.max, spec.example)
+	}
+	if e.key == "base_url" && !m.app.isLocal() && !config.IsCustomProvider(m.app.cfg, m.app.cfg.Provider) {
+		h += " · empty = its default"
+	}
+	return cDim.Render("     " + h + " · enter save · esc cancel")
 }
 
 // cycleProvider switches to the next configured provider and re-wires.
@@ -617,7 +794,7 @@ func (m *tuiModel) cycleProvider() {
 			break
 		}
 	}
-	_ = m.app.setProvider(provs[(idx+1)%len(provs)]) // saves + re-wires + re-detects
+	m.pushLines(m.app.setProvider(provs[(idx+1)%len(provs)])) // saves + re-wires; says so, or why not
 }
 
 var permCycle = []string{"ask", "allow", "deny"}
@@ -625,8 +802,13 @@ var permCycle = []string{"ask", "allow", "deny"}
 // cyclePerm advances one policy default (file OR run, independently) through
 // ask → allow → deny, persists the workspace policy, and re-wires.
 func (m *tuiModel) cyclePerm(field *string) {
+	before := *field
 	*field = nextStr(*field, permCycle)
-	_ = config.SaveWorkspacePolicy(m.app.workspace, m.app.cfg.Run, m.app.cfg.File)
+	if err := config.SaveWorkspacePolicy(m.app.workspace, m.app.cfg.Run, m.app.cfg.File); err != nil {
+		*field = before // shown only once it is on disk
+		m.push(cErr.Render("  could not persist: " + err.Error()))
+		return
+	}
 	_ = m.app.wire()
 }
 
@@ -635,8 +817,13 @@ var timeoutCycle = []int{60, 120, 300, 600}
 // cycleTimeout advances the run timeout through the preset values, persists, and
 // re-wires so the run tool picks up the new default.
 func (m *tuiModel) cycleTimeout() {
-	m.app.cfg.Run.TimeoutSeconds = nextInt(m.app.cfg.Run.TimeoutSeconds, timeoutCycle)
-	_ = config.SaveWorkspacePolicy(m.app.workspace, m.app.cfg.Run, m.app.cfg.File)
+	before := m.app.cfg.Run.TimeoutSeconds
+	m.app.cfg.Run.TimeoutSeconds = nextInt(before, timeoutCycle)
+	if err := config.SaveWorkspacePolicy(m.app.workspace, m.app.cfg.Run, m.app.cfg.File); err != nil {
+		m.app.cfg.Run.TimeoutSeconds = before
+		m.push(cErr.Render("  could not persist: " + err.Error()))
+		return
+	}
 	_ = m.app.wire()
 }
 
@@ -731,54 +918,11 @@ func (m *tuiModel) cycleMaxStuckTurns() {
 	_ = m.app.wire()
 }
 
-// temperatureCycle presets for the /config "temperature" row. 0 = server
-// default (see Chat's c.temp > 0 gate); 1.0 is NVIDIA's recommended pairing
-// with top_p=0.95 below.
-var temperatureCycle = []float64{0, 0.2, 0.7, 1.0}
-
-// cycleTemperature advances the active provider's sampling temperature through
-// preset values, persists it (same local-vs-named-provider branching as
-// setModel), and re-wires so the client picks it up.
-func (m *tuiModel) cycleTemperature() {
-	next := nextFloat(m.app.activeLLM().Temperature, temperatureCycle)
-	if err := m.app.setTemperature(next); err != nil {
-		m.push(cErr.Render("  could not persist: " + err.Error()))
-		return
-	}
-	_ = m.app.wire()
-}
-
-// topPCycle presets for the /config "top_p" row. 0 = server default; 0.95 is
-// NVIDIA's recommended pairing with temperature=1.0 above.
-var topPCycle = []float64{0, 0.7, 0.9, 0.95, 1.0}
-
-// cycleTopP advances the active provider's nucleus-sampling top_p through
-// preset values, persists it, and re-wires.
-func (m *tuiModel) cycleTopP() {
-	next := nextFloat(m.app.activeLLM().TopP, topPCycle)
-	if err := m.app.setTopP(next); err != nil {
-		m.push(cErr.Render("  could not persist: " + err.Error()))
-		return
-	}
-	_ = m.app.wire()
-}
-
 // maxOutputTokensCycle presets for the /config "max_output_tokens" row. 0 =
 // server default (often too small for a reasoning model's own thinking phase —
 // observed live: a reply cut off, finish_reason=length, mid-reasoning, well
 // under the context window's own limit).
 var maxOutputTokensCycle = []int{0, 2000, 4000, 8000, 16000, 32000}
-
-// cycleMaxOutputTokens advances the active provider's max_tokens override
-// through presets, persists it, and re-wires.
-func (m *tuiModel) cycleMaxOutputTokens() {
-	next := nextInt(m.app.activeLLM().MaxOutputTokens, maxOutputTokensCycle)
-	if err := m.app.setMaxOutputTokens(next); err != nil {
-		m.push(cErr.Render("  could not persist: " + err.Error()))
-		return
-	}
-	_ = m.app.wire()
-}
 
 // cycleJudgeMaxOutput advances the goal judge's own max_tokens through the same
 // presets, persists it, and re-wires so wireJudge picks it up. Reported live:
@@ -792,12 +936,6 @@ func (m *tuiModel) cycleJudgeMaxOutput() {
 	}
 	_ = m.app.wire()
 }
-
-// retryAttemptsCycle presets for the "retry attempts" row. 0 = the built-in 8;
-// 1 means try once and fail, which is what you want against an endpoint that
-// simply is not running — eight exponential backoffs to discover nothing is
-// listening is its own kind of wrong.
-var retryAttemptsCycle = []int{0, 1, 2, 4, 8, 16}
 
 // goalTTLCycle presets for the "goal TTL" row. 0 = pursuit off: the model's own
 // finish stands.
@@ -821,11 +959,6 @@ func nextLevel(cur string) string {
 	return order[0]
 }
 
-// idleTimeoutCycle presets (seconds) for the /config "idle_timeout" row. 0 =
-// the client's built-in 90s default; the larger values suit a hosted
-// reasoning model that can think silently (no streamed deltas) for longer.
-var idleTimeoutCycle = []int{0, 60, 120, 180, 300, 600}
-
 // idleTimeoutLabel renders the idle timeout for the panel (0 = the built-in 90s).
 func idleTimeoutLabel(sec int) string {
 	if sec <= 0 {
@@ -834,44 +967,17 @@ func idleTimeoutLabel(sec int) string {
 	return (time.Duration(sec) * time.Second).String()
 }
 
-// cycleIdleTimeout advances the active provider's idle watchdog through preset
-// values, persists it (same local-vs-named-provider branching as
-// setTemperature/setTopP), and re-wires so the client picks it up.
-func (m *tuiModel) cycleIdleTimeout() {
-	next := nextInt(m.app.activeLLM().IdleTimeoutSeconds, idleTimeoutCycle)
-	if err := m.app.setIdleTimeout(next); err != nil {
-		m.push(cErr.Render("  could not persist: " + err.Error()))
-		return
-	}
-	_ = m.app.wire()
-}
-
-// contextWindowCycle presets (tokens) for the /config "context_window" row. 0
-// clears the override (falls back to auto-detect / the provider's default);
-// the rest cover common local and hosted model window sizes.
-var contextWindowCycle = []int{0, 4096, 8192, 16384, 32768, 65536, 131072}
-
-// cycleContextWindow advances the active provider's context-window override
-// through preset sizes, persists it (same local-vs-named-provider branching as
-// the other per-connection rows), and re-wires so auto-compact/maxRespTk sizing
-// picks it up immediately.
-func (m *tuiModel) cycleContextWindow() {
-	next := nextInt(m.app.activeLLM().ContextWindow, contextWindowCycle)
-	if err := m.app.setContextWindow(next); err != nil {
-		m.push(cErr.Render("  could not persist: " + err.Error()))
-		return
-	}
-	_ = m.app.wire()
-}
-
 // toggleChannel flips stable ⇄ nightly and persists it.
 func (m *tuiModel) toggleChannel() {
 	next := "nightly"
 	if channelOf(m.app.cfg) == "nightly" {
 		next = "stable"
 	}
+	if err := config.SaveChannel(next); err != nil {
+		m.push(cErr.Render("  could not persist: " + err.Error()))
+		return
+	}
 	m.app.cfg.Channel = next
-	_ = config.SaveChannel(next)
 }
 
 // cfgPendingCount is how many times this row was activated while the task ran.
@@ -889,8 +995,7 @@ func (m *tuiModel) cfgPendingCount(key string) int {
 func (m *tuiModel) renderConfigPanel() string {
 	accent := lipgloss.NewStyle().Foreground(m.accent)
 	if m.cfgPhase != cfgPhaseList { // the in-panel add-provider form
-		box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(m.accent).Padding(0, 1)
-		return box.Render(strings.Join(m.renderAddProviderForm(accent), "\n"))
+		return m.panelBox(m.renderAddProviderForm(accent))
 	}
 	cur := m.configKey()
 
@@ -911,6 +1016,13 @@ func (m *tuiModel) renderConfigPanel() string {
 			continue
 		}
 		label, value, hint := m.configRowView(r.key)
+		if r.key == cur && m.cfgEdit != nil { // the value being typed, in place
+			lines = append(lines, accent.Render(" ▸ ")+accent.Bold(true).Render(padVis(label, 15))+" "+m.cfgEdit.f.view(), m.editorHint())
+			continue
+		}
+		if m.projectOverrides(r.key) {
+			hint = "this project's .agent/config.json sets it — that value wins at the next start"
+		}
 		if n := m.cfgPendingCount(r.key); n > 0 {
 			// Say the change was taken and where it went — the value column still
 			// shows the LIVE setting, because that is what the running task is using.
@@ -938,8 +1050,19 @@ func (m *tuiModel) renderConfigPanel() string {
 		footer = "  ↑↓ move · enter stages a change (applies when the task ends) · esc back to it"
 	}
 	lines = append(lines, "", cDim.Render(footer))
-	lines = append(lines, cDim.Render("  saved to ~/.config/ipsupport-code/config.json (kept private)"))
+	lines = append(lines, cDim.Render("  saved privately to ~/.config/ipsupport-code/config.json · file writes, shell run, run timeout: this project's .agent/config.json"))
+	return m.panelBox(lines)
+}
 
+// panelBox draws the panel's lines in its border, each cut to the terminal's
+// width: a long model name or hint used to widen the box past the screen and
+// wrap, which the height budget never counted.
+func (m *tuiModel) panelBox(lines []string) string {
+	if w := m.width - 4; w > 20 { // border and padding
+		for i, l := range lines {
+			lines[i] = ansi.Truncate(l, w, "…")
+		}
+	}
 	box := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(m.accent).Padding(0, 1)
 	return box.Render(strings.Join(lines, "\n"))
 }
@@ -962,7 +1085,10 @@ func (m *tuiModel) configWindow() ([]cfgRow, int) {
 	// Inside that: the title, the blank line and two footer lines, the box's two
 	// border lines, and BOTH scroll markers — in the middle of a long list both
 	// are drawn.
-	const chrome = 8
+	chrome := 8
+	if m.cfgEdit != nil {
+		chrome++ // the editor's hint line under its row
+	}
 	avail := m.viewportHeight() - chrome
 	if avail < 3 {
 		avail = 3

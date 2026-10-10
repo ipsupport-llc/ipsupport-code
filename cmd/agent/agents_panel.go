@@ -46,6 +46,7 @@ const agModelWindow = 12 // visible rows in the (possibly long) model list
 
 // openAgents enters the profile manager at the list.
 func (m *tuiModel) openAgents() {
+	m.agFromConfig = false
 	m.state = stAgents
 	m.agPhase = agList
 	m.agCursor = 0
@@ -144,6 +145,10 @@ func (m *tuiModel) agentsListKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.agPhase = agPickProvider
 	case "esc", "q":
 		m.state = stIdle
+		if m.agFromConfig { // opened from /config: back to it
+			m.state = stConfig
+			m.agFromConfig = false
+		}
 	}
 	return m, nil
 }
@@ -275,7 +280,9 @@ func (m *tuiModel) saveDraft(name string) {
 		delete(m.app.cfg.Agents, m.agDraft.orig) // a rename
 	}
 	m.app.cfg.Agents[name] = config.AgentProfile{Provider: m.agDraft.provider, Model: m.agDraft.model, Prompt: keep.Prompt}
-	_ = config.SaveAgents(m.app.cfg.Agents)
+	if err := config.SaveAgents(m.app.cfg.Agents); err != nil {
+		m.push(cErr.Render("  profile not saved: " + err.Error()))
+	}
 	_ = m.app.wire() // the agent tool / roster may have changed
 }
 

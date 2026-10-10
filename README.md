@@ -129,10 +129,22 @@ Switching keeps your session, tokens, and mode. Keys live in
 env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`,
 `OPENROUTER_API_KEY`, `ZAI_API_KEY`).
 `/config` opens an interactive settings panel: **↑↓** to move, **Enter** to
-cycle a value in place (provider, mode, permissions, run timeout, memory,
-compact threshold, color, channel) or jump to the right flow (model, key,
-rename), **esc** to close — changes apply and save as you make them, no
-hand-editing JSON.
+change the selected row, **esc** to close — changes apply and save as you make
+them, no hand-editing JSON.
+
+- **Connection** edits the provider in use, the local server included: its
+  **address** (host, port, path), **model**, **API key** (typed masked; empty
+  keeps it, `ctrl+d` removes it), server **type** (LM Studio or plain
+  OpenAI-compatible) and **context window** (any size; 0 = auto-detect). A
+  built-in provider's address can point at a proxy or your own gateway; empty
+  puts it back.
+- **Providers** adds or edits an OpenAI-compatible endpoint, and removes one
+  (confirmed with a second Enter; the one in use falls back to local).
+- Tuning values — temperature, top_p, output cap, idle timeout, retries — are
+  typed; the rest cycle in place. Values are edited like a shell line: ←/→,
+  home/end, ctrl+u.
+- A setting this project's `.agent/config.json` also sets is marked: that file
+  wins at the next start.
 
 ## Sub-agents
 

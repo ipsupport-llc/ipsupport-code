@@ -4516,12 +4516,15 @@ func (a *app) setProvider(name string) []string {
 			return []string{fmt.Sprintf("%s needs an API key — run: /ai key %s <token>  (or set the env var)", name, name)}
 		}
 	}
-	a.cfg.Provider = name
-	a.windowDetected = false
-	a.modelEpoch.Add(1) // orphan any in-flight probe for the old provider/model
-	if err := config.SaveProviders(a.cfg.Provider, a.cfg.Providers); err != nil {
-		return []string{"error: " + err.Error()}
+	// Saved first: a provider shown as selected must be the one on disk, and
+	// the one in use.
+	if err := config.SaveProviders(name, a.cfg.Providers); err != nil {
+		return []string{"error: provider not saved: " + err.Error()}
 	}
+	a.cfg.Provider = name
+	// A size set by hand for this connection stands; otherwise detect afresh.
+	a.windowDetected = a.activeLLM().ContextWindowManual
+	a.modelEpoch.Add(1) // orphan any in-flight probe for the old provider/model
 	if err := a.wire(); err != nil {
 		return []string{"error: " + err.Error()}
 	}
@@ -4531,6 +4534,21 @@ func (a *app) setProvider(name string) []string {
 }
 
 func (a *app) setProviderKey(name, token string) []string {
+	if name == "local" { // the local server's key, in llm — it used to be "unknown provider"
+		if strings.TrimSpace(token) == "" {
+			return []string{"usage: /ai key local <token>"}
+		}
+		before := a.cfg.LLM.APIKey
+		a.cfg.LLM.APIKey = strings.TrimSpace(token)
+		if err := config.SaveGlobal(a.cfg.Name, a.cfg.LLM); err != nil {
+			a.cfg.LLM.APIKey = before
+			return []string{"error: " + err.Error()}
+		}
+		if a.isLocal() {
+			_ = a.wire()
+		}
+		return []string{"key saved for local"}
+	}
 	_, isTmpl := config.ProviderTemplates[name]
 	_, isCustom := a.cfg.Providers[name]
 	if !isTmpl && !isCustom {
@@ -4673,17 +4691,13 @@ func modelLines(ctx context.Context, act config.LLM, provider string) []string {
 }
 
 func (a *app) setModel(name string) []string {
-	if a.isLocal() {
-		a.cfg.LLM.Model = name
-		_ = config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
-	} else {
-		if a.cfg.Providers == nil {
-			a.cfg.Providers = map[string]config.LLM{}
-		}
-		p := a.cfg.Providers[a.cfg.Provider]
-		p.Model = name
-		a.cfg.Providers[a.cfg.Provider] = p
-		_ = config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+	// Another model has another context size: a size set by hand for the old
+	// one no longer holds, and detection takes over again.
+	if err := a.updateActive(func(l *config.LLM) {
+		l.Model = name
+		l.ContextWindowManual = false
+	}); err != nil {
+		return []string{"error: model not saved: " + err.Error()}
 	}
 	a.windowDetected = false
 	a.modelEpoch.Add(1) // orphan any in-flight probe for the old model
@@ -4812,6 +4826,7 @@ func (a *app) setRetryAttempts(v int) error {
 // again.
 func (a *app) setContextWindow(v int) error {
 	a.windowDetected = v > 0
+	a.modelEpoch.Add(1) // a probe already in flight must not overwrite this
 	if a.isLocal() {
 		a.cfg.LLM.ContextWindow = v
 		a.cfg.LLM.ContextWindowManual = v > 0 // persisted twin of windowDetected — survives a restart, see ContextWindowManual
@@ -5780,14 +5795,14 @@ func initLocalModel(reader *bufio.Reader, def config.Config) {
 		fmt.Printf("  ✓ reached %s — models: %s\n", url, strings.Join(shown, ", "))
 	}
 
-	l := config.LLM{
-		BaseURL:       url,
-		Model:         ask(reader, "Model name", def.LLM.Model),
-		APIKey:        key,
-		Temperature:   def.LLM.Temperature,
-		MaxSteps:      def.LLM.MaxSteps,
-		ContextWindow: def.LLM.ContextWindow,
-	}
+	// The existing connection, with only what setup asked changed: rebuilt from
+	// scratch, a re-run (say, for a new port) dropped its type (LM Studio's
+	// model list and context detection), top_p, output cap, timeouts, retries
+	// and a context size set by hand.
+	l := def.LLM
+	l.BaseURL = url
+	l.Model = ask(reader, "Model name", def.LLM.Model)
+	l.APIKey = key
 	if err := config.SaveLocalModel(def.Name, l); err != nil { // preserve any custom name; also (re)activates "local"
 		slog.Warn("could not save config", "err", err)
 		return
@@ -5824,7 +5839,9 @@ func initCloudProvider(reader *bufio.Reader, def config.Config) {
 
 	_, isTemplate := config.ProviderTemplates[name]
 	existing, _ := config.ResolveProvider(def, name) // any already-saved key/model, or the env var
-	l := config.LLM{}
+	// The provider's saved entry, with only what setup asks changed — starting
+	// from empty dropped its tuning (temperature, timeouts, a context size).
+	l := def.Providers[name]
 	if !isTemplate {
 		fmt.Printf("  %q isn't a built-in — setting it up as a custom OpenAI-compatible endpoint (built-ins: %s).\n", name, strings.Join(names, ", "))
 		url := ask(reader, "Base URL", existing.BaseURL)

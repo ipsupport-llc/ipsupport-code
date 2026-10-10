@@ -10,11 +10,11 @@ import (
 	"testing"
 )
 
-// isolate points HOME at a temp dir so configHome()/GlobalPath() never touch the
-// real user config during tests.
+// isolate points the user's home at a temp dir so configHome()/GlobalPath()
+// never touch the real user config during tests.
 func isolate(t *testing.T) {
 	t.Helper()
-	t.Setenv("HOME", t.TempDir())
+	setHome(t, t.TempDir())
 }
 
 func TestSavePreservesProviders(t *testing.T) {
@@ -525,7 +525,7 @@ func contains(ss []string, s string) bool {
 // state in .agent/ and read it as project content, so it had to stop living in
 // the workspace.
 func TestStateIsPerWorkspaceAndOutsideIt(t *testing.T) {
-	t.Setenv("HOME", t.TempDir()) // configHome() reads HOME
+	setHome(t, t.TempDir()) // configHome() reads the user's home
 	a, b := DefaultKBPath("/tmp/project-a"), DefaultKBPath("/tmp/project-b")
 	if a == b {
 		t.Fatalf("both workspaces share one store: %q", a)

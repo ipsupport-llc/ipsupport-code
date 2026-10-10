@@ -342,7 +342,7 @@ func TestE2E_Binary(t *testing.T) {
 		`{"llm":{"base_url":"`+url+`/v1","model":"fake","max_steps":4}}`)
 
 	cmd := exec.Command(bin, "-C", ws, "use calc to compute 2+2")
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(os.Environ(), "HOME="+home, "USERPROFILE="+home) // the child's home on Windows too
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, out)

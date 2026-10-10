@@ -47,7 +47,7 @@ func TestResolveJailEscapeErrorExplainsItsAHardBoundary(t *testing.T) {
 
 func TestResolveExpandsTilde(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setHome(t, home)
 	c := config.Default()
 	c.Workspace = home
 	c.File = config.FilePolicy{Default: "allow", Jail: "."}

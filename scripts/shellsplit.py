@@ -87,8 +87,7 @@ class _Result:
         self.cmds = []
         self.piped = []
         self.pipe_to = []
-        self.blocks = []
-        self.cases = []
+        self.opens = []  # (start, is_case), innermost last
         self.closed = None
         self.groups = []
         self.code = []  # pieces, joined once: += on a str is quadratic
@@ -101,7 +100,7 @@ class _Result:
         if s:
             self.cmds.append(s)
             self.piped.append(pipe)
-            self.pipe_to.append(-1)
+            self.pipe_to.append([])
             self.inner_code(s)
             if self.code:
                 self.code.append(" ")
@@ -121,26 +120,27 @@ class _Result:
         b.reset()
 
     def block(self, s, op, pipe):
-        """Mirrors block: ( … ), { … } and case … esac piped on."""
+        """Mirrors block: ( … ), { … } and case … esac piped on, nested."""
         if self.closed is not None and pipe:
-            for j in range(self.closed[0], self.closed[1]):
-                self.pipe_to[j] = len(self.cmds)
+            self.read_by(self.closed[0], self.closed[1], len(self.cmds))
         self.closed = None
+        if s and self.d == SH:
+            first = _fields(s)[0]
+            if first == "case":
+                self.opens.append((len(self.cmds) - 1, True))
+            elif first == "esac" and self.opens and self.opens[-1][1]:
+                if pipe:
+                    self.read_by(self.opens[-1][0], len(self.cmds) - 1, len(self.cmds))
+                self.opens.pop()
         if op in ("(", "{"):
-            self.blocks.append(len(self.cmds))
-        elif op in (")", "}"):
-            if self.blocks:
-                self.closed = (self.blocks.pop(), len(self.cmds))
-        if s == "" or self.d != SH:
-            return
-        first = _fields(s)[0]
-        if first == "case":
-            self.cases.append(len(self.cmds) - 1)
-        elif first == "esac" and self.cases:
-            start = self.cases.pop()
-            if pipe:
-                for j in range(start, len(self.cmds) - 1):
-                    self.pipe_to[j] = len(self.cmds)
+            self.opens.append((len(self.cmds), False))
+        elif op in (")", "}") and self.opens and not self.opens[-1][1]:
+            self.closed = (self.opens.pop()[0], len(self.cmds))
+
+    def read_by(self, frm, to, t):
+        """Mirrors readBy."""
+        for j in range(frm, to):
+            self.pipe_to[j].append(t)
 
     def end_group(self):
         if len(self.group) > 1:
@@ -201,11 +201,7 @@ class _Result:
         if first >= len(self.cmds):
             return []
         n = len(self.cmds)
-        open_ = n
-        if self.blocks:
-            open_ = self.blocks[0]
-        if self.cases:
-            open_ = min(open_, self.cases[0])
+        open_ = self.opens[0][0] if self.opens else n
         fed = [0] * (n - first)
 
         def into(t):
@@ -215,8 +211,8 @@ class _Result:
             f = _feeds(self.cmds[j])
             if self.piped[j]:
                 f |= into(j + 1)
-            if self.pipe_to[j] >= 0:
-                f |= into(self.pipe_to[j])
+            for t in self.pipe_to[j]:
+                f |= into(t)
             if j >= open_:
                 f |= _UNKNOWN
             fed[j - first] = f
@@ -487,7 +483,13 @@ def _assignment(w):
 
 def _git_writes(ws):
     """Mirrors gitWrites."""
-    return any(w in ("apply", "am", "fast-import") for w in ws)
+    for w in ws:
+        cut = [k for k in (w.find("<"), w.find(">")) if k >= 0]
+        if cut:
+            w = w[:min(cut)]
+        if w in ("apply", "am", "fast-import", "update-index", "update-ref"):
+            return True
+    return False
 
 
 def _split_sh(line, out):

@@ -152,7 +152,12 @@ var casesForGolden = []string{
 	"git apply <<'EOF'\n--- a/x\n+++ b/x\nEOF", "(\ncat <<'EOF'\nrm -rf x\nEOF\n) | sh", "(cat <<'EOF') | sh\nrm -rf src/legacy\nEOF",
 	"{ cat <<'EOF'; } | sh\nrm -rf src/legacy\nEOF", "(cat <<'EOF'; echo hi) | sh\nrm -rf src/legacy\nEOF",
 	"case x in x) cat <<'EOF';; esac | sh\nrm -rf src/legacy\nEOF", "( (cat <<'EOF') ) |& bash\nrm -rf src/legacy\nEOF",
-	"(cat <<'EOF') > out.txt\nrm -rf x\nEOF", "{ cat <<'EOF'; } | grep x\nrm -rf x\nEOF", "(cat <<'EOF') 2>/dev/null | sh\nrm -rf src/legacy\nEOF", "cat 2>&- sh <<EOF\nrm -rf x\nEOF",
+	"(cat <<'EOF') > out.txt\nrm -rf x\nEOF", "{ cat <<'EOF'; } | grep x\nrm -rf x\nEOF", "(cat <<'EOF') 2>/dev/null | sh\nrm -rf src/legacy\nEOF",
+	"((cat <<'EOF') | sh) | grep x\nrm -rf src/legacy\nEOF", "( (cat <<'EOF') | sh; echo hi) | grep x\nrm -rf src/legacy\nEOF",
+	"{ { cat <<'EOF'; } | sh; } | grep x\nrm -rf src/legacy\nEOF", "case a in a) case b in b) cat <<'EOF';; esac | sh;; esac | grep x\nrm -rf src/legacy\nEOF",
+	"case x in x) (cat <<'EOF') | sh;; esac | grep x\nrm -rf src/legacy\nEOF", "(case x in x) cat <<'EOF';; esac) | sh\nrm -rf src/legacy\nEOF",
+	"{ case x in x) cat <<'EOF';; esac; } | sh\nrm -rf src/legacy\nEOF", "git apply<<'EOF'\n--- a/x\n+++ b/x\nEOF",
+	"git update-ref --stdin <<'EOF'\nupdate refs/heads/main 0000\nEOF", "case x in (a) cat <<'EOF';; esac | sh\nrm -rf src/legacy\nEOF", "cat 2>&- sh <<EOF\nrm -rf x\nEOF",
 	strings.Repeat("eval $(", 12) + "echo ok" + strings.Repeat(")", 12), // past the parse budget
 	"sh <<EOF\n# $(rm -rf src/legacy)\nEOF",
 	"timeout 5 sh <<EOF\nrm -rf x\nEOF", "ssh deploy@host <<'EOF'\nrm -rf /srv/app\nEOF",

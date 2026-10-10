@@ -98,11 +98,10 @@ type result struct {
 	budget     *int // parses left, shared by the whole line
 	incomplete bool
 	cmds       []string
-	piped      []bool // cmds[i]'s output goes into cmds[i+1]: | or |&
-	pipeTo     []int  // cmds[i] is in a block whose output goes into cmds[pipeTo[i]]; -1 if not
-	blocks     []int  // where each ( or { still open started: an index into cmds
-	cases      []int  // where each case … esac still open started
-	closed     []int  // the block just closed, [start, end): piped on if the next cut is a pipe
+	piped      []bool  // cmds[i]'s output goes into cmds[i+1]: | or |&
+	pipeTo     [][]int // cmds[i] is in blocks whose output goes into each cmds[pipeTo[i][k]]
+	opens      []open  // the ( { and case … esac still open, innermost last
+	closed     []int   // the block just closed, [start, end): piped on if the next cut is a pipe
 	groups     []string
 	inner      []string // what a command runs inside it: sh -c '…', eval …
 	innerG     []string
@@ -121,7 +120,7 @@ func (r *result) cut(b *buf, op string) {
 	if s != "" {
 		r.cmds = append(r.cmds, s)
 		r.piped = append(r.piped, pipe)
-		r.pipeTo = append(r.pipeTo, -1)
+		r.pipeTo = append(r.pipeTo, nil)
 		r.innerCode(s)
 		if r.code.Len() > 0 {
 			r.code.WriteString(" ")
@@ -147,41 +146,51 @@ func (r *result) cut(b *buf, op string) {
 	b.reset()
 }
 
+// open is a block not yet closed: where it started (an index into cmds), and
+// whether it is a case … esac — inside which a ) ends a pattern, not a block.
+type open struct {
+	start  int
+	isCase bool
+}
+
 // block keeps track of ( … ), { … } and case … esac: what a block writes is
 // read by what it is piped into — (cat <<EOF) | sh, { …; } | sh — so each
 // command in it is read by that too (see readers) — whatever redirection
-// comes between: (…) 2>/dev/null | sh still pipes its output.
+// comes between: (…) 2>/dev/null | sh still pipes its output. Blocks nest,
+// and each pipe out of one adds a reader: ((cat <<EOF) | sh) | grep x is
+// read by sh and by grep.
 func (r *result) block(s, op string, pipe bool) {
 	if r.closed != nil && pipe {
-		for j := r.closed[0]; j < r.closed[1]; j++ {
-			r.pipeTo[j] = len(r.cmds)
-		}
+		r.readBy(r.closed[0], r.closed[1], len(r.cmds))
 	}
 	r.closed = nil
-	switch op {
-	case "(", "{":
-		r.blocks = append(r.blocks, len(r.cmds))
-	case ")", "}":
-		if n := len(r.blocks); n > 0 {
-			r.closed = []int{r.blocks[n-1], len(r.cmds)}
-			r.blocks = r.blocks[:n-1]
-		}
-	}
-	if s == "" || r.d != Sh {
-		return
-	}
-	switch strings.Fields(s)[0] {
-	case "case":
-		r.cases = append(r.cases, len(r.cmds)-1)
-	case "esac":
-		if n := len(r.cases); n > 0 {
-			if pipe {
-				for j := r.cases[n-1]; j < len(r.cmds)-1; j++ {
-					r.pipeTo[j] = len(r.cmds)
+	if s != "" && r.d == Sh {
+		switch strings.Fields(s)[0] {
+		case "case":
+			r.opens = append(r.opens, open{start: len(r.cmds) - 1, isCase: true})
+		case "esac":
+			if n := len(r.opens); n > 0 && r.opens[n-1].isCase {
+				if pipe {
+					r.readBy(r.opens[n-1].start, len(r.cmds)-1, len(r.cmds))
 				}
+				r.opens = r.opens[:n-1]
 			}
-			r.cases = r.cases[:n-1]
 		}
+	}
+	n := len(r.opens)
+	switch {
+	case op == "(" || op == "{":
+		r.opens = append(r.opens, open{start: len(r.cmds)})
+	case (op == ")" || op == "}") && n > 0 && !r.opens[n-1].isCase:
+		r.closed = []int{r.opens[n-1].start, len(r.cmds)}
+		r.opens = r.opens[:n-1]
+	}
+}
+
+// readBy adds cmds[t] as a reader of cmds[from:to].
+func (r *result) readBy(from, to, t int) {
+	for j := from; j < to; j++ {
+		r.pipeTo[j] = append(r.pipeTo[j], t)
 	}
 }
 
@@ -504,10 +513,15 @@ func assignment(w string) bool {
 	return true
 }
 
-// gitWrites: git apply, am, fast-import — the heredoc says what they change.
+// gitWrites: git apply, am, fast-import, update-index, update-ref — the
+// heredoc says what they change. A word may carry a redirection (apply<<EOF).
 func gitWrites(ws []string) bool {
 	for _, w := range ws {
-		if w == "apply" || w == "am" || w == "fast-import" {
+		if i := strings.IndexAny(w, "<>"); i >= 0 {
+			w = w[:i]
+		}
+		switch w {
+		case "apply", "am", "fast-import", "update-index", "update-ref":
 			return true
 		}
 	}
@@ -660,12 +674,9 @@ func (r *result) readers(first int) []feed {
 	if first >= len(r.cmds) {
 		return nil
 	}
-	open := len(r.cmds) // from here on, commands are in a block not yet closed
-	if len(r.blocks) > 0 {
-		open = r.blocks[0]
-	}
-	if len(r.cases) > 0 {
-		open = min(open, r.cases[0])
+	unclosed := len(r.cmds) // from here on, commands are in a block not yet closed
+	if len(r.opens) > 0 {
+		unclosed = r.opens[0].start
 	}
 	fed := make([]feed, len(r.cmds)-first)
 	into := func(t int) feed {
@@ -679,10 +690,10 @@ func (r *result) readers(first int) []feed {
 		if r.piped[j] {
 			f |= into(j + 1)
 		}
-		if t := r.pipeTo[j]; t >= 0 {
+		for _, t := range r.pipeTo[j] {
 			f |= into(t)
 		}
-		if j >= open {
+		if j >= unclosed {
 			f |= unknown
 		}
 		fed[j-first] = f

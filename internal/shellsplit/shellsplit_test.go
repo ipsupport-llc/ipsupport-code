@@ -318,6 +318,8 @@ func TestAHeredocsReaderDecidesWhatItIs(t *testing.T) {
 		"sed 's/.*/&/e' <<'EOF'\nrm -rf x\nEOF",       // sed runs lines: e
 		"patch -p1 <<'EOF'\n--- /dev/null\n+++ b/x\nEOF",
 		"git apply <<'EOF'\n--- a/x\n+++ b/x\nEOF",
+		"git apply<<'EOF'\n--- a/x\n+++ b/x\nEOF",
+		"git update-ref --stdin <<'EOF'\nupdate refs/heads/main 0000\nEOF",
 		"(\ncat <<'EOF'\nrm -rf x\nEOF\n) | sh", // a block still open: its reader isn't known yet
 	} {
 		if p := Parse(Sh, line); !p.Incomplete {
@@ -347,6 +349,13 @@ func TestAHeredocInABlockIsReadByWhatTheBlockIsPipedInto(t *testing.T) {
 		"case x in x) cat <<'EOF';; esac | sh\nrm -rf src/legacy\nEOF",
 		"( (cat <<'EOF') ) |& bash\nrm -rf src/legacy\nEOF",
 		"(cat <<'EOF') 2>/dev/null | sh\nrm -rf src/legacy\nEOF", // a redirection between
+		"((cat <<'EOF') | sh) | grep x\nrm -rf src/legacy\nEOF",  // nested: each pipe adds a reader
+		"( (cat <<'EOF') | sh; echo hi) | grep x\nrm -rf src/legacy\nEOF",
+		"{ { cat <<'EOF'; } | sh; } | grep x\nrm -rf src/legacy\nEOF",
+		"case a in a) case b in b) cat <<'EOF';; esac | sh;; esac | grep x\nrm -rf src/legacy\nEOF",
+		"case x in x) (cat <<'EOF') | sh;; esac | grep x\nrm -rf src/legacy\nEOF",
+		"(case x in x) cat <<'EOF';; esac) | sh\nrm -rf src/legacy\nEOF", // a pattern's ) closes no block
+		"{ case x in x) cat <<'EOF';; esac; } | sh\nrm -rf src/legacy\nEOF",
 	} {
 		if got := Split(Sh, line); !slices.Contains(got, "rm -rf src/legacy") {
 			t.Errorf("Split(%q) = %q", line, got)

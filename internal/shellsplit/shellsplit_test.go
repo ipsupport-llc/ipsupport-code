@@ -370,6 +370,94 @@ func TestAHeredocsReaderDecidesWhatItIs(t *testing.T) {
 	}
 }
 
+// What git, gh and PowerShell do with a heredoc or a here-string, and a body
+// dropped as data that a variable runs later.
+func TestHiddenCommandsAreFoundRound6(t *testing.T) {
+	for _, c := range []struct {
+		d    Dialect
+		line string
+	}{
+		{Sh, "git -C repo commit -F - <<'EOF'\nmsg\nEOF"},
+		{Sh, "git --no-pager log --stdin <<'EOF'\nHEAD\nEOF"},
+		{Sh, "git log --oneline am>out <<'EOF'\nHEAD\nEOF"}, // a revision named am: the subcommand is log
+		{Sh, "gh api repos/o/r/issues --input - <<'EOF'\n{}\nEOF"},
+		{Sh, "gh pr create --body-file - <<'EOF'\nbody\nEOF"},
+		{Sh, "cat > f <<'EOF'\nx\nEOF\nsh -c 'make all'"},  // nothing on the line runs a variable
+		{Sh, "cat > f <<'EOF'\nx\nEOF\nmake $TARGET"},      // a variable as an argument, not the program
+		{Sh, "LC_ALL=C git commit -F - <<'EOF'\nmsg\nEOF"}, // an assignment not for git
+		{Sh, "sort -u <<'EOF'\nb\na\nEOF"},                 // sort with no program to run
+		{PowerShell, "Set-Content notes.md @'\nRemove-Item is mentioned\n'@"},
+		{PowerShell, "@'\nRemove-Item is mentioned\n'@ | Out-File notes.md"},
+		{PowerShell, "$t = @'\nRemove-Item is mentioned\n'@\nSet-Content notes.md $t"},
+		{PowerShell, "$t=@'\nRemove-Item is mentioned\n'@; whoami"},
+		{PowerShell, "git commit -F - @'\nmsg\n'@"},
+	} {
+		p := Parse(c.d, c.line)
+		if p.Incomplete || slices.ContainsFunc(p.Commands, func(s string) bool { return strings.Contains(s, "is mentioned") }) {
+			t.Errorf("Parse(%d, %q) = %q incomplete=%v: data was scored or made incomplete", c.d, c.line, p.Commands, p.Incomplete)
+		}
+	}
+	for _, line := range []string{
+		"git -c alias.run='!sh' run <<'EOF'\nrm -rf x\nEOF", // an alias defined on the line
+		"git -calias.run=!sh run <<'EOF'\nrm -rf x\nEOF",
+		"git --config-env=alias.run=X run <<'EOF'\nrm -rf x\nEOF",
+		"git -c core.editor=x commit -F - <<'EOF'\nrm -rf x\nEOF",
+		"git myalias <<'EOF'\nrm -rf x\nEOF", // an alias set up before
+		"gh myext <<'EOF'\nrm -rf x\nEOF",    // a gh extension
+		"git apply <<'EOF'\n--- a/x\n+++ b/x\nEOF",
+		"read -r x <<'EOF'\nrm -rf x\nEOF\ne=eval; $e \"$x\"", // a variable run after the body was read
+		"read -r x <<'EOF'\nrm -rf x\nEOF\nsh -c \"$x\"",
+		"read -r x <<'EOF'\nrm -rf x\nEOF\npython3 -c \"$x\"",
+		"read -r x <<'EOF'\nrm -rf x\nEOF\nsh -c '$1' _ \"$x\"",
+		"x=$(cat <<'EOF'\nrm -rf x\nEOF\n)\n$x", // dropped in a substitution, run by the line
+		"read -r x <<'EOF'\nrm -rf x\nEOF\nf () { :; }",
+		"read -r x <<'EOF'\nrm -rf x\nEOF\ny=$(e=eval; $e \"$x\")",        // run inside a substitution
+		"read -r x <<'EOF'\nrm -rf x\nEOF\ne=eval; echo \"$($e \"$x\")\"", // seen only inside the substitution
+		"git -ccore.hooksPath=h commit -F - <<'EOF'\nrm -rf x\nEOF",       // config attached to -c
+		"sort --compress-program=sh -S 1K <<'EOF'\nrm -rf x\nEOF",         // sort pipes what it reads through a program
+		"sort --compress=sh <<'EOF'\nrm -rf x\nEOF",                       // abbreviated, as GNU takes it
+		"rg --pre=sh x <<'EOF'\nrm -rf x\nEOF",
+		"git -ccore.editor=sh commit -e -F - <<'EOF'\nrm -rf x\nEOF", // an editor that runs the message
+		"git commit --edit -F - <<'EOF'\nrm -rf x\nEOF",              // whatever core.editor is
+		"GIT_EDITOR=sh git commit -e -F - <<'EOF'\nrm -rf x\nEOF",
+		"GIT_CONFIG_PARAMETERS=\"'alias.log=!sh'\" git log <<'EOF'\nrm -rf x\nEOF",
+		"gh pr create --editor <<'EOF'\nrm -rf x\nEOF",
+	} {
+		if p := Parse(Sh, line); !p.Incomplete {
+			t.Errorf("Parse(%q) = %q: marked complete", line, p.Commands)
+		}
+	}
+	// A bare variable is data; a member of one may be a call that runs it.
+	for w, want := range map[string]bool{"$c": true, "$env:TEMP": true, "$c.Invoke()": false, "$ExecutionContext.InvokeCommand": false, "$": false} {
+		if got := psDataCommand(w); got != want {
+			t.Errorf("psDataCommand(%q) = %v, want %v", w, got, want)
+		}
+	}
+	for _, c := range []struct {
+		d    Dialect
+		line string
+		want string
+	}{
+		{Sh, "pwsh -NoProfile -File - <<'EOF'\nRemove-Item -Recurse -Force ./src\nEOF", "Remove-Item -Recurse -Force ./src"},
+		{Sh, "pwsh -Command - <<'EOF'\nRemove-Item -Recurse -Force ./src\nEOF", "Remove-Item -Recurse -Force ./src"},
+		{Sh, "powershell.exe <<'EOF'\nRemove-Item -Recurse -Force ./src\nEOF", "Remove-Item -Recurse -Force ./src"},
+		{Sh, "cmd <<'EOF'\nrd /s /q C:\\src\nEOF", `rd /s /q C:\src`},
+		{PowerShell, "iex @'\nRemove-Item -Recurse -Force ./src\n'@", "Remove-Item -Recurse -Force ./src"},
+		{PowerShell, "Invoke-Expression @\"\nRemove-Item -Recurse -Force ./src\n\"@", "Remove-Item -Recurse -Force ./src"},
+		{PowerShell, "@'\nRemove-Item -Recurse -Force ./src\n'@ | iex", "Remove-Item -Recurse -Force ./src"},
+		{PowerShell, "@'\nRemove-Item -Recurse -Force ./src\n'@ | Out-String | iex", "Remove-Item -Recurse -Force ./src"},
+		{PowerShell, "$c = @'\nRemove-Item -Recurse -Force ./src\n'@\n& ([scriptblock]::Create($c))", "Remove-Item -Recurse -Force ./src"},
+		{PowerShell, "$c=@'\nRemove-Item -Recurse -Force ./src\n'@; iex $c", "Remove-Item -Recurse -Force ./src"},
+		{PowerShell, "$c = @'\nRemove-Item -Recurse -Force ./src\n'@; $ExecutionContext.InvokeCommand.InvokeScript($c)", "Remove-Item -Recurse -Force ./src"},
+		{PowerShell, "Set-Content x (iex @'\nRemove-Item -Recurse -Force ./src\n'@)", "Remove-Item -Recurse -Force ./src"},
+		{PowerShell, "git -c alias.x='!sh' x @'\nrm -rf src\n'@", "rm -rf src"},
+	} {
+		if got := Split(c.d, c.line); !slices.Contains(got, c.want) {
+			t.Errorf("Split(%d, %q) = %q — %q is not among them", c.d, c.line, got, c.want)
+		}
+	}
+}
+
 // A block's output piped into a shell runs the heredocs read inside it.
 func TestAHeredocInABlockIsReadByWhatTheBlockIsPipedInto(t *testing.T) {
 	for _, line := range []string{

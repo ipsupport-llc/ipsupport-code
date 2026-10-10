@@ -17,6 +17,7 @@ package shellsplit
 import (
 	"encoding/base64"
 	"path"
+	"slices"
 	"strings"
 	"unicode/utf16"
 )
@@ -46,6 +47,8 @@ type Parsed struct {
 	Incomplete bool
 
 	untracked bool // see result.untracked: eval hands it on
+	varProg   bool // see result.varProg: every nesting hands it on
+	dropped   bool // see result.dropped: every nesting hands it on
 }
 
 // maxDepth bounds nesting — $( $( $( … ) ) ), script blocks, heredocs fed to
@@ -86,8 +89,14 @@ func parse(d Dialect, line string, depth int, budget *int) Parsed {
 		splitSh(line, r)
 	}
 	r.endGroup()
+	// read x <<EOF … EOF; $e "$x": a body dropped as data can still be run by
+	// a variable, or a name, set up after it was read.
+	if r.dropped && (r.untracked || r.varProg) {
+		r.incomplete = true
+	}
 	code := strings.TrimSuffix(r.code.String(), " ;")
-	return Parsed{Commands: append(r.cmds, r.inner...), Groups: append(r.groups, r.innerG...), Code: Trim(code), Incomplete: r.incomplete, untracked: r.untracked}
+	return Parsed{Commands: append(r.cmds, r.inner...), Groups: append(r.groups, r.innerG...), Code: Trim(code), Incomplete: r.incomplete,
+		untracked: r.untracked, varProg: r.varProg, dropped: r.dropped}
 }
 
 // Trim is strings.TrimSpace — named so the Python port can match it exactly
@@ -111,6 +120,8 @@ type result struct {
 	input      []bool   // cmds[i] is in a <( … ): what it writes is read as a file
 	funcName   bool     // the last cut was a single word before (: name () …
 	untracked  bool     // a function, coproc or alias was set up: a heredoc's output can reach a reader later, unseen
+	varProg    bool     // a variable's value runs as code: $e "$x", sh -c "$x"
+	dropped    bool     // a heredoc was read as data, its body scored as nothing
 	groups     []string
 	inner      []string // what a command runs inside it: sh -c '…', eval …
 	innerG     []string
@@ -217,6 +228,9 @@ func (r *result) block(s, op string, pipe bool) {
 		l := lead(s)
 		if r.funcName && op == ")" && s == "" || keyword(s) == "function" || keyword(s) == "coproc" || l == "alias" || expands(l) {
 			r.untracked = true
+		}
+		if expands(l) {
+			r.varProg = true
 		}
 		r.funcName = op == "(" && len(strings.Fields(s)) == 1 && !strings.ContainsAny(s, "<>=") // not arr=( )
 	}
@@ -333,6 +347,8 @@ func (r *result) nest(n *[]string, ng *[]string, d Dialect, code string) Parsed 
 	*n = append(*n, p.Commands...)
 	*ng = append(*ng, p.Groups...)
 	r.incomplete = r.incomplete || p.Incomplete
+	r.varProg = r.varProg || p.varProg
+	r.dropped = r.dropped || p.dropped
 	return p
 }
 
@@ -393,6 +409,9 @@ func (r *result) handOff(prog, w string, rest []string) bool {
 		}
 	default:
 		return false
+	}
+	if r.d == Sh && expands(strings.Join(rest, " ")) {
+		r.varProg = true // sh -c "$x", python3 -c "$x": a value not on the line runs
 	}
 	return true
 }
@@ -568,12 +587,17 @@ const (
 	script feed = 1 << iota
 	code
 	unknown
+	psScript  // read by PowerShell: pwsh -Command -, pwsh -File -
+	cmdScript // read by cmd
 )
+
+// scored is what has a heredoc's body scored.
+const scored = script | code | psScript | cmdScript
 
 // dataReaders are programs that read a heredoc as data: they store, show,
 // search or transform it, and run none of it. Not sed (its e command runs
 // lines), awk (system), patch (writes the files the body names), less
-// (LESSOPEN); git, but not git apply, am or fast-import. A heredoc is data only for one
+// (LESSOPEN); git and gh only for the subcommands in dataSubcommands. A heredoc is data only for one
 // of them; any other reader — sudo, xargs, psql, docker, $SH — is unknown, and
 // the parse incomplete: the list of what runs its input is never complete,
 // the list of what doesn't can be.
@@ -584,6 +608,11 @@ var dataReaders = map[string]bool{":": true, "cat": true, "tee": true, "git": tr
 	"read": true, "echo": true, "printf": true, "tac": true, "rev": true, "paste": true, "envsubst": true,
 	"md5sum": true, "sha256sum": true, "shasum": true}
 
+// readerRuns are the flags that make a data reader run a program on what it
+// reads (sort --compress-program, which GNU sort takes abbreviated) or on the
+// files it is given (rg --pre).
+var readerRuns = map[string][]string{"sort": {"--com"}, "rg": {"--pre"}}
+
 // feeds is what cmd runs what it reads as: every interpreter among its words
 // counts (see runner) — a match adds what is scored, never takes it away —
 // and a program that is neither an interpreter nor a data reader makes it
@@ -591,7 +620,7 @@ var dataReaders = map[string]bool{":": true, "cat": true, "tee": true, "git": tr
 // that: see block.)
 func feeds(cmd string) feed {
 	var f feed
-	prog, found := "", false
+	prog, found, at, env := "", false, 0, false
 	ws := words(cmd)
 	for i := 0; i < len(ws); i++ {
 		w := ws[i]
@@ -604,16 +633,26 @@ func feeds(cmd string) feed {
 			f |= script
 		case interpreters[r]:
 			f |= code
+		case r == "pwsh" || r == "powershell":
+			f |= psScript
+		case r == "cmd":
+			f |= cmdScript
 		}
 		if !found && !assignment(w) {
 			prog, found = program(w)
+			at = i
 		}
+		env = env || !found && assignment(w) && (strings.HasPrefix(w, "GIT_") || strings.HasPrefix(w, "GH_"))
 	}
 	switch {
 	case !found:
 		f |= unknown
-	case prog == "git" && gitWrites(ws):
-		f |= unknown // the body names the files it changes
+	case (prog == "git" || prog == "gh") && (env || !dataSubcommand(prog, ws[at+1:])):
+		f |= unknown // git apply, an alias (git -c alias.x='!sh' x), a gh extension, GIT_EDITOR=sh
+	case slices.ContainsFunc(ws[at+1:], func(w string) bool {
+		return slices.ContainsFunc(readerRuns[prog], func(f string) bool { return strings.HasPrefix(w, f) })
+	}):
+		f |= unknown // sort --compress-program=sh pipes what it reads through sh
 	case dataReaders[prog], wordRunner(prog) != "":
 	default:
 		f |= unknown
@@ -647,16 +686,40 @@ func assignment(w string) bool {
 	return true
 }
 
-// gitWrites: git apply, am, fast-import, update-index, update-ref — the
-// heredoc says what they change. A word may carry a redirection (apply<<EOF).
-func gitWrites(ws []string) bool {
-	for _, w := range ws {
-		if i := strings.IndexAny(w, "<>"); i >= 0 {
-			w = w[:i]
-		}
-		switch w {
-		case "apply", "am", "fast-import", "update-index", "update-ref":
-			return true
+// dataSubcommands are what git and gh do with a heredoc as data: a message,
+// an object, a request body, paths to check. Not git apply, am, fast-import,
+// update-index or update-ref — the body says what they change — nor an alias
+// or a gh extension, which can be anything.
+var dataSubcommands = map[string]map[string]bool{
+	"git": {"commit": true, "tag": true, "notes": true, "hash-object": true, "cat-file": true, "check-ignore": true,
+		"check-attr": true, "check-mailmap": true, "rev-list": true, "log": true, "diff": true, "show": true,
+		"status": true, "stripspace": true, "interpret-trailers": true, "mktree": true, "mktag": true,
+		"commit-tree": true, "rev-parse": true, "ls-files": true, "grep": true, "shortlog": true, "blame": true},
+	"gh": {"api": true, "issue": true, "pr": true, "release": true, "gist": true, "secret": true, "variable": true,
+		"repo": true, "label": true, "workflow": true, "run": true, "search": true},
+}
+
+// dataSubcommand: ws, the words after git or gh, name one of its
+// dataSubcommands — past the options before it, but no -c or --config-env,
+// which can define an alias or a command to run — and don't open an editor
+// (-e, --edit): git commit -e -F - hands the body to whatever core.editor is,
+// and sh as an editor runs it.
+func dataSubcommand(prog string, ws []string) bool {
+	for i := 0; i < len(ws); i++ {
+		w := ws[i]
+		switch {
+		case operator(w):
+			i++
+		case strings.HasPrefix(w, "-c") || strings.HasPrefix(w, "--config-env") || strings.HasPrefix(w, "--exec-path"):
+			return false
+		case w == "-C" || w == "--git-dir" || w == "--work-tree" || w == "--namespace" || w == "-R" || w == "--repo":
+			i++
+		case strings.HasPrefix(w, "-"):
+		default:
+			sub, ok := program(w)
+			return ok && dataSubcommands[prog][sub] && !slices.ContainsFunc(ws[i+1:], func(w string) bool {
+				return w == "-e" || w == "--edit" || w == "--editor"
+			})
 		}
 	}
 	return false
@@ -754,8 +817,11 @@ func splitSh(line string, out *result) {
 				if !h.quoted {
 					substitutions(body, out, &nested, &ngroups) // expanded first: its $( ) and ` ` run, whatever reads it
 				}
-				if f&unknown != 0 && f&(script|code) == 0 {
+				switch {
+				case f&unknown != 0 && f&scored == 0:
 					out.incomplete = true // read by a program that may run it, and scored as nothing
+				case f&scored == 0:
+					out.dropped = true
 				}
 				if f&script != 0 {
 					out.nest(&nested, &ngroups, Sh, body) // its commands run
@@ -764,6 +830,12 @@ func splitSh(line string, out *result) {
 					if s := Trim(body); s != "" {
 						nested = append(nested, s) // code in another language: scored as itself
 					}
+				}
+				if f&psScript != 0 {
+					out.nest(&nested, &ngroups, PowerShell, body)
+				}
+				if f&cmdScript != 0 {
+					out.nest(&nested, &ngroups, Cmd, body)
 				}
 				i = next - 1
 			}
@@ -968,13 +1040,16 @@ func continued(l string) bool {
 // splitPowerShell follows PowerShell: ; | && || and newlines separate
 // commands (& is the call operator, not a separator); '…' (” escapes) hides
 // everything, "…" and the backtick escape hide separators; # at a word's start
-// and <# … #> are comments; here-strings (@'…'@, @"…"@) are data; $( ), @( ),
+// and <# … #> are comments; here-strings (@'…'@, @"…"@) are data when what
+// reads them is a psDataCommand, and scored as code when not (see psReads);
+// $( ), @( ),
 // ( ) and { } hold code of their own, as does $( ) inside "…" and @"…"@ —
 // quotes of its own included.
 func splitPowerShell(line string, out *result) {
 	rs := []rune(line)
 	var b buf
 	var nested, ngroups []string
+	var hs []hereString
 	cut := func(op string) { out.cut(&b, op) }
 	for i := 0; i < len(rs); i++ {
 		r := rs[i]
@@ -989,7 +1064,12 @@ func splitPowerShell(line string, out *result) {
 			if q == '"' {
 				subexpressions(rs[i+2:min(end, len(rs))], out, &nested, &ngroups)
 			}
-			b.writeStr("@" + string(q) + "…" + string(q) + "@") // the body is data
+			stop := len(rs) // the body ends before the \n'@ closing it
+			if end < len(rs) {
+				stop = end - 1
+			}
+			hs = append(hs, hereString{body: string(rs[i+2 : stop]), cmd: len(out.cmds)})
+			b.writeStr("@" + string(q) + "…" + string(q) + "@") // the body is left out of the command
 			i = end                                             // the line after it goes on
 		case r == '\'':
 			j := i + 1
@@ -1059,8 +1139,106 @@ func splitPowerShell(line string, out *result) {
 		}
 	}
 	cut("")
+	for _, h := range hs {
+		if psReads(out, nested, h.cmd) {
+			continue
+		}
+		if t := Trim(h.body); t != "" {
+			nested = append(nested, t) // as itself: it may be another language
+			out.nest(&nested, &ngroups, PowerShell, h.body)
+		}
+	}
 	out.cmds = append(out.cmds, nested...)
 	out.groups = append(out.groups, ngroups...)
+}
+
+type hereString struct {
+	body string
+	cmd  int // the index of the command it is in
+}
+
+// psReads: what reads the here-string in out.cmds[k] reads it as data — that
+// command, and every one it is piped into (@'…'@ | Out-File f), each a
+// psDataCommand. Assigned to a variable ($c = @'…'@), it is read wherever a
+// variable is: every command of the line that names one must be one too
+// (iex $c, & ([scriptblock]::Create($c))).
+func psReads(out *result, nested []string, k int) bool {
+	if k >= len(out.cmds) {
+		return true // nothing reads it
+	}
+	for j := k; ; j++ {
+		if !psDataCommand(out.cmds[j]) {
+			return false
+		}
+		if !out.piped[j] || j+1 >= len(out.cmds) {
+			break
+		}
+	}
+	if _, ok := psAssignment(out.cmds[k]); !ok {
+		return true
+	}
+	return !slices.ContainsFunc(slices.Concat(out.cmds, nested), func(c string) bool {
+		return strings.Contains(c, "$") && !psDataCommand(c)
+	})
+}
+
+// psAssignment: cmd assigns to a variable ($c = …, $c=…, $c += …); rest is
+// the words of what it assigns.
+func psAssignment(cmd string) (rest []string, ok bool) {
+	ws := strings.Fields(cmd)
+	if len(ws) == 0 {
+		return nil, false
+	}
+	if v, after, eq := strings.Cut(ws[0], "="); eq {
+		return append(strings.Fields(after), ws[1:]...), psVariable(strings.TrimRight(v, "+-*/"))
+	}
+	if len(ws) < 2 || !psVariable(ws[0]) {
+		return nil, false
+	}
+	if op := strings.TrimLeft(ws[1], "+-*/"); strings.HasPrefix(op, "=") {
+		return append(strings.Fields(op[1:]), ws[2:]...), true
+	}
+	return nil, false
+}
+
+// psDataCommands are PowerShell commands that take a here-string as data:
+// they write, show, parse or search it, and run none of it.
+var psDataCommands = map[string]bool{"set-content": true, "add-content": true, "out-file": true, "new-item": true,
+	"write-output": true, "write-host": true, "write": true, "echo": true, "write-verbose": true,
+	"write-information": true, "out-string": true, "out-null": true, "set-clipboard": true, "sc": true, "ac": true,
+	"convertfrom-json": true, "convertfrom-csv": true, "convertfrom-stringdata": true, "select-string": true,
+	"measure-object": true, "sort-object": true, "git": true, "gh": true}
+
+// psDataCommand: cmd, past an assignment to a variable ($c = …), is nothing,
+// a string or a bare variable, or a psDataCommands one (git and gh only for
+// their dataSubcommands).
+func psDataCommand(cmd string) bool {
+	ws := strings.Fields(cmd)
+	if rest, ok := psAssignment(cmd); ok {
+		ws = rest
+	}
+	if len(ws) == 0 || psVariable(ws[0]) || strings.ContainsRune("'\"@", rune(ws[0][0])) {
+		return true
+	}
+	prog := strings.ToLower(name(ws[0]))
+	if prog == "git" || prog == "gh" {
+		return dataSubcommand(prog, ws[1:])
+	}
+	return psDataCommands[prog]
+}
+
+// psVariable: w is a bare variable, $name or $scope:name — not a member or a
+// call on one ($x.Invoke(), $ExecutionContext.InvokeCommand…).
+func psVariable(w string) bool {
+	if len(w) < 2 || w[0] != '$' {
+		return false
+	}
+	for _, c := range w[1:] {
+		if !(c == '_' || c == ':' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // hereStringStart: a here-string's opening @' or @" ends its line.

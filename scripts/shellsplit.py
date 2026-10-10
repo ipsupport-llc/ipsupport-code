@@ -279,7 +279,7 @@ def _close_brace(rs, i):
 # ── sh ──────────────────────────────────────────────────────────────────────
 
 _SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "ssh", "su"}
-_INTERPRETERS = {"python", "python3", "python2", "perl", "ruby", "node", "php", "lua", "deno", "bun",
+_INTERPRETERS = {"python", "python3", "python2", "perl", "ruby", "node", "nodejs", "php", "lua", "deno", "bun",
                  "osascript", "tclsh", "Rscript"}
 
 
@@ -348,15 +348,24 @@ def _words(cmd):
 
 def _runner(w):
     """Mirrors runner: the interpreter a word names, by base name, or ""."""
-    b = _go_path_base(w.replace("\\", "/"))
+    b = _name(w)
     l = b.lower()
-    if l.endswith(".exe"):
-        l = l[:-4]
     if l in ("pwsh", "powershell", "cmd"):
         return l
+    v = b.rstrip("0123456789.")
+    if v:
+        b = v
     if b == "eval" or b in _SHELLS or b in _INTERPRETERS:
         return b
     return ""
+
+
+def _name(w):
+    """Mirrors name: base name, without quotes or .exe."""
+    b = _go_path_base(w.strip('"').replace("\\", "/"))
+    if len(b) > 4 and b[-4:].lower() == ".exe":
+        b = b[:-4]
+    return b
 
 
 def _operator(w):
@@ -374,25 +383,71 @@ def _word_runner(w):
     return _runner(w)
 
 
-_SCRIPT, _CODE = 1, 2
+_SCRIPT, _CODE, _UNKNOWN = 1, 2, 4
+
+# Mirrors dataReaders.
+_DATA_READERS = {":", "cat", "tee", "git", "gh", "grep", "egrep", "fgrep", "rg", "sort", "uniq", "wc", "head",
+                 "tail", "cut", "tr", "base64", "jq", "yq", "diff", "cmp", "patch", "column", "fold", "nl", "od",
+                 "xxd", "hexdump", "less", "more", "read", "echo", "printf", "tac", "rev", "paste", "envsubst",
+                 "md5sum", "sha256sum", "shasum", "sed", "awk"}
 
 
 def _feeds(cmd):
-    """Mirrors feeds: every interpreter among the words adds what is scored."""
+    """Mirrors feeds: interpreters among the words add what is scored; a program
+    neither an interpreter nor a data reader makes the reader unknown."""
     f = 0
+    prog, found = "", False
     ws = _words(cmd)
     i = 0
     while i < len(ws):
-        if _operator(ws[i]):
+        w = ws[i]
+        if _operator(w):
             i += 2
             continue
-        w = _word_runner(ws[i])
-        if w in _SHELLS:
+        r = _word_runner(w)
+        if r in _SHELLS:
             f |= _SCRIPT
-        elif w in _INTERPRETERS:
+        elif r in _INTERPRETERS:
             f |= _CODE
+        if not found and not _assignment(w):
+            prog, found = _program(w)
         i += 1
+    if not found or (ws and _operator(ws[-1])):
+        f |= _UNKNOWN
+    elif prog in _DATA_READERS and prog in ("sed", "awk") and _script_file(ws):
+        f |= _UNKNOWN
+    elif prog in _DATA_READERS or _word_runner(prog):
+        pass
+    else:
+        f |= _UNKNOWN
     return f
+
+
+def _program(w):
+    """Mirrors program."""
+    cut = [k for k in (w.find("<"), w.find(">")) if k >= 0]
+    if cut:
+        k = min(cut)
+        if w[:k].strip("0123456789&") == "":
+            return "", False
+        w = w[:k]
+    return _name(w), True
+
+
+def _assignment(w):
+    """Mirrors assignment: NAME=value."""
+    i = w.find("=")
+    if i <= 0:
+        return False
+    for j, c in enumerate(w[:i]):
+        if not (c == "_" or "a" <= c <= "z" or "A" <= c <= "Z" or (j > 0 and "0" <= c <= "9")):
+            return False
+    return True
+
+
+def _script_file(ws):
+    """Mirrors scriptFile."""
+    return any(w.startswith("--file") or (w.startswith("-") and not w.startswith("--") and "f" in w) for w in ws)
 
 
 def _split_sh(line, out):
@@ -474,6 +529,8 @@ def _split_sh(line, out):
                 body = rs[start:end]
                 if not h["quoted"]:
                     _substitutions(body, out, nested, ngroups)
+                if f & _UNKNOWN and not f & (_SCRIPT | _CODE):
+                    out.incomplete = True
                 if f & _SCRIPT:
                     out.nest(nested, ngroups, SH, body)
                 if f & _CODE:

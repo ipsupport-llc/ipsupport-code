@@ -286,6 +286,53 @@ func TestManyInterpreterWordsAreLinear(t *testing.T) {
 	}
 }
 
+// A heredoc is data only for a program known to read data; any other reader
+// may run it, and the parse says it is incomplete. Interpreters, versioned or
+// not, have it scored.
+func TestAHeredocsReaderDecidesWhatItIs(t *testing.T) {
+	for _, line := range []string{
+		"cat > notes.md <<'EOF'\nrm is mentioned here\nEOF",
+		"git commit -F - <<'EOF'\nmsg\nEOF",
+		"git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n)\"",
+		": <<'EOF'\na comment\nEOF",
+		"cat <<EOF | grep x | sort\nbody\nEOF",
+		"2>/dev/null cat >f <<EOF\nbody\nEOF",
+		"LC_ALL=C sort <<EOF\nb\na\nEOF",
+		"timeout 5 sh <<EOF\nrm -rf x\nEOF", // a wrapper, but sh reads it, and it is scored
+		"sudo -u deploy bash <<EOF\nrm -rf x\nEOF",
+	} {
+		if p := Parse(Sh, line); p.Incomplete {
+			t.Errorf("Parse(%q): a data reader's heredoc marked incomplete", line)
+		}
+	}
+	for _, line := range []string{
+		"psql mydb <<'EOF'\nDROP TABLE users;\nEOF",
+		"$SH <<'EOF'\nrm -rf x\nEOF",
+		"cat <<'EOF' | xargs rm -rf\nsrc\nEOF",
+		"cat <<'EOF' > >(sh)\nrm -rf x\nEOF",
+		"tee >(sh) <<'EOF'\nrm -rf x\nEOF",
+		"sudo -s <<'EOF'\nrm -rf x\nEOF",
+		"sed -f - x.txt <<'EOF'\ns/a/b/\nEOF",
+		"while read l; do :; done <<'EOF'\nx\nEOF",
+	} {
+		if p := Parse(Sh, line); !p.Incomplete {
+			t.Errorf("Parse(%q) = %q: an unknown reader's heredoc marked complete", line, p.Commands)
+		}
+	}
+	for line, want := range map[string]string{
+		"python3.11 <<'EOF'\nimport shutil; shutil.rmtree('x')\nEOF": "import shutil; shutil.rmtree('x')",
+		"ksh93 <<'EOF'\nrm -rf x\nEOF":                               "rm -rf x",
+		"/usr/bin/perl5.38 - <<'EOF'\nunlink 'x';\nEOF":              "unlink 'x';",
+	} {
+		if got := Split(Sh, line); !slices.Contains(got, want) {
+			t.Errorf("Split(%q) = %q — %q is not among them", line, got, want)
+		}
+	}
+	if got := Split(Cmd, `"powershell" /e `+encoded); !slices.Contains(got, `Remove-Item -Recurse -Force C:\src\app`) {
+		t.Errorf("a quoted program in cmd: %q", got)
+	}
+}
+
 // A heredoc read as data stays data: a word of the command that is only a
 // heredoc's word or a file is not a shell.
 func TestAHeredocsWordIsNotItsShell(t *testing.T) {

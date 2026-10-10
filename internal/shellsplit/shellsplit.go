@@ -312,7 +312,7 @@ var (
 	// ssh and su run a heredoc as a shell script too — on another host, as
 	// another user.
 	shells       = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true, "ssh": true, "su": true}
-	interpreters = map[string]bool{"python": true, "python3": true, "python2": true, "perl": true, "ruby": true, "node": true,
+	interpreters = map[string]bool{"python": true, "python3": true, "python2": true, "perl": true, "ruby": true, "node": true, "nodejs": true,
 		"php": true, "lua": true, "deno": true, "bun": true, "osascript": true, "tclsh": true, "Rscript": true}
 )
 
@@ -323,17 +323,31 @@ var (
 // program: telling the program from its wrappers' arguments (sudo -u deploy sh,
 // timeout -s KILL 5 sh, env -u FOO sh, &>log sh) takes knowing every option of
 // every wrapper, and getting one wrong hides the code. A word taken for an
-// interpreter that isn't one costs only a little more scoring.
+// interpreter that isn't one costs only a little more scoring. A version in
+// the name doesn't hide it: python3.11, ksh93, perl5.38 are python, ksh, perl.
 func runner(w string) string {
-	b := path.Base(strings.ReplaceAll(w, `\`, "/"))
-	switch l := strings.TrimSuffix(strings.ToLower(b), ".exe"); l {
+	b := name(w)
+	switch l := strings.ToLower(b); l {
 	case "pwsh", "powershell", "cmd":
 		return l
+	}
+	if v := strings.TrimRight(b, "0123456789."); v != "" {
+		b = v
 	}
 	if b == "eval" || shells[b] || interpreters[b] {
 		return b
 	}
 	return ""
+}
+
+// name is a program word's base name: quotes (cmd keeps them), directories
+// and .exe left off.
+func name(w string) string {
+	b := path.Base(strings.ReplaceAll(strings.Trim(w, `"`), `\`, "/"))
+	if len(b) > 4 && strings.EqualFold(b[len(b)-4:], ".exe") {
+		b = b[:len(b)-4]
+	}
+	return b
 }
 
 // operator: a redirection operator standing alone and waiting for its operand,
@@ -356,41 +370,109 @@ func wordRunner(w string) string {
 }
 
 // feed is what reads a heredoc: a shell (its commands run), another language
-// (scored as itself), both — an interpreter's arguments can name a shell —
-// or neither (data).
+// (scored as itself), both — an interpreter's arguments can name a shell — a
+// program not known to read data (what it does with it can't be told), or
+// none of these (data).
 type feed uint8
 
 const (
 	script feed = 1 << iota
 	code
+	unknown
 )
 
+// dataReaders are programs that read a heredoc as data: they store, show,
+// search or transform it, and run none of it. A heredoc is data only for one
+// of them; any other reader — sudo, xargs, psql, docker, $SH — is unknown, and
+// the parse incomplete: the list of what runs its input is never complete,
+// the list of what doesn't can be.
+var dataReaders = map[string]bool{":": true, "cat": true, "tee": true, "git": true, "gh": true, "grep": true,
+	"egrep": true, "fgrep": true, "rg": true, "sort": true, "uniq": true, "wc": true, "head": true, "tail": true,
+	"cut": true, "tr": true, "base64": true, "jq": true, "yq": true, "diff": true, "cmp": true, "patch": true,
+	"column": true, "fold": true, "nl": true, "od": true, "xxd": true, "hexdump": true, "less": true, "more": true,
+	"read": true, "echo": true, "printf": true, "tac": true, "rev": true, "paste": true, "envsubst": true,
+	"md5sum": true, "sha256sum": true, "shasum": true, "sed": true, "awk": true}
+
 // feeds is what cmd runs what it reads as: every interpreter among its words
-// counts (see runner) — a match adds what is scored, never takes it away.
+// counts (see runner) — a match adds what is scored, never takes it away —
+// and a program that is neither an interpreter nor a data reader makes it
+// unknown. So does a redirection left waiting for its operand: > >(sh) runs
+// what it writes.
 func feeds(cmd string) feed {
 	var f feed
+	prog, found := "", false
 	ws := words(cmd)
 	for i := 0; i < len(ws); i++ {
-		if operator(ws[i]) {
+		w := ws[i]
+		if operator(w) {
 			i++
 			continue
 		}
-		switch w := wordRunner(ws[i]); {
-		case shells[w]:
+		switch r := wordRunner(w); {
+		case shells[r]:
 			f |= script
-		case interpreters[w]:
+		case interpreters[r]:
 			f |= code
 		}
+		if !found && !assignment(w) {
+			prog, found = program(w)
+		}
+	}
+	switch {
+	case !found, len(ws) > 0 && operator(ws[len(ws)-1]): // > >(sh): its operand, a process substitution, runs what it writes
+		f |= unknown
+	case dataReaders[prog] && (prog == "sed" || prog == "awk") && scriptFile(ws):
+		f |= unknown // sed -f -, awk -f -: their program comes from it
+	case dataReaders[prog], wordRunner(prog) != "":
+	default:
+		f |= unknown
 	}
 	return f
 }
 
+// program is the program a word names, if it names one: not a redirection
+// with its operand (2>/dev/null), and before one it carries (cat>f).
+func program(w string) (string, bool) {
+	if i := strings.IndexAny(w, "<>"); i >= 0 {
+		if strings.Trim(w[:i], "0123456789&") == "" {
+			return "", false
+		}
+		w = w[:i]
+	}
+	return name(w), true
+}
+
+// assignment is a NAME=value word before a command.
+func assignment(w string) bool {
+	i := strings.IndexByte(w, '=')
+	if i <= 0 {
+		return false
+	}
+	for j, c := range w[:i] {
+		if !(c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || j > 0 && c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+// scriptFile: sed's or awk's -f, which reads its program from a file.
+func scriptFile(ws []string) bool {
+	for _, w := range ws {
+		if strings.HasPrefix(w, "--file") || strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.Contains(w, "f") {
+			return true
+		}
+	}
+	return false
+}
+
 // splitSh follows POSIX sh: ; & && || | |& and newlines separate commands;
 // '…' hides everything, "…" and \ hide separators; # at the start of a word
-// comments out the rest of the line; a heredoc's body (<<WORD … WORD) is data —
-// unless its word is unquoted (its $( ) and ` ` run) or it feeds a shell or an
-// interpreter (then it is code); $( … ) and `…` hold commands of their own;
-// ( ) and { } group commands.
+// comments out the rest of the line; a heredoc's body (<<WORD … WORD) is data
+// for a data reader, code for a shell or an interpreter, and for any other
+// reader not known: the parse is incomplete (see feeds) — and an unquoted
+// word's $( ) and ` ` run whoever reads it; $( … ) and `…` hold commands of
+// their own; ( ) and { } group commands.
 func splitSh(line string, out *result) {
 	rs := []rune(line)
 	var b buf
@@ -475,6 +557,9 @@ func splitSh(line string, out *result) {
 				body := string(rs[start:end])
 				if !h.quoted {
 					substitutions(body, out, &nested, &ngroups) // expanded first: its $( ) and ` ` run, whatever reads it
+				}
+				if f&unknown != 0 && f&(script|code) == 0 {
+					out.incomplete = true // read by a program that may run it, and scored as nothing
 				}
 				if f&script != 0 {
 					out.nest(&nested, &ngroups, Sh, body) // its commands run

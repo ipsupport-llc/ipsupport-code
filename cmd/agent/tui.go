@@ -42,6 +42,7 @@ const (
 	stConfig        // interactive /config settings panel
 	stChooseSession // startup: pick a saved session to restore / start new / delete
 	stAgents        // interactive sub-agent profile manager (add/edit/delete)
+	stPick          // a list to pick from: /model, /ai or /sessions with no argument
 	stRewind        // pick a checkpoint to rewind to
 	stPlanReview    // a plan-mode task just proposed a plan: accept (→auto+execute) or keep planning
 	stHistSearch    // Ctrl+R incremental reverse-search over the prompt history
@@ -95,6 +96,9 @@ type tuiModel struct {
 	cfgPhase      int             // stConfig sub-flow: cfgPhaseList, or an add-provider form field
 	cfgDraft      providerDraft   // the provider being added in the panel form
 	cfgEdit       *cfgEditor      // a /config value being typed in place on its row, or nil
+	cfgPick       *cfgPicker      // a /config list open on its row, or nil
+	pick          *picker         // the list open in stPick (/model, /ai, /sessions)
+	pickKind      string          // what stPick's list is: "model", "provider" or "session"
 	agFromConfig  bool            // the profiles manager was opened from /config: esc returns there
 	cfgWSKeys     map[string]bool // settings this project's .agent/config.json sets (they win over the panel's global saves)
 	chooseRows    []sessionMeta   // saved sessions offered by the startup chooser (stChooseSession)
@@ -845,6 +849,18 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.agCursor = 0
 		return m, nil
 
+	case pickListMsg:
+		if msg.epoch != m.app.modelEpoch.Load() { // the connection changed since — not its list
+			return m, nil
+		}
+		if m.cfgPick != nil && m.cfgPick.p.loading {
+			m.cfgPick.p.load(msg.items, msg.err, m.app.activeLLM().Model)
+		}
+		if m.state == stPick && m.pick != nil && m.pick.loading {
+			m.pick.load(msg.items, msg.err, m.app.activeLLM().Model)
+		}
+		return m, nil
+
 	case modelsMsg:
 		if msg.setTo != "" { // resolved a /model arg to one model — switch (UI thread)
 			m.pushLines(m.app.setModel(msg.setTo))
@@ -931,7 +947,7 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Nuke the whole input — fast recovery from a bad clipboard paste. (In the
 		// profile builder's name step it clears that field instead; in a /config
 		// field it is that field's own edit key.)
-		if m.state == stConfig && (m.cfgEdit != nil || m.cfgPhase != cfgPhaseList) {
+		if (m.state == stConfig && (m.cfgEdit != nil || m.cfgPick != nil || m.cfgPhase != cfgPhaseList)) || m.state == stPick {
 			break
 		}
 		if m.state == stAgents && m.agPhase == agName {
@@ -1003,6 +1019,9 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.cfgEdit != nil { // typing a value in place on its row
 			return m.configEditKey(k)
 		}
+		if m.cfgPick != nil { // a list open on its row
+			return m.configPickKey(k)
+		}
 		switch k.String() {
 		case "up", "k":
 			m.configMove(-1)
@@ -1016,6 +1035,8 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case stAgents:
 		return m.agentsKey(k)
+	case stPick:
+		return m.pickKey(k)
 	case stRewind:
 		switch k.String() {
 		case "up", "k":
@@ -1525,6 +1546,16 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "/sessions":
+		// Bare, it is the one form allowed over a running task (commandWhileBusy):
+		// there it stays a listing — a pick would switch the thread under the task.
+		if strings.TrimSpace(rest) == "" && m.cancel == nil {
+			items := m.app.sessionPickItems()
+			if len(items) == 0 {
+				m.pushLines(m.app.listSessionsLines())
+				return m, nil
+			}
+			return m.openPick("session", newPicker(items, m.app.cfg.Name))
+		}
 		lines, switched := m.app.sessionsCommand(rest)
 		m.pushLines(lines)
 		if switched {
@@ -1692,6 +1723,9 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 		m.pushLines(m.app.reasoningCommand(rest))
 		return m, nil
 	case "/ai":
+		if strings.TrimSpace(rest) == "" && m.cancel == nil { // over a running task: the listing, as for /sessions
+			return m.openPick("provider", newPicker(m.app.providerPickItems(), m.app.providerName()))
+		}
 		m.pushLines(m.app.aiCommand(rest))
 		return m, m.detectWindowCmd() // re-detect the window off-thread after a switch
 	case "/config":
@@ -1700,6 +1734,10 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/model":
 		act, name := m.app.activeLLM(), m.app.providerName()
 		arg := strings.TrimSpace(rest)
+		if arg == "" {
+			model, _ := m.openPick("model", picker{loading: true, free: true})
+			return model, m.fetchModelsCmd()
+		}
 		m.state = stRunning
 		m.taskStart = time.Now()
 		verb := "listing models on " + name
@@ -2095,6 +2133,8 @@ func (m *tuiModel) View() string {
 		status = cDim.Render("welcome back — pick up a session, or start fresh")
 	case m.state == stAgents:
 		status = cDim.Render("sub-agent profiles — models the assistant can delegate to")
+	case m.state == stPick:
+		status = cDim.Render(m.pickTitle())
 	case m.state == stRewind:
 		status = cDim.Render("rewind — ↑↓ pick a step, enter to return there, esc to cancel")
 	case m.state == stConfig:
@@ -2195,6 +2235,8 @@ func (m *tuiModel) View() string {
 		bottom += cDim.Render("  · esc cancels · ctrl+t thinking")
 	case m.state == stAgents:
 		bottom = cDim.Render(m.agentsHint())
+	case m.state == stPick:
+		bottom = cDim.Render("  ↑↓ move · pgup/pgdn page · type to filter · enter pick · esc cancel")
 	case m.state == stRewind:
 		bottom = cDim.Render("  ↑↓ move · enter rewind here · esc cancel")
 	}
@@ -2207,6 +2249,8 @@ func (m *tuiModel) View() string {
 		content = m.renderChooser()
 	case stAgents:
 		content = m.renderAgentsPanel()
+	case stPick:
+		content = m.renderPickPanel()
 	case stRewind:
 		content = m.renderRewindPanel()
 	}

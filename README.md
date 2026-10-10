@@ -102,11 +102,11 @@ OpenAI-compatible API and switch in one command — run a strong cloud model for
 hard task, then drop back to your local one:
 
 ```
-/ai                       list providers (local + openai, anthropic, grok, groq, openrouter, zai)
+/ai                       pick a provider from a list (built-ins: openai, anthropic, grok, groq, openrouter, zai)
 /ai key openai sk-…       add an API key for a built-in provider (one command)
 /ai add mylab https://api.lab.co/v1 llama-3.1 key=sk-…   add a CUSTOM provider + key in one step
 /ai openai                switch to it   ·   /ai local   back to your local server
-/model                    list models   ·   /model gpt-4o   pick   ·   /model sonnet   filter (great for OpenRouter)
+/model                    pick from the server's models (↑↓, type to filter)   ·   /model gpt-4o   switch directly
 ```
 
 Pasting a key on Linux? A middle-click paste is swallowed by the mouse-wheel
@@ -132,14 +132,16 @@ env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`,
 change the selected row, **esc** to close — changes apply and save as you make
 them, no hand-editing JSON.
 
-- **Connection** edits the provider in use, the local server included: its
-  **address** (host, port, path), **model**, **API key** (typed masked; empty
+- **Connection** edits the provider in use, the local server included: the
+  **provider** and **model** are picked from a list (↑↓ to scroll, type to
+  filter; a model the server doesn't list can be typed), its **address** (host,
+  port, path), **API key** (typed masked; empty
   keeps it, `ctrl+d` removes it), server **type** (LM Studio or plain
   OpenAI-compatible) and **context window** (any size; 0 = auto-detect). A
   built-in provider's address can point at a proxy or your own gateway; empty
   puts it back.
 - **Providers** adds or edits an OpenAI-compatible endpoint, and removes one
-  (confirmed with a second Enter; the one in use falls back to local).
+  picked from the saved ones (confirmed with a second Enter; the one in use falls back to local).
 - Tuning values — temperature, top_p, output cap, idle timeout, retries, and
   the goal judge's output cap — are typed; the rest cycle in place. Values are edited like a shell line: ←/→,
   home/end, ctrl+u.
@@ -740,7 +742,7 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | `/compact` | summarize the session so far to free up context |
 | `/color [name]` | change the TUI frame color (cycles if no name) |
 | `/rename <name>` | rename the agent (saved in settings) |
-| `/sessions` | list / switch / delete saved sessions (per agent name) |
+| `/sessions` | pick a saved session to switch to (`/sessions <name>` switches, `/sessions delete <name>` deletes) |
 | `/agents` | sub-agent profiles: `add` (LLM) / `add-tool` (external CLI) / `rm` / `exec` |
 | `/telemetry` | anonymous usage statistics: exactly what is sent · `on` · `off` · `reset` |
 | `/rate` | rate ipsupport-code: `/rate <1-5> <a few words> [--name <you>]` · `later` · `never` |

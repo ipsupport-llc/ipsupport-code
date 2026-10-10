@@ -82,6 +82,11 @@ type Assessment struct {
 	Top      string             // the label that produced Risk ("" if the model has only "safe")
 	BaseRisk float32            // Risk as the base model alone put it
 	Scores   map[string]float32 // every label the model carries, as the base model scored it
+	// Params is the part of the call that produced Risk: the call's own
+	// parameters, or — for a shell line of several commands — the call with
+	// "command" set to the one that scored highest. A correction teaches
+	// that part, the one the score was about.
+	Params map[string]any
 }
 
 // Assess scores one tool call.

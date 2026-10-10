@@ -9,11 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
+	"github.com/ipsupport-llc/ipsupport-code/internal/shellsplit"
 )
 
 // Learning from real use, rather than from scripts/risk_dataset.jsonl.
@@ -104,6 +106,7 @@ type Delta struct {
 // goroutines are scoring.
 type Tuned struct {
 	mu      sync.RWMutex
+	shell   shellsplit.Dialect // how a run.shell command is cut into commands; set before use
 	base    *Model
 	fp      [8]byte // base.Fingerprint(), computed once
 	d       *Delta
@@ -144,15 +147,90 @@ func (m *Model) Fingerprint() [8]byte {
 	return fp
 }
 
+// SetShell names the shell run.shell commands are written for. Called once,
+// before the model is shared.
+func (t *Tuned) SetShell(d shellsplit.Dialect) {
+	if t != nil {
+		t.shell = d
+	}
+}
+
+// parts is what a call is scored as. A shell line is a program of several
+// commands, and scored as one text a long harmless tail dilutes a destructive
+// head: `rm -rf x && cat > report.md <<EOF …` came out at 0.07, `rm -rf x`
+// alone at 0.88. So the line's code (its commands and operators, without
+// heredoc bodies, here-strings or comments — data, not commands) is scored,
+// and each command in it on its own; the call's risk is the highest. The
+// whole is kept for what only the combination says (`curl … | sh`).
+func (t *Tuned) parts(tool, action string, params map[string]any) []map[string]any {
+	cmd, ok := params["command"].(string)
+	if tool != "run" || action != "shell" || !ok {
+		return []map[string]any{params}
+	}
+	with := func(c string) map[string]any {
+		p := make(map[string]any, len(params))
+		for k, v := range params {
+			p[k] = v
+		}
+		p["command"] = c
+		return p
+	}
+	code := shellsplit.Code(t.shell, cmd)
+	out := []map[string]any{params}
+	seen := map[string]bool{strings.TrimSpace(cmd): true}
+	if code != "" && !seen[code] {
+		out[0] = with(code) // the data stays out of the whole as well
+		seen[code] = true
+	}
+	for _, c := range shellsplit.Split(t.shell, cmd) {
+		if !seen[c] {
+			seen[c] = true
+			out = append(out, with(c))
+		}
+	}
+	return out
+}
+
 // Base is the underlying model — its labels, config and informational flags.
 func (t *Tuned) Base() *Model { return t.base }
 
-// Assess scores a call through the base model plus the local corrections.
+// Assess scores a call through the base model plus the local corrections —
+// each of its parts (see parts), the call's risk being the highest.
 func (t *Tuned) Assess(tool, action string, params map[string]any) Assessment {
+	return t.AssessIn("", tool, action, params)
+}
+
+// AssessIn is Assess for a call made in workspace: paths into it are read as
+// the project's own (see Localize).
+func (t *Tuned) AssessIn(workspace, tool, action string, params map[string]any) Assessment {
 	if t == nil {
 		return Assessment{}
 	}
-	text := CallText(tool, action, params)
+	params = localizeParams(params, workspace)
+	var out Assessment
+	for i, p := range t.parts(tool, action, params) {
+		a := t.assessText(CallText(tool, action, p))
+		a.Params = p
+		if i == 0 {
+			out = a
+			continue
+		}
+		for l, v := range a.Scores { // what the call does: the most any part does —
+			// and it is safe only as far as every part is
+			if (l == LabelSafe) == (v < out.Scores[l]) {
+				out.Scores[l] = v
+			}
+		}
+		out.BaseRisk = max(out.BaseRisk, a.BaseRisk)
+		if a.Risk > out.Risk {
+			out.Risk, out.Top, out.Params = a.Risk, a.Top, p
+		}
+	}
+	return out
+}
+
+// assessText scores one rendered call.
+func (t *Tuned) assessText(text string) Assessment {
 	vec := Featurize(t.base.Cfg, text)
 	dim := int(t.base.Cfg.Dim)
 

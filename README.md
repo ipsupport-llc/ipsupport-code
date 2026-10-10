@@ -500,6 +500,18 @@ dependency of any kind: 768KB of `float32` embedded in the binary, ~28µs per
 call. Training is offline and separate (`scripts/train_risk.py`, stdlib only);
 its only output is the weights file.
 
+**A shell line is scored by its parts.** Read as one text, a long harmless tail
+diluted a destructive head: `rm -rf quotesdemo && cat > REPORT.md <<'EOF' …`
+came out at 0.07. The line is now cut by the rules of the shell it runs in —
+`sh` off Windows, PowerShell (or `cmd` when `run.shell` says so) on it
+(`internal/shellsplit`) — and its code (commands and operators, without heredoc
+bodies, here-strings or comments, which are data) and each command in it are
+scored; the call's risk is the highest. That line now scores 0.89, and a note
+written through a heredoc no longer fires on what the note says. Paths into the
+workspace are read as the project's own (`/app/data.csv` in a workspace at
+`/app` scores as `./data.csv`): the scorer knows where the workspace is, the
+model can't.
+
 Swap the model without rebuilding: `IPS_RISK_MODEL=/path/to/model.bin`. The file
 carries its own feature config and label names, so a model with a different
 feature space or a different set of labels loads unchanged.
@@ -508,16 +520,22 @@ On held-out **paths** — a fifth of every path class, never seen under any verb
 
 | label | precision | recall |
 |---|---|---|
-| destructive | 0.91 | 0.97 |
-| sandbox_escape | 1.00 | 0.90 |
-| credential_access | 0.96 | 0.98 |
-| network | 0.99 | 0.95 |
-| external_side_effect | 1.00 | 0.94 |
-| safe | 0.96 | 0.88 |
+| destructive | 0.85 | 0.98 |
+| sandbox_escape | 0.80 | 0.89 |
+| credential_access | 0.96 | 0.93 |
+| network | 1.00 | 0.99 |
+| external_side_effect | 1.00 | 0.99 |
+| safe | 0.96 | 0.94 |
 
-On the headline score — what the log shows and a gate would use — that is **7.0%
-false alarms on ordinary calls and 3.4% missed risky ones**. The trainer prints
-both, and names every false alarm.
+On the headline score — what the log shows and a gate would use — that is
+**6.8% false alarms on ordinary calls and 4.1% missed risky ones** (single
+commands 5.1% and 4.3%; chains of commands share their members' held-out paths,
+so an unseen path's mistake repeats in them). Most false alarms are deleting
+build output under a name never seen (`artifacts`, `local.properties`). On the
+honest set of real agents' commands (`scripts/risk_eval.jsonl`), the number
+that decides whether a model ships: **156 of 198 risky commands flagged, 34 of
+501 ordinary ones** — against 124 and 70 before lines were scored by their
+parts. The trainer prints both, and names every false alarm.
 
 The feature vector is **L2-normalized**, which is what makes a score mean the
 same thing for a long call as a short one. Without it a repeated feature

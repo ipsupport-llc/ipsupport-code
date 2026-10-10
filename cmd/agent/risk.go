@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
+	"github.com/ipsupport-llc/ipsupport-code/internal/shellsplit"
 )
 
 // EnvRiskOff turns shadow scoring off for a run. Shadow mode blocks nothing, so
@@ -53,7 +55,22 @@ func (a *app) ensureShadow() {
 	// on the pointer, which is what CI caught. Reusing it also keeps what the
 	// session has learned: rebuilding would drop the in-memory corrections on the
 	// floor every time a setting changed.
-	a.shadow = risk.NewShadow(risk.NewTuned(base, d))
+	tuned := risk.NewTuned(base, d)
+	tuned.SetShell(shellDialect(runtime.GOOS, a.cfg.Run.Shell))
+	a.shadow = risk.NewShadow(tuned)
+}
+
+// shellDialect is the shell run.shell commands are written for: sh off
+// Windows; on Windows PowerShell, or cmd.exe when run.shell says so (see
+// tool.Shell).
+func shellDialect(goos, shell string) shellsplit.Dialect {
+	switch {
+	case goos != "windows":
+		return shellsplit.Sh
+	case strings.EqualFold(strings.TrimSpace(shell), "cmd"):
+		return shellsplit.Cmd
+	}
+	return shellsplit.PowerShell
 }
 
 // riskObserver returns the shadow-mode hook for an agent, scoring against the
@@ -69,8 +86,9 @@ func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, a
 	if sh == nil {
 		return nil
 	}
+	ws := pol.Workdir() // paths into it are the project's own (risk.Localize)
 	return func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
-		as := sh.Observe(tool, action, params, policyVerdict(pol, tool, action, params))
+		as := sh.Observe(ws, tool, action, params, policyVerdict(pol, tool, action, params))
 		// Hand the score down to the approval prompt, which is where a human
 		// answers for this call and so the only place ground truth appears — and
 		// back up as a note, so the call's own line can carry it.

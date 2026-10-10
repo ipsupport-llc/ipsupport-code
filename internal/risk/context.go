@@ -65,6 +65,16 @@ func (a Assessment) Note() string {
 // An approval of a call the model also thought was fine confirms only that the
 // two agreed, and a refusal of one it flagged confirms the same. Learning from
 // those would be learning from its own output.
+// part is what the correction is about: the part of the call the score came
+// from (a shell line's riskiest command), so the answer teaches the same text
+// the next score reads.
+func (s *scored) part() map[string]any {
+	if s.a.Params != nil {
+		return s.a.Params
+	}
+	return s.params
+}
+
 func CorrectionFrom(ctx context.Context, approved bool) (Correction, bool) {
 	s, _ := ctx.Value(assessKey{}).(*scored)
 	if s == nil {
@@ -87,12 +97,12 @@ func CorrectionFrom(ctx context.Context, approved bool) (Correction, bool) {
 		if len(fired) == 0 {
 			return Correction{}, false
 		}
-		return Correction{Tool: s.tool, Action: s.action, Params: s.params, Risky: false, Labels: fired}, true
+		return Correction{Tool: s.tool, Action: s.action, Params: s.part(), Risky: false, Labels: fired}, true
 	case !flagged && !approved:
 		if s.a.Top == "" {
 			return Correction{}, false
 		}
-		return Correction{Tool: s.tool, Action: s.action, Params: s.params, Risky: true, Labels: []string{s.a.Top}}, true
+		return Correction{Tool: s.tool, Action: s.action, Params: s.part(), Risky: true, Labels: []string{s.a.Top}}, true
 	}
 	return Correction{}, false
 }

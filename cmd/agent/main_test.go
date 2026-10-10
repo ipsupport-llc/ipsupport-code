@@ -9084,7 +9084,7 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 	}
 
 	// A call the model flags, approved by a human: a false alarm.
-	params := map[string]any{"command": "truncate -s 0 install_manifest.txt"}
+	params := map[string]any{"command": "rm -rf src/legacy"} // flagged — approving it is a correction
 	as := a.shadow.Model().Assess("run", "shell", params)
 	if as.Risk < risk.Threshold {
 		t.Skipf("the shipped model no longer flags %v (%.2f) — pick another false alarm", params, as.Risk)
@@ -9114,7 +9114,7 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no feedback log: %v", err)
 	}
-	if !strings.Contains(string(fb), `"command":"truncate -s 0 install_manifest.txt"`) || !strings.Contains(string(fb), `"verdict":"approved"`) {
+	if !strings.Contains(string(fb), `"command":"rm -rf src/legacy"`) || !strings.Contains(string(fb), `"verdict":"approved"`) {
 		t.Errorf("feedback line does not record the answer:\n%s", fb)
 	}
 
@@ -9141,7 +9141,7 @@ func TestRiskCommandReportsAndResets(t *testing.T) {
 	if err := a.wire(); err != nil {
 		t.Fatal(err)
 	}
-	params := map[string]any{"command": "truncate -s 0 install_manifest.txt"}
+	params := map[string]any{"command": "rm -rf src/legacy"} // flagged — approving it is a correction
 	as := a.shadow.Model().Assess("run", "shell", params)
 	a.learnFromApproval(risk.WithAssessment(context.Background(), "run", "shell", params, as), true)
 	a.waitRiskSaves()
@@ -9292,7 +9292,7 @@ func TestLearningDoesNotBlockTheApproval(t *testing.T) {
 	}
 	defer unlock()
 
-	params := map[string]any{"command": "truncate -s 0 install_manifest.txt"}
+	params := map[string]any{"command": "rm -rf src/legacy"} // flagged — approving it is a correction
 	as := a.shadow.Model().Assess("run", "shell", params)
 	if as.Risk < risk.Threshold {
 		t.Skipf("the shipped model no longer flags %v (%.2f)", params, as.Risk)

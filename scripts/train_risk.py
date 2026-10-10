@@ -9,6 +9,7 @@ training step nobody can run without installing a stack is a training step
 nobody re-runs.
 
     python3 scripts/gen_risk_dataset.py     # regenerate the data
+    go test ./internal/shellsplit -run TestGolden -update   # the lines, cut by Go
     python3 scripts/train_risk.py           # retrain + write the weights
     go test ./internal/risk/                # the Go side must agree
 
@@ -21,6 +22,8 @@ same ones. If either side is edited alone, both fail.
 """
 import argparse, json, math, pathlib, random, struct, sys, unicodedata
 from collections import Counter
+
+import shellsplit
 
 # ── feature config (written into the model file, read back by Go) ────────────
 DIM        = 1 << 15          # 32768 features -> 6 labels * 32768 * 4B = 786KB
@@ -126,7 +129,117 @@ def call_text(tool, action, params):
     return s[:MAX_TEXT]
 
 
+_PATH_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/\\~$")
+_PATH_ENDS = set("/\\ \t\n\"';&|)<>,:=")
+
+# Produced by the Go implementation (internal/risk, localizeVectors).
+LOCALIZE_VECTORS = [
+    ("wc -l /app/data.txt", "/app", "wc -l ./data.txt"),
+    ("cd /app && make", "/app", "cd . && make"),
+    ("cat /application/x /x/app/y", "/app", "cat /application/x /x/app/y"),
+    ('cat "/app/a b.txt"', "/app/", 'cat "./a b.txt"'),
+    ("ls /app", "/app", "ls ."),
+    ("cp /app/x /etc/x", "/app", "cp ./x /etc/x"),
+    ("type C:\\Users\\dev\\project\\report.txt", "C:\\Users\\dev\\project", "type .\\report.txt"),
+    ("cat ~/project/a.md ~/projects/b", "~/project", "cat ./a.md ~/projects/b"),
+    ("rm -rf /app", "", "rm -rf /app"),
+    ("rm -rf /", "/", "rm -rf /"),
+]
+
+
+def localize(text, workspace):
+    """Mirrors risk.Localize: the workspace's own absolute path, at a path's
+    edges, read as "." — the scorer knows where the workspace is."""
+    ws = (workspace or "").rstrip("/\\")
+    if ws in ("", ".", "~") or len(ws) < 2:
+        return text
+    out, i = [], 0
+    while i < len(text):
+        j = text.find(ws, i)
+        if j < 0:
+            out.append(text[i:])
+            break
+        end = j + len(ws)
+        start_ok = j == 0 or text[j - 1] not in _PATH_CHARS
+        end_ok = end == len(text) or text[end] in _PATH_ENDS
+        out.append(text[i:j])
+        out.append("." if start_ok and end_ok else ws)
+        i = end
+    return "".join(out)
+
+
+def localized_params(r):
+    ws = r.get("workspace", "")
+    return {k: (localize(v, ws) if isinstance(v, str) else v) for k, v in r.get("params", {}).items()}
+
+
+def dialect(r):
+    """The shell a row's command is written for — what the scorer cuts it by."""
+    return shellsplit.POWERSHELL if r.get("os") == "windows" else shellsplit.SH
+
+
+def call_texts(r):
+    """What the scorer reads for a row, mirroring Tuned.parts in internal/risk: a
+    shell line's code (without heredoc bodies, here-strings, comments) and each
+    command in it on its own; any other call as one text. The first is the
+    whole, which is what training fits; scoring takes the highest of all."""
+    tool, action, params = r["tool"], r.get("action", ""), localized_params(r)
+    cmd = params.get("command")
+    if tool != "run" or action != "shell" or not isinstance(cmd, str):
+        return [call_text(tool, action, params)]
+    d = dialect(r)
+
+    def with_(c):
+        p = dict(params)
+        p["command"] = c
+        return p
+
+    out = [params]
+    seen = {cmd.strip()}
+    c = shellsplit.code(d, cmd)
+    if c and c not in seen:
+        out[0] = with_(c)
+        seen.add(c)
+    for part in shellsplit.split(d, cmd):
+        if part not in seen:
+            seen.add(part)
+            out.append(with_(part))
+    return [call_text(tool, action, p) for p in out]
+
+
+def probs(xs, W, b):
+    """Each label's probability for a call scored by its parts: the highest —
+    and "safe" the lowest, a line being safe only as far as every part is.
+    Mirrors Tuned.Assess."""
+    out = []
+    for li in range(len(LABELS)):
+        ps = []
+        for x in xs:
+            z = b[li] + sum(W[li][j] * v for j, v in x.items())
+            ps.append(1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z)))))
+        out.append(min(ps) if LABELS[li] == "safe" else max(ps))
+    return out
+
+
+def check_split(paths):
+    """The lines the trainer reads cut as the Go scorer cuts them (see shellsplit.py)."""
+    lines = set()
+    for path in paths:
+        if not path.exists():
+            continue
+        for l in path.read_text().splitlines():
+            if l.strip():
+                r = json.loads(l)
+                cmd = localized_params(r).get("command")
+                if r.get("tool") == "run" and r.get("action") == "shell" and isinstance(cmd, str):
+                    lines.add((dialect(r), cmd))
+    shellsplit.check_golden(lines)
+
+
 def check_vectors():
+    loc = [(t, w, want, localize(t, w)) for t, w, want in LOCALIZE_VECTORS if localize(t, w) != want]
+    if loc:
+        sys.exit(f"localize() disagrees with risk.Localize: {loc[0]}")
     bad = [(f, hash_idx(f), want) for f, want in HASH_VECTORS.items() if hash_idx(f) != want]
     if bad:
         for f, got, want in bad:
@@ -141,9 +254,8 @@ def report(title, rows, W, b):
     print(f"\n{title} ({len(rows)} examples):")
     for li, lab in enumerate(LABELS):
         tp = fp = fn = 0
-        for x, y in rows:
-            z = b[li] + sum(W[li][j] * v for j, v in x.items())
-            p = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
+        for xs, y in rows:
+            p = probs(xs, W, b)[li]
             hit, want = p >= 0.5, y[li] >= 0.5
             tp += hit and want
             fp += hit and not want
@@ -182,13 +294,11 @@ def honest_eval(path, W, b, title):
     misses, alarms = [], []
     data = []
     for r in rows:
-        x = featurize(call_text(r["tool"], r.get("action", ""), r.get("params", {})))
+        xs = [featurize(t) for t in call_texts(r)]
         y = [1.0 if l in r["labels"] else 0.0 for l in LABELS]
-        data.append((x, y))
-        top = 0.0
-        for li in RISKY:
-            z = b[li] + sum(W[li][j] * v for j, v in x.items())
-            top = max(top, 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z)))))
+        data.append((xs, y))
+        p = probs(xs, W, b)
+        top = max(p[li] for li in RISKY)
         should = any(y[li] >= 0.5 for li in RISKY)
         warned = top >= 0.5
         for key in ("all", "os " + r.get("os", "?"), r.get("category", "?")):
@@ -280,6 +390,8 @@ def main():
 
     check_vectors()
     here = pathlib.Path(__file__).parent
+    check_split([here / "risk_dataset.jsonl", here / "risk_eval.jsonl"] +
+                [pathlib.Path(p) for p in (args.extra + ([args.private] if args.private else []))])
     if args.eval:
         W, b = read_model(pathlib.Path(args.eval))
         honest_eval(here / "risk_eval.jsonl", W, b, f"honest set, {args.eval}")
@@ -319,11 +431,13 @@ def main():
                   f'label one ("labels": [...], "source": "manual") to train on it')
     print(f"dataset: {len(rows)} examples ({base} synthetic), {DIM} features, {len(LABELS)} labels")
 
+    # Each row as the scorer reads it: training fits the whole (a shell line's
+    # code); scoring below takes the highest of the whole and its commands.
     data = []
     for r in rows:
-        x = featurize(call_text(r["tool"], r.get("action", ""), r.get("params", {})))
+        xs = [featurize(t) for t in call_texts(r)]
         y = [1.0 if l in r["labels"] else 0.0 for l in LABELS]
-        data.append((x, y))
+        data.append((xs, y))
 
     # The split comes from the dataset, which holds out PATHS rather than rows:
     # a fifth of every path class never appears in training under any verb.
@@ -361,7 +475,7 @@ def main():
         rng.shuffle(order)
         lr = LR * (1.0 - epoch / args.epochs)          # linear decay
         for i in order:
-            x, y = data[i]
+            x, y = data[i][0][0], data[i][1]
             for li in range(len(LABELS)):
                 row = W[li]
                 z = b[li] + sum(row[j] * v for j, v in x.items())
@@ -382,11 +496,9 @@ def main():
     RISKY = [i for i, l in enumerate(LABELS) if l != "safe" and l not in INFORMATIONAL]
     holdrows_ = [r for r in rows if r.get("split") == "holdout"]
     alarm_on_safe, safe_total, missed_risky, risky_total = [], 0, [], 0
-    for (x, y), r in zip(hold, holdrows_):
-        top = 0.0
-        for li in RISKY:
-            z = b[li] + sum(W[li][j] * v for j, v in x.items())
-            top = max(top, 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z)))))
+    for (xs, y), r in zip(hold, holdrows_):
+        p = probs(xs, W, b)
+        top = max(p[li] for li in RISKY)
         truly_risky = any(y[li] >= 0.5 for li in RISKY)
         text = call_text(r["tool"], r.get("action", ""), r.get("params", {}))
         if truly_risky:
@@ -417,9 +529,8 @@ def main():
     print("\nworst holdout mistakes (up to 4 per label):")
     for li, lab in enumerate(LABELS):
         wrong = []
-        for (x, y), r in zip(hold, holdrows):
-            z = b[li] + sum(W[li][j] * v for j, v in x.items())
-            pr = 1.0 / (1.0 + math.exp(-max(-30.0, min(30.0, z))))
+        for (xs, y), r in zip(hold, holdrows):
+            pr = probs(xs, W, b)[li]
             if (pr >= 0.5) != (y[li] >= 0.5):
                 kind = "false alarm" if pr >= 0.5 else "missed"
                 wrong.append((abs(pr - 0.5), kind, pr, call_text(r["tool"], r.get("action", ""), r.get("params", {}))))

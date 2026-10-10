@@ -15,8 +15,10 @@
 package shellsplit
 
 import (
+	"encoding/base64"
 	"path"
 	"strings"
+	"unicode/utf16"
 )
 
 // Dialect is the shell a command line is written for.
@@ -96,6 +98,7 @@ type result struct {
 	budget     *int // parses left, shared by the whole line
 	incomplete bool
 	cmds       []string
+	piped      []bool // cmds[i]'s output goes into cmds[i+1]: | or |&
 	groups     []string
 	inner      []string // what a command runs inside it: sh -c '…', eval …
 	innerG     []string
@@ -111,6 +114,7 @@ var joins = map[string]bool{"|": true, "||": true, "&&": true, "|&": true}
 func (r *result) cut(b *buf, op string) {
 	if s := Trim(b.String()); s != "" {
 		r.cmds = append(r.cmds, s)
+		r.piped = append(r.piped, op == "|" || op == "|&")
 		r.innerCode(s)
 		if r.code.Len() > 0 {
 			r.code.WriteString(" ")
@@ -152,66 +156,79 @@ func (r *result) nest(n *[]string, ng *[]string, d Dialect, code string) {
 }
 
 // innerCode adds the code a command hands to another interpreter as an
-// argument: sh -c '…', pwsh -Command "…", cmd /c …, python -c '…', eval ….
-// The interpreter is looked for among all the command's words, not just its
-// program: see runner.
+// argument: sh -c '…', pwsh -Command "…", powershell -EncodedCommand …,
+// cmd /c …, python -c '…', eval …. The interpreter is looked for among all the
+// command's words, not just its program (see runner), in one pass: a flag
+// belongs to the latest interpreter named before it.
 func (r *result) innerCode(cmd string) {
-	if r.d == Cmd { // cmd's own words aren't sh's; /c is read as the rest of the line
-		ws := strings.Fields(cmd)
-		isCmd := false
-		for i, w := range ws {
-			switch {
-			case !isCmd:
-				isCmd = runner(w) == "cmd"
-			case strings.EqualFold(w, "/c") || strings.EqualFold(w, "/k"):
-				r.nest(&r.inner, &r.innerG, Cmd, strings.Join(ws[i+1:], " "))
-				return
-			}
-		}
-		return
-	}
 	ws := words(cmd)
+	if r.d == Cmd { // cmd's own words aren't sh's; /c is read as the rest of the line
+		ws = strings.Fields(cmd)
+	}
+	prog := ""
 	for i := 0; i < len(ws); i++ {
-		if operator(ws[i]) {
+		switch w := ws[i]; {
+		case operator(w):
 			i++ // its operand: << sh is a heredoc's word, > sh a file
-			continue
-		}
-		if prog := runner(ws[i]); prog != "" && r.handOff(prog, ws[i+1:]) {
+		case wordRunner(w) == "eval":
+			r.nest(&r.inner, &r.innerG, r.d, strings.Join(ws[i+1:], " "))
+			return
+		case wordRunner(w) != "":
+			prog = wordRunner(w)
+		case prog != "" && i+1 < len(ws) && r.handOff(prog, w, ws[i+1:]):
 			return
 		}
 	}
 }
 
-// handOff adds the code prog is handed in its arguments, if it is; whether it
-// was.
-func (r *result) handOff(prog string, rest []string) bool {
-	if prog == "eval" {
-		r.nest(&r.inner, &r.innerG, r.d, strings.Join(rest, " "))
-		return true
-	}
-	for i, w := range rest {
-		if i+1 >= len(rest) {
-			break
+// handOff adds the code prog is handed by flag w, rest being what follows the
+// flag; whether w was such a flag.
+func (r *result) handOff(prog, w string, rest []string) bool {
+	ps := prog == "pwsh" || prog == "powershell"
+	switch {
+	case shells[prog] && strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.Contains(w, "c"):
+		r.nest(&r.inner, &r.innerG, Sh, rest[0])
+	case ps && (strings.EqualFold(w, "-c") || strings.EqualFold(w, "-command")):
+		r.nest(&r.inner, &r.innerG, PowerShell, strings.Join(rest, " "))
+	case ps && encodedFlag(w):
+		if code, ok := decodeUTF16(rest[0]); ok {
+			r.nest(&r.inner, &r.innerG, PowerShell, code)
+		} else {
+			r.incomplete = true // a script in a form that can't be read
 		}
-		body := rest[i+1]
-		switch {
-		case shells[prog] && strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.Contains(w, "c"):
-			r.nest(&r.inner, &r.innerG, Sh, body)
-			return true
-		case (prog == "pwsh" || prog == "powershell") && (strings.EqualFold(w, "-c") || strings.EqualFold(w, "-command")):
-			r.nest(&r.inner, &r.innerG, PowerShell, strings.Join(rest[i+1:], " "))
-			return true
-		case prog == "cmd" && (strings.EqualFold(w, "/c") || strings.EqualFold(w, "/k")):
-			r.nest(&r.inner, &r.innerG, Cmd, strings.Join(rest[i+1:], " "))
-			return true
-		case interpreters[prog] && (w == "-c" || w == "-e" || w == "--eval"):
-			if t := Trim(body); t != "" {
-				r.inner = append(r.inner, t) // another language: scored as itself
-			}
-			return true
+	case prog == "cmd" && (strings.EqualFold(w, "/c") || strings.EqualFold(w, "/k")):
+		r.nest(&r.inner, &r.innerG, Cmd, strings.Join(rest, " "))
+	case interpreters[prog] && (w == "-c" || w == "-e" || w == "--eval"):
+		if t := Trim(rest[0]); t != "" {
+			r.inner = append(r.inner, t) // another language: scored as itself
 		}
+	default:
+		return false
 	}
-	return false
+	return true
+}
+
+// encodedFlag is PowerShell's -EncodedCommand as it may be written: any prefix
+// of it (-e, -enc, -encoded), -ec, with - or /.
+func encodedFlag(w string) bool {
+	l := strings.ToLower(w)
+	if len(l) < 2 || (l[0] != '-' && l[0] != '/') {
+		return false
+	}
+	return l[1:] == "ec" || strings.HasPrefix("encodedcommand", l[1:])
+}
+
+// decodeUTF16 reads -EncodedCommand's argument: base64 of UTF-16LE text.
+func decodeUTF16(s string) (string, bool) {
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil || len(b)%2 != 0 {
+		return "", false
+	}
+	u := make([]uint16, len(b)/2)
+	for i := range u {
+		u[i] = uint16(b[2*i]) | uint16(b[2*i+1])<<8
+	}
+	return string(utf16.Decode(u)), true
 }
 
 // words splits a simple command into its words with sh quote removal:
@@ -319,36 +336,50 @@ func runner(w string) string {
 	return ""
 }
 
-// operator: a word that is a redirection operator alone (<<, 2>, &>, 0<<),
-// whose operand is the next word.
+// operator: a redirection operator standing alone and waiting for its operand,
+// the next word (<<, <<-, >, 2>, &>, 2>&) — not one complete in itself (2>&1,
+// <&0, 2>&-), which the next word is not part of.
 func operator(w string) bool {
-	return strings.ContainsAny(w, "<>") && strings.Trim(w, "0123456789&<>-|") == ""
+	if !strings.ContainsAny(w, "<>") || strings.Trim(w, "0123456789&<>-|") != "" {
+		return false
+	}
+	return strings.HasSuffix(w, "<<-") || strings.ContainsRune("<>&|", rune(w[len(w)-1]))
 }
 
-// feed is what a command does with the heredoc it reads.
-type feed int
+// wordRunner is runner for a word that may carry a redirection with it:
+// sh<<EOF, python3<<'EOF', sh>log — the word before the operator.
+func wordRunner(w string) string {
+	if i := strings.IndexAny(w, "<>"); i >= 0 {
+		w = strings.TrimRight(w[:i], "0123456789&")
+	}
+	return runner(w)
+}
+
+// feed is what reads a heredoc: a shell (its commands run), another language
+// (scored as itself), both — an interpreter's arguments can name a shell —
+// or neither (data).
+type feed uint8
 
 const (
-	data   feed = iota
-	script      // a shell runs it: its commands run
-	code        // another language runs it: scored as itself
+	script feed = 1 << iota
+	code
 )
 
-// feeds reads a heredoc's command: a shell among its words runs the body as a
-// script; else an interpreter, as code (see runner).
+// feeds is what cmd runs what it reads as: every interpreter among its words
+// counts (see runner) — a match adds what is scored, never takes it away.
 func feeds(cmd string) feed {
-	f := data
+	var f feed
 	ws := words(cmd)
 	for i := 0; i < len(ws); i++ {
 		if operator(ws[i]) {
 			i++
 			continue
 		}
-		switch w := runner(ws[i]); {
+		switch w := wordRunner(ws[i]); {
 		case shells[w]:
-			return script
+			f |= script
 		case interpreters[w]:
-			f = code
+			f |= code
 		}
 	}
 	return f
@@ -429,16 +460,15 @@ func splitSh(line string, out *result) {
 			b.writeStr(string(rs[i:next]))
 			i = next - 1
 		case r == '\n':
-			fed := map[int]feed{}
-			if len(heredocs) > 0 {
-				fed[len(out.cmds)] = feeds(b.String())
-			}
 			cut(";")
+			var fed []feed
+			if len(heredocs) > 0 {
+				fed = out.readers(heredocs[0].cmd)
+			}
 			for _, h := range heredocs {
-				f, ok := fed[h.cmd]
-				if !ok && h.cmd < len(out.cmds) {
-					f = feeds(out.cmds[h.cmd])
-					fed[h.cmd] = f
+				var f feed
+				if h.cmd < len(out.cmds) {
+					f = fed[h.cmd-heredocs[0].cmd]
 				}
 				start := i + 1
 				end, next := heredocBody(rs, start, h)
@@ -446,10 +476,10 @@ func splitSh(line string, out *result) {
 				if !h.quoted {
 					substitutions(body, out, &nested, &ngroups) // expanded first: its $( ) and ` ` run, whatever reads it
 				}
-				switch f {
-				case script:
+				if f&script != 0 {
 					out.nest(&nested, &ngroups, Sh, body) // its commands run
-				case code:
+				}
+				if f&code != 0 {
 					if s := Trim(body); s != "" {
 						nested = append(nested, s) // code in another language: scored as itself
 					}
@@ -486,6 +516,28 @@ func splitSh(line string, out *result) {
 	cut("")
 	out.cmds = append(out.cmds, nested...)
 	out.groups = append(out.groups, ngroups...)
+}
+
+// readers is, for each command from the first on, what reads its heredoc:
+// the command, and every command its output is piped into (cat <<EOF | sh).
+// A pipe that goes on past the line leaves the reader unknown: incomplete.
+func (r *result) readers(first int) []feed {
+	if first >= len(r.cmds) {
+		return nil
+	}
+	fed := make([]feed, len(r.cmds)-first)
+	for j := len(r.cmds) - 1; j >= first; j-- {
+		f := feeds(r.cmds[j])
+		switch {
+		case !r.piped[j]:
+		case j+1 < len(r.cmds):
+			f |= fed[j+1-first]
+		default:
+			r.incomplete = true
+		}
+		fed[j-first] = f
+	}
+	return fed
 }
 
 // substitutions adds the commands in the $( ) and ` ` of expanded text.

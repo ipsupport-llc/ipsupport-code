@@ -15,7 +15,7 @@ import (
 // start the path (nothing that could continue a name before it) and either go
 // on into it (a separator) or end there — at the end, at a closing quote, or,
 // outside quotes, at a blank or an operator. So /application, /x/app/y,
-// "/app backup/x", "/app"' backup/x' and /app,old are left alone. On Windows
+// "/app backup/x", "/app"' backup/x', "/app",x and /app,old are left alone. On Windows
 // paths, case and / versus \ don't matter, as they don't to Windows, and \ is
 // a separator, never an escape. scripts/train_risk.py mirrors this
 // (LOCALIZE_VECTORS).
@@ -36,10 +36,11 @@ func Localize(text, workspace string) string {
 			end := i + len(needle)
 			startOK := i == 0 || !strings.ContainsRune(pathRunes, rune(text[i-1]))
 			endOK := end == len(text) || text[end] == '/' || text[end] == '\\' ||
-				(quote == 0 && strings.ContainsRune(" \t\n;&|)<>", rune(text[end]))) ||
-				// A closing quote ends it only if the word ends there:
-				// "/app"x is /appx, "/app"' x' is "/app x".
-				(quote != 0 && text[end] == quote && (end+1 == len(text) || !strings.ContainsRune(pathRunes+`'"`, rune(text[end+1]))))
+				(quote == 0 && strings.ContainsRune(wordEnd, rune(text[end]))) ||
+				// A closing quote ends it only if the word ends there — at the end,
+				// a blank or an operator: "/app"x is /appx, "/app"' x' is "/app x",
+				// "/app"@b is /app@b.
+				(quote != 0 && text[end] == quote && (end+1 == len(text) || strings.ContainsRune(wordEnd, rune(text[end+1]))))
 			if startOK && endOK {
 				b.WriteString(".")
 				i = end
@@ -63,6 +64,9 @@ func Localize(text, workspace string) string {
 	}
 	return b.String()
 }
+
+// wordEnd is what ends a shell word outside quotes.
+const wordEnd = " \t\n;&|)<>"
 
 const pathRunes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/\\~$"
 

@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func check(t *testing.T, d Dialect, cases []struct {
@@ -224,6 +225,64 @@ func TestHiddenCommandsAreFoundRound3(t *testing.T) {
 		if !slices.Contains(got, c.want) {
 			t.Errorf("Split(%d, %q) = %q — %q is not among them", c.d, c.in, got, c.want)
 		}
+	}
+}
+
+// encoded is -EncodedCommand's form of Remove-Item -Recurse -Force C:\src\app:
+// base64 of its UTF-16LE.
+const encoded = "UgBlAG0AbwB2AGUALQBJAHQAZQBtACAALQBSAGUAYwB1AHIAcwBlACAALQBGAG8AcgBjAGUAIABDADoAXABzAHIAYwBcAGEAcABwAA=="
+
+// The fourth review's ways to hide a command, each now cut out.
+var hiddenRound4 = []struct {
+	d    Dialect
+	in   string
+	want string
+}{
+	{Sh, "2>&1 sh <<'EOF'\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"}, // a complete redirection takes no operand
+	{Sh, "0<&0 sh <<'EOF'\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"},
+	{Sh, "python3 - sh <<'EOF'\nimport shutil\nshutil.rmtree('x')\nEOF", "import shutil\nshutil.rmtree('x')"}, // a match adds, never takes away
+	{Sh, "cat <<'EOF' | sh\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"},                                     // piped into a shell
+	{Sh, "cat <<'EOF' | tee log | sudo bash\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"},
+	{Sh, "sh<<'EOF'\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"}, // attached
+	{Sh, "/bin/bash>log <<EOF\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"},
+	{Sh, "python3<<'EOF'\nimport shutil; shutil.rmtree('x')\nEOF", "import shutil; shutil.rmtree('x')"},
+	{PowerShell, "powershell -EncodedCommand " + encoded, "Remove-Item -Recurse -Force C:\\src\\app"}, // base64 UTF-16LE
+	{PowerShell, "pwsh -enc " + encoded, "Remove-Item -Recurse -Force C:\\src\\app"},
+	{Cmd, "powershell /e " + encoded, "Remove-Item -Recurse -Force C:\\src\\app"},
+}
+
+func TestHiddenCommandsAreFoundRound4(t *testing.T) {
+	for _, c := range hiddenRound4 {
+		got := Split(c.d, c.in)
+		if !slices.Contains(got, c.want) {
+			t.Errorf("Split(%d, %q) = %q — %q is not among them", c.d, c.in, got, c.want)
+		}
+	}
+}
+
+// A script that can't be read — -EncodedCommand that isn't base64 of UTF-16,
+// a heredoc piped on to a line not yet read — makes the parse incomplete.
+func TestUnreadableCodeIsIncomplete(t *testing.T) {
+	for _, line := range []string{"powershell -enc not-base64!", "cat <<EOF |\nrm -rf x\nEOF\nsh"} {
+		if p := Parse(Sh, line); !p.Incomplete {
+			t.Errorf("Parse(%q) complete: %q", line, p.Commands)
+		}
+	}
+	if p := Parse(Sh, "cat <<EOF | grep x\nbody\nEOF"); p.Incomplete {
+		t.Error("a heredoc piped into grep marked incomplete")
+	}
+}
+
+// One pass over a command's words: a line naming an interpreter in every word
+// costs no more than one that names none.
+func TestManyInterpreterWordsAreLinear(t *testing.T) {
+	line := "echo " + strings.Repeat("sh ", 200000)
+	done := make(chan struct{})
+	go func() { Parse(Sh, line); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("200000 words naming sh took over 5s")
 	}
 }
 

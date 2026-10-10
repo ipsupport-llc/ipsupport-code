@@ -20,7 +20,7 @@ so it is guarded: HASH_VECTORS below is asserted on every run against values
 produced by the Go implementation, and internal/risk/features_test.go pins the
 same ones. If either side is edited alone, both fail.
 """
-import argparse, json, math, pathlib, random, struct, sys, unicodedata
+import argparse, decimal, json, math, pathlib, random, struct, sys, unicodedata
 from collections import Counter
 
 import shellsplit
@@ -124,14 +124,40 @@ def head_tail(s, cap):
 
 
 def go_sprint(v):
-    """fmt.Sprint for a JSON value: true not True, 5 not 5.0, <nil> not None."""
+    """fmt.Sprint of a JSON value as Go decodes it (numbers are float64):
+    true, <nil>, 1e+06, [a b], map[k:v] — what CallText renders."""
     if isinstance(v, bool):
         return "true" if v else "false"
     if v is None:
         return "<nil>"
-    if isinstance(v, float) and v.is_integer() and abs(v) < 1e21:
-        return str(int(v))
+    if isinstance(v, (int, float)):
+        return _go_float(float(v))
+    if isinstance(v, list):
+        return "[" + " ".join(go_sprint(x) for x in v) + "]"
+    if isinstance(v, dict):
+        return "map[" + " ".join(f"{k}:{go_sprint(v[k])}" for k in sorted(v)) + "]"
     return str(v)
+
+
+def _go_float(f):
+    """strconv.FormatFloat(f, 'g', -1, 64) as %v uses it: shortest digits, an
+    exponent below 1e-4 or from 1e6 (fmt's precision 6 for that choice)."""
+    if f == 0:
+        return "-0" if math.copysign(1, f) < 0 else "0"
+    d = decimal.Decimal(repr(abs(f))).normalize()
+    t = d.as_tuple()
+    digits = "".join(map(str, t.digits))
+    dp = len(digits) + t.exponent  # where the decimal point goes
+    sign = "-" if f < 0 else ""
+    exp = dp - 1
+    if exp < -4 or exp >= 6:
+        m = digits[0] + ("." + digits[1:] if len(digits) > 1 else "")
+        return f"{sign}{m}e{'-' if exp < 0 else '+'}{abs(exp):02d}"
+    if dp <= 0:
+        return sign + "0." + "0" * -dp + digits
+    if dp >= len(digits):
+        return sign + digits + "0" * (dp - len(digits))
+    return sign + digits[:dp] + "." + digits[dp:]
 
 
 def call_text(tool, action, params):
@@ -149,6 +175,7 @@ def call_text(tool, action, params):
     return head_tail(s, MAX_TEXT)
 
 
+_WORD_END = " \t\n;&|)<>"  # what ends a shell word outside quotes (wordEnd)
 _PATH_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/\\~$")
 
 # Produced by the Go implementation (internal/risk, localizeVectors).
@@ -171,6 +198,9 @@ LOCALIZE_VECTORS = [
     ('rm "/app"x', "/app", 'rm "/app"x'),
     ('echo "a\\"" /app/b', "/app", 'echo "a\\"" ./b'),
     ("rm \"/app\"' backup/data'", "/app", "rm \"/app\"' backup/data'"),
+    ('rm "/app"@backup', "/app", 'rm "/app"@backup'),
+    ('cat "/app",old/secret', "/app", 'cat "/app",old/secret'),
+    ('cd "/app"; ls', "/app", 'cd "."; ls'),
     ('type "C:\\app\\" "C:\\app backup\\data"', "C:\\app", 'type ".\\" "C:\\app backup\\data"'),
 ]
 
@@ -197,8 +227,8 @@ def localize(text, workspace):
             end = i + len(needle)
             start_ok = i == 0 or text[i - 1] not in _PATH_CHARS
             end_ok = (end == len(text) or text[end] in "/\\" or
-                      (not quote and text[end] in " \t\n;&|)<>") or
-                      (quote and text[end] == quote and (end + 1 == len(text) or (text[end + 1] not in _PATH_CHARS and text[end + 1] not in "'\""))))
+                      (not quote and text[end] in _WORD_END) or
+                      (quote and text[end] == quote and (end + 1 == len(text) or text[end + 1] in _WORD_END)))
             if start_ok and end_ok:
                 out.append(".")
                 i = end
@@ -311,7 +341,31 @@ def check_split(paths, golden=()):
     shellsplit.check_golden(lines, extra=golden)
 
 
+# Produced by the Go implementation (internal/risk, sprintVectors).
+SPRINT_VECTORS = [
+    ('1000000', '1e+06'),
+    ('123456', '123456'),
+    ('1234567', '1.234567e+06'),
+    ('100', '100'),
+    ('0.5', '0.5'),
+    ('0.0001', '0.0001'),
+    ('0.00001', '1e-05'),
+    ('1e+21', '1e+21'),
+    ('-3', '-3'),
+    ('2.5e-7', '2.5e-07'),
+    ('123456789012', '1.23456789012e+11'),
+    ('[true,null,"a b",1.5]', '[true <nil> a b 1.5]'),
+    ('{"b":1,"a":[false]}', 'map[a:[false] b:1]'),
+    ('true', 'true'),
+    ('null', '<nil>'),
+    ('12345678.9', '1.23456789e+07'),
+]
+
+
 def check_vectors():
+    spr = [(j, go_sprint(json.loads(j)), w) for j, w in SPRINT_VECTORS if go_sprint(json.loads(j)) != w]
+    if spr:
+        sys.exit(f"go_sprint() disagrees with CallText's fmt.Sprint: {spr[0]}")
     loc = [(t, w, want, localize(t, w)) for t, w, want in LOCALIZE_VECTORS if localize(t, w) != want]
     if loc:
         sys.exit(f"localize() disagrees with risk.Localize: {loc[0]}")

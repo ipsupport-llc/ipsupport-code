@@ -20,9 +20,12 @@ var localizeVectors = []struct{ text, ws, want string }{
 	{`cd "/app" && ls`, "/app", `cd "." && ls`},
 	{`type c:/USERS/dev/project/a.txt`, `C:\Users\dev\project`, `type ./a.txt`}, // Windows: case and / don't matter
 	{"cat é/a", "é", "cat é/a"},
-	{`rm "/app"x`, "/app", `rm "/app"x`},                                                // the word is /appx: outside
-	{`echo "a\"" /app/b`, "/app", `echo "a\"" ./b`},                                     // an escaped quote doesn't end the string
-	{`rm "/app"' backup/data'`, "/app", `rm "/app"' backup/data'`},                      // the word goes on past the quote
+	{`rm "/app"x`, "/app", `rm "/app"x`},                           // the word is /appx: outside
+	{`echo "a\"" /app/b`, "/app", `echo "a\"" ./b`},                // an escaped quote doesn't end the string
+	{`rm "/app"' backup/data'`, "/app", `rm "/app"' backup/data'`}, // the word goes on past the quote
+	{`rm "/app"@backup`, "/app", `rm "/app"@backup`},               // the word is /app@backup
+	{`cat "/app",old/secret`, "/app", `cat "/app",old/secret`},
+	{`cd "/app"; ls`, "/app", `cd "."; ls`},
 	{`type "C:\app\" "C:\app backup\data"`, `C:\app`, `type ".\" "C:\app backup\data"`}, // on Windows \ escapes nothing
 }
 

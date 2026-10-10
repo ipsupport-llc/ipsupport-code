@@ -13,6 +13,8 @@ one side alone and both fail.
 
 Python strings index by code point, as the Go code indexes []rune.
 """
+import base64
+import binascii
 import json
 import pathlib
 import posixpath
@@ -83,6 +85,7 @@ class _Result:
         self.inner = []
         self.inner_g = []
         self.cmds = []
+        self.piped = []
         self.groups = []
         self.code = []  # pieces, joined once: += on a str is quadratic
         self.group = []
@@ -92,6 +95,7 @@ class _Result:
         s = trim(b.text())
         if s:
             self.cmds.append(s)
+            self.piped.append(op in ("|", "|&"))
             self.inner_code(s)
             if self.code:
                 self.code.append(" ")
@@ -122,52 +126,80 @@ class _Result:
         self.incomplete = self.incomplete or inc
 
     def inner_code(self, cmd):
-        """Mirrors innerCode: sh -c '…', pwsh -Command "…", cmd /c …, python -c '…', eval …"""
-        if self.d == CMD:
-            ws = _fields(cmd)
-            is_cmd = False
-            for i, w in enumerate(ws):
-                if not is_cmd:
-                    is_cmd = _runner(w) == "cmd"
-                elif w.lower() in ("/c", "/k"):
-                    self.nest(self.inner, self.inner_g, CMD, " ".join(ws[i + 1:]))
-                    return
-            return
-        ws = _words(cmd)
+        """Mirrors innerCode: one pass; a flag belongs to the latest interpreter named."""
+        ws = _fields(cmd) if self.d == CMD else _words(cmd)
+        prog = ""
         i = 0
         while i < len(ws):
-            if _operator(ws[i]):
-                i += 2
-                continue
-            prog = _runner(ws[i])
-            if prog and self.hand_off(prog, ws[i + 1:]):
+            w = ws[i]
+            run = _word_runner(w)
+            if _operator(w):
+                i += 1
+            elif run == "eval":
+                self.nest(self.inner, self.inner_g, self.d, " ".join(ws[i + 1:]))
+                return
+            elif run:
+                prog = run
+            elif prog and i + 1 < len(ws) and self.hand_off(prog, w, ws, i + 1):
                 return
             i += 1
 
-    def hand_off(self, prog, rest):
-        """Mirrors handOff."""
-        if prog == "eval":
-            self.nest(self.inner, self.inner_g, self.d, " ".join(rest))
-            return True
-        for i, w in enumerate(rest):
-            if i + 1 >= len(rest):
-                break
-            body = rest[i + 1]
-            if prog in _SHELLS and w.startswith("-") and not w.startswith("--") and "c" in w:
-                self.nest(self.inner, self.inner_g, SH, body)
-                return True
-            if prog in ("pwsh", "powershell") and w.lower() in ("-c", "-command"):
-                self.nest(self.inner, self.inner_g, POWERSHELL, " ".join(rest[i + 1:]))
-                return True
-            if prog == "cmd" and w.lower() in ("/c", "/k"):
-                self.nest(self.inner, self.inner_g, CMD, " ".join(rest[i + 1:]))
-                return True
-            if prog in _INTERPRETERS and w in ("-c", "-e", "--eval"):
-                t = trim(body)
-                if t:
-                    self.inner.append(t)
-                return True
+    def hand_off(self, prog, w, ws, at):
+        """Mirrors handOff; the flag's argument is ws[at], what follows it ws[at:]."""
+        ps = prog in ("pwsh", "powershell")
+        if prog in _SHELLS and w.startswith("-") and not w.startswith("--") and "c" in w:
+            self.nest(self.inner, self.inner_g, SH, ws[at])
+        elif ps and w.lower() in ("-c", "-command"):
+            self.nest(self.inner, self.inner_g, POWERSHELL, " ".join(ws[at:]))
+        elif ps and _encoded_flag(w):
+            code_ = _decode_utf16(ws[at])
+            if code_ is not None:
+                self.nest(self.inner, self.inner_g, POWERSHELL, code_)
+            else:
+                self.incomplete = True
+        elif prog == "cmd" and w.lower() in ("/c", "/k"):
+            self.nest(self.inner, self.inner_g, CMD, " ".join(ws[at:]))
+        elif prog in _INTERPRETERS and w in ("-c", "-e", "--eval"):
+            t = trim(ws[at])
+            if t:
+                self.inner.append(t)
+        else:
+            return False
+        return True
+
+    def readers(self, first):
+        """Mirrors readers: what reads each command's heredoc, through pipes."""
+        if first >= len(self.cmds):
+            return []
+        fed = [0] * (len(self.cmds) - first)
+        for j in range(len(self.cmds) - 1, first - 1, -1):
+            f = _feeds(self.cmds[j])
+            if self.piped[j]:
+                if j + 1 < len(self.cmds):
+                    f |= fed[j + 1 - first]
+                else:
+                    self.incomplete = True
+            fed[j - first] = f
+        return fed
+
+
+def _encoded_flag(w):
+    """Mirrors encodedFlag: -EncodedCommand, any prefix of it, -ec; - or /."""
+    l = w.lower()
+    if len(l) < 2 or l[0] not in "-/":
         return False
+    return l[1:] == "ec" or "encodedcommand".startswith(l[1:])
+
+
+def _decode_utf16(s):
+    """Mirrors decodeUTF16: base64 (Go's StdEncoding skips CR and LF) of UTF-16LE."""
+    try:
+        b = base64.b64decode(s.replace("\r", "").replace("\n", ""), validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if len(b) % 2:
+        return None
+    return b.decode("utf-16-le", errors="replace")
 
 
 class _Buf:
@@ -328,27 +360,37 @@ def _runner(w):
 
 
 def _operator(w):
-    """Mirrors operator: a redirection operator alone, its operand the next word."""
-    return any(c in "<>" for c in w) and w.strip("0123456789&<>-|") == ""
+    """Mirrors operator: a redirection operator alone, waiting for its operand."""
+    if not any(c in "<>" for c in w) or w.strip("0123456789&<>-|") != "":
+        return False
+    return w.endswith("<<-") or w[-1] in "<>&|"
 
 
-_DATA, _SCRIPT, _CODE = 0, 1, 2
+def _word_runner(w):
+    """Mirrors wordRunner: runner of the word before an attached redirection."""
+    cut = [k for k in (w.find("<"), w.find(">")) if k >= 0]
+    if cut:
+        w = w[:min(cut)].rstrip("0123456789&")
+    return _runner(w)
+
+
+_SCRIPT, _CODE = 1, 2
 
 
 def _feeds(cmd):
-    """Mirrors feeds: what a heredoc's command does with it."""
-    f = _DATA
+    """Mirrors feeds: every interpreter among the words adds what is scored."""
+    f = 0
     ws = _words(cmd)
     i = 0
     while i < len(ws):
         if _operator(ws[i]):
             i += 2
             continue
-        w = _runner(ws[i])
+        w = _word_runner(ws[i])
         if w in _SHELLS:
-            return _SCRIPT
-        if w in _INTERPRETERS:
-            f = _CODE
+            f |= _SCRIPT
+        elif w in _INTERPRETERS:
+            f |= _CODE
         i += 1
     return f
 
@@ -423,25 +465,18 @@ def _split_sh(line, out):
             b.write_str(rs[i:nxt])
             i = nxt - 1
         elif r == "\n":
-            fed = {}
-            if heredocs:
-                fed[len(out.cmds)] = _feeds(b.text())
             cut(";")
+            fed = out.readers(heredocs[0]["cmd"]) if heredocs else []
             for h in heredocs:
-                if h["cmd"] in fed:
-                    f = fed[h["cmd"]]
-                elif h["cmd"] < len(out.cmds):
-                    f = fed[h["cmd"]] = _feeds(out.cmds[h["cmd"]])
-                else:
-                    f = _DATA
+                f = fed[h["cmd"] - heredocs[0]["cmd"]] if h["cmd"] < len(out.cmds) else 0
                 start = i + 1
                 end, nxt = _heredoc_body(rs, start, h)
                 body = rs[start:end]
                 if not h["quoted"]:
                     _substitutions(body, out, nested, ngroups)
-                if f == _SCRIPT:
+                if f & _SCRIPT:
                     out.nest(nested, ngroups, SH, body)
-                elif f == _CODE:
+                if f & _CODE:
                     s = trim(body)
                     if s:
                         nested.append(s)

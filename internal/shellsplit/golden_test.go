@@ -134,6 +134,13 @@ var casesForGolden = []string{
 	"xargs -a list.txt sh -c 'rm -rf src/legacy'", "cmd.exe /c \"rd /s /q build\"", "cmd /d /c rd /s /q build",
 	"cmd.exe /d /c \"rd /s /q build\"", "cat << sh\nrm -rf x\nsh", "cat > sh <<EOF\nrm -rf x\nEOF",
 	"eval $(eval $(eval $(eval $(echo ok))))", "eval $(ssh-agent -s)",
+	"2>&1 sh <<'EOF'\nrm -rf src/legacy\nEOF", "0<&0 sh <<'EOF'\nrm -rf src/legacy\nEOF",
+	"python3 - sh <<'EOF'\nn = 1 << 2\nimport shutil\nshutil.rmtree('x')\nEOF", "cat <<'EOF' | sh\nrm -rf src/legacy\nEOF",
+	"cat <<'EOF' | tee log | sudo bash\nrm -rf src/legacy\nEOF", "sh<<'EOF'\nrm -rf src/legacy\nEOF",
+	"/bin/bash>log <<EOF\nrm -rf src/legacy\nEOF", "python3<<'EOF'\nimport shutil; shutil.rmtree('x')\nEOF",
+	"powershell -EncodedCommand UgBlAG0AbwB2AGUALQBJAHQAZQBtACAALQBSAGUAYwB1AHIAcwBlACAALQBGAG8AcgBjAGUAIABDADoAXABzAHIAYwBcAGEAcABwAA==", "powershell /e UgBlAG0AbwB2AGUALQBJAHQAZQBtACAALQBSAGUAYwB1AHIAcwBlACAALQBGAG8AcgBjAGUAIABDADoAXABzAHIAYwBcAGEAcABwAA==",
+	"powershell -enc not-base64!", "cat <<EOF |\nrm -rf x\nEOF\nsh", "cat <<EOF | grep x\nbody\nEOF",
+	"echo sh sh sh -c 'rm -rf x'", "cat 2>&- sh <<EOF\nrm -rf x\nEOF",
 	strings.Repeat("eval $(", 12) + "echo ok" + strings.Repeat(")", 12), // past the parse budget
 	"sh <<EOF\n# $(rm -rf src/legacy)\nEOF",
 	"timeout 5 sh <<EOF\nrm -rf x\nEOF", "ssh deploy@host <<'EOF'\nrm -rf /srv/app\nEOF",

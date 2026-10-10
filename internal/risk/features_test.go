@@ -1,6 +1,7 @@
 package risk
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -132,5 +133,38 @@ func TestCallTextCapsByCharacters(t *testing.T) {
 	want := "run command=" + strings.Repeat("й", h) + " … " + strings.Repeat("й", maxValue-3-h)
 	if got != want {
 		t.Fatalf("got %d runes (valid UTF-8: %v), want %d", utf8.RuneCountInString(got), utf8.ValidString(got), utf8.RuneCountInString(want))
+	}
+}
+
+// sprintVectors: how CallText renders a JSON value, which
+// scripts/train_risk.py (SPRINT_VECTORS, go_sprint) must render the same.
+var sprintVectors = []struct{ json, want string }{
+	{`1000000`, `1e+06`},
+	{`123456`, `123456`},
+	{`1234567`, `1.234567e+06`},
+	{`100`, `100`},
+	{`0.5`, `0.5`},
+	{`0.0001`, `0.0001`},
+	{`0.00001`, `1e-05`},
+	{`1e+21`, `1e+21`},
+	{`-3`, `-3`},
+	{`2.5e-7`, `2.5e-07`},
+	{`123456789012`, `1.23456789012e+11`},
+	{`[true,null,"a b",1.5]`, `[true <nil> a b 1.5]`},
+	{`{"b":1,"a":[false]}`, `map[a:[false] b:1]`},
+	{`true`, `true`},
+	{`null`, `<nil>`},
+	{`12345678.9`, `1.23456789e+07`},
+}
+
+func TestCallTextRendersJSONValuesAsTheTrainerDoes(t *testing.T) {
+	for _, v := range sprintVectors {
+		var x any
+		if err := json.Unmarshal([]byte(v.json), &x); err != nil {
+			t.Fatal(err)
+		}
+		if got := CallText("t", "", map[string]any{"v": x}); got != "t v="+v.want && !(v.want == "" && got == "t") {
+			t.Errorf("%s renders as %q, want %q", v.json, got, "t v="+v.want)
+		}
 	}
 }

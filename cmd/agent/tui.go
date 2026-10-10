@@ -673,10 +673,10 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.cancel = nil
 		m.retry = nil
-		m.steer = nil                 // steering notes belonged to the run that just ended
-		m.applyPendingMode()          // a shift+tab during the task takes effect now, before the next one
-		detect := m.detectWindowCmd() // model is loaded now — confirm the real window
-		m.applyPendingConfig()        // settings staged in /config while this task was running
+		m.steer = nil                                      // steering notes belonged to the run that just ended
+		m.applyPendingMode()                               // a shift+tab during the task takes effect now, before the next one
+		detect := m.detectWindowCmd()                      // model is loaded now — confirm the real window
+		detect = tea.Batch(detect, m.applyPendingConfig()) // settings staged in /config while this task was running
 		if held := m.heldLessons; held != nil {
 			// A pass from the PREVIOUS task finished under this one — apply it now
 			// that nothing is reading the stores (see the reflectDoneMsg handler).
@@ -1204,6 +1204,11 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if strings.TrimSpace(m.input.Value()) == "" && len(m.queued) > 0 {
 				last := m.queued[len(m.queued)-1]
 				m.queued = m.queued[:len(m.queued)-1]
+				if redactSecrets(last) != last { // masked in the queue — don't unmask it into the input
+					m.push(cDim.Render("  dropped the queued " + redactSecrets(last) + " — retype it to keep it"))
+					m.syncViewport()
+					return m, nil
+				}
 				m.input.SetValue(last)
 				m.input.CursorEnd()
 				m.syncViewport() // the pinned queue shrank
@@ -1409,20 +1414,22 @@ func (m *tuiModel) idleDrain() (tea.Model, tea.Cmd) {
 	// The background work is over: settings staged in /config while it ran
 	// apply now. Only a task's end used to do this, so a change staged during
 	// /compact or a skill install stayed "staged" for good.
+	var staged tea.Cmd
 	if m.cancel == nil {
-		m.applyPendingConfig()
+		staged = m.applyPendingConfig()
 	}
 	// A panel open over that work stays open — a /model listing or an update
 	// landing used to close /config mid-edit. Closing the panel drains.
 	if m.state == stConfig || m.state == stAgents {
 		m.taskDoneAway = true
-		return m, nil
+		return m, staged
 	}
 	m.state = stIdle
 	if len(m.queued) > 0 {
-		return m.drainQueue()
+		model, cmd := m.drainQueue()
+		return model, tea.Batch(staged, cmd)
 	}
-	return m, m.input.Focus()
+	return m, tea.Batch(staged, m.input.Focus())
 }
 
 // drainQueue runs the next pending messages: it executes queued /commands in place
@@ -1983,9 +1990,10 @@ func (m *tuiModel) forceDetach() (tea.Model, tea.Cmd) {
 	m.steer = nil
 	m.busyMsg = ""
 	m.taskCancelled = false
-	m.applyPendingConfig() // a detached run emits no taskDoneMsg — don't strand staged settings
+	staged := m.applyPendingConfig() // a detached run emits no taskDoneMsg — don't strand staged settings
 	m.push(cErr.Render("  ⚠ force-detached") + cDim.Render(" — abandoned the stuck request; you're clear to work."))
-	return m.drainQueue() // run anything queued, on the fresh agent
+	model, cmd := m.drainQueue() // run anything queued, on the fresh agent
+	return model, tea.Batch(staged, cmd)
 }
 
 // runTask runs a single goal in the background, streaming via the bridge and

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os/exec"
 	"strings"
 	"time"
@@ -272,6 +273,7 @@ func (m *tuiModel) filteredModels() []string {
 
 // saveDraft writes the drafted profile (renaming if the name changed) and re-wires.
 func (m *tuiModel) saveDraft(name string) {
+	before := maps.Clone(m.app.cfg.Agents) // a failed save leaves the roster as it was
 	if m.app.cfg.Agents == nil {
 		m.app.cfg.Agents = map[string]config.AgentProfile{}
 	}
@@ -281,7 +283,9 @@ func (m *tuiModel) saveDraft(name string) {
 	}
 	m.app.cfg.Agents[name] = config.AgentProfile{Provider: m.agDraft.provider, Model: m.agDraft.model, Prompt: keep.Prompt}
 	if err := config.SaveAgents(m.app.cfg.Agents); err != nil {
+		m.app.cfg.Agents = before
 		m.push(cErr.Render("  profile not saved: " + err.Error()))
+		return
 	}
 	_ = m.app.wire() // the agent tool / roster may have changed
 }

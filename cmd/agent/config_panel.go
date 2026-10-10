@@ -193,6 +193,11 @@ func (m *tuiModel) configAddKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				} else if d.prefilled != "" {
 					d.url, d.model = textField{}, textField{}
 				}
+				// A key typed for the previous name is that provider's: kept,
+				// it would be saved under this one and sent to its server.
+				if d.prefilled != "" {
+					d.key = newTextField("", true)
+				}
 				d.prefilled = name
 			}
 			m.cfgPhase = cfgPhaseURL
@@ -213,6 +218,7 @@ func (m *tuiModel) configAddKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.push(cDim.Render("  " + msg))
 			m.cfgPhase = cfgPhaseList
 			m.cfgDraft = newProviderDraft()
+			return m, m.detectWindowCmd() // the provider in use may have moved
 		}
 	case "esc":
 		d.err = ""
@@ -366,7 +372,7 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		if m.app.cfg.JudgeMaxOutputTokens > 0 {
 			v = fmt.Sprintf("%d", m.app.cfg.JudgeMaxOutputTokens)
 		}
-		return "judge max output", v, "enter: cycle (the goal judge is cut off mid-verdict on a small budget)"
+		return "judge max output", v, "enter: type tokens, 0 = the task model's (the goal judge is cut off mid-verdict on a small budget)"
 	case "judge_criteria":
 		v, hint := "— none", "enter: how to create it"
 		if src := m.app.judgeCriteriaSource(); src != "" {
@@ -494,7 +500,8 @@ var cfgUnstageableRows = map[string]bool{
 	"addprovider": true, "removeprovider": true, "model": true, "apikey": true,
 	"base_url": true, "context_window": true,
 	"temperature": true, "top_p": true, "max_output_tokens": true, "idle_timeout": true, "retry_attempts": true,
-	"budget": true, "name": true, "agents": true,
+	"judge_max_output_tokens": true,
+	"budget":                  true, "name": true, "agents": true,
 }
 
 // configActivate handles Enter on the selected row. While a task is running,
@@ -520,16 +527,21 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 // applyPendingConfig replays the row activations staged while a task was running,
 // in the order they were pressed. Called once the task is over, from the one
 // goroutine allowed to re-wire the agent.
-func (m *tuiModel) applyPendingConfig() {
+// It returns what the replayed rows asked for — a provider switched while the
+// task ran needs its window probed, and dropping that left the old size.
+func (m *tuiModel) applyPendingConfig() tea.Cmd {
 	if len(m.cfgPending) == 0 {
-		return
+		return nil
 	}
 	pending := m.cfgPending
 	m.cfgPending = nil
+	var cmds []tea.Cmd
 	for _, key := range pending {
-		m.activateConfigRow(key)
+		_, cmd := m.activateConfigRow(key)
+		cmds = append(cmds, cmd)
 	}
 	m.push(cDim.Render(fmt.Sprintf("  applied %d staged setting change(s) from /config", len(pending))))
+	return tea.Batch(cmds...)
 }
 
 // activateConfigRow performs a row's action for real. It assumes no task is
@@ -600,10 +612,8 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 		if _, ok := m.app.applyReasoning(provider+"/"+model, provider, next); !ok {
 			m.push(cDim.Render("  " + provider + " reasoning must be set raw in config.json (key " + provider + "/" + model + ")"))
 		}
-	case "temperature", "top_p", "max_output_tokens", "idle_timeout", "retry_attempts":
+	case "temperature", "top_p", "max_output_tokens", "idle_timeout", "retry_attempts", "judge_max_output_tokens":
 		m.cfgEdit = &cfgEditor{key: key, f: newTextField(m.app.numberValue(key), false)}
-	case "judge_max_output_tokens":
-		m.cycleJudgeMaxOutput()
 	case "goal_ttl":
 		m.pushLines(m.app.goalTTL("ttl", []string{"ttl", fmt.Sprint(nextInt(m.app.cfg.GoalMaxReturns, goalTTLCycle))}))
 	case "goal_nudge":
@@ -666,6 +676,7 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 			m.push(cErr.Render("  " + err.Error()))
 		} else {
 			m.push(cDim.Render("  " + msg))
+			return m, m.detectWindowCmd() // detected another way now
 		}
 	case "addprovider": // open the in-panel form (name → URL → model → key)
 		m.cfgPhase = cfgPhaseName
@@ -708,7 +719,7 @@ func (m *tuiModel) configEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.finishEdit(m.app.setActiveKey(v, false))
 		case "context_window":
 			return m.finishEdit(m.app.setContextWindowValue(v))
-		case "temperature", "top_p", "max_output_tokens", "idle_timeout", "retry_attempts":
+		case "temperature", "top_p", "max_output_tokens", "idle_timeout", "retry_attempts", "judge_max_output_tokens":
 			return m.finishEdit(m.app.setNumber(e.key, v))
 		case "model":
 			if strings.TrimSpace(v) == "" { // nothing typed: list the server's models
@@ -726,6 +737,10 @@ func (m *tuiModel) configEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.detectWindowCmd()
 		case "removeprovider":
 			name := strings.TrimSpace(v)
+			if name == "" {
+				e.err = "type the name of a saved provider: " + strings.Join(m.app.savedProviderNames(), ", ")
+				return m, nil
+			}
 			if e.confirm != name { // first enter: name it, ask again
 				if _, saved := m.app.cfg.Providers[name]; !saved {
 					e.err = fmt.Sprintf("no saved provider %q — saved: %s", name, strings.Join(m.app.savedProviderNames(), ", "))
@@ -912,25 +927,6 @@ var maxStuckTurnsCycle = []int{0, 3, 5, 8, 15, 25}
 func (m *tuiModel) cycleMaxStuckTurns() {
 	m.app.cfg.MaxStuckTurns = nextInt(m.app.cfg.MaxStuckTurns, maxStuckTurnsCycle)
 	if err := config.SaveMaxStuckTurns(m.app.cfg.MaxStuckTurns); err != nil {
-		m.push(cErr.Render("  could not persist: " + err.Error()))
-		return
-	}
-	_ = m.app.wire()
-}
-
-// maxOutputTokensCycle presets for the /config "max_output_tokens" row. 0 =
-// server default (often too small for a reasoning model's own thinking phase —
-// observed live: a reply cut off, finish_reason=length, mid-reasoning, well
-// under the context window's own limit).
-var maxOutputTokensCycle = []int{0, 2000, 4000, 8000, 16000, 32000}
-
-// cycleJudgeMaxOutput advances the goal judge's own max_tokens through the same
-// presets, persists it, and re-wires so wireJudge picks it up. Reported live:
-// nine judge calls in one run, all "finish_reason=length" — the judge reasoning
-// sensibly about the evidence and being cut off before writing a verdict.
-func (m *tuiModel) cycleJudgeMaxOutput() {
-	next := nextInt(m.app.cfg.JudgeMaxOutputTokens, maxOutputTokensCycle)
-	if err := m.app.setJudgeMaxOutput(next); err != nil {
 		m.push(cErr.Render("  could not persist: " + err.Error()))
 		return
 	}

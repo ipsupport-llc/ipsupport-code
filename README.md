@@ -140,8 +140,8 @@ them, no hand-editing JSON.
   puts it back.
 - **Providers** adds or edits an OpenAI-compatible endpoint, and removes one
   (confirmed with a second Enter; the one in use falls back to local).
-- Tuning values — temperature, top_p, output cap, idle timeout, retries — are
-  typed; the rest cycle in place. Values are edited like a shell line: ←/→,
+- Tuning values — temperature, top_p, output cap, idle timeout, retries, and
+  the goal judge's output cap — are typed; the rest cycle in place. Values are edited like a shell line: ←/→,
   home/end, ctrl+u.
 - A setting this project's `.agent/config.json` also sets is marked: that file
   wins at the next start.

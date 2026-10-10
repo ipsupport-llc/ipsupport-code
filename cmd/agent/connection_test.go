@@ -254,6 +254,7 @@ func TestSetupKeepsTheRestOfTheConnection(t *testing.T) {
 	def.LLM.TopP = 0.95
 	def.LLM.IdleTimeoutSeconds = 600
 	def.LLM.RetryAttempts = 3
+	def.LLM.Model = "my-model" // the same model: its hand-set size stays
 	def.LLM.ContextWindow, def.LLM.ContextWindowManual = 65536, true
 	initLocalModel(bufio.NewReader(strings.NewReader("http://localhost:8080/v1\n\nmy-model\n")), def)
 	c := reload(t)
@@ -374,5 +375,314 @@ func TestTuningValuesAreTyped(t *testing.T) {
 		if got := get(m.app.cfg.LLM, c.key); got != c.want {
 			t.Errorf("%s on local changed to %v", c.key, got)
 		}
+	}
+}
+
+// blockSaves makes every global config write fail: the config directory's
+// parent is a file.
+func blockSaves(t *testing.T) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(os.Getenv("HOME"), ".config"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func cursorOn(m *tuiModel, key string) {
+	for i, k := range cfgKeys() {
+		if k == key {
+			m.cfgCursor = i
+		}
+	}
+}
+
+func typeKeys(m *tuiModel, s string) {
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)})
+}
+
+// A key typed for one name, then the name changed: the key belonged to the
+// first provider and must not be saved under (and sent to) the second.
+func TestAddFormDropsTheKeyWhenTheNameChanges(t *testing.T) {
+	m := panelModel(t)
+	cursorOn(m, "addprovider")
+	m.configActivate()
+	enter := tea.KeyMsg{Type: tea.KeyEnter}
+	esc := tea.KeyMsg{Type: tea.KeyEsc}
+	typeKeys(m, "lab-a")
+	m.handleKey(enter)
+	typeKeys(m, "https://a.example.com/v1")
+	m.handleKey(enter)
+	m.handleKey(enter) // no model
+	typeKeys(m, "sk-for-lab-a")
+	m.handleKey(esc)
+	m.handleKey(esc)
+	m.handleKey(esc) // back at the name
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlE})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlU})
+	typeKeys(m, "lab-b")
+	m.handleKey(enter)
+	if m.cfgDraft.url.value() != "" {
+		t.Fatalf("lab-a's address carried over: %q", m.cfgDraft.url.value())
+	}
+	typeKeys(m, "https://b.example.com/v1")
+	m.handleKey(enter)
+	m.handleKey(enter)
+	m.handleKey(enter) // save, key field as left
+	if p, ok := m.app.cfg.Providers["lab-b"]; !ok || p.APIKey != "" {
+		t.Fatalf("lab-b = %+v (saved %v), want it saved without lab-a's key", p, ok)
+	}
+}
+
+// Setup re-run on a configured machine: the saved key is neither shown nor lost.
+func TestSetupNeverEchoesASavedKey(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OPENAI_API_KEY", "")
+	out := captureStdout(t, func() {
+		def := config.Default()
+		def.LLM.BaseURL, def.LLM.APIKey = "http://127.0.0.1:1/v1", "sk-secret-local"
+		initLocalModel(bufio.NewReader(strings.NewReader("\n\n\n")), def)
+		def.Providers = map[string]config.LLM{"openai": {APIKey: "sk-secret-cloud", Model: "gpt-x"}}
+		initCloudProvider(bufio.NewReader(strings.NewReader("openai\n\n\n")), def)
+	})
+	if strings.Contains(out, "sk-secret") {
+		t.Fatalf("setup printed a saved key:\n%s", out)
+	}
+	c := reload(t)
+	if c.LLM.APIKey != "sk-secret-local" || c.Providers["openai"].APIKey != "sk-secret-cloud" {
+		t.Fatalf("Enter did not keep the keys: local %q, openai %q", c.LLM.APIKey, c.Providers["openai"].APIKey)
+	}
+}
+
+func captureStdout(t *testing.T, f func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	was := os.Stdout
+	os.Stdout = w
+	done := make(chan string)
+	go func() {
+		var b strings.Builder
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Read(buf)
+			b.Write(buf[:n])
+			if err != nil {
+				break
+			}
+		}
+		done <- b.String()
+	}()
+	f()
+	os.Stdout = was
+	w.Close()
+	return <-done
+}
+
+// A context size set by hand belongs to its model: setup answering another
+// model detects again; the same model keeps it.
+func TestSetupForgetsAHandSetWindowForANewModel(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	def := config.Default()
+	def.LLM.BaseURL, def.LLM.Model = "http://127.0.0.1:1/v1", "old-model"
+	def.LLM.ContextWindow, def.LLM.ContextWindowManual = 65536, true
+	initLocalModel(bufio.NewReader(strings.NewReader("\n\nold-model\n")), def)
+	if !reload(t).LLM.ContextWindowManual {
+		t.Fatal("the same model lost its hand-set size")
+	}
+	initLocalModel(bufio.NewReader(strings.NewReader("\n\nnew-model\n")), def)
+	if reload(t).LLM.ContextWindowManual {
+		t.Fatal("a new model kept the old model's hand-set size")
+	}
+}
+
+// A provider switch staged during a task probes the new window when it applies.
+func TestStagedProviderSwitchProbesTheWindow(t *testing.T) {
+	m := panelModel(t)
+	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://lab.example.com/v1", APIKey: "k"}}
+	m.cancel = func() {}
+	cursorOn(m, "provider")
+	m.configActivate()
+	if len(m.cfgPending) != 1 {
+		t.Fatalf("pending = %v, want the switch staged", m.cfgPending)
+	}
+	m.cancel = nil
+	if cmd := m.applyPendingConfig(); cmd == nil {
+		t.Fatal("the staged switch did not ask for the window to be probed")
+	}
+	if m.app.cfg.Provider == "local" {
+		t.Fatal("the staged switch did not apply")
+	}
+}
+
+// Changing how the window is found, or the provider in use, re-probes it.
+func TestConnectionChangesProbeTheWindow(t *testing.T) {
+	m := panelModel(t)
+	cursorOn(m, "conn_type")
+	if _, cmd := m.configActivate(); cmd == nil {
+		t.Fatal("toggling the server type did not re-probe the window")
+	}
+	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://lab.example.com/v1", APIKey: "k"}}
+	m.app.cfg.Provider = "mylab"
+	_ = m.app.wire()
+	cursorOn(m, "addprovider")
+	m.configActivate()
+	enter := tea.KeyMsg{Type: tea.KeyEnter}
+	typeKeys(m, "mylab")
+	m.handleKey(enter)
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlE})
+	m.handleKey(tea.KeyMsg{Type: tea.KeyCtrlU})
+	typeKeys(m, "https://lab.example.com:8443/v1")
+	m.handleKey(enter)
+	m.handleKey(enter)
+	if _, cmd := m.handleKey(enter); cmd == nil {
+		t.Fatal("moving the provider in use did not re-probe the window")
+	}
+}
+
+func TestAFailedProfileSaveLeavesTheRosterAlone(t *testing.T) {
+	m := panelModel(t)
+	m.app.cfg.Agents = map[string]config.AgentProfile{"codex": {Provider: "local", Model: "a"}}
+	blockSaves(t)
+	m.agDraft = agentDraft{orig: "codex", provider: "local", model: "b", name: "renamed"}
+	m.saveDraft("renamed")
+	if p, ok := m.app.cfg.Agents["codex"]; !ok || p.Model != "a" || len(m.app.cfg.Agents) != 1 {
+		t.Fatalf("roster = %v, want it unchanged after a failed save", m.app.cfg.Agents)
+	}
+}
+
+// A refused save leaves every setting as it was.
+func TestSettingsRollBackOnAFailedSave(t *testing.T) {
+	m := panelModel(t)
+	m.app.cfg.LLM.Temperature = 0.2
+	blockSaves(t)
+	for _, c := range []struct{ key, value string }{
+		{"temperature", "0.9"}, {"context_window", "65536"}, {"judge_max_output_tokens", "9000"},
+	} {
+		editRow(t, m, c.key, c.value)
+		if m.cfgEdit == nil || m.cfgEdit.err == "" {
+			t.Errorf("%s: a failed save was reported as done", c.key)
+		}
+		m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	}
+	if l := m.app.cfg.LLM; l.Temperature != 0.2 || l.ContextWindowManual {
+		t.Fatalf("connection changed in memory: %+v", l)
+	}
+	if m.app.cfg.JudgeMaxOutputTokens != 0 {
+		t.Fatalf("judge cap = %d after a failed save", m.app.cfg.JudgeMaxOutputTokens)
+	}
+}
+
+func TestNotANumberIsRefused(t *testing.T) {
+	m := panelModel(t)
+	for _, v := range []string{"NaN", "Inf"} {
+		editRow(t, m, "temperature", v)
+		if m.cfgEdit == nil || m.cfgEdit.err == "" {
+			t.Errorf("temperature accepted %q", v)
+		}
+		m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	}
+}
+
+// Re-saving what is already there changes nothing: the same model keeps a
+// hand-set size, the detected size re-entered stays detected.
+func TestResavingTheSameValueKeepsHowTheWindowIsFound(t *testing.T) {
+	m := panelModel(t)
+	m.app.cfg.LLM.Model = "m"
+	m.app.cfg.LLM.ContextWindow, m.app.cfg.LLM.ContextWindowManual = 65536, true
+	m.app.setModel("m")
+	if !m.app.cfg.LLM.ContextWindowManual {
+		t.Fatal("re-picking the same model forgot the hand-set size")
+	}
+	m.app.cfg.LLM.ContextWindow, m.app.cfg.LLM.ContextWindowManual = 32768, false
+	editRow(t, m, "context_window", "32768")
+	if m.app.cfg.LLM.ContextWindowManual {
+		t.Fatal("re-entering the detected size pinned it")
+	}
+}
+
+// The project's .agent/config.json names this provider: removing it would
+// leave the next start pointing at nothing.
+func TestAProjectPinnedProviderIsNotRemoved(t *testing.T) {
+	m := panelModel(t)
+	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://lab.example.com/v1"}}
+	m.app.cfg.Provider = "mylab"
+	dir := filepath.Join(m.app.workspace, ".agent")
+	os.MkdirAll(dir, 0o700)
+	os.WriteFile(filepath.Join(dir, "config.json"), []byte(`{"provider":"mylab"}`), 0o600)
+	if _, err := m.app.removeProvider("mylab"); err == nil {
+		t.Fatal("removed a provider the project pins")
+	}
+	if _, ok := m.app.cfg.Providers["mylab"]; !ok {
+		t.Fatal("the provider is gone")
+	}
+}
+
+func TestRemoveProviderAsksForAName(t *testing.T) {
+	m := panelModel(t)
+	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://lab.example.com/v1"}}
+	cursorOn(m, "removeprovider")
+	m.configActivate()
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if m.cfgEdit == nil || !strings.Contains(m.cfgEdit.err, "mylab") || m.cfgEdit.confirm != "" {
+		t.Fatalf("empty enter: %+v, want a prompt naming the saved providers", m.cfgEdit)
+	}
+}
+
+// Clearing the saved key while the environment still has one says so.
+func TestClearingAKeyNamesTheEnvironment(t *testing.T) {
+	m := panelModel(t)
+	t.Setenv("OPENAI_API_KEY", "sk-env")
+	m.app.cfg.Providers = map[string]config.LLM{"openai": {APIKey: "sk-saved"}}
+	m.app.cfg.Provider = "openai"
+	msg, err := m.app.setActiveKey("", true)
+	if err != nil || !strings.Contains(msg, "environment") {
+		t.Fatalf("msg %q, err %v; want the environment named", msg, err)
+	}
+}
+
+// /ai add takes the form's checks and reconnects the provider in use.
+func TestAIAddChecksAndReconnects(t *testing.T) {
+	m := panelModel(t)
+	m.app.cfg.Providers = map[string]config.LLM{"mylab": {BaseURL: "https://lab.example.com/v1", APIKey: "k", Model: "m1"}}
+	m.app.cfg.Provider = "mylab"
+	_ = m.app.wire()
+	before := m.app.client
+	m.app.addProvider("mylab https://lab.example.com:9443/v1")
+	if m.app.client == before {
+		t.Fatal("the provider in use was not reconnected")
+	}
+	if p := m.app.cfg.Providers["mylab"]; p.Model != "m1" || p.APIKey != "k" {
+		t.Fatalf("mylab = %+v, want model and key kept", p)
+	}
+	for _, bad := range []string{"my/lab https://x.example.com", "other localhost:8080"} {
+		m.app.addProvider(bad)
+	}
+	if len(m.app.cfg.Providers) != 1 {
+		t.Fatalf("a bad /ai add was saved: %v", m.app.cfg.Providers)
+	}
+}
+
+// ↑ on a queued /ai key does not put the token back on screen.
+func TestRecallingAQueuedKeyDropsIt(t *testing.T) {
+	m := panelModel(t)
+	m.state = stRunning
+	m.queued = []string{"/ai key openai sk-live-abcdef123456"}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyUp})
+	if strings.Contains(m.input.Value(), "sk-live") || strings.Contains(strings.Join(m.history, "\n"), "sk-live") {
+		t.Fatalf("recall showed the key: input %q", m.input.Value())
+	}
+	if len(m.queued) != 0 {
+		t.Fatal("the line stayed queued")
+	}
+}
+
+func TestJudgeOutputCapIsTyped(t *testing.T) {
+	m := panelModel(t)
+	editRow(t, m, "judge_max_output_tokens", "12000")
+	if m.app.cfg.JudgeMaxOutputTokens != 12000 || reload(t).JudgeMaxOutputTokens != 12000 {
+		t.Fatalf("judge cap = %d", m.app.cfg.JudgeMaxOutputTokens)
 	}
 }

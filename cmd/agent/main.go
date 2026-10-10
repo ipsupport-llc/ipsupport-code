@@ -2253,8 +2253,11 @@ func (a *app) wireJudge() {
 // judging STEP needs, which is the same wherever it runs). 0 = inherit the task
 // model's.
 func (a *app) setJudgeMaxOutput(v int) error {
+	if err := config.SaveJudgeMaxOutput(v); err != nil {
+		return err
+	}
 	a.cfg.JudgeMaxOutputTokens = v
-	return config.SaveJudgeMaxOutput(v)
+	return nil
 }
 
 // reasoningParams resolves the merge-params for (provider, model). scope ""
@@ -4440,31 +4443,23 @@ func (a *app) addProvider(arg string) []string {
 	if _, ok := config.ProviderTemplates[name]; ok {
 		return []string{fmt.Sprintf("%q is a built-in provider — set its key in one step: /ai key %s <token>", name, name)}
 	}
-	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-		return []string{"base_url must start with http:// or https:// — got " + url}
-	}
-	if a.cfg.Providers == nil {
-		a.cfg.Providers = map[string]config.LLM{}
-	}
-	p := a.cfg.Providers[name]
-	p.BaseURL = strings.TrimRight(url, "/")
+	// The /config form's path: same name/URL checks, and a provider in use is
+	// reconnected — saved with only a key, it kept running on the old one.
+	model := a.cfg.Providers[name].Model // left out, it stays
 	if len(f) >= 3 {
-		p.Model = f[2]
+		model = f[2]
 	}
-	if key != "" {
-		p.APIKey = key
-	}
-	a.cfg.Providers[name] = p
-	if err := config.SaveProviders(a.cfg.Provider, a.cfg.Providers); err != nil {
+	msg, err := a.addProviderFields(name, url, model, key)
+	if err != nil {
 		return []string{"error: " + err.Error()}
 	}
-	if key != "" {
-		if a.cfg.Provider == name {
-			_ = a.wire()
-		}
-		return []string{fmt.Sprintf("added %q → %s with a key — /ai %s to use it", name, p.BaseURL, name)}
+	if a.cfg.Provider == name {
+		return []string{msg}
 	}
-	return []string{fmt.Sprintf("added %q → %s — next: /ai key %s <token>, then /ai %s", name, p.BaseURL, name, name)}
+	if key != "" {
+		return []string{fmt.Sprintf("added %q → %s with a key — /ai %s to use it", name, a.cfg.Providers[name].BaseURL, name)}
+	}
+	return []string{fmt.Sprintf("added %q → %s — next: /ai key %s <token>, then /ai %s", name, a.cfg.Providers[name].BaseURL, name, name)}
 }
 
 func (a *app) providerList() []string {
@@ -4694,8 +4689,10 @@ func (a *app) setModel(name string) []string {
 	// Another model has another context size: a size set by hand for the old
 	// one no longer holds, and detection takes over again.
 	if err := a.updateActive(func(l *config.LLM) {
+		if l.Model != name { // the same model re-saved keeps a size set for it
+			l.ContextWindowManual = false
+		}
 		l.Model = name
-		l.ContextWindowManual = false
 	}); err != nil {
 		return []string{"error: model not saved: " + err.Error()}
 	}
@@ -4714,17 +4711,7 @@ func (a *app) setModel(name string) []string {
 // hosted provider (Claude, OpenAI) opt out of the local-model-oriented
 // repetition detectors per-connection.
 func (a *app) toggleLoopDetection() error {
-	if a.isLocal() {
-		a.cfg.LLM.DisableLoopDetection = !a.cfg.LLM.DisableLoopDetection
-		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
-	}
-	if a.cfg.Providers == nil {
-		a.cfg.Providers = map[string]config.LLM{}
-	}
-	p := a.cfg.Providers[a.cfg.Provider]
-	p.DisableLoopDetection = !p.DisableLoopDetection
-	a.cfg.Providers[a.cfg.Provider] = p
-	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+	return a.updateActive(func(l *config.LLM) { l.DisableLoopDetection = !l.DisableLoopDetection })
 }
 
 // setTemperature sets the sampling temperature for the CURRENTLY ACTIVE
@@ -4732,34 +4719,14 @@ func (a *app) toggleLoopDetection() error {
 // branching as setModel. 0 means "unset" (server default — see Chat's
 // c.temp > 0 gate).
 func (a *app) setTemperature(v float64) error {
-	if a.isLocal() {
-		a.cfg.LLM.Temperature = v
-		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
-	}
-	if a.cfg.Providers == nil {
-		a.cfg.Providers = map[string]config.LLM{}
-	}
-	p := a.cfg.Providers[a.cfg.Provider]
-	p.Temperature = v
-	a.cfg.Providers[a.cfg.Provider] = p
-	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+	return a.updateActive(func(l *config.LLM) { l.Temperature = v })
 }
 
 // setTopP sets nucleus-sampling top_p for the CURRENTLY ACTIVE provider's
 // connection and persists it — same branching as setTemperature. 0 means
 // "unset" (server default).
 func (a *app) setTopP(v float64) error {
-	if a.isLocal() {
-		a.cfg.LLM.TopP = v
-		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
-	}
-	if a.cfg.Providers == nil {
-		a.cfg.Providers = map[string]config.LLM{}
-	}
-	p := a.cfg.Providers[a.cfg.Provider]
-	p.TopP = v
-	a.cfg.Providers[a.cfg.Provider] = p
-	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+	return a.updateActive(func(l *config.LLM) { l.TopP = v })
 }
 
 // setMaxOutputTokens sets the request's max_tokens for the CURRENTLY ACTIVE
@@ -4768,17 +4735,7 @@ func (a *app) setTopP(v float64) error {
 // default, which can be too small for a reasoning model's thinking phase —
 // see Config.LLM.MaxOutputTokens).
 func (a *app) setMaxOutputTokens(v int) error {
-	if a.isLocal() {
-		a.cfg.LLM.MaxOutputTokens = v
-		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
-	}
-	if a.cfg.Providers == nil {
-		a.cfg.Providers = map[string]config.LLM{}
-	}
-	p := a.cfg.Providers[a.cfg.Provider]
-	p.MaxOutputTokens = v
-	a.cfg.Providers[a.cfg.Provider] = p
-	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+	return a.updateActive(func(l *config.LLM) { l.MaxOutputTokens = v })
 }
 
 // setIdleTimeout sets the idle watchdog (seconds with NO response/stream data
@@ -4787,34 +4744,14 @@ func (a *app) setMaxOutputTokens(v int) error {
 // branching as setTemperature/setTopP. 0 means "unset" (the client's built-in
 // 90s default).
 func (a *app) setIdleTimeout(v int) error {
-	if a.isLocal() {
-		a.cfg.LLM.IdleTimeoutSeconds = v
-		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
-	}
-	if a.cfg.Providers == nil {
-		a.cfg.Providers = map[string]config.LLM{}
-	}
-	p := a.cfg.Providers[a.cfg.Provider]
-	p.IdleTimeoutSeconds = v
-	a.cfg.Providers[a.cfg.Provider] = p
-	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+	return a.updateActive(func(l *config.LLM) { l.IdleTimeoutSeconds = v })
 }
 
 // setRetryAttempts sets how many times a TRANSIENT request failure is retried
 // before the task gives up, for the CURRENTLY ACTIVE provider — same
 // local-vs-named-provider branching as setIdleTimeout. 0 = the built-in 8.
 func (a *app) setRetryAttempts(v int) error {
-	if a.isLocal() {
-		a.cfg.LLM.RetryAttempts = v
-		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
-	}
-	if a.cfg.Providers == nil {
-		a.cfg.Providers = map[string]config.LLM{}
-	}
-	p := a.cfg.Providers[a.cfg.Provider]
-	p.RetryAttempts = v
-	a.cfg.Providers[a.cfg.Provider] = p
-	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+	return a.updateActive(func(l *config.LLM) { l.RetryAttempts = v })
 }
 
 // setContextWindow sets the model's context size (tokens) for the CURRENTLY
@@ -4825,21 +4762,15 @@ func (a *app) setRetryAttempts(v int) error {
 // manual override; setting it back to 0 clears that, letting auto-detect run
 // again.
 func (a *app) setContextWindow(v int) error {
+	if err := a.updateActive(func(l *config.LLM) {
+		l.ContextWindow = v
+		l.ContextWindowManual = v > 0 // persisted twin of windowDetected — survives a restart, see ContextWindowManual
+	}); err != nil {
+		return err // nothing changed, in memory or on disk
+	}
 	a.windowDetected = v > 0
 	a.modelEpoch.Add(1) // a probe already in flight must not overwrite this
-	if a.isLocal() {
-		a.cfg.LLM.ContextWindow = v
-		a.cfg.LLM.ContextWindowManual = v > 0 // persisted twin of windowDetected — survives a restart, see ContextWindowManual
-		return config.SaveGlobal(a.cfg.Name, a.cfg.LLM)
-	}
-	if a.cfg.Providers == nil {
-		a.cfg.Providers = map[string]config.LLM{}
-	}
-	p := a.cfg.Providers[a.cfg.Provider]
-	p.ContextWindow = v
-	p.ContextWindowManual = v > 0
-	a.cfg.Providers[a.cfg.Provider] = p
-	return config.SaveProviders(a.cfg.Provider, a.cfg.Providers)
+	return nil
 }
 
 // configOverview is the control panel: current settings + the command to change
@@ -5779,7 +5710,7 @@ func initLocalModel(reader *bufio.Reader, def config.Config) {
 		cancel()
 	}
 	url := ask(reader, "Server URL", urlDef)
-	key := ask(reader, "API key (blank for a local server)", def.LLM.APIKey)
+	key := askSecret(reader, "API key (blank for a local server)", def.LLM.APIKey)
 
 	// Best-effort probe: show what's loaded there so the model name isn't a blind
 	// guess, and so we can confirm the connection at the end. (max_steps and the
@@ -5802,6 +5733,9 @@ func initLocalModel(reader *bufio.Reader, def config.Config) {
 	l := def.LLM
 	l.BaseURL = url
 	l.Model = ask(reader, "Model name", def.LLM.Model)
+	if l.Model != def.LLM.Model {
+		l.ContextWindowManual = false // a size set by hand was the old model's
+	}
 	l.APIKey = key
 	if err := config.SaveLocalModel(def.Name, l); err != nil { // preserve any custom name; also (re)activates "local"
 		slog.Warn("could not save config", "err", err)
@@ -5850,12 +5784,15 @@ func initCloudProvider(reader *bufio.Reader, def config.Config) {
 		}
 		l.BaseURL = strings.TrimRight(url, "/")
 	}
-	key := ask(reader, "API key", existing.APIKey)
+	key := askSecret(reader, "API key", existing.APIKey)
 	if key == "" {
 		fmt.Printf("  ⚠ no key set — add one later with: /ai key %s <token>\n", name)
 	}
 	l.APIKey = key
 	l.Model = ask(reader, "Model", existing.Model)
+	if l.Model != existing.Model {
+		l.ContextWindowManual = false // a size set by hand was the old model's
+	}
 
 	providers := def.Providers
 	if providers == nil {
@@ -5883,6 +5820,23 @@ func ask(r *bufio.Reader, label, def string) string {
 	} else {
 		fmt.Printf("  %s: ", label)
 	}
+	line, err := r.ReadString('\n')
+	if err != nil {
+		return def
+	}
+	if v := strings.TrimSpace(line); v != "" {
+		return v
+	}
+	return def
+}
+
+// askSecret is ask for a key: one already set is never echoed back — setup
+// is run on shared screens and in recorded terminals.
+func askSecret(r *bufio.Reader, label, def string) string {
+	if def == "" {
+		return ask(r, label, "")
+	}
+	fmt.Printf("  %s [set — Enter keeps it]: ", label)
 	line, err := r.ReadString('\n')
 	if err != nil {
 		return def

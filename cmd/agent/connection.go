@@ -1,8 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"math"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -107,6 +111,9 @@ func (a *app) setActiveKey(token string, clear bool) (string, error) {
 		return "", err
 	}
 	if clear {
+		if a.activeLLM().APIKey != "" { // an environment variable supplies one too
+			return "saved key removed for " + a.providerName() + " — the environment still supplies one", nil
+		}
 		return "key removed for " + a.providerName(), nil
 	}
 	return "key saved for " + a.providerName(), nil
@@ -147,6 +154,11 @@ func (a *app) setContextWindowValue(raw string) (string, error) {
 	n, err := strconv.Atoi(s)
 	if err != nil || n < 0 || n > 10_000_000 {
 		return "", fmt.Errorf("not a size: %q — tokens, e.g. 32768, or 0 for auto-detect", raw)
+	}
+	// The editor opens on the current size, detected or set. Enter on it
+	// unchanged must not turn a detected size into one set by hand.
+	if l := a.activeLLM(); n == l.ContextWindow && !l.ContextWindowManual {
+		return "context window unchanged — still auto-detected", nil
 	}
 	if err := a.setContextWindow(n); err != nil {
 		return "", err
@@ -194,7 +206,10 @@ func (a *app) addProviderFields(name, rawURL, model, key string) (string, error)
 	before, had := a.cfg.Providers[name]
 	p := before
 	p.BaseURL = u
-	p.Model = strings.TrimSpace(model)
+	if m := strings.TrimSpace(model); m != p.Model {
+		p.Model = m
+		p.ContextWindowManual = false // another model, another size: detect it again
+	}
 	if k := strings.TrimSpace(key); k != "" {
 		p.APIKey = k
 	}
@@ -230,6 +245,11 @@ func (a *app) removeProvider(name string) (string, error) {
 	}
 	_, saved := a.cfg.Providers[name]
 	_, builtin := config.ProviderTemplates[name]
+	// A project that selects this provider in its own .agent/config.json would
+	// fail to start once it is gone ("unknown provider").
+	if config.WorkspaceKeys(a.workspace)["provider"] && a.workspaceProvider() == name {
+		return "", fmt.Errorf("this project's .agent/config.json selects %q — change that file first", name)
+	}
 	if !saved {
 		if builtin {
 			return "", fmt.Errorf("%q has nothing saved to remove", name)
@@ -269,6 +289,20 @@ func (a *app) removeProvider(name string) (string, error) {
 	return msg, nil
 }
 
+// workspaceProvider is the provider this project's own config file selects,
+// or "".
+func (a *app) workspaceProvider() string {
+	data, err := os.ReadFile(filepath.Join(a.workspace, ".agent", "config.json"))
+	if err != nil {
+		return ""
+	}
+	var c struct {
+		Provider string `json:"provider"`
+	}
+	_ = json.Unmarshal(data, &c)
+	return c.Provider
+}
+
 // savedProviderNames are the providers with anything saved, sorted.
 func (a *app) savedProviderNames() []string {
 	var out []string
@@ -303,6 +337,8 @@ var numberRows = map[string]struct {
 	"max_output_tokens": {false, 0, 10_000_000, "16000"},
 	"idle_timeout":      {false, 0, 86_400, "300 (seconds)"},
 	"retry_attempts":    {false, 0, 100, "8"},
+	// The goal judge's own cap — global, not the connection's: 0 = the task model's.
+	"judge_max_output_tokens": {false, 0, 10_000_000, "8000"},
 }
 
 // numberValue is a tuning row's current value, as the editor starts with it.
@@ -319,6 +355,8 @@ func (a *app) numberValue(key string) string {
 		return strconv.Itoa(l.IdleTimeoutSeconds)
 	case "retry_attempts":
 		return strconv.Itoa(l.RetryAttempts)
+	case "judge_max_output_tokens":
+		return strconv.Itoa(a.cfg.JudgeMaxOutputTokens)
 	}
 	return ""
 }
@@ -334,7 +372,9 @@ func (a *app) setNumber(key, raw string) (string, error) {
 		s = "0"
 	}
 	f, err := strconv.ParseFloat(s, 64)
-	if err != nil || f < spec.min || f > spec.max || (!spec.float && f != float64(int(f))) {
+	// NaN passes every range comparison, and a NaN in the config then fails
+	// every later save: refused here, before anything is touched.
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < spec.min || f > spec.max || (!spec.float && f != float64(int(f))) {
 		return "", fmt.Errorf("%q: want %g to %g, e.g. %s — 0 = server default", raw, spec.min, spec.max, spec.example)
 	}
 	n := int(f)
@@ -349,12 +389,17 @@ func (a *app) setNumber(key, raw string) (string, error) {
 		err = a.setIdleTimeout(n)
 	case "retry_attempts":
 		err = a.setRetryAttempts(n)
+	case "judge_max_output_tokens":
+		err = a.setJudgeMaxOutput(n)
 	}
 	if err != nil {
 		return "", err
 	}
 	if err := a.wire(); err != nil {
 		return "", err
+	}
+	if f == 0 && key == "judge_max_output_tokens" {
+		return key + " → same as the task model", nil
 	}
 	if f == 0 {
 		return key + " → server default", nil

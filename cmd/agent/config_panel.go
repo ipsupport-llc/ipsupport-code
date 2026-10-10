@@ -516,6 +516,9 @@ func (m *tuiModel) configActivate() (tea.Model, tea.Cmd) {
 	if key == "provider" { // opens a list; the provider picked there is what stages
 		return m.activateConfigRow(key)
 	}
+	if m.cancel != nil && liveTuneRows[key] { // into the running task at once
+		return m.tuneLive(key)
+	}
 	if m.cancel != nil && !cfgLiveRows[key] {
 		if cfgUnstageableRows[key] {
 			m.push(cDim.Render("  " + key + " needs you at the keyboard — it waits until the task ends"))
@@ -551,6 +554,9 @@ func (m *tuiModel) applyPendingConfig() tea.Cmd {
 // activateConfigRow performs a row's action for real. It assumes no task is
 // running: several branches re-wire the agent or leave the panel.
 func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
+	if e, ok := parseTune(key); ok { // changed while a task ran: saved now
+		return m.applyTune(e)
+	}
 	if name, ok := strings.CutPrefix(key, "provider="); ok { // picked while a task ran
 		m.pushLines(m.app.setProvider(name))
 		return m, m.detectWindowCmd()
@@ -815,6 +821,9 @@ func (m *tuiModel) configEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "context_window":
 			return m.finishEdit(m.app.setContextWindowValue(v))
 		case "temperature", "top_p", "max_output_tokens", "idle_timeout", "retry_attempts", "judge_max_output_tokens":
+			if m.cancel != nil && liveTuneRows[e.key] {
+				return m.tuneTyped(e.key, v)
+			}
 			return m.finishEdit(m.app.setNumber(e.key, v))
 		}
 		return m, nil
@@ -1024,7 +1033,7 @@ func (m *tuiModel) toggleChannel() {
 func (m *tuiModel) cfgPendingCount(key string) int {
 	n := 0
 	for _, k := range m.cfgPending {
-		if k == key || strings.HasPrefix(k, key+"=") {
+		if k == key || strings.HasPrefix(k, key+"=") || strings.HasPrefix(k, tunePrefix+key+"=") {
 			n++
 		}
 	}
@@ -1069,7 +1078,11 @@ func (m *tuiModel) renderConfigPanel() string {
 		if m.projectOverrides(r.key) {
 			hint = "this project's .agent/config.json sets it — that value wins at the next start"
 		}
-		if n := m.cfgPendingCount(r.key); n > 0 {
+		if v, ok := m.tunedValue(r.key); ok {
+			// Already in the running task's requests; a.cfg — what configRowView
+			// shows — gets it when the task ends.
+			value, hint = v, "in use now · saved when the task ends"
+		} else if n := m.cfgPendingCount(r.key); n > 0 {
 			// Say the change was taken and where it went — the value column still
 			// shows the LIVE setting, because that is what the running task is using.
 			hint = "staged"

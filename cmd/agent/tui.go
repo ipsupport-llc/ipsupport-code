@@ -1838,6 +1838,10 @@ func (m *tuiModel) pushLines(lines []string) {
 // type it — plain text is queued as type-ahead.)
 func (m *tuiModel) commandWhileBusy(line string) (tea.Model, tea.Cmd) {
 	cmd, rest := splitCommand(line)
+	// A reasoning level goes into the running task's requests at once (see livetune.go).
+	if cmd == "/reasoning" && strings.TrimSpace(rest) != "" && m.reasoningWhileBusy(rest) {
+		return m, nil
+	}
 	switch cmd {
 	case "/exit", "/quit":
 		return m, tea.Quit

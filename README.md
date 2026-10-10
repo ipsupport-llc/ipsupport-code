@@ -145,6 +145,10 @@ them, no hand-editing JSON.
 - Tuning values — temperature, top_p, output cap, idle timeout, retries, and
   the goal judge's output cap — are typed; the rest cycle in place. Values are edited like a shell line: ←/→,
   home/end, ctrl+u.
+- While a task runs, reasoning (also `/reasoning <level>`), temperature,
+  top_p, the output caps, retries and loop detection take effect from the
+  model's next reply and are saved when the task ends; other changes are
+  staged until then.
 - A setting this project's `.agent/config.json` also sets is marked: that file
   wins at the next start.
 

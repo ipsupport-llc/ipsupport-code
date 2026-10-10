@@ -2265,12 +2265,18 @@ func (a *app) setJudgeMaxOutput(v int) error {
 // reflect-prefixed keys first (a separate setting for the learning pass), then
 // falls back to the normal ones.
 func (a *app) reasoningParams(provider, model, scope string) map[string]any {
+	return reasoningParamsIn(a.cfg.Reasoning, provider, model, scope)
+}
+
+// reasoningParamsIn is reasoningParams over a given map — a copy with changes
+// staged during a task, which a.cfg must not see until it ends.
+func reasoningParamsIn(reasoning map[string]json.RawMessage, provider, model, scope string) map[string]any {
 	keys := []string{provider + "/" + model, provider}
 	if scope != "" {
 		keys = append([]string{scope + ":" + provider + "/" + model, scope + ":" + provider}, keys...)
 	}
 	for _, k := range keys {
-		if raw, ok := a.cfg.Reasoning[k]; ok {
+		if raw, ok := reasoning[k]; ok {
 			var m map[string]any
 			if json.Unmarshal(raw, &m) == nil {
 				return m
@@ -2453,9 +2459,13 @@ func (a *app) reasoningLevel(provider, model string) string {
 // is. The shape is matched against the PROVIDER's: matched against
 // "judge:local" it never was, and a judge set to minimal showed as "custom".
 func (a *app) scopedReasoningLevel(scope, provider, model string) (string, bool) {
-	raw, ok := a.cfg.Reasoning[scope+provider+"/"+model]
+	return scopedLevelIn(a.cfg.Reasoning, scope, provider, model)
+}
+
+func scopedLevelIn(reasoning map[string]json.RawMessage, scope, provider, model string) (string, bool) {
+	raw, ok := reasoning[scope+provider+"/"+model]
 	if !ok {
-		raw, ok = a.cfg.Reasoning[scope+provider] // provider default
+		raw, ok = reasoning[scope+provider] // provider default
 	}
 	if !ok {
 		return "", false

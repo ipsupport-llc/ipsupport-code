@@ -341,6 +341,25 @@ var numberRows = map[string]struct {
 	"judge_max_output_tokens": {false, 0, 10_000_000, "8000"},
 }
 
+// parseNumber checks a typed tuning value against its row's range.
+func parseNumber(key, raw string) (float64, error) {
+	spec, ok := numberRows[key]
+	if !ok {
+		return 0, fmt.Errorf("%s is not a number setting", key)
+	}
+	s := strings.ReplaceAll(strings.TrimSpace(raw), "_", "")
+	if s == "" {
+		s = "0"
+	}
+	f, err := strconv.ParseFloat(s, 64)
+	// NaN passes every range comparison, and a NaN in the config then fails
+	// every later save: refused here, before anything is touched.
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < spec.min || f > spec.max || (!spec.float && f != float64(int(f))) {
+		return 0, fmt.Errorf("%q: want %g to %g, e.g. %s — 0 = server default", raw, spec.min, spec.max, spec.example)
+	}
+	return f, nil
+}
+
 // numberValue is a tuning row's current value, as the editor starts with it.
 func (a *app) numberValue(key string) string {
 	l := a.activeLLM()
@@ -363,19 +382,9 @@ func (a *app) numberValue(key string) string {
 
 // setNumber parses and saves a tuning row's value for the active connection.
 func (a *app) setNumber(key, raw string) (string, error) {
-	spec, ok := numberRows[key]
-	if !ok {
-		return "", fmt.Errorf("%s is not a number setting", key)
-	}
-	s := strings.ReplaceAll(strings.TrimSpace(raw), "_", "")
-	if s == "" {
-		s = "0"
-	}
-	f, err := strconv.ParseFloat(s, 64)
-	// NaN passes every range comparison, and a NaN in the config then fails
-	// every later save: refused here, before anything is touched.
-	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < spec.min || f > spec.max || (!spec.float && f != float64(int(f))) {
-		return "", fmt.Errorf("%q: want %g to %g, e.g. %s — 0 = server default", raw, spec.min, spec.max, spec.example)
+	f, err := parseNumber(key, raw)
+	if err != nil {
+		return "", err
 	}
 	n := int(f)
 	switch key {

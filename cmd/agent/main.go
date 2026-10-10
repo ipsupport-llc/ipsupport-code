@@ -324,6 +324,10 @@ func misplacedFlags(args []string, lookup func(string) *flag.Flag) []string {
 // runUpdate downloads and installs a newer binary from GitHub Releases for the
 // configured channel (an optional "stable"/"nightly" arg switches and saves it).
 func runUpdate(args []string, client *http.Client) {
+	if cmd := selfupdate.BrewUpgrade(); cmd != "" {
+		fmt.Println("installed with Homebrew — update it with: " + cmd)
+		return
+	}
 	cfg, _ := config.Load(".")
 	channel := cfg.Channel
 	if channel == "" {
@@ -420,7 +424,11 @@ func (a *app) freshnessNotice(ctx context.Context) string {
 	if err != nil || rel.Version == "" || rel.Version == version {
 		return ""
 	}
-	return fmt.Sprintf("a newer %s build is available: %s (you're on %s) — run `update`", channel, rel.Version, version)
+	how := "run `update`"
+	if cmd := selfupdate.BrewUpgrade(); cmd != "" {
+		how = "run `" + cmd + "`"
+	}
+	return fmt.Sprintf("a newer %s build is available: %s (you're on %s) — %s", channel, rel.Version, version, how)
 }
 
 // app bundles everything one process needs across tasks, plus session counters.

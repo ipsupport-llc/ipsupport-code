@@ -73,6 +73,15 @@ arg): `& ([scriptblock]::Create((irm https://ipsupport-llc.github.io/ipsupport-c
 Both installers also add the short name **`ipco`** beside it (a symlink; on
 Windows a one-line `ipco.cmd`), unless something else already owns that name.
 
+**Homebrew** (macOS/Linux) — the latest stable release, with `ipco` beside it:
+
+```sh
+brew install ipsupport-llc/tap/ipco
+```
+
+Homebrew then owns the install: `update` points you at `brew upgrade ipsupport-code`
+instead of replacing the binary.
+
 **Or download the archive** for your platform from the
 [latest release](https://github.com/ipsupport-llc/ipsupport-code/releases/latest)
 (or the rolling [`nightly`](https://github.com/ipsupport-llc/ipsupport-code/releases/tag/nightly)):

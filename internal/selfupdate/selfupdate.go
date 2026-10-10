@@ -100,6 +100,9 @@ func Latest(ctx context.Context, repo, channel string, hc *http.Client) (Release
 // Apply downloads the release asset, verifies its checksum, and replaces the
 // running executable. It returns the path of the replaced binary.
 func Apply(ctx context.Context, rel Release, hc *http.Client) (string, error) {
+	if cmd := BrewUpgrade(); cmd != "" {
+		return "", fmt.Errorf("installed with Homebrew — update it with: %s", cmd)
+	}
 	if hc == nil {
 		hc = http.DefaultClient
 	}
@@ -262,6 +265,25 @@ func extractZip(data []byte, name string) ([]byte, error) {
 		return bin, nil
 	}
 	return nil, fmt.Errorf("%q not found in the archive", name)
+}
+
+// BrewUpgrade is the command that updates this binary when Homebrew installed
+// it, or "" when Homebrew didn't. Homebrew owns that install: replacing the
+// file in its Cellar behind its back leaves brew believing in a version that
+// is no longer there.
+func BrewUpgrade() string {
+	exe, err := executable()
+	if err != nil {
+		return ""
+	}
+	return brewUpgrade(exe)
+}
+
+func brewUpgrade(exe string) string {
+	if strings.Contains(filepath.ToSlash(exe), "/Cellar/ipsupport-code/") {
+		return "brew upgrade ipsupport-code"
+	}
+	return ""
 }
 
 // executable is the path of the running binary, symlinks resolved.

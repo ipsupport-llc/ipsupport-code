@@ -267,3 +267,17 @@ func TestReplaceInUseMovesTheOldOneAside(t *testing.T) {
 		t.Fatalf(".old still there after cleanup: %v", err)
 	}
 }
+
+// A binary Homebrew installed is updated by brew, not by replacing it.
+func TestBrewInstallIsUpdatedByBrew(t *testing.T) {
+	for _, c := range []struct{ exe, want string }{
+		{"/opt/homebrew/Cellar/ipsupport-code/0.62.21/bin/ipsupport-code", "brew upgrade ipsupport-code"},
+		{"/home/linuxbrew/.linuxbrew/Cellar/ipsupport-code/0.62.21/bin/ipsupport-code", "brew upgrade ipsupport-code"},
+		{"/usr/local/bin/ipsupport-code", ""},
+		{"/home/me/.local/bin/ipsupport-code", ""},
+	} {
+		if got := brewUpgrade(c.exe); got != c.want {
+			t.Errorf("brewUpgrade(%q) = %q, want %q", c.exe, got, c.want)
+		}
+	}
+}

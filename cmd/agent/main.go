@@ -785,7 +785,7 @@ func (a *app) newSubAgent(plan spawnPlan, client *llm.OpenAIClient, id string) *
 		resolveStepBudget(plan.goalMaxSteps, plan.llmCfg))
 	sub.SetPlanMode(plan.planMode)
 	sub.SetLabel(id)
-	sub.SetRiskObserver(a.riskObserver(plan.subPol)) // its own, against its own policy
+	sub.SetRiskObserver(a.riskObserver(plan.subPol, string(plan.shell))) // its own, against its own policy
 	sub.SetContextWindow(plan.llmCfg.ContextWindow)
 	return sub
 }
@@ -3011,12 +3011,12 @@ func (a *app) wire() error {
 	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
 	a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
-	a.ensureShadow()                                   // once per process, here on the wiring goroutine
-	a.ag.SetRiskObserver(a.riskObserver(pol))          // shadow-mode risk scoring: logs, blocks nothing
-	a.ag.SetContextWindow(a.activeLLM().ContextWindow) // so a single long task can watch its OWN growing trail mid-run
-	a.wireJudge()                                      // its own connection only when /reasoning judge was set
-	a.ag.SetSideContinuation(a.isLocal())              // judge as a continuation where the server caches the prefix
-	a.ag.SetMaxStuckTurns(a.cfg.MaxStuckTurns)         // 0 = internal/agent's own default
+	a.ensureShadow()                                           // once per process, here on the wiring goroutine
+	a.ag.SetRiskObserver(a.riskObserver(pol, a.cfg.Run.Shell)) // shadow-mode risk scoring: logs, blocks nothing
+	a.ag.SetContextWindow(a.activeLLM().ContextWindow)         // so a single long task can watch its OWN growing trail mid-run
+	a.wireJudge()                                              // its own connection only when /reasoning judge was set
+	a.ag.SetSideContinuation(a.isLocal())                      // judge as a continuation where the server caches the prefix
+	a.ag.SetMaxStuckTurns(a.cfg.MaxStuckTurns)                 // 0 = internal/agent's own default
 	// A local server's KV-cache only helps while the prompt PREFIX stays
 	// identical between requests; remember()'s trim cuts from the front, which
 	// breaks that just like a summary compact would — so the cap is meant as a

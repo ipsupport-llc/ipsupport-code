@@ -30,13 +30,7 @@ const EnvRiskOff = "IPS_RISK"
 // observer of their own from their own goroutine, and that must never be the
 // call that constructs the shared scorer.
 func (a *app) ensureShadow() {
-	if a.shadow != nil {
-		// wire() runs again on every /config change: a new run.shell must
-		// reach the scorer too. Under the model's lock (SetShell).
-		a.shadow.Model().SetShell(shellDialect(runtime.GOOS, a.cfg.Run.Shell))
-		return
-	}
-	if strings.EqualFold(os.Getenv(EnvRiskOff), "off") {
+	if a.shadow != nil || strings.EqualFold(os.Getenv(EnvRiskOff), "off") {
 		return
 	}
 	base := risk.DefaultOrNil()
@@ -61,9 +55,7 @@ func (a *app) ensureShadow() {
 	// on the pointer, which is what CI caught. Reusing it also keeps what the
 	// session has learned: rebuilding would drop the in-memory corrections on the
 	// floor every time a setting changed.
-	tuned := risk.NewTuned(base, d)
-	tuned.SetShell(shellDialect(runtime.GOOS, a.cfg.Run.Shell))
-	a.shadow = risk.NewShadow(tuned)
+	a.shadow = risk.NewShadow(risk.NewTuned(base, d))
 }
 
 // shellDialect is the shell run.shell commands are written for: sh off
@@ -87,14 +79,17 @@ func shellDialect(goos, shell string) shellsplit.Dialect {
 // sub-agent's file write recorded a correction about the spawn, with the
 // spawn's parameters. Wrong call, wrong label, written to the feedback log that
 // later fine-tunes the base.
-func (a *app) riskObserver(pol *policy.Engine) func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
+func (a *app) riskObserver(pol *policy.Engine, shell string) func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
 	sh := a.shadow
 	if sh == nil {
 		return nil
 	}
-	ws := pol.Workdir() // paths into it are the project's own (risk.Localize)
+	// shell is the run.shell this agent's tool registry got, passed in rather
+	// than read from a.cfg: a delegate is built on its spawn's goroutine, and it
+	// keeps the shell it runs in when the host's run.shell changes later.
+	sc := risk.Scope{Workspace: pol.Workdir(), Shell: shellDialect(runtime.GOOS, shell)}
 	return func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string) {
-		as := sh.Observe(ws, tool, action, params, policyVerdict(pol, tool, action, params))
+		as := sh.Observe(sc, tool, action, params, policyVerdict(pol, tool, action, params))
 		// Hand the score down to the approval prompt, which is where a human
 		// answers for this call and so the only place ground truth appears — and
 		// back up as a note, so the call's own line can carry it.

@@ -624,15 +624,9 @@ OS = "windows"
 # argument decides — plus the commands whose danger is the command itself.
 # Absolute project paths too: a project on Windows lives at C:\\Users\\…\\src or
 # D:\\repos\\…, and with only relative ones every C:\\ path read as the system.
-WIN_PROJECT_ABS = ["C:\\Users\\alice\\src\\api\\main.go", "C:\\Users\\alice\\src\\api\\README.md",
-                   "D:\\repos\\billing\\Program.cs", "D:\\repos\\billing\\appsettings.Development.json.example",
-                   "C:\\work\\tool\\scripts\\build.ps1", "C:\\work\\tool\\docs\\index.md",
-                   "C:\\Users\\bob\\Documents\\GitHub\\site\\index.html", "E:\\dev\\game\\src\\player.cpp",
-                   # The user name carries nothing: secrets sit under these same
-                   # users. With "dev" only ever in a secret's path, every
-                   # C:\\Users\\dev\\… read as credentials.
-                   "C:\\Users\\dev\\repos\\shop\\main.py", "C:\\Users\\dev\\source\\api\\Program.cs",
-                   "C:\\Users\\dev\\code\\cli\\README.md"]
+# No absolute project paths: the scorer reads a path into the workspace as
+# relative (risk.Localize), so the model never sees one.
+WIN_PROJECT_ABS = []
 WIN_PROJECT = WIN_PROJECT_ABS + ["README.md", "src\\app.ts", ".\\main.go", "tests\\test_api.py", "docs\\index.html",
                "package.json", "src\\components\\Button.tsx", "cmd\\agent\\main.go", "app\\models.py",
                "config\\dev.yaml", "scripts\\build.ps1", "Program.cs", "MyApp.csproj"]
@@ -943,12 +937,19 @@ for os_ in ("linux", "windows"):
             cmd = rng.choice([" & ", " && "]).join(m["params"]["command"] for m in members)
             split = "holdout" if any(m["split"] == "holdout" for m in members) else "train"
             add("run", "shell", {"command": cmd}, [], split)
-        for r in rng.sample([x for x in singles if risky(x["labels"])], 60):
-            g = rng.choice(cmd_ok)
-            add("run", "shell", {"command": f'{g["params"]["command"]} & {r["params"]["command"]}'}, r["labels"],
-                "holdout" if "holdout" in (r["split"], g["split"]) else "train")
         SHELL = None
 OS = "linux"
+
+# One row per call: the same command in two places (npm ci is a build step and
+# a package fetch) gave it two splits and, at times, two sets of labels.
+_seen = set()
+_unique = []
+for r in rows:
+    k = json.dumps([r["tool"], r["action"], r["params"], r.get("os"), r.get("shell")], sort_keys=True)
+    if k not in _seen:
+        _seen.add(k)
+        _unique.append(r)
+rows = _unique
 
 out = pathlib.Path(__file__).with_name("risk_dataset.jsonl")
 with out.open("w") as f:

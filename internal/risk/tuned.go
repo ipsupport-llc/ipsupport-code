@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -107,7 +106,6 @@ type Delta struct {
 // goroutines are scoring.
 type Tuned struct {
 	mu      sync.RWMutex
-	shell   shellsplit.Dialect // how a run.shell command is cut into commands; set before use
 	base    *Model
 	fp      [8]byte // base.Fingerprint(), computed once
 	d       *Delta
@@ -148,24 +146,17 @@ func (m *Model) Fingerprint() [8]byte {
 	return fp
 }
 
-// SetShell names the shell run.shell commands are written for. Called once,
-// before the model is shared.
-func (t *Tuned) SetShell(d shellsplit.Dialect) {
-	if t != nil {
-		t.mu.Lock()
-		t.shell = d
-		t.mu.Unlock()
-	}
+// Scope is where a call is made: the workspace whose paths are the project's
+// own, and the shell its run.shell commands are cut by. It belongs to the
+// observer of one agent — a delegate keeps the shell it was started with
+// when the host's run.shell changes.
+type Scope struct {
+	Workspace string
+	Shell     shellsplit.Dialect
 }
 
-func (t *Tuned) dialect() shellsplit.Dialect {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.shell
-}
-
-// maxParts bounds what one call costs to score: past it, a line's remaining
-// commands are scored together as one text rather than one by one.
+// maxParts bounds what one call costs to score. Past it the rest is not
+// scored, and the assessment says so (Incomplete).
 const maxParts = 256
 
 // parts is what a call is scored as. A shell line is a program of several
@@ -175,61 +166,66 @@ const maxParts = 256
 // heredoc bodies, here-strings or comments — data, not commands) is scored,
 // each group of commands joined by | && || (a pipeline's danger can be in the
 // joining: `curl … | sh`, whatever comes before it), and each command on its
-// own; the call's risk is the highest. Every part is a copy: what Assess hands
-// back must not change with the caller's map.
-func (t *Tuned) parts(d shellsplit.Dialect, tool, action string, params map[string]any) []map[string]any {
+// own; the call's risk is the highest.
+//
+// The line is cut as written and each part then localized: localizing first
+// rewrote a heredoc's word and the cut swallowed what followed. Every part is
+// a copy: what Assess hands back must not change with the caller's map.
+func (t *Tuned) parts(sc Scope, tool, action string, params map[string]any) (out []map[string]any, incomplete bool) {
 	with := func(c string, set bool) map[string]any {
 		p := make(map[string]any, len(params))
 		for k, v := range params {
+			if s, ok := v.(string); ok {
+				v = LocalizePath(s, sc.Workspace)
+			}
 			p[k] = v
 		}
 		if set {
-			p["command"] = c
+			p["command"] = Localize(c, sc.Workspace)
 		}
 		return p
 	}
 	cmd, ok := params["command"].(string)
 	if tool != "run" || action != "shell" || !ok {
-		return []map[string]any{with("", false)}
+		return []map[string]any{with("", false)}, false
 	}
-	parsed := shellsplit.Parse(d, cmd)
+	parsed := shellsplit.Parse(sc.Shell, cmd)
 	// The whole, as code. A line that is all comment runs nothing: its code is
 	// empty and scored as such, not as the comment's words.
-	out := []map[string]any{with(parsed.Code, true)}
+	out = []map[string]any{with(parsed.Code, true)}
 	seen := map[string]bool{parsed.Code: true}
-	pieces := append(append([]string{}, parsed.Groups...), parsed.Commands...)
-	for i, c := range pieces {
-		if len(out) == maxParts-1 && i < len(pieces)-1 {
-			out = append(out, with(strings.Join(pieces[i:], " ; "), true))
-			break
+	for _, c := range append(append([]string{}, parsed.Groups...), parsed.Commands...) {
+		if seen[c] {
+			continue
 		}
-		if !seen[c] {
-			seen[c] = true
-			out = append(out, with(c, true))
+		if len(out) == maxParts {
+			return out, true
 		}
+		seen[c] = true
+		out = append(out, with(c, true))
 	}
-	return out
+	return out, parsed.Incomplete
 }
 
 // Base is the underlying model — its labels, config and informational flags.
 func (t *Tuned) Base() *Model { return t.base }
 
 // Assess scores a call through the base model plus the local corrections —
-// each of its parts (see parts), the call's risk being the highest.
+// each of its parts (see parts), the call's risk being the highest. No
+// workspace, and sh: see AssessIn.
 func (t *Tuned) Assess(tool, action string, params map[string]any) Assessment {
-	return t.AssessIn("", tool, action, params)
+	return t.AssessIn(Scope{}, tool, action, params)
 }
 
-// AssessIn is Assess for a call made in workspace: paths into it are read as
-// the project's own (see Localize).
-func (t *Tuned) AssessIn(workspace, tool, action string, params map[string]any) Assessment {
+// AssessIn is Assess for a call made in sc: its shell cuts the line, and
+// paths into its workspace are read as the project's own (see Localize).
+func (t *Tuned) AssessIn(sc Scope, tool, action string, params map[string]any) Assessment {
 	if t == nil {
 		return Assessment{}
 	}
-	params = localizeParams(params, workspace)
-	d := t.dialect()
+	parts, incomplete := t.parts(sc, tool, action, params)
 	var out Assessment
-	for i, p := range t.parts(d, tool, action, params) {
+	for i, p := range parts {
 		a := t.assessText(CallText(tool, action, p))
 		a.Params, a.PartScores = p, a.Scores
 		if i == 0 {
@@ -249,8 +245,9 @@ func (t *Tuned) AssessIn(workspace, tool, action string, params map[string]any) 
 		}
 	}
 	if tool == "run" && action == "shell" {
-		out.Shell = d.String()
+		out.Shell = sc.Shell.String()
 	}
+	out.Incomplete = incomplete
 	return out
 }
 

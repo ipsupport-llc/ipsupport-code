@@ -89,11 +89,11 @@ func (s *Shadow) NoteLearned() {
 // model finds unremarkable. Those two sets are the entire product of shadow
 // mode — the first says what a risk signal could add, the second says how much
 // noise it would add.
-func (s *Shadow) Observe(workspace, tool, action string, params map[string]any, verdict PolicyVerdict) Assessment {
+func (s *Shadow) Observe(sc Scope, tool, action string, params map[string]any, verdict PolicyVerdict) Assessment {
 	if s == nil {
 		return Assessment{}
 	}
-	a := s.model.AssessIn(workspace, tool, action, params)
+	a := s.model.AssessIn(sc, tool, action, params)
 	s.calls.Add(1)
 
 	flagged := a.Risk >= Threshold
@@ -121,7 +121,8 @@ func (s *Shadow) Observe(workspace, tool, action string, params map[string]any, 
 		"policy", verdict.String(),
 		"disagreement", dis,
 		"call", clip(CallText(tool, action, params), 160),
-		"part", clip(partText(tool, action, params, a.Params), 160))
+		"part", clip(partText(tool, action, params, a.Params), 160),
+		"incomplete", a.Incomplete)
 	return a
 }
 

@@ -161,3 +161,52 @@ func TestALongLineIsCutInLinearTime(t *testing.T) {
 		t.Fatal("no commands")
 	}
 }
+
+// The second review's ways to hide a command, each now cut out.
+func TestHiddenCommandsAreFoundRound2(t *testing.T) {
+	for _, c := range []struct {
+		d    Dialect
+		in   string
+		want string
+	}{
+		{Sh, "'sh' <<'EOF'\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"},            // a quoted program name
+		{Sh, "<<'EOF' sh\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"},              // the redirection first
+		{Sh, "<< 'EOF' sh\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"},             // the operator apart from its word
+		{Sh, "> log sh <<'EOF'\nrm -rf src/legacy\nEOF", "rm -rf src/legacy"},        // an output file is not the program
+		{Sh, "sh <<EOF\n# $(rm -rf src/legacy)\nEOF", "rm -rf src/legacy"},           // expanded before the script runs
+		{Sh, "timeout 5 sh <<EOF\nrm -rf x\nEOF", "rm -rf x"},                        // past a wrapper's argument
+		{Sh, "ssh deploy@host <<'EOF'\nrm -rf /srv/app\nEOF", "rm -rf /srv/app"},     // a script for another host
+		{Sh, "echo $(printf x)#not-comment; rm -rf src/legacy", "rm -rf src/legacy"}, // a ) starts no word
+		{Sh, "cat <<EO\\\nF\nbody\nEOF\nrm -rf victim", "rm -rf victim"},             // continuation in the word
+		{Sh, "cat <<EOF\nbody\nEO\\\nF\nrm -rf victim", "rm -rf victim"},             // continuation in the terminator
+		{Sh, "sh -c 'echo hi; rm -rf /tmp/q'", "rm -rf /tmp/q"},
+		{Sh, "bash -lc \"cd x && rm -rf build\"", "rm -rf build"},
+		{Sh, "pwsh -Command \"Remove-Item -Recurse x\"", "Remove-Item -Recurse x"},
+		{PowerShell, "cmd /c \"rd /s /q build\"", "rd /s /q build"},
+		{Cmd, "cmd /c rd /s /q build & dir", "rd /s /q build"},
+		{Sh, "python3 -c 'import shutil; shutil.rmtree(\"/\")'", "import shutil; shutil.rmtree(\"/\")"},
+		{Sh, "eval 'rm -rf x'", "rm -rf x"},
+	} {
+		got := Split(c.d, c.in)
+		found := false
+		for _, g := range got {
+			found = found || g == c.want
+		}
+		if !found {
+			t.Errorf("Split(%d, %q) = %q — %q is not among them", c.d, c.in, got, c.want)
+		}
+	}
+}
+
+// Nesting past maxDepth is kept as text and said to be incomplete — not a
+// crash, not unbounded work.
+func TestDeepNestingIsIncomplete(t *testing.T) {
+	line := "echo " + strings.Repeat("$(", 500) + "rm -rf x" + strings.Repeat(")", 500)
+	p := Parse(Sh, line)
+	if !p.Incomplete {
+		t.Fatal("500 levels of $( ) were not marked incomplete")
+	}
+	if q := Parse(Sh, "echo $(echo $(ls))"); q.Incomplete {
+		t.Fatal("ordinary nesting marked incomplete")
+	}
+}

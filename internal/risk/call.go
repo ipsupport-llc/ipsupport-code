@@ -44,10 +44,7 @@ func CallText(tool, action string, params map[string]any) string {
 		if v == "" {
 			continue
 		}
-		r := []rune(v)
-		if len(r) > maxValue {
-			r = r[:maxValue]
-		}
+		r := headTail([]rune(v), maxValue)
 		b = append(b, ' ')
 		b = append(b, []rune(k)...)
 		b = append(b, '=')
@@ -56,10 +53,20 @@ func CallText(tool, action string, params map[string]any) string {
 			break
 		}
 	}
-	if len(b) > maxText {
-		b = b[:maxText]
+	return string(headTail(b, maxText))
+}
+
+// headTail keeps the first and last halves of what is too long, joined by
+// " … ": a cap that kept only the head let a long harmless start hide what
+// came last (`sh -c 'echo <400 chars>; rm -rf x'`).
+func headTail(r []rune, max int) []rune {
+	if len(r) <= max {
+		return r
 	}
-	return string(b)
+	h := (max - 3) / 2
+	out := append([]rune{}, r[:h]...)
+	out = append(out, []rune(" … ")...)
+	return append(out, r[len(r)-(max-3-h):]...)
 }
 
 // LabelSafe is the label that means "none of the risky ones". It is scored like
@@ -93,6 +100,10 @@ type Assessment struct {
 	// Shell is the dialect a shell line was cut by ("" for other calls), so a
 	// recorded correction is retrained under the same rules.
 	Shell string
+	// Incomplete: not every part of the call was scored — more than maxParts
+	// commands, or code nested past the splitter's depth. A gate must not
+	// read the score as clearance.
+	Incomplete bool
 }
 
 // Assess scores one tool call.

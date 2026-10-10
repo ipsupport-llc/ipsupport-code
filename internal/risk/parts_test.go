@@ -2,6 +2,7 @@ package risk
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -40,9 +41,8 @@ func TestAHeredocBodyIsNotScoredAsCommands(t *testing.T) {
 // so an answer about it would teach the whole line instead of the delete.
 func TestPowerShellLinesAreCutByPowerShellRules(t *testing.T) {
 	m := NewTuned(DefaultOrNil(), nil)
-	m.SetShell(shellsplit.PowerShell)
 	line := "Write-Host 'Cleaning up, it''s quick'; Remove-Item -Recurse -Force C:\\src\\app; Write-Host 'Done.'"
-	a := m.Assess("run", "shell", shellCall(line))
+	a := m.AssessIn(Scope{Shell: shellsplit.PowerShell}, "run", "shell", shellCall(line))
 	if a.Risk < Threshold || a.Params["command"] != "Remove-Item -Recurse -Force C:\\src\\app" {
 		t.Fatalf("risk %.2f on %q, want the Remove-Item", a.Risk, a.Params["command"])
 	}
@@ -90,7 +90,7 @@ func TestALineIsSafeOnlyAsFarAsEveryPart(t *testing.T) {
 // relative path, not like an absolute one somewhere on the machine.
 func TestAPathIntoTheWorkspaceIsTheProjects(t *testing.T) {
 	m := NewTuned(DefaultOrNil(), nil)
-	in := m.AssessIn("/home/dev/src/shop", "run", "shell", shellCall("wc -l /home/dev/src/shop/data/orders.csv"))
+	in := m.AssessIn(Scope{Workspace: "/home/dev/src/shop"}, "run", "shell", shellCall("wc -l /home/dev/src/shop/data/orders.csv"))
 	rel := m.Assess("run", "shell", shellCall("wc -l ./data/orders.csv"))
 	if d := in.Risk - rel.Risk; d > 1e-5 || d < -1e-5 {
 		t.Fatalf("in the workspace %.2f, relative %.2f", in.Risk, rel.Risk)
@@ -157,5 +157,58 @@ func TestAnAssessmentDoesNotAliasTheCallersParams(t *testing.T) {
 	file["path"] = "elsewhere"
 	if b.Params["path"] != "src/app.go" {
 		t.Fatalf("a file call's params changed to %q", b.Params["path"])
+	}
+}
+
+// One part longer than a value's cap: its end is still in the text scored,
+// not cut off with the rest.
+func TestTheEndOfALongPartIsRead(t *testing.T) {
+	line := "printf '%s' " + strings.Repeat("ok ", 300) + "> ~/.ssh/authorized_keys"
+	parts, _ := NewTuned(DefaultOrNil(), nil).parts(Scope{}, "run", "shell", shellCall(line))
+	if len(parts) != 1 {
+		t.Fatalf("%d parts, want the one command", len(parts))
+	}
+	if text := CallText("run", "shell", parts[0]); !strings.Contains(text, "authorized_keys") {
+		t.Fatalf("the end of the command is not scored: %q", text)
+	}
+}
+
+// More parts than maxParts: not silently cut — the assessment says it is
+// incomplete.
+func TestTooManyPartsIsIncomplete(t *testing.T) {
+	m := NewTuned(DefaultOrNil(), nil)
+	var cmds []string
+	for i := range 300 {
+		cmds = append(cmds, fmt.Sprintf("echo ok%d", i))
+	}
+	a := m.Assess("run", "shell", shellCall(strings.Join(append(cmds, "rm -rf src/legacy"), "; ")))
+	if !a.Incomplete {
+		t.Fatal("301 commands scored as if complete")
+	}
+	if b := m.Assess("run", "shell", shellCall("ls; pwd")); b.Incomplete {
+		t.Fatal("two commands marked incomplete")
+	}
+}
+
+// Cut first, localize the parts: a workspace path as a heredoc's word no
+// longer turns the following command into heredoc data.
+func TestLocalizingDoesNotChangeHowALineIsCut(t *testing.T) {
+	m := NewTuned(DefaultOrNil(), nil)
+	line := "cat <<'/app'\ncan't\n/app\nrm -rf src/legacy"
+	a := m.AssessIn(Scope{Workspace: "/app"}, "run", "shell", shellCall(line))
+	if a.Params["command"] != "rm -rf src/legacy" {
+		t.Fatalf("scored %q (risk %.2f): the rm after the heredoc was lost", a.Params["command"], a.Risk)
+	}
+}
+
+// A file tool's path is a path, whole: a space is part of the name.
+func TestAPathParameterIsLocalizedWhole(t *testing.T) {
+	for _, c := range []struct{ v, ws, want string }{
+		{"/app/data.csv", "/app", "./data.csv"}, {"/app", "/app", "."}, {"/app backup/data", "/app", "/app backup/data"},
+		{"/application/x", "/app", "/application/x"}, {`c:\WORK\proj\a.txt`, `C:\work\proj`, `.\a.txt`},
+	} {
+		if got := LocalizePath(c.v, c.ws); got != c.want {
+			t.Errorf("LocalizePath(%q, %q) = %q, want %q", c.v, c.ws, got, c.want)
+		}
 	}
 }

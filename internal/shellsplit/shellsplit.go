@@ -35,10 +35,17 @@ type Parsed struct {
 	// Groups are commands joined by | || && (|& in sh) into one unit with two
 	// or more members — a pipeline's danger can be in the joining (`curl … | sh`).
 	Groups []string
-	// Code is the line without its data — heredoc bodies, here-strings,
-	// comments — with its commands and the operators between them.
+	// Code is the line without its data — heredoc bodies, PowerShell
+	// here-strings, comments — with its commands and the operators between
+	// them. (A sh <<< here-string is one word of its command and stays.)
 	Code string
+	// Incomplete: code nested deeper than maxDepth was kept as text, not cut.
+	Incomplete bool
 }
+
+// maxDepth bounds nesting — $( $( $( … ) ) ), script blocks, heredocs fed to
+// a shell. Deeper code is kept whole as one command, and the parse says so.
+const maxDepth = 32
 
 // Split returns the commands in line (see Parsed.Commands).
 func Split(d Dialect, line string) []string { return Parse(d, line).Commands }
@@ -47,8 +54,16 @@ func Split(d Dialect, line string) []string { return Parse(d, line).Commands }
 func Code(d Dialect, line string) string { return Parse(d, line).Code }
 
 // Parse cuts line once.
-func Parse(d Dialect, line string) Parsed {
-	r := &result{}
+func Parse(d Dialect, line string) Parsed { return parse(d, line, 0) }
+
+func parse(d Dialect, line string, depth int) Parsed {
+	r := &result{d: d, depth: depth}
+	if depth >= maxDepth {
+		if s := Trim(line); s != "" {
+			r.cmds = append(r.cmds, s)
+		}
+		return Parsed{Commands: r.cmds, Code: Trim(line), Incomplete: true}
+	}
 	switch d {
 	case PowerShell:
 		splitPowerShell(line, r)
@@ -59,7 +74,7 @@ func Parse(d Dialect, line string) Parsed {
 	}
 	r.endGroup()
 	code := strings.TrimSuffix(r.code.String(), " ;")
-	return Parsed{Commands: r.cmds, Groups: r.groups, Code: Trim(code)}
+	return Parsed{Commands: append(r.cmds, r.inner...), Groups: append(r.groups, r.innerG...), Code: Trim(code), Incomplete: r.incomplete}
 }
 
 // Trim is strings.TrimSpace — named so the Python port can match it exactly
@@ -67,11 +82,16 @@ func Parse(d Dialect, line string) Parsed {
 func Trim(s string) string { return strings.TrimSpace(s) }
 
 type result struct {
-	cmds   []string
-	groups []string
-	code   strings.Builder
-	group  []string // commands of the group being read
-	gtext  strings.Builder
+	d          Dialect
+	depth      int
+	incomplete bool
+	cmds       []string
+	groups     []string
+	inner      []string // what a command runs inside it: sh -c '…', eval …
+	innerG     []string
+	code       strings.Builder
+	group      []string // commands of the group being read
+	gtext      strings.Builder
 }
 
 // joins are the operators that keep a group going.
@@ -81,6 +101,7 @@ var joins = map[string]bool{"|": true, "||": true, "&&": true, "|&": true}
 func (r *result) cut(b *buf, op string) {
 	if s := Trim(b.String()); s != "" {
 		r.cmds = append(r.cmds, s)
+		r.innerCode(s)
 		if r.code.Len() > 0 {
 			r.code.WriteString(" ")
 		}
@@ -114,9 +135,104 @@ func (r *result) endGroup() {
 
 // nest adds what a nested piece of code holds, after the line's own.
 func (r *result) nest(n *[]string, ng *[]string, d Dialect, code string) {
-	p := Parse(d, code)
+	p := parse(d, code, r.depth+1)
 	*n = append(*n, p.Commands...)
 	*ng = append(*ng, p.Groups...)
+	r.incomplete = r.incomplete || p.Incomplete
+}
+
+// innerCode adds the code a command hands to another interpreter as an
+// argument: sh -c '…', pwsh -Command "…", cmd /c …, python -c '…', eval ….
+func (r *result) innerCode(cmd string) {
+	if r.d == Cmd { // cmd's own words aren't sh's; /c is read as the rest of the line
+		ws := strings.Fields(cmd)
+		for i, w := range ws {
+			if (strings.EqualFold(w, "/c") || strings.EqualFold(w, "/k")) && i > 0 && strings.EqualFold(path.Base(strings.ReplaceAll(ws[i-1], `\`, "/")), "cmd") {
+				r.nest(&r.inner, &r.innerG, Cmd, strings.Join(ws[i+1:], " "))
+				return
+			}
+		}
+		return
+	}
+	ws := words(cmd)
+	at := programAt(ws)
+	if at < 0 {
+		return
+	}
+	prog, rest := ws[at], ws[at+1:]
+	switch {
+	case prog == "eval":
+		r.nest(&r.inner, &r.innerG, r.d, strings.Join(rest, " "))
+	case shells[prog] || prog == "pwsh" || prog == "powershell" || prog == "cmd" || interpreters[prog]:
+		for i, w := range rest {
+			if i+1 >= len(rest) {
+				break
+			}
+			body := rest[i+1]
+			switch {
+			case (shells[prog]) && strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.Contains(w, "c"):
+				r.nest(&r.inner, &r.innerG, Sh, body)
+				return
+			case (prog == "pwsh" || prog == "powershell") && (strings.EqualFold(w, "-c") || strings.EqualFold(w, "-command")):
+				r.nest(&r.inner, &r.innerG, PowerShell, strings.Join(rest[i+1:], " "))
+				return
+			case prog == "cmd" && (strings.EqualFold(w, "/c") || strings.EqualFold(w, "/k")):
+				r.nest(&r.inner, &r.innerG, Cmd, strings.Join(rest[i+1:], " "))
+				return
+			case interpreters[prog] && (w == "-c" || w == "-e" || w == "--eval"):
+				if t := Trim(body); t != "" {
+					r.inner = append(r.inner, t) // another language: scored as itself
+				}
+				return
+			}
+		}
+	}
+}
+
+// words splits a simple command into its words with sh quote removal:
+// '…' literal, "…" with \ escapes, \ outside quotes.
+func words(cmd string) []string {
+	var out []string
+	var w strings.Builder
+	in := false
+	rs := []rune(cmd)
+	for i := 0; i < len(rs); i++ {
+		c := rs[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n':
+			if in {
+				out = append(out, w.String())
+				w.Reset()
+				in = false
+			}
+		case c == '\'':
+			in = true
+			j := indexFrom(rs, i+1, '\'')
+			w.WriteString(string(rs[i+1 : min(j, len(rs))]))
+			i = j
+		case c == '"':
+			in = true
+			i++
+			for i < len(rs) && rs[i] != '"' {
+				if rs[i] == '\\' && i+1 < len(rs) && strings.ContainsRune("\"\\$`", rs[i+1]) {
+					i++
+				}
+				w.WriteRune(rs[i])
+				i++
+			}
+		case c == '\\' && i+1 < len(rs):
+			in = true
+			i++
+			w.WriteRune(rs[i])
+		default:
+			in = true
+			w.WriteRune(c)
+		}
+	}
+	if in {
+		out = append(out, w.String())
+	}
+	return out
 }
 
 // buf is the command being read. It remembers its last rune and whether an
@@ -151,22 +267,68 @@ func (b *buf) after(set string) bool {
 
 // shells read a heredoc as a script; interpreters read it as their own code.
 var (
-	shells       = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true}
+	// ssh and su run a heredoc as a shell script too — on another host, as
+	// another user.
+	shells       = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true, "ssh": true, "su": true}
 	interpreters = map[string]bool{"python": true, "python3": true, "python2": true, "perl": true, "ruby": true, "node": true,
 		"php": true, "lua": true, "deno": true, "bun": true, "osascript": true, "tclsh": true, "Rscript": true}
-	wrappers = map[string]bool{"sudo": true, "env": true, "exec": true, "nohup": true, "time": true, "command": true, "doas": true}
+	wrappers = map[string]bool{"sudo": true, "env": true, "exec": true, "nohup": true, "time": true, "command": true, "doas": true,
+		"timeout": true, "nice": true, "ionice": true, "stdbuf": true, "setsid": true, "xargs": true, "builtin": true}
 )
 
-// program is the command's program name, past sudo/env and the like.
+// program is the command's program name: past assignments, flags,
+// redirections (<<EOF sh) and wrappers (sudo, env, timeout 5, nice -n 10).
 func program(cmd string) string {
-	for _, f := range strings.Fields(cmd) {
-		base := path.Base(f)
-		if wrappers[base] || strings.HasPrefix(f, "-") || strings.Contains(f, "=") {
-			continue
-		}
-		return base
+	ws := words(cmd)
+	if at := programAt(ws); at >= 0 {
+		return ws[at]
 	}
 	return ""
+}
+
+// programAt is the index of the program's word, its value the base name; -1
+// when there is none.
+func programAt(ws []string) int {
+	for i := 0; i < len(ws); i++ {
+		w := ws[i]
+		switch {
+		case w == "<<" || w == "<<-" || w == "<" || w == ">" || w == ">>" || w == "2>" || w == "&>":
+			i++ // the operator's operand
+			continue
+		case strings.HasPrefix(w, "<") || strings.HasPrefix(w, ">") || redirection(w),
+			strings.HasPrefix(w, "-"), strings.Contains(w, "="), duration(w):
+			continue
+		}
+		base := path.Base(w)
+		if wrappers[base] {
+			continue
+		}
+		ws[i] = base
+		return i
+	}
+	return -1
+}
+
+func redirection(w string) bool {
+	i := 0
+	for i < len(w) && w[i] >= '0' && w[i] <= '9' {
+		i++
+	}
+	return i > 0 && i < len(w) && (w[i] == '<' || w[i] == '>')
+}
+
+// duration is a wrapper's numeric argument: timeout 5, nice 10, sleep 1.5s.
+func duration(w string) bool {
+	t := strings.TrimRight(w, "smhd")
+	if t == "" {
+		return false
+	}
+	for _, c := range t {
+		if (c < '0' || c > '9') && c != '.' {
+			return false
+		}
+	}
+	return true
 }
 
 // splitSh follows POSIX sh: ; & && || | |& and newlines separate commands;
@@ -181,7 +343,9 @@ func splitSh(line string, out *result) {
 	var heredocs []heredoc // pending on this line: their bodies start at the next newline
 	var nested, ngroups []string
 	cut := func(op string) { out.cut(&b, op) }
-	wordStart := func() bool { return b.empty() || b.after(" \t\n;&|()") }
+	// Operators cut the command, so a word starts after a blank or at the
+	// start — a ) written into the buffer closed a $( ) and starts nothing.
+	wordStart := func() bool { return b.empty() || b.after(" \t\n") }
 	blankNext := func(i int) bool { return i+1 >= len(rs) || strings.ContainsRune(" \t\n;&|)", rs[i+1]) }
 	for i := 0; i < len(rs); i++ {
 		r := rs[i]
@@ -237,25 +401,35 @@ func splitSh(line string, out *result) {
 			i += 2
 		case r == '<' && i+1 < len(rs) && rs[i+1] == '<':
 			h, next := readHeredoc(rs, i+2)
-			h.prog = program(b.String())
+			h.cmd = len(out.cmds) // the command it belongs to; its program is read when that ends
 			heredocs = append(heredocs, h)
 			b.writeStr(string(rs[i:next]))
 			i = next - 1
 		case r == '\n':
+			progs := map[int]string{}
+			if len(heredocs) > 0 {
+				progs[len(out.cmds)] = program(b.String())
+			}
 			cut(";")
 			for _, h := range heredocs {
+				prog, ok := progs[h.cmd]
+				if !ok && h.cmd < len(out.cmds) {
+					prog = program(out.cmds[h.cmd])
+					progs[h.cmd] = prog
+				}
 				start := i + 1
 				end, next := heredocBody(rs, start, h)
 				body := string(rs[start:end])
+				if !h.quoted {
+					substitutions(body, out, &nested, &ngroups) // expanded first: its $( ) and ` ` run, whatever reads it
+				}
 				switch {
-				case shells[h.prog]:
+				case shells[prog]:
 					out.nest(&nested, &ngroups, Sh, body) // a script: its commands run
-				case interpreters[h.prog]:
+				case interpreters[prog]:
 					if s := Trim(body); s != "" {
 						nested = append(nested, s) // code in another language: scored as itself
 					}
-				case !h.quoted:
-					substitutions(body, out, &nested, &ngroups) // expanded: its $( ) and ` ` run
 				}
 				i = next - 1
 			}
@@ -312,9 +486,9 @@ func substitutions(body string, out *result, nested, ngroups *[]string) {
 
 type heredoc struct {
 	word   string
-	tabs   bool   // <<- : the closing word may be indented with tabs
-	quoted bool   // any quoting in the word: the body is not expanded
-	prog   string // the program reading it
+	tabs   bool // <<- : the closing word may be indented with tabs
+	quoted bool // any quoting in the word: the body is not expanded
+	cmd    int  // the index of the command it feeds
 }
 
 // readHeredoc reads the word after << (or <<-), with the shell's quote
@@ -350,6 +524,10 @@ func readHeredoc(rs []rune, i int) (heredoc, int) {
 			i = min(i+1, len(rs))
 			continue
 		case '\\':
+			if i+1 < len(rs) && rs[i+1] == '\n' { // a line continuation, not quoting
+				i += 2
+				continue
+			}
 			h.quoted = true
 			i++
 			if i >= len(rs) {
@@ -370,6 +548,12 @@ func heredocBody(rs []rune, i int, h heredoc) (end, next int) {
 	for i < len(rs) {
 		e := indexFrom(rs, i, '\n')
 		l := string(rs[i:e])
+		// An unquoted body takes line continuations: EO\⏎F closes it as EOF.
+		for !h.quoted && strings.HasSuffix(l, "\\") && e < len(rs) {
+			n := indexFrom(rs, e+1, '\n')
+			l = l[:len(l)-1] + string(rs[e+1:n])
+			e = n
+		}
 		if h.tabs {
 			l = strings.TrimLeft(l, "\t")
 		}
@@ -447,7 +631,7 @@ func splitPowerShell(line string, out *result) {
 				j++
 			}
 			i = j + 1
-		case r == '#' && (b.empty() || b.after(" \t;|&(){}")):
+		case r == '#' && (b.empty() || b.after(" \t")):
 			for i < len(rs) && rs[i] != '\n' {
 				i++
 			}

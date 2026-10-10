@@ -35,7 +35,9 @@ func Localize(text, workspace string) string {
 			startOK := i == 0 || !strings.ContainsRune(pathRunes, rune(text[i-1]))
 			endOK := end == len(text) || text[end] == '/' || text[end] == '\\' ||
 				(quote == 0 && strings.ContainsRune(" \t\n;&|)<>", rune(text[end]))) ||
-				(quote != 0 && text[end] == quote)
+				// A closing quote ends it only if no name goes on after it:
+				// "/app"x is the word /appx.
+				(quote != 0 && text[end] == quote && (end+1 == len(text) || !strings.ContainsRune(pathRunes, rune(text[end+1]))))
 			if startOK && endOK {
 				b.WriteString(".")
 				i = end
@@ -44,6 +46,11 @@ func Localize(text, workspace string) string {
 		}
 		c := text[i]
 		switch {
+		case c == '\\' && quote != '\'' && i+1 < len(text): // an escaped character changes no quoting
+			b.WriteByte(c)
+			b.WriteByte(text[i+1])
+			i += 2
+			continue
 		case quote == 0 && (c == '"' || c == '\''):
 			quote = c
 		case c == quote:
@@ -77,14 +84,23 @@ func foldWindows(s string) string {
 	return string(b)
 }
 
-// localizeParams is a copy of params with every string value localized.
-func localizeParams(params map[string]any, workspace string) map[string]any {
-	out := make(map[string]any, len(params))
-	for k, v := range params {
-		if s, ok := v.(string); ok {
-			v = Localize(s, workspace)
-		}
-		out[k] = v
+// LocalizePath is Localize for a value that is a path and nothing else — a
+// file tool's "path": the workspace itself, or a path inside it, whole. A
+// space in it is part of the name, so "/app backup/x" stays outside.
+func LocalizePath(value, workspace string) string {
+	ws := strings.TrimRight(workspace, `/\`)
+	if ws == "" || ws == "." || ws == "~" || utf8.RuneCountInString(ws) < 2 {
+		return value
 	}
-	return out
+	hay, needle := value, ws
+	if windowsPath(ws) {
+		hay, needle = foldWindows(value), foldWindows(ws)
+	}
+	switch {
+	case hay == needle:
+		return "."
+	case strings.HasPrefix(hay, needle) && (hay[len(needle)] == '/' || hay[len(needle)] == '\\'):
+		return "." + value[len(ws):]
+	}
+	return value
 }

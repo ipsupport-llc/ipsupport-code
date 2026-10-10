@@ -149,7 +149,7 @@ func TestAssessNeverTopsOutOnSafe(t *testing.T) {
 // already allowed must not fail because a classifier could not load.
 func TestNilModelIsSafeToUse(t *testing.T) {
 	var s *Shadow = NewShadow(nil)
-	if a := s.Observe("", "run", "shell", map[string]any{"command": "rm -rf /"}, VerdictAllow); a.Risk != 0 {
+	if a := s.Observe(Scope{}, "run", "shell", map[string]any{"command": "rm -rf /"}, VerdictAllow); a.Risk != 0 {
 		t.Errorf("risk = %v from a nil shadow, want 0", a.Risk)
 	}
 	if c, f, d := s.Stats(); c|f|d != 0 {

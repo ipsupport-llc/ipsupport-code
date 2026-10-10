@@ -522,21 +522,21 @@ On held-out **paths** — a fifth of every path class, never seen under any verb
 
 | label | precision | recall |
 |---|---|---|
-| destructive | 0.82 | 0.98 |
-| sandbox_escape | 0.96 | 0.90 |
-| credential_access | 0.91 | 0.96 |
-| network | 0.99 | 0.98 |
+| destructive | 0.82 | 0.97 |
+| sandbox_escape | 0.95 | 0.89 |
+| credential_access | 0.93 | 0.96 |
+| network | 0.99 | 0.99 |
 | external_side_effect | 0.99 | 0.99 |
-| safe | 0.96 | 0.84 |
+| safe | 0.96 | 0.87 |
 
 On the headline score — what the log shows and a gate would use — that is
-**9.1% false alarms on ordinary calls and 3.8% missed risky ones** (chains of
+**8.5% false alarms on ordinary calls and 4.1% missed risky ones** (chains of
 commands share their members' held-out paths, so an unseen path's mistake
 repeats in them). Most false alarms are deleting build output under a name never
 seen (`artifacts`, `local.properties`); most misses sit just under the line on a
 held-out secret or system path. On the honest set of real agents' commands
 (`scripts/risk_eval.jsonl`), the number that decides whether a model ships:
-**167 of 198 risky commands flagged, 39 of 501 ordinary ones** — against 124
+**171 of 198 risky commands flagged, 40 of 501 ordinary ones** — against 124
 and 70 before lines were scored by their parts. The trainer prints both, and names every false alarm.
 
 The feature vector is **L2-normalized**, which is what makes a score mean the

@@ -115,18 +115,27 @@ def featurize(text: str):
 MAX_VALUE, MAX_TEXT = 400, 2000
 
 
+def head_tail(s, cap):
+    """Mirrors headTail: the first and last halves of what is too long."""
+    if len(s) <= cap:
+        return s
+    h = (cap - 3) // 2
+    return s[:h] + " … " + s[len(s) - (cap - 3 - h):]
+
+
 def call_text(tool, action, params):
-    """Mirrors CallText: sorted params, capped values, capped whole."""
+    """Mirrors CallText: sorted params, values and the whole capped head+tail,
+    trimmed as Go's TrimSpace trims."""
     parts = [tool] + ([action] if action else [])
     s = " ".join(parts)
     for k in sorted(params):
-        v = str(params[k]).strip()
+        v = shellsplit.trim(str(params[k]))
         if not v:
             continue
-        s += " " + k + "=" + v[:MAX_VALUE]
+        s += " " + k + "=" + head_tail(v, MAX_VALUE)
         if len(s) > MAX_TEXT:
             break
-    return s[:MAX_TEXT]
+    return head_tail(s, MAX_TEXT)
 
 
 _PATH_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/\\~$")
@@ -148,6 +157,8 @@ LOCALIZE_VECTORS = [
     ('cd "/app" && ls', "/app", 'cd "." && ls'),
     ("type c:/USERS/dev/project/a.txt", "C:\\Users\\dev\\project", "type ./a.txt"),
     ("cat é/a", "é", "cat é/a"),
+    ('rm "/app"x', "/app", 'rm "/app"x'),
+    ('echo "a\\"" /app/b', "/app", 'echo "a\\"" ./b'),
 ]
 
 
@@ -172,12 +183,18 @@ def localize(text, workspace):
             end = i + len(needle)
             start_ok = i == 0 or text[i - 1] not in _PATH_CHARS
             end_ok = (end == len(text) or text[end] in "/\\" or
-                      (not quote and text[end] in " \t\n;&|)<>") or (quote and text[end] == quote))
+                      (not quote and text[end] in " \t\n;&|)<>") or
+                      (quote and text[end] == quote and (end + 1 == len(text) or text[end + 1] not in _PATH_CHARS)))
             if start_ok and end_ok:
                 out.append(".")
                 i = end
                 continue
         c = text[i]
+        if c == "\\" and quote != "'" and i + 1 < len(text):
+            out.append(c)
+            out.append(text[i + 1])
+            i += 2
+            continue
         if not quote and c in "\"'":
             quote = c
         elif c == quote:
@@ -187,9 +204,19 @@ def localize(text, workspace):
     return "".join(out)
 
 
-def localized_params(r):
-    ws = r.get("workspace", "")
-    return {k: (localize(v, ws) if isinstance(v, str) else v) for k, v in r.get("params", {}).items()}
+def localize_path(value, workspace):
+    """Mirrors risk.LocalizePath: a value that is a path, whole."""
+    ws = (workspace or "").rstrip("/\\")
+    if ws in ("", ".", "~") or len(ws) < 2:
+        return value
+    hay, needle = value, ws
+    if "\\" in ws or (len(ws) >= 2 and ws[1] == ":"):
+        hay, needle = _fold_windows(value), _fold_windows(ws)
+    if hay == needle:
+        return "."
+    if hay.startswith(needle) and hay[len(needle)] in "/\\":
+        return "." + value[len(ws):]
+    return value
 
 
 def dialect(r):
@@ -209,29 +236,32 @@ def call_texts(r):
     """What the scorer reads for a row, mirroring Tuned.parts in internal/risk:
     a shell line's code (without heredoc bodies, here-strings, comments — empty
     for a line that is all comment), each group of commands joined by | && ||,
-    and each command on its own; any other call as one text. The first is the
-    whole, which is what training fits; scoring takes the highest of all."""
-    tool, action, params = r["tool"], r.get("action", ""), localized_params(r)
-    cmd = params.get("command")
-    if tool != "run" or action != "shell" or not isinstance(cmd, str):
-        return [call_text(tool, action, params)]
+    and each command on its own; any other call as one text. The line is cut
+    as written and each part then localized; other string params are localized
+    as whole paths. The first is the whole, which is what training fits;
+    scoring takes the highest of all."""
+    tool, action, raw = r["tool"], r.get("action", ""), r.get("params", {})
+    ws = r.get("workspace", "")
 
-    def with_(c):
-        p = dict(params)
-        p["command"] = c
+    def with_(c=None):
+        p = {k: (localize_path(v, ws) if isinstance(v, str) else v) for k, v in raw.items()}
+        if c is not None:
+            p["command"] = localize(c, ws)
         return p
 
-    cmds, groups, code_ = shellsplit.parse(dialect(r), cmd)
+    cmd = raw.get("command")
+    if tool != "run" or action != "shell" or not isinstance(cmd, str):
+        return [call_text(tool, action, with_())]
+    cmds, groups, code_, _ = shellsplit.parse(dialect(r), cmd)
     out = [with_(code_)]
     seen = {code_}
-    pieces = groups + cmds
-    for i, c in enumerate(pieces):
-        if len(out) == MAX_PARTS - 1 and i < len(pieces) - 1:
-            out.append(with_(" ; ".join(pieces[i:])))
+    for c in groups + cmds:
+        if c in seen:
+            continue
+        if len(out) == MAX_PARTS:
             break
-        if c not in seen:
-            seen.add(c)
-            out.append(with_(c))
+        seen.add(c)
+        out.append(with_(c))
     return [call_text(tool, action, p) for p in out]
 
 
@@ -261,7 +291,7 @@ def check_split(paths, golden=()):
                 r = json.loads(l)
                 if r.get("source") == "approval":
                     continue
-                cmd = localized_params(r).get("command")
+                cmd = r.get("params", {}).get("command")
                 if r.get("tool") == "run" and r.get("action") == "shell" and isinstance(cmd, str):
                     lines.add((dialect(r), cmd))
     shellsplit.check_golden(lines, extra=golden)

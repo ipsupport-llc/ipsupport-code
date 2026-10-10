@@ -124,10 +124,12 @@ func TestFeatureVectorIsUnitLength(t *testing.T) {
 
 // CallText caps by characters, as scripts/train_risk.py does: a byte cap
 // split a multi-byte rune and diverged from the text the model was trained on.
+// It keeps the head and the tail, so what comes last is still read.
 func TestCallTextCapsByCharacters(t *testing.T) {
 	v := strings.Repeat("й", maxValue+10)
 	got := CallText("run", "", map[string]any{"command": v})
-	want := "run command=" + strings.Repeat("й", maxValue)
+	h := (maxValue - 3) / 2
+	want := "run command=" + strings.Repeat("й", h) + " … " + strings.Repeat("й", maxValue-3-h)
 	if got != want {
 		t.Fatalf("got %d runes (valid UTF-8: %v), want %d", utf8.RuneCountInString(got), utf8.ValidString(got), utf8.RuneCountInString(want))
 	}

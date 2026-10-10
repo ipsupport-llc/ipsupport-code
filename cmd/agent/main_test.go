@@ -9051,7 +9051,7 @@ func TestRiskShadowCanBeTurnedOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.ensureShadow() // what wire() does, on the wiring goroutine
-	if a.riskObserver(pol) == nil {
+	if a.riskObserver(pol, "") == nil {
 		t.Error("no observer by default — shadow mode should be on, since it blocks nothing")
 	}
 	t.Setenv(EnvRiskOff, "off")
@@ -9060,7 +9060,7 @@ func TestRiskShadowCanBeTurnedOff(t *testing.T) {
 	if a2.shadow != nil {
 		t.Errorf("%s=off still built a scorer", EnvRiskOff)
 	}
-	if a2.riskObserver(pol) != nil {
+	if a2.riskObserver(pol, "") != nil {
 		t.Errorf("%s=off still installed an observer", EnvRiskOff)
 	}
 }
@@ -9384,7 +9384,7 @@ func TestASubAgentGetsItsOwnRiskObserver(t *testing.T) {
 		t.Fatal("a sub-agent was built without a risk observer — its calls inherit the parent spawn's assessment")
 	}
 
-	obs := a.riskObserver(pol)
+	obs := a.riskObserver(pol, "")
 	if obs == nil {
 		t.Fatal("no observer for a sub-agent")
 	}

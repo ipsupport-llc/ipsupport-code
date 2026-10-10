@@ -37,9 +37,15 @@ def trim(s):
     return s[i:j]
 
 
-def parse(dialect, line):
-    """(commands, groups, code) — see internal/shellsplit.Parse."""
-    r = _Result()
+MAX_DEPTH = 32  # mirrors maxDepth
+
+
+def parse(dialect, line, depth=0):
+    """(commands, groups, code, incomplete) — see internal/shellsplit.Parse."""
+    if depth >= MAX_DEPTH:
+        s = trim(line)
+        return ([s] if s else []), [], trim(line), True
+    r = _Result(dialect, depth)
     if dialect == POWERSHELL:
         _split_powershell(line, r)
     elif dialect == CMD:
@@ -50,7 +56,7 @@ def parse(dialect, line):
     c = r.code
     if c.endswith(" ;"):
         c = c[:-2]
-    return r.cmds, r.groups, trim(c)
+    return r.cmds + r.inner, r.groups + r.inner_g, trim(c), r.incomplete
 
 
 def split(dialect, line):
@@ -65,7 +71,12 @@ _JOINS = {"|", "||", "&&", "|&"}
 
 
 class _Result:
-    def __init__(self):
+    def __init__(self, dialect=SH, depth=0):
+        self.d = dialect
+        self.depth = depth
+        self.incomplete = False
+        self.inner = []
+        self.inner_g = []
         self.cmds = []
         self.groups = []
         self.code = ""
@@ -76,6 +87,7 @@ class _Result:
         s = trim(b.text())
         if s:
             self.cmds.append(s)
+            self.inner_code(s)
             if self.code:
                 self.code += " "
             self.code += s
@@ -99,9 +111,48 @@ class _Result:
         self.gtext = ""
 
     def nest(self, nested, ngroups, dialect, code_):
-        c, g, _ = parse(dialect, code_)
+        c, g, _, inc = parse(dialect, code_, self.depth + 1)
         nested += c
         ngroups += g
+        self.incomplete = self.incomplete or inc
+
+    def inner_code(self, cmd):
+        """Mirrors innerCode: sh -c '…', pwsh -Command "…", cmd /c …, python -c '…', eval …"""
+        if self.d == CMD:
+            ws = _fields(cmd)
+            for i, w in enumerate(ws):
+                if w.lower() in ("/c", "/k") and i > 0 and _go_path_base(ws[i - 1].replace("\\", "/")).lower() == "cmd":
+                    self.nest(self.inner, self.inner_g, CMD, " ".join(ws[i + 1:]))
+                    return
+            return
+        ws = _words(cmd)
+        at = _program_at(ws)
+        if at < 0:
+            return
+        prog, rest = ws[at], ws[at + 1:]
+        if prog == "eval":
+            self.nest(self.inner, self.inner_g, self.d, " ".join(rest))
+            return
+        if not (prog in _SHELLS or prog in ("pwsh", "powershell", "cmd") or prog in _INTERPRETERS):
+            return
+        for i, w in enumerate(rest):
+            if i + 1 >= len(rest):
+                break
+            body = rest[i + 1]
+            if prog in _SHELLS and w.startswith("-") and not w.startswith("--") and "c" in w:
+                self.nest(self.inner, self.inner_g, SH, body)
+                return
+            if prog in ("pwsh", "powershell") and w.lower() in ("-c", "-command"):
+                self.nest(self.inner, self.inner_g, POWERSHELL, " ".join(rest[i + 1:]))
+                return
+            if prog == "cmd" and w.lower() in ("/c", "/k"):
+                self.nest(self.inner, self.inner_g, CMD, " ".join(rest[i + 1:]))
+                return
+            if prog in _INTERPRETERS and w in ("-c", "-e", "--eval"):
+                t = trim(body)
+                if t:
+                    self.inner.append(t)
+                return
 
 
 class _Buf:
@@ -180,10 +231,11 @@ def _close_brace(rs, i):
 
 # ── sh ──────────────────────────────────────────────────────────────────────
 
-_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "mksh"}
+_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "mksh", "ssh", "su"}
 _INTERPRETERS = {"python", "python3", "python2", "perl", "ruby", "node", "php", "lua", "deno", "bun",
                  "osascript", "tclsh", "Rscript"}
-_WRAPPERS = {"sudo", "env", "exec", "nohup", "time", "command", "doas"}
+_WRAPPERS = {"sudo", "env", "exec", "nohup", "time", "command", "doas",
+             "timeout", "nice", "ionice", "stdbuf", "setsid", "xargs", "builtin"}
 
 
 def _fields(s):
@@ -209,13 +261,79 @@ def _go_path_base(f):
     return f[f.rfind("/") + 1:]
 
 
-def _program(cmd):
-    for f in _fields(cmd):
-        base = _go_path_base(f)
-        if base in _WRAPPERS or f.startswith("-") or "=" in f:
+def _words(cmd):
+    """Mirrors words: a simple command's words with sh quote removal."""
+    out, w, inw = [], [], False
+    rs = cmd
+    i = 0
+    while i < len(rs):
+        c = rs[i]
+        if c in " \t\n":
+            if inw:
+                out.append("".join(w))
+                w = []
+                inw = False
+        elif c == "'":
+            inw = True
+            j = _index_from(rs, i + 1, "'")
+            w.append(rs[i + 1:min(j, len(rs))])
+            i = j
+        elif c == '"':
+            inw = True
+            i += 1
+            while i < len(rs) and rs[i] != '"':
+                if rs[i] == "\\" and i + 1 < len(rs) and rs[i + 1] in "\"\\$`":
+                    i += 1
+                w.append(rs[i])
+                i += 1
+        elif c == "\\" and i + 1 < len(rs):
+            inw = True
+            i += 1
+            w.append(rs[i])
+        else:
+            inw = True
+            w.append(c)
+        i += 1
+    if inw:
+        out.append("".join(w))
+    return out
+
+
+def _redirection(w):
+    i = 0
+    while i < len(w) and "0" <= w[i] <= "9":
+        i += 1
+    return 0 < i < len(w) and w[i] in "<>"
+
+
+def _duration(w):
+    t = w.rstrip("smhd")
+    return t != "" and all(("0" <= c <= "9") or c == "." for c in t)
+
+
+def _program_at(ws):
+    i = 0
+    while i < len(ws):
+        w = ws[i]
+        if w in ("<<", "<<-", "<", ">", ">>", "2>", "&>"):
+            i += 2
             continue
-        return base
-    return ""
+        if w.startswith("<") or w.startswith(">") or _redirection(w) or w.startswith("-") or "=" in w or _duration(w):
+            i += 1
+            continue
+        base = _go_path_base(w)
+        if base in _WRAPPERS:
+            i += 1
+            continue
+        ws[i] = base
+        return i
+    return -1
+
+
+def _program(cmd):
+    ws = _words(cmd)
+    at = _program_at(ws)
+    return ws[at] if at >= 0 else ""
 
 
 def _split_sh(line, out):
@@ -228,7 +346,7 @@ def _split_sh(line, out):
         out.cut(b, op)
 
     def word_start():
-        return b.empty() or b.after(" \t\n;&|()")
+        return b.empty() or b.after(" \t\n")
 
     def blank_next(i):
         return i + 1 >= len(rs) or rs[i + 1] in " \t\n;&|)"
@@ -283,24 +401,33 @@ def _split_sh(line, out):
             i += 2
         elif r == "<" and i + 1 < len(rs) and rs[i + 1] == "<":
             h, nxt = _read_heredoc(rs, i + 2)
-            h["prog"] = _program(b.text())
+            h["cmd"] = len(out.cmds)
             heredocs.append(h)
             b.write_str(rs[i:nxt])
             i = nxt - 1
         elif r == "\n":
+            progs = {}
+            if heredocs:
+                progs[len(out.cmds)] = _program(b.text())
             cut(";")
             for h in heredocs:
+                if h["cmd"] in progs:
+                    prog = progs[h["cmd"]]
+                elif h["cmd"] < len(out.cmds):
+                    prog = progs[h["cmd"]] = _program(out.cmds[h["cmd"]])
+                else:
+                    prog = ""
                 start = i + 1
                 end, nxt = _heredoc_body(rs, start, h)
                 body = rs[start:end]
-                if h["prog"] in _SHELLS:
+                if not h["quoted"]:
+                    _substitutions(body, out, nested, ngroups)
+                if prog in _SHELLS:
                     out.nest(nested, ngroups, SH, body)
-                elif h["prog"] in _INTERPRETERS:
+                elif prog in _INTERPRETERS:
                     s = trim(body)
                     if s:
                         nested.append(s)
-                elif not h["quoted"]:
-                    _substitutions(body, out, nested, ngroups)
                 i = nxt - 1
             heredocs = []
         elif r in ";()":
@@ -347,7 +474,7 @@ def _substitutions(body, out, nested, ngroups):
 
 
 def _read_heredoc(rs, i):
-    h = {"word": "", "tabs": False, "quoted": False, "prog": ""}
+    h = {"word": "", "tabs": False, "quoted": False, "cmd": 0}
     if i < len(rs) and rs[i] == "-":
         h["tabs"] = True
         i += 1
@@ -373,6 +500,9 @@ def _read_heredoc(rs, i):
             i = min(i + 1, len(rs))
             continue
         if c == "\\":
+            if i + 1 < len(rs) and rs[i + 1] == "\n":
+                i += 2
+                continue
             h["quoted"] = True
             i += 1
             if i >= len(rs):
@@ -387,6 +517,10 @@ def _heredoc_body(rs, i, h):
     while i < len(rs):
         e = _index_from(rs, i, "\n")
         l = rs[i:e]
+        while not h["quoted"] and l.endswith("\\") and e < len(rs):
+            n = _index_from(rs, e + 1, "\n")
+            l = l[:-1] + rs[e + 1:n]
+            e = n
         if h["tabs"]:
             l = l.lstrip("\t")
         if l == h["word"]:
@@ -450,7 +584,7 @@ def _split_powershell(line, out):
             while j + 1 < len(rs) and not (rs[j] == "#" and rs[j + 1] == ">"):
                 j += 1
             i = j + 1
-        elif r == "#" and (b.empty() or b.after(" \t;|&(){}")):
+        elif r == "#" and (b.empty() or b.after(" \t")):
             while i < len(rs) and rs[i] != "\n":
                 i += 1
             i -= 1
@@ -571,14 +705,14 @@ def check_golden(lines=(), path=GOLDEN, extra=()):
         known.update(_load(pathlib.Path(p)))
     bad = []
     for g in known.values():
-        c, gr, co = parse(g["dialect"], g["line"])
+        c, gr, co, _ = parse(g["dialect"], g["line"])
         if c != g["parts"] or gr != g.get("groups", []) or co != g["code"]:
             bad.append((g, {"parts": c, "groups": gr, "code": co}))
     for d, line in lines:
         if (d, line) in known:
             continue
         s = trim(line)
-        c, gr, co = parse(d, line)
+        c, gr, co, _ = parse(d, line)
         if c != [s] or gr or co != s:
             bad.append(({"dialect": d, "line": line, "parts": "[not in a golden file: trivial in Go]", "code": ""},
                         {"parts": c, "groups": gr, "code": co}))

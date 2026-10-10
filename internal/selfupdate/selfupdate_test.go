@@ -67,10 +67,14 @@ func makeTarGz(t *testing.T, name string, data []byte) []byte {
 
 func TestLatestExtractAndVerify(t *testing.T) {
 	bin := []byte("FAKE-IPSUPPORT-CODE-BINARY")
-	archive := makeTarGz(t, "ipsupport-code", bin)
+	// The archive this platform's release really carries: a .zip holding the
+	// .exe on Windows — a tar.gz named .zip would test nothing Apply does there.
+	archive, extract := makeTarGz(t, "ipsupport-code", bin), func(b []byte) ([]byte, error) { return extractBinary(b, "ipsupport-code") }
+	if runtime.GOOS == "windows" {
+		archive, extract = makeZip(t, "ipsupport-code.exe", bin), func(b []byte) ([]byte, error) { return extractZip(b, "ipsupport-code.exe") }
+	}
 	sum := sha256.Sum256(archive)
-	oa := osArch()
-	assetName := "ipsupport-code_v1.2.3_" + oa + ".tar.gz"
+	assetName := "ipsupport-code_v1.2.3" + assetSuffix(runtime.GOOS, runtime.GOARCH)
 	checksums := hex.EncodeToString(sum[:]) + "  " + assetName + "\n"
 
 	mux := http.NewServeMux()
@@ -111,9 +115,22 @@ func TestLatestExtractAndVerify(t *testing.T) {
 	if err := verifyChecksum([]byte("tampered"), checksums, rel.AssetName); err == nil {
 		t.Error("checksum of tampered data should fail")
 	}
-	got, err := extractBinary(data, "ipsupport-code")
+	got, err := extract(data)
 	if err != nil || !bytes.Equal(got, bin) {
-		t.Errorf("extractBinary = %q, %v; want the original binary", got, err)
+		t.Errorf("extracted %q, %v; want the original binary", got, err)
+	}
+}
+
+func TestAssetSuffix(t *testing.T) {
+	for _, tc := range []struct{ goos, goarch, want string }{
+		{"linux", "amd64", "_linux-amd64.tar.gz"},
+		{"darwin", "arm64", "_darwin-arm64.tar.gz"},
+		{"windows", "amd64", "_windows-amd64.zip"},
+		{"windows", "arm64", "_windows-arm64.zip"},
+	} {
+		if got := assetSuffix(tc.goos, tc.goarch); got != tc.want {
+			t.Errorf("assetSuffix(%s, %s) = %q, want %q", tc.goos, tc.goarch, got, tc.want)
+		}
 	}
 }
 

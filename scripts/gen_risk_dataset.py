@@ -23,6 +23,8 @@ question that matters.
 """
 import json, pathlib, random, sys
 
+import shellsplit
+
 # Where the vocabulary comes from, and where it does not:
 #
 #   build output   github/gitignore, vetoed  (scripts/risk_vocab.json)
@@ -41,6 +43,8 @@ rows = []
 # The OS a shell row is written for: the scorer cuts a line by that shell's
 # rules (PowerShell on Windows, sh elsewhere — see scripts/shellsplit.py).
 OS = "linux"
+# The shell a row is cut by when it isn't the OS's default (cmd on Windows).
+SHELL = None
 
 
 # The honest set (ADR-0018) is never trained on: a command that is also in it
@@ -51,12 +55,21 @@ EVAL_COMMANDS = {json.loads(l)["params"].get("command", "").strip()
 
 
 def add(tool, action, params, labels, split):
-    if tool == "run" and params.get("command", "").strip() in EVAL_COMMANDS:
-        return
+    if tool == "run":
+        cmd = params.get("command", "")
+        d = shellsplit.POWERSHELL if OS == "windows" else shellsplit.SH
+        if SHELL == "cmd":
+            d = shellsplit.CMD
+        # Not in the honest set as a whole, nor as any command in the line: a
+        # chain or a tail must not carry one into training either.
+        if cmd.strip() in EVAL_COMMANDS or any(c in EVAL_COMMANDS for c in shellsplit.split(d, cmd)):
+            return
     row = {"tool": tool, "action": action, "params": params,
            "labels": labels or ["safe"], "split": split}
     if tool == "run":
         row["os"] = OS
+        if SHELL:
+            row["shell"] = SHELL
     rows.append(row)
 
 
@@ -73,11 +86,8 @@ PROJECT = [
     "Dockerfile", "docker-compose.yml", ".gitignore", "scripts/build.sh",
     "config/dev.yaml", "config/routes.yaml", "config/logging.json", "config/app.toml",
     "config/webpack.config.js", "internal/config/config.go", "src/config/index.ts",
-    # A workspace has an absolute path too. With only relative ones, every
-    # absolute path read as outside — `wc -l /srv/…` and a checkout's own
-    # files alike.
-    "/workspace/api/main.go", "/workspace/web/src/app.ts", "/home/dev/src/shop/app.py",
-    "/home/dev/src/shop/README.md", "/Users/alice/code/site/index.html", "/Users/alice/code/site/package.json",
+    # No absolute ones: the scorer reads a path into the workspace as relative
+    # (risk.Localize), so the model never sees one.
 ]
 # Build output: regenerable, so deleting it is routine.
 VOCAB_PATH = pathlib.Path(__file__).with_name("risk_vocab.json")
@@ -786,9 +796,10 @@ OS = "linux"
 FLAG_TWINS = ["sort -t, -k2 {p}", "objdump -t {p}", "tar -tzf {p}", "ls -lt {p}", "cut -d, -f1 {p}",
               "date -d @1700000000", "tail -F {p}", "uniq -d {p}", "readelf -d {p}", "nm -D {p}",
               "xxd -l 64 {p}", "grep -F TODO {p}", "diff -u {p} {p}.orig", "wc -c {p}", "file {p}"]
+OWNER = {**CLASSES["project"], **CLASSES["build"]}  # a path's split, wherever it is used
 for tmpl in FLAG_TWINS:
     for path in rng.sample(PROJECT + BUILD, 6):
-        add("run", "shell", {"command": tmpl.format(p=path)}, [], "train" if rng.random() > 0.2 else "holdout")
+        add("run", "shell", {"command": tmpl.format(p=path)}, [], OWNER[path])
 
 # ── leaks: a file leaving the machine ────────────────────────────────────────
 # Upload verbs used to be crossed with harmless bodies only (-d '{}', -T
@@ -907,8 +918,11 @@ for os_ in ("linux", "windows"):
     # taught the harmless members the risky ones' labels (a plain `curl` GET
     # began to read as a side effect). A chain with a held-out member is held
     # out, so no held-out path is trained on.
-    glue_rows = [{"params": {"command": g}, "labels": ["safe"], "split": "train"} for g in GLUE[os_]]
-    write_rows = [{"params": {"command": w}, "labels": ["safe"], "split": "train"} for w in writes]
+    # Members keep their own split, and nothing from the honest set joins a
+    # chain — it is never trained on, in a chain or alone.
+    added = {r["params"]["command"]: r for r in rows if r["tool"] == "run"}
+    glue_rows = [added[g] for g in GLUE[os_] if g in added]
+    write_rows = [added[w] for w in writes if w in added]
     harmless = [r for r in singles if not risky(r["labels"])]
     for _ in range(1500 if os_ == "linux" else 500):
         k = rng.choice((2, 2, 3))
@@ -920,6 +934,20 @@ for os_ in ("linux", "windows"):
         labels = sorted({l for m in members for l in risky(m["labels"])})
         split = "holdout" if any(m["split"] == "holdout" for m in members) else "train"
         add("run", "shell", {"command": cmd}, labels, split)
+    if os_ == "windows":
+        # With run.shell = cmd the same lines are cut by cmd's rules: & joins.
+        SHELL = "cmd"
+        cmd_ok = [r for r in harmless if not any(ch in r["params"]["command"] for ch in "$@{}`'")]
+        for _ in range(300):
+            members = [rng.choice(cmd_ok) for _ in range(rng.choice((2, 3)))]
+            cmd = rng.choice([" & ", " && "]).join(m["params"]["command"] for m in members)
+            split = "holdout" if any(m["split"] == "holdout" for m in members) else "train"
+            add("run", "shell", {"command": cmd}, [], split)
+        for r in rng.sample([x for x in singles if risky(x["labels"])], 60):
+            g = rng.choice(cmd_ok)
+            add("run", "shell", {"command": f'{g["params"]["command"]} & {r["params"]["command"]}'}, r["labels"],
+                "holdout" if "holdout" in (r["split"], g["split"]) else "train")
+        SHELL = None
 OS = "linux"
 
 out = pathlib.Path(__file__).with_name("risk_dataset.jsonl")

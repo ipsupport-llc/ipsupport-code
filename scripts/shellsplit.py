@@ -2,54 +2,43 @@
 would run, by that shell's own rules.
 
 The risk model scores a shell line by its parts — its code (the line without
-heredoc bodies, here-strings and comments) and each command in it — and the
-trainer must cut lines exactly as the Go scorer does, or it trains and measures
-on text inference never produces. So this is a line-by-line port, and it is
-guarded like the feature hash: internal/shellsplit/testdata/golden.jsonl holds
-what the Go code returns for a corpus of lines, the Go tests check Go against
-it, and check_golden() below checks this file against it on every training run.
-Edit one side alone and both fail.
+heredoc bodies, here-strings and comments), each command in it, and each group
+of commands joined by | && || — and the trainer must cut lines exactly as the
+Go scorer does, or it trains and measures on text inference never produces. So
+this is a line-by-line port, and it is guarded like the feature hash:
+internal/shellsplit/testdata/golden.jsonl holds what the Go code returns for
+every line the trainer reads, the Go tests check Go against it, and
+check_golden() below checks this file against it on every training run. Edit
+one side alone and both fail.
 
 Python strings index by code point, as the Go code indexes []rune.
 """
 import json
 import pathlib
+import posixpath
+import unicodedata
 
 SH, POWERSHELL, CMD = 0, 1, 2
 
-
-def split(dialect, line):
-    """The commands in line, in order, trimmed; empty ones dropped. Commands
-    nested in another follow the one that holds them."""
-    return _parse(dialect, line)[0]
+_GO_SPACE = set("\t\n\v\f\r \x85\xa0")
 
 
-def code(dialect, line):
-    """line without its data, with its commands and the operators between them."""
-    c = _parse(dialect, line)[1]
-    if c.endswith(" ;"):
-        c = c[:-2]
-    return c.strip()
+def _is_go_space(c):
+    return c in _GO_SPACE or unicodedata.category(c) in ("Zs", "Zl", "Zp")
 
 
-class _Result:
-    def __init__(self):
-        self.cmds = []
-        self.code = ""
-
-    def cut(self, b, op):
-        s = "".join(b).strip()
-        if s:
-            self.cmds.append(s)
-            if self.code:
-                self.code += " "
-            self.code += s
-        if op and self.code:
-            self.code += " " + op
-        b.clear()
+def trim(s):
+    """strings.TrimSpace: Python's strip() also drops \\x1c-\\x1f, Go's does not."""
+    i, j = 0, len(s)
+    while i < j and _is_go_space(s[i]):
+        i += 1
+    while j > i and _is_go_space(s[j - 1]):
+        j -= 1
+    return s[i:j]
 
 
-def _parse(dialect, line):
+def parse(dialect, line):
+    """(commands, groups, code) — see internal/shellsplit.Parse."""
     r = _Result()
     if dialect == POWERSHELL:
         _split_powershell(line, r)
@@ -57,12 +46,92 @@ def _parse(dialect, line):
         _split_cmd(line, r)
     else:
         _split_sh(line, r)
-    return r.cmds, r.code
+    r.end_group()
+    c = r.code
+    if c.endswith(" ;"):
+        c = c[:-2]
+    return r.cmds, r.groups, trim(c)
 
 
-def _last(b):
-    s = "".join(b)
-    return s[-1] if s else ""
+def split(dialect, line):
+    return parse(dialect, line)[0]
+
+
+def code(dialect, line):
+    return parse(dialect, line)[2]
+
+
+_JOINS = {"|", "||", "&&", "|&"}
+
+
+class _Result:
+    def __init__(self):
+        self.cmds = []
+        self.groups = []
+        self.code = ""
+        self.group = []
+        self.gtext = ""
+
+    def cut(self, b, op):
+        s = trim(b.text())
+        if s:
+            self.cmds.append(s)
+            if self.code:
+                self.code += " "
+            self.code += s
+            if self.group:
+                self.gtext += " "
+            self.gtext += s
+            self.group.append(s)
+        if op and self.code:
+            self.code += " " + op
+        if op in _JOINS:
+            if self.group:
+                self.gtext += " " + op
+        else:
+            self.end_group()
+        b.reset()
+
+    def end_group(self):
+        if len(self.group) > 1:
+            self.groups.append(trim(trim(self.gtext).rstrip("|&")))
+        self.group = []
+        self.gtext = ""
+
+    def nest(self, nested, ngroups, dialect, code_):
+        c, g, _ = parse(dialect, code_)
+        nested += c
+        ngroups += g
+
+
+class _Buf:
+    def __init__(self):
+        self.parts = []
+        self.last = ""
+        self.last_esc = False
+
+    def write(self, ch, esc):
+        self.parts.append(ch)
+        self.last, self.last_esc = ch, esc
+
+    def write_str(self, s):
+        if not s:
+            return
+        self.parts.append(s)
+        self.last, self.last_esc = s[-1], False
+
+    def reset(self):
+        self.parts = []
+        self.last, self.last_esc = "", False
+
+    def text(self):
+        return "".join(self.parts)
+
+    def empty(self):
+        return not any(self.parts)
+
+    def after(self, chars):
+        return not self.empty() and not self.last_esc and self.last != "" and self.last in chars
 
 
 def _index_from(rs, i, ch):
@@ -111,17 +180,58 @@ def _close_brace(rs, i):
 
 # ── sh ──────────────────────────────────────────────────────────────────────
 
+_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "mksh"}
+_INTERPRETERS = {"python", "python3", "python2", "perl", "ruby", "node", "php", "lua", "deno", "bun",
+                 "osascript", "tclsh", "Rscript"}
+_WRAPPERS = {"sudo", "env", "exec", "nohup", "time", "command", "doas"}
+
+
+def _fields(s):
+    """strings.Fields: runs of Go white space."""
+    out, cur = [], []
+    for c in s:
+        if _is_go_space(c):
+            if cur:
+                out.append("".join(cur))
+                cur = []
+        else:
+            cur.append(c)
+    if cur:
+        out.append("".join(cur))
+    return out
+
+
+def _go_path_base(f):
+    """path.Base for a non-empty field."""
+    f = f.rstrip("/")
+    if f == "":
+        return "/"
+    return f[f.rfind("/") + 1:]
+
+
+def _program(cmd):
+    for f in _fields(cmd):
+        base = _go_path_base(f)
+        if base in _WRAPPERS or f.startswith("-") or "=" in f:
+            continue
+        return base
+    return ""
+
+
 def _split_sh(line, out):
     rs = line
-    b = []
+    b = _Buf()
     heredocs = []
-    nested = []
+    nested, ngroups = [], []
 
     def cut(op):
         out.cut(b, op)
 
     def word_start():
-        return not b or _last(b) in " \t\n;&|()"
+        return b.empty() or b.after(" \t\n;&|()")
+
+    def blank_next(i):
+        return i + 1 >= len(rs) or rs[i + 1] in " \t\n;&|)"
 
     i = 0
     while i < len(rs):
@@ -130,12 +240,12 @@ def _split_sh(line, out):
             if rs[i + 1] == "\n":
                 i += 2
                 continue
-            b.append(r)
+            b.write(r, True)
             i += 1
-            b.append(rs[i])
+            b.write(rs[i], True)
         elif r == "'":
             j = min(_index_from(rs, i + 1, "'") + 1, len(rs))
-            b.append(rs[i:j])
+            b.write_str(rs[i:j])
             i = j - 1
         elif r == '"':
             j = i + 1
@@ -144,41 +254,58 @@ def _split_sh(line, out):
                     j += 1
                 elif rs[j] == "$" and j + 1 < len(rs) and rs[j + 1] == "(":
                     end = _close_paren(rs, j + 2, SH)
-                    nested += split(SH, rs[j + 2:min(end, len(rs))])
+                    out.nest(nested, ngroups, SH, rs[j + 2:min(end, len(rs))])
                     j = end
                 elif rs[j] == "`":
                     end = _index_from(rs, j + 1, "`")
-                    nested += split(SH, rs[j + 1:min(end, len(rs))])
+                    out.nest(nested, ngroups, SH, rs[j + 1:min(end, len(rs))])
                     j = end
                 j += 1
             j = min(j + 1, len(rs))
-            b.append(rs[i:j])
+            b.write_str(rs[i:j])
             i = j - 1
         elif r == "$" and i + 1 < len(rs) and rs[i + 1] == "(" and not (i + 2 < len(rs) and rs[i + 2] == "("):
             end = _close_paren(rs, i + 2, SH)
-            nested += split(SH, rs[i + 2:min(end, len(rs))])
-            b.append(rs[i:min(end + 1, len(rs))])
+            out.nest(nested, ngroups, SH, rs[i + 2:min(end, len(rs))])
+            b.write_str(rs[i:min(end + 1, len(rs))])
             i = end
         elif r == "`":
             end = _index_from(rs, i + 1, "`")
-            nested += split(SH, rs[i + 1:min(end, len(rs))])
-            b.append(rs[i:min(end + 1, len(rs))])
+            out.nest(nested, ngroups, SH, rs[i + 1:min(end, len(rs))])
+            b.write_str(rs[i:min(end + 1, len(rs))])
             i = end
         elif r == "#" and word_start():
             while i < len(rs) and rs[i] != "\n":
                 i += 1
             i -= 1
-        elif r == "<" and i + 1 < len(rs) and rs[i + 1] == "<" and not (i + 2 < len(rs) and rs[i + 2] == "<"):
+        elif r == "<" and i + 2 < len(rs) and rs[i + 1] == "<" and rs[i + 2] == "<":
+            b.write_str("<<<")
+            i += 2
+        elif r == "<" and i + 1 < len(rs) and rs[i + 1] == "<":
             h, nxt = _read_heredoc(rs, i + 2)
+            h["prog"] = _program(b.text())
             heredocs.append(h)
-            b.append(rs[i:nxt])
+            b.write_str(rs[i:nxt])
             i = nxt - 1
         elif r == "\n":
             cut(";")
             for h in heredocs:
-                i = _skip_heredoc_body(rs, i + 1, h) - 1
+                start = i + 1
+                end, nxt = _heredoc_body(rs, start, h)
+                body = rs[start:end]
+                if h["prog"] in _SHELLS:
+                    out.nest(nested, ngroups, SH, body)
+                elif h["prog"] in _INTERPRETERS:
+                    s = trim(body)
+                    if s:
+                        nested.append(s)
+                elif not h["quoted"]:
+                    _substitutions(body, out, nested, ngroups)
+                i = nxt - 1
             heredocs = []
-        elif r in ";()" or (r in "{}" and word_start()):
+        elif r in ";()":
+            cut(r)
+        elif r in "{}" and word_start() and blank_next(i):
             cut(r)
         elif r == "|":
             op = "|"
@@ -190,60 +317,90 @@ def _split_sh(line, out):
             if i + 1 < len(rs) and rs[i + 1] == "&":
                 i += 1
                 cut("&&")
-            elif (i + 1 < len(rs) and rs[i + 1] == ">") or (b and _last(b) in "<>"):
-                b.append(r)
+            elif (i + 1 < len(rs) and rs[i + 1] == ">") or b.after("<>"):
+                b.write(r, False)
             else:
                 cut("&")
         else:
-            b.append(r)
+            b.write(r, False)
         i += 1
     cut("")
     out.cmds += nested
+    out.groups += ngroups
+
+
+def _substitutions(body, out, nested, ngroups):
+    rs = body
+    i = 0
+    while i < len(rs):
+        if rs[i] == "\\":
+            i += 1
+        elif rs[i] == "$" and i + 1 < len(rs) and rs[i + 1] == "(":
+            end = _close_paren(rs, i + 2, SH)
+            out.nest(nested, ngroups, SH, rs[i + 2:min(end, len(rs))])
+            i = end
+        elif rs[i] == "`":
+            end = _index_from(rs, i + 1, "`")
+            out.nest(nested, ngroups, SH, rs[i + 1:min(end, len(rs))])
+            i = end
+        i += 1
 
 
 def _read_heredoc(rs, i):
-    tabs = False
+    h = {"word": "", "tabs": False, "quoted": False, "prog": ""}
     if i < len(rs) and rs[i] == "-":
-        tabs = True
+        h["tabs"] = True
         i += 1
     while i < len(rs) and rs[i] in " \t":
         i += 1
     w = []
     while i < len(rs) and rs[i] not in " \t\n;&|<>()":
         c = rs[i]
-        if c in "'\"":
-            j = _index_from(rs, i + 1, c)
+        if c == "'":
+            h["quoted"] = True
+            j = _index_from(rs, i + 1, "'")
             w.append(rs[i + 1:min(j, len(rs))])
             i = min(j + 1, len(rs))
             continue
+        if c == '"':
+            h["quoted"] = True
+            i += 1
+            while i < len(rs) and rs[i] != '"':
+                if rs[i] == "\\" and i + 1 < len(rs) and rs[i + 1] in "\"\\$`":
+                    i += 1
+                w.append(rs[i])
+                i += 1
+            i = min(i + 1, len(rs))
+            continue
         if c == "\\":
+            h["quoted"] = True
             i += 1
             if i >= len(rs):
                 continue
         w.append(rs[i])
         i += 1
-    return ("".join(w), tabs), i
+    h["word"] = "".join(w)
+    return h, i
 
 
-def _skip_heredoc_body(rs, i, h):
-    word, tabs = h
+def _heredoc_body(rs, i, h):
     while i < len(rs):
-        end = _index_from(rs, i, "\n")
-        l = rs[i:end]
-        if tabs:
+        e = _index_from(rs, i, "\n")
+        l = rs[i:e]
+        if h["tabs"]:
             l = l.lstrip("\t")
-        if l == word:
-            return min(end + 1, len(rs))
-        i = end + 1
-    return len(rs)
+        if l == h["word"]:
+            return i, min(e + 1, len(rs))
+        i = e + 1
+    return len(rs), len(rs)
 
 
 # ── PowerShell ──────────────────────────────────────────────────────────────
 
 def _split_powershell(line, out):
     rs = line
-    b = []
-    nested = []
+    b = _Buf()
+    nested, ngroups = [], []
 
     def cut(op):
         out.cut(b, op)
@@ -252,15 +409,15 @@ def _split_powershell(line, out):
     while i < len(rs):
         r = rs[i]
         if r == "`" and i + 1 < len(rs):
-            b.append(r)
+            b.write(r, True)
             i += 1
-            b.append(rs[i])
+            b.write(rs[i], True)
         elif r == "@" and i + 1 < len(rs) and rs[i + 1] in "'\"" and _here_string_start(rs, i + 2):
             q = rs[i + 1]
             end = _here_string_end(rs, i + 2, q)
             if q == '"':
-                nested += _subexpressions(rs[i + 2:min(end, len(rs))])
-            b.append("@" + q + "…" + q + "@")
+                _subexpressions(rs[i + 2:min(end, len(rs))], out, nested, ngroups)
+            b.write_str("@" + q + "…" + q + "@")
             i = end
         elif r == "'":
             j = i + 1
@@ -272,31 +429,35 @@ def _split_powershell(line, out):
                     break
                 j += 1
             j = min(j + 1, len(rs))
-            b.append(rs[i:j])
+            b.write_str(rs[i:j])
             i = j - 1
         elif r == '"':
             j = i + 1
             while j < len(rs) and rs[j] != '"':
                 if rs[j] == "`":
+                    j += 2
+                elif rs[j] == "$" and j + 1 < len(rs) and rs[j + 1] == "(":
+                    end = _close_paren(rs, j + 2, POWERSHELL)
+                    out.nest(nested, ngroups, POWERSHELL, rs[j + 2:min(end, len(rs))])
+                    j = end + 1
+                else:
                     j += 1
-                j += 1
-            nested += _subexpressions(rs[i + 1:min(j, len(rs))])
             j = min(j + 1, len(rs))
-            b.append(rs[i:j])
+            b.write_str(rs[i:j])
             i = j - 1
         elif r == "<" and i + 1 < len(rs) and rs[i + 1] == "#":
             j = i + 2
             while j + 1 < len(rs) and not (rs[j] == "#" and rs[j + 1] == ">"):
                 j += 1
             i = j + 1
-        elif r == "#" and (not b or _last(b) in " \t;|&(){}"):
+        elif r == "#" and (b.empty() or b.after(" \t;|&(){}")):
             while i < len(rs) and rs[i] != "\n":
                 i += 1
             i -= 1
         elif r in "({":
             end = _close_paren(rs, i + 1, POWERSHELL) if r == "(" else _close_brace(rs, i + 1)
-            nested += split(POWERSHELL, rs[i + 1:min(end, len(rs))])
-            b.append(rs[i:min(end + 1, len(rs))])
+            out.nest(nested, ngroups, POWERSHELL, rs[i + 1:min(end, len(rs))])
+            b.write_str(rs[i:min(end + 1, len(rs))])
             i = end
         elif r in "\n;":
             cut(";")
@@ -310,10 +471,11 @@ def _split_powershell(line, out):
             i += 1
             cut("&&")
         else:
-            b.append(r)
+            b.write(r, False)
         i += 1
     cut("")
     out.cmds += nested
+    out.groups += ngroups
 
 
 def _here_string_start(rs, i):
@@ -332,8 +494,7 @@ def _here_string_end(rs, i, q):
     return len(rs)
 
 
-def _subexpressions(rs):
-    out = []
+def _subexpressions(rs, out, nested, ngroups):
     i = 0
     while i + 1 < len(rs):
         if rs[i] == "`":
@@ -341,17 +502,16 @@ def _subexpressions(rs):
             continue
         if rs[i] == "$" and rs[i + 1] == "(":
             end = _close_paren(rs, i + 2, POWERSHELL)
-            out += split(POWERSHELL, rs[i + 2:min(end, len(rs))])
+            out.nest(nested, ngroups, POWERSHELL, rs[i + 2:min(end, len(rs))])
             i = end
         i += 1
-    return out
 
 
 # ── cmd.exe ─────────────────────────────────────────────────────────────────
 
 def _split_cmd(line, out):
     rs = line
-    b = []
+    b = _Buf()
 
     def cut(op):
         out.cut(b, op)
@@ -360,20 +520,20 @@ def _split_cmd(line, out):
     while i < len(rs):
         r = rs[i]
         if r == "^" and i + 1 < len(rs):
-            b.append(r)
+            b.write(r, True)
             i += 1
-            b.append(rs[i])
+            b.write(rs[i], True)
         elif r == '"':
             j = min(_index_from(rs, i + 1, '"') + 1, len(rs))
-            b.append(rs[i:j])
+            b.write_str(rs[i:j])
             i = j - 1
         elif r == "\n":
             cut("&")
         elif r in "()":
             cut(r)
         elif r in "&|":
-            if r == "&" and b and _last(b) in "<>":
-                b.append(r)
+            if r == "&" and b.after("<>"):
+                b.write(r, False)
                 i += 1
                 continue
             op = r
@@ -382,7 +542,7 @@ def _split_cmd(line, out):
                 op += op
             cut(op)
         else:
-            b.append(r)
+            b.write(r, False)
         i += 1
     cut("")
 
@@ -392,31 +552,42 @@ def _split_cmd(line, out):
 GOLDEN = pathlib.Path(__file__).parent.parent / "internal" / "shellsplit" / "testdata" / "golden.jsonl"
 
 
-def check_golden(lines=(), path=GOLDEN):
-    """Every line in the Go-made golden file cut the same way here, and every
-    (dialect, line) in lines that the file leaves out — Go found it trivial, one
-    command cut into itself — trivial here too; or exit. Returns the count."""
-    bad = []
+def _load(path):
     known = {}
     for l in path.read_text().splitlines():
         if l.strip():
             g = json.loads(l)
             known[(g["dialect"], g["line"])] = g
+    return known
+
+
+def check_golden(lines=(), path=GOLDEN, extra=()):
+    """Every line in the Go-made golden file(s) cut the same way here, and every
+    (dialect, line) in lines that the files leave out — Go found it trivial,
+    one command cut into itself — trivial here too; or exit. extra are golden
+    files Go made for data outside the repository (see TestGolden's -extra)."""
+    known = _load(path)
+    for p in extra:
+        known.update(_load(pathlib.Path(p)))
+    bad = []
     for g in known.values():
-        got = {"parts": split(g["dialect"], g["line"]), "code": code(g["dialect"], g["line"])}
-        if got["parts"] != g["parts"] or got["code"] != g["code"]:
-            bad.append((g, got))
+        c, gr, co = parse(g["dialect"], g["line"])
+        if c != g["parts"] or gr != g.get("groups", []) or co != g["code"]:
+            bad.append((g, {"parts": c, "groups": gr, "code": co}))
     for d, line in lines:
         if (d, line) in known:
             continue
-        s = line.strip()
-        got = {"parts": split(d, line), "code": code(d, line)}
-        if got["parts"] != [s] or got["code"] != s:
-            bad.append(({"dialect": d, "line": line, "parts": "[not in the golden file: trivial in Go]", "code": ""}, got))
+        s = trim(line)
+        c, gr, co = parse(d, line)
+        if c != [s] or gr or co != s:
+            bad.append(({"dialect": d, "line": line, "parts": "[not in a golden file: trivial in Go]", "code": ""},
+                        {"parts": c, "groups": gr, "code": co}))
     if bad:
         g, got = bad[0]
         raise SystemExit(f"scripts/shellsplit.py disagrees with internal/shellsplit on {len(bad)} line(s) — "
                          f"first: {g['line']!r}\n  go:     {g['parts']} | {g['code']!r}\n"
-                         f"  python: {got['parts']} | {got['code']!r}\n"
-                         "(data changed? go test ./internal/shellsplit -run TestGolden -update)")
+                         f"  python: {got['parts']} {got['groups']} | {got['code']!r}\n"
+                         "(the repository's data changed? go test ./internal/shellsplit -run TestGolden -update\n"
+                         " data of your own? go test ./internal/shellsplit -run TestGolden -args -extra a.jsonl,b.jsonl"
+                         " -out /tmp/extra-golden.jsonl, then train_risk.py --golden /tmp/extra-golden.jsonl)")
     return len(known) + len(lines)

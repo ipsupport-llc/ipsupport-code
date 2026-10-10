@@ -15,6 +15,11 @@ var localizeVectors = []struct{ text, ws, want string }{
 	{"cat ~/project/a.md ~/projects/b", "~/project", "cat ./a.md ~/projects/b"},
 	{"rm -rf /app", "", "rm -rf /app"},
 	{"rm -rf /", "/", "rm -rf /"},
+	{`cat "/app backup/data"`, "/app", `cat "/app backup/data"`}, // a quoted space is part of the name
+	{"cat /app,old/data", "/app", "cat /app,old/data"},
+	{`cd "/app" && ls`, "/app", `cd "." && ls`},
+	{`type c:/USERS/dev/project/a.txt`, `C:\Users\dev\project`, `type ./a.txt`}, // Windows: case and / don't matter
+	{"cat é/a", "é", "cat é/a"},                                                 // too short to be a workspace
 }
 
 func TestLocalize(t *testing.T) {

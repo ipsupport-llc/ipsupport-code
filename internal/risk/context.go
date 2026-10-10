@@ -84,7 +84,11 @@ func CorrectionFrom(ctx context.Context, approved bool) (Correction, bool) {
 	switch {
 	case flagged && approved:
 		var fired []string
-		for l, v := range s.a.Scores {
+		own := s.a.PartScores // the taught part's labels — not another part's
+		if own == nil {
+			own = s.a.Scores
+		}
+		for l, v := range own {
 			if l != LabelSafe && v >= Threshold {
 				fired = append(fired, l)
 			}
@@ -97,12 +101,12 @@ func CorrectionFrom(ctx context.Context, approved bool) (Correction, bool) {
 		if len(fired) == 0 {
 			return Correction{}, false
 		}
-		return Correction{Tool: s.tool, Action: s.action, Params: s.part(), Risky: false, Labels: fired}, true
+		return Correction{Tool: s.tool, Action: s.action, Params: s.part(), Risky: false, Labels: fired, Shell: s.a.Shell}, true
 	case !flagged && !approved:
 		if s.a.Top == "" {
 			return Correction{}, false
 		}
-		return Correction{Tool: s.tool, Action: s.action, Params: s.part(), Risky: true, Labels: []string{s.a.Top}}, true
+		return Correction{Tool: s.tool, Action: s.action, Params: s.part(), Risky: true, Labels: []string{s.a.Top}, Shell: s.a.Shell}, true
 	}
 	return Correction{}, false
 }

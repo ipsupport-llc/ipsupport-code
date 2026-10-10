@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -151,41 +152,60 @@ func (m *Model) Fingerprint() [8]byte {
 // before the model is shared.
 func (t *Tuned) SetShell(d shellsplit.Dialect) {
 	if t != nil {
+		t.mu.Lock()
 		t.shell = d
+		t.mu.Unlock()
 	}
 }
+
+func (t *Tuned) dialect() shellsplit.Dialect {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.shell
+}
+
+// maxParts bounds what one call costs to score: past it, a line's remaining
+// commands are scored together as one text rather than one by one.
+const maxParts = 256
 
 // parts is what a call is scored as. A shell line is a program of several
 // commands, and scored as one text a long harmless tail dilutes a destructive
 // head: `rm -rf x && cat > report.md <<EOF …` came out at 0.07, `rm -rf x`
 // alone at 0.88. So the line's code (its commands and operators, without
 // heredoc bodies, here-strings or comments — data, not commands) is scored,
-// and each command in it on its own; the call's risk is the highest. The
-// whole is kept for what only the combination says (`curl … | sh`).
-func (t *Tuned) parts(tool, action string, params map[string]any) []map[string]any {
-	cmd, ok := params["command"].(string)
-	if tool != "run" || action != "shell" || !ok {
-		return []map[string]any{params}
-	}
-	with := func(c string) map[string]any {
+// each group of commands joined by | && || (a pipeline's danger can be in the
+// joining: `curl … | sh`, whatever comes before it), and each command on its
+// own; the call's risk is the highest. Every part is a copy: what Assess hands
+// back must not change with the caller's map.
+func (t *Tuned) parts(d shellsplit.Dialect, tool, action string, params map[string]any) []map[string]any {
+	with := func(c string, set bool) map[string]any {
 		p := make(map[string]any, len(params))
 		for k, v := range params {
 			p[k] = v
 		}
-		p["command"] = c
+		if set {
+			p["command"] = c
+		}
 		return p
 	}
-	code := shellsplit.Code(t.shell, cmd)
-	out := []map[string]any{params}
-	seen := map[string]bool{strings.TrimSpace(cmd): true}
-	if code != "" && !seen[code] {
-		out[0] = with(code) // the data stays out of the whole as well
-		seen[code] = true
+	cmd, ok := params["command"].(string)
+	if tool != "run" || action != "shell" || !ok {
+		return []map[string]any{with("", false)}
 	}
-	for _, c := range shellsplit.Split(t.shell, cmd) {
+	parsed := shellsplit.Parse(d, cmd)
+	// The whole, as code. A line that is all comment runs nothing: its code is
+	// empty and scored as such, not as the comment's words.
+	out := []map[string]any{with(parsed.Code, true)}
+	seen := map[string]bool{parsed.Code: true}
+	pieces := append(append([]string{}, parsed.Groups...), parsed.Commands...)
+	for i, c := range pieces {
+		if len(out) == maxParts-1 && i < len(pieces)-1 {
+			out = append(out, with(strings.Join(pieces[i:], " ; "), true))
+			break
+		}
 		if !seen[c] {
 			seen[c] = true
-			out = append(out, with(c))
+			out = append(out, with(c, true))
 		}
 	}
 	return out
@@ -207,12 +227,14 @@ func (t *Tuned) AssessIn(workspace, tool, action string, params map[string]any) 
 		return Assessment{}
 	}
 	params = localizeParams(params, workspace)
+	d := t.dialect()
 	var out Assessment
-	for i, p := range t.parts(tool, action, params) {
+	for i, p := range t.parts(d, tool, action, params) {
 		a := t.assessText(CallText(tool, action, p))
-		a.Params = p
+		a.Params, a.PartScores = p, a.Scores
 		if i == 0 {
 			out = a
+			out.Scores = maps.Clone(a.Scores) // pooled below; PartScores keeps the part's own
 			continue
 		}
 		for l, v := range a.Scores { // what the call does: the most any part does —
@@ -223,8 +245,11 @@ func (t *Tuned) AssessIn(workspace, tool, action string, params map[string]any) 
 		}
 		out.BaseRisk = max(out.BaseRisk, a.BaseRisk)
 		if a.Risk > out.Risk {
-			out.Risk, out.Top, out.Params = a.Risk, a.Top, p
+			out.Risk, out.Top, out.Params, out.PartScores = a.Risk, a.Top, p, a.PartScores
 		}
+	}
+	if tool == "run" && action == "shell" {
+		out.Shell = d.String()
 	}
 	return out
 }
@@ -281,6 +306,8 @@ type Correction struct {
 	// Risky is the human's verdict: true when they refused a call the model had
 	// not flagged, false when they approved one it had.
 	Risky bool
+	// Shell is the dialect the call's shell line was cut by (see Assessment).
+	Shell string
 	// Labels are the model's own labels being corrected. On a false alarm these
 	// are the ones that fired, which is exactly known. On a miss the fact of risk
 	// comes from the human but the KIND does not, so this carries the model's own
@@ -598,6 +625,7 @@ type FeedbackRow struct {
 	Action  string         `json:"action,omitempty"`
 	Params  map[string]any `json:"params,omitempty"`
 	Labels  []string       `json:"labels,omitempty"`
+	Shell   string         `json:"shell,omitempty"`  // sh, powershell or cmd: how the trainer cuts it
 	Verdict string         `json:"verdict"`          // "approved" or "refused"
 	Scored  []string       `json:"scored,omitempty"` // the labels the model put on it — its claim, not the answer
 	Source  string         `json:"source"`
@@ -611,7 +639,7 @@ func AppendFeedback(path string, c Correction) error {
 		verdict = "refused"
 	}
 	row := FeedbackRow{
-		Tool: c.Tool, Action: c.Action, Params: c.Params, Verdict: verdict, Scored: c.Labels,
+		Tool: c.Tool, Action: c.Action, Params: c.Params, Shell: c.Shell, Verdict: verdict, Scored: c.Labels,
 		Source: "approval", When: time.Now().UTC().Format(time.RFC3339),
 	}
 	data, err := json.Marshal(row)

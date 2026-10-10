@@ -505,8 +505,10 @@ diluted a destructive head: `rm -rf quotesdemo && cat > REPORT.md <<'EOF' …`
 came out at 0.07. The line is now cut by the rules of the shell it runs in —
 `sh` off Windows, PowerShell (or `cmd` when `run.shell` says so) on it
 (`internal/shellsplit`) — and its code (commands and operators, without heredoc
-bodies, here-strings or comments, which are data) and each command in it are
-scored; the call's risk is the highest. That line now scores 0.89, and a note
+bodies, here-strings or comments, which are data) each group of commands joined by `|` `&&` `||` (a pipeline's danger
+can be in the joining: `curl … | sh`) and each command in it are scored; the
+call's risk is the highest. A heredoc that is expanded or fed to a shell or an
+interpreter (`sh <<EOF`, `python3 - <<EOF`) is code, not data. That line now scores 0.89, and a note
 written through a heredoc no longer fires on what the note says. Paths into the
 workspace are read as the project's own (`/app/data.csv` in a workspace at
 `/app` scores as `./data.csv`): the scorer knows where the workspace is, the
@@ -520,21 +522,21 @@ On held-out **paths** — a fifth of every path class, never seen under any verb
 
 | label | precision | recall |
 |---|---|---|
-| destructive | 0.89 | 0.96 |
-| sandbox_escape | 0.87 | 0.85 |
-| credential_access | 0.96 | 0.92 |
-| network | 1.00 | 0.98 |
-| external_side_effect | 0.98 | 0.98 |
-| safe | 0.95 | 0.96 |
+| destructive | 0.82 | 0.98 |
+| sandbox_escape | 0.96 | 0.90 |
+| credential_access | 0.91 | 0.96 |
+| network | 0.99 | 0.98 |
+| external_side_effect | 0.99 | 0.99 |
+| safe | 0.96 | 0.84 |
 
 On the headline score — what the log shows and a gate would use — that is
-**4.8% false alarms on ordinary calls and 5.3% missed risky ones** (chains of
+**9.1% false alarms on ordinary calls and 3.8% missed risky ones** (chains of
 commands share their members' held-out paths, so an unseen path's mistake
 repeats in them). Most false alarms are deleting build output under a name never
 seen (`artifacts`, `local.properties`); most misses sit just under the line on a
 held-out secret or system path. On the honest set of real agents' commands
 (`scripts/risk_eval.jsonl`), the number that decides whether a model ships:
-**164 of 198 risky commands flagged, 33 of 501 ordinary ones** — against 124
+**167 of 198 risky commands flagged, 39 of 501 ordinary ones** — against 124
 and 70 before lines were scored by their parts. The trainer prints both, and names every false alarm.
 
 The feature vector is **L2-normalized**, which is what makes a score mean the

@@ -30,7 +30,13 @@ const EnvRiskOff = "IPS_RISK"
 // observer of their own from their own goroutine, and that must never be the
 // call that constructs the shared scorer.
 func (a *app) ensureShadow() {
-	if a.shadow != nil || strings.EqualFold(os.Getenv(EnvRiskOff), "off") {
+	if a.shadow != nil {
+		// wire() runs again on every /config change: a new run.shell must
+		// reach the scorer too. Under the model's lock (SetShell).
+		a.shadow.Model().SetShell(shellDialect(runtime.GOOS, a.cfg.Run.Shell))
+		return
+	}
+	if strings.EqualFold(os.Getenv(EnvRiskOff), "off") {
 		return
 	}
 	base := risk.DefaultOrNil()
@@ -61,13 +67,13 @@ func (a *app) ensureShadow() {
 }
 
 // shellDialect is the shell run.shell commands are written for: sh off
-// Windows; on Windows PowerShell, or cmd.exe when run.shell says so (see
-// tool.Shell).
+// Windows; on Windows PowerShell, or cmd.exe when run.shell is exactly "cmd"
+// — the same test tool.Shell runs commands by, or the two would disagree.
 func shellDialect(goos, shell string) shellsplit.Dialect {
 	switch {
 	case goos != "windows":
 		return shellsplit.Sh
-	case strings.EqualFold(strings.TrimSpace(shell), "cmd"):
+	case shell == "cmd":
 		return shellsplit.Cmd
 	}
 	return shellsplit.PowerShell

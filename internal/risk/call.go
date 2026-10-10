@@ -87,6 +87,12 @@ type Assessment struct {
 	// "command" set to the one that scored highest. A correction teaches
 	// that part, the one the score was about.
 	Params map[string]any
+	// PartScores are that part's own label scores: a correction names the
+	// labels that fired on the text it teaches, not ones another part raised.
+	PartScores map[string]float32
+	// Shell is the dialect a shell line was cut by ("" for other calls), so a
+	// recorded correction is retrained under the same rules.
+	Shell string
 }
 
 // Assess scores one tool call.

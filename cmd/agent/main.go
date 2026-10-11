@@ -2710,10 +2710,11 @@ func (a *app) mcpClient(ctx context.Context, servers map[string]mcp.Server, name
 	if !ok {
 		return nil, fmt.Errorf("unknown MCP server %q (configured: %s)", name, strings.Join(a.mcpServerNames(servers), ", "))
 	}
-	detail := name
+	detail, launch := name, ""
 	switch {
 	case srv.Command != "":
-		detail = fmt.Sprintf("%s: %s %s", name, srv.Command, strings.Join(srv.Args, " "))
+		launch = strings.TrimSpace(srv.Command + " " + strings.Join(srv.Args, " "))
+		detail = name + ": " + launch
 	case srv.URL != "":
 		detail = fmt.Sprintf("%s: %s", name, srv.URL)
 	}
@@ -2729,7 +2730,7 @@ func (a *app) mcpClient(ctx context.Context, servers map[string]mcp.Server, name
 	// TestMCPClientLockNotHeldDuringApproval. attemptCtx (rather than ctx)
 	// carries the wait so closeMCP can cut it short on shutdown instead of
 	// leaving the eventual connection an orphan with nothing left to close it.
-	approved := a.approveGated(attemptCtx, "mcp launch", detail)
+	approved := a.approveGated(a.withLaunchScore(attemptCtx, "", launch), "mcp launch", detail)
 	if !approved {
 		return nil, fmt.Errorf("mcp server %q launch denied by user", name)
 	}

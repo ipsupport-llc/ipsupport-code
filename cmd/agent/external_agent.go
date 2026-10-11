@@ -97,7 +97,7 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 	// with its own safety into one without (found by review: the prompt showed
 	// "codex" and the task, never "exec --yolo").
 	launch := strings.TrimSpace(command + " " + strings.Join(p.Args, " "))
-	approved := a.approveGated(ctx, "external agent", head+"\n  launch: "+launch+"\n  task: "+task)
+	approved := a.approveGated(a.withLaunchScore(ctx, root, launch), "external agent", head+"\n  launch: "+launch+"\n  task: "+task)
 	if !approved {
 		return "", fmt.Errorf("external agent denied by user")
 	}

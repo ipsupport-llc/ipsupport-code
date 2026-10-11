@@ -1091,7 +1091,7 @@ const readOnlyDirective = `READ-ONLY MODE: do NOT change anything. Investigate w
 
 const readOnlyRunNote = ` run.shell works: commands run in a sandbox where the workspace and the rest of the disk are read-only, only temp dirs are writable, and there is no network.`
 
-const readOnlyNoRunNote = ` Commands (run) are blocked too.`
+const readOnlyNoRunNote = ` Commands (run) and git are blocked too: read the files instead.`
 
 // planOffNote is said once, on the first task after plan mode is turned off —
 // the ON directive is still in an earlier message of the history.

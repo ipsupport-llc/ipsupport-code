@@ -9797,6 +9797,7 @@ func TestCheckReadOnly(t *testing.T) {
 		name                  string
 		args                  []string
 		interactive, res, clr bool
+		init                  bool
 		session               string
 		ok                    bool
 	}{
@@ -9809,9 +9810,10 @@ func TestCheckReadOnly(t *testing.T) {
 		{name: "-session", args: []string{"x"}, session: "review"},
 		{name: "config set", args: []string{"config", "set", "run.default", "allow"}},
 		{name: "update", args: []string{"update"}},
+		{name: "-init", args: []string{"x"}, init: true},
 		{name: "a task that starts with a command's word", args: []string{"configure", "nothing"}, ok: true},
 	} {
-		if err := checkReadOnly(c.args, c.interactive, c.res, c.clr, c.session); (err == nil) != c.ok {
+		if err := checkReadOnly(c.args, c.interactive, c.res, c.clr, c.init, c.session); (err == nil) != c.ok {
 			t.Errorf("%s: err = %v, want ok=%v", c.name, err, c.ok)
 		}
 	}
@@ -9997,6 +9999,38 @@ func TestReadOnlyRefusesCommandsWhereTheRepositoryIsWritable(t *testing.T) {
 	if ok, why := a.readOnlyRun(); ok || !strings.Contains(why, ".git") {
 		t.Errorf("readOnlyRun = %v %q, want refused over the repository in a temp dir", ok, why)
 	}
+	// A jail elsewhere leaves the workspace's own repository as writable.
+	jail := filepath.Join(parent, "jail")
+	if err := os.Mkdir(jail, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b, cleanupB, err := build(ws, "", []string{"file.jail=" + jail}, true, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupB()
+	if ok, why := b.readOnlyRun(); ok || !strings.Contains(why, ".git") {
+		t.Errorf("with a jail elsewhere: readOnlyRun = %v %q, want refused over the workspace's repository", ok, why)
+	}
+}
+
+// gitDirs keeps a path with a space whole.
+func TestGitDirsKeepsAPathWhole(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	repo := filepath.Join(t.TempDir(), "a repo")
+	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	for _, d := range gitDirs(repo) {
+		if _, err := os.Stat(d); err != nil {
+			t.Errorf("gitDirs = %q: %v", gitDirs(repo), err)
+		}
+	}
+	if n := len(gitDirs(repo)); n != 2 {
+		t.Errorf("gitDirs = %q, want the git dir and the common dir", gitDirs(repo))
+	}
 }
 
 // A read-only run rewrites none of the stores on its way in: an expired usage
@@ -10027,15 +10061,68 @@ func TestReadOnlyLeavesTheStoresAndSandboxesGit(t *testing.T) {
 		if wrapped := a.gitWrapperFor(a.hostSandboxRoot()) != nil; wrapped != (readOnly && sandbox.Available(sandbox.Auto)) {
 			t.Errorf("readOnly=%v: git wrapped = %v", readOnly, wrapped)
 		}
+		// The workspace is in a temp dir, which the sandbox lets commands
+		// write: no commands, and no git, the host's or a sub-agent's.
+		if ok, _ := a.readOnlyRun(); readOnly && ok {
+			t.Fatal("commands allowed in a temp dir")
+		}
+		if git := a.subReg.Actions("git") != nil || a.gitTools(a.pol, a.hostSandboxRoot()) != nil; git == readOnly {
+			t.Errorf("readOnly=%v: a git tool = %v", readOnly, git)
+		}
+	}
+}
+
+// What a read-only run writes on its own lands outside the workspace and its
+// repositories however the path is written: relative to a working directory
+// below the workspace, through a symlink in it, in the git dir of a linked
+// worktree, or in a settings dir inside it.
+func TestReadOnlyRefusesStoresThatLeadIntoTheWorkspace(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ws := t.TempDir()
+	sub := filepath.Join(ws, "sub")
+	outside := filepath.Join(t.TempDir(), "usage.json")
+	main := t.TempDir()
+	for _, args := range [][]string{{"-C", main, "init", "-q"}, {"-C", main, "commit", "-q", "--allow-empty", "-m", "x"},
+		{"-C", main, "worktree", "add", "-q", filepath.Join(ws, "wt")}} {
+		if out, err := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t"}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws, "u.json")); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(sub)
+	for _, c := range []struct{ ws, kv string }{
+		{ws, "trace_path=../t.jsonl"},                                                  // the working directory's ../, not the workspace's
+		{ws, "usage_path=" + filepath.Join(ws, "u.json")},                              // a symlink out: the rename over it lands here
+		{filepath.Join(ws, "wt"), "trace_path=" + filepath.Join(main, ".git", "HEAD")}, // the worktree's common git dir
+	} {
+		if _, _, err := build(c.ws, "", []string{c.kv}, true, bufio.NewReader(strings.NewReader(""))); err == nil {
+			t.Errorf("%s: a read-only build started", c.kv)
+		}
+	}
+	setHome(t, ws) // the settings dir, where the rating state is kept, in the workspace
+	if _, _, err := build(ws, "", []string{"trace_path=" + filepath.Join(t.TempDir(), "t.jsonl"), "usage_path=" + outside,
+		"skills_path=" + t.TempDir(), "kb_path=" + filepath.Join(t.TempDir(), "kb.json")}, true, bufio.NewReader(strings.NewReader(""))); err == nil {
+		t.Error("a settings dir in the workspace: a read-only build started")
 	}
 }
 
 // A store a repository's config points into the workspace is refused: a
-// read-only run would otherwise write it there.
+// read-only run would otherwise write it there. A relative path is the
+// working directory's, as the store opens it.
 func TestReadOnlyRefusesStoresInTheWorkspace(t *testing.T) {
 	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	ws := t.TempDir()
+	t.Chdir(ws)
 	for _, kv := range []string{"trace_path=.agent/trace.jsonl", "usage_path=" + filepath.Join(ws, "u.json"), "skills_path=skills", "kb_path=./kb.json"} {
 		if _, _, err := build(ws, "", []string{kv}, true, bufio.NewReader(strings.NewReader(""))); err == nil {
 			t.Errorf("%s: a read-only build started", kv)

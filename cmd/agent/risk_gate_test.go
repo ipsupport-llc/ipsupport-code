@@ -338,6 +338,8 @@ func TestRiskCheckKnowsAnAgentsSafetyOffFlags(t *testing.T) {
 		{"claude --permission-mode plan -p {task}", false},
 		{"gemini -p {task}", false},
 		{"muse exec --disable-write --approval-mode never {task}", false},
+		{"muse exec --disable-approval {task}", false},
+		{"muse exec --disable-sandbox {task}", true},
 		{"copilot -p {task}", false},
 		{"cursor-agent -p {task}", false},
 		{"ipco -read-only {task}", false},

@@ -956,7 +956,11 @@ OS = "linux"
 # above, so they are drawn from the same rows as before.
 AGENT_TASKS = ["{task}", '"fix the failing test"', '"review the diff against main"',
                "'add a /health endpoint and run the tests'", '"summarize README.md"']
-AGENT_UNSAFE = {  # documented flags (each CLI's --help or docs) that drop its own approvals or sandbox
+# Which flags count: one that drops the agent's sandbox, or that drops its
+# approvals where it has no sandbox to fall back on (copilot, gemini's -y,
+# cursor's --force). Approvals off with the sandbox still on is contained —
+# `codex exec --full-auto`, `muse exec --approval-mode never` — and is safe.
+AGENT_UNSAFE = {  # documented flags (each CLI's --help or docs)
     "codex exec": ["--dangerously-bypass-approvals-and-sandbox", "--yolo", "--sandbox danger-full-access",
                    "-s danger-full-access"],
     "npx @openai/codex exec": ["--dangerously-bypass-approvals-and-sandbox", "--yolo"],
@@ -964,7 +968,7 @@ AGENT_UNSAFE = {  # documented flags (each CLI's --help or docs) that drop its o
     "gemini -p": ["--yolo", "-y", "--approval-mode yolo"],
     "npx @google/gemini-cli -p": ["--yolo", "--approval-mode yolo"],
     "qwen -p": ["--yolo", "-y", "--approval-mode yolo"],
-    "muse exec": ["--yolo", "--disable-approval", "--disable-sandbox"],
+    "muse exec": ["--yolo", "--disable-sandbox"],
     "copilot -p": ["--allow-all", "--allow-all-tools", "--allow-all-paths"],
     "opencode run": ["--dangerously-skip-permissions"],
     "cursor-agent -p": ["--force", "-f", "--yolo", "--sandbox disabled"],
@@ -981,7 +985,7 @@ AGENT_SAFE = {
     "npx @google/gemini-cli -p": ["", "-m gemini-2.5-flash"],
     "qwen -p": ["", "-m qwen3-coder-plus"],
     "muse exec": ["", "--approval-mode on-request", "--disable-write", "--disable-write --approval-mode never",
-                  "--sandbox-network restricted"],
+                  "--approval-mode never", "--disable-approval", "--sandbox-network restricted"],
     "copilot -p": ["", "--allow-tool 'shell(git status)'", "--deny-tool 'shell(rm)'", "--model gpt-5"],
     "opencode run": ["", "-m anthropic/claude-sonnet-4"],
     "cursor-agent -p": ["", "--model gpt-5", "--sandbox enabled", "--output-format json"],

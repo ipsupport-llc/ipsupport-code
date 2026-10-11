@@ -576,18 +576,20 @@ repeats in them). Most false alarms are deleting build output under a name never
 seen (`artifacts`, `local.properties`); most misses sit just under the line on a
 held-out secret or system path. On the honest set of real agents' commands
 (`scripts/risk_eval.jsonl`), the number that decides whether a model ships:
-**168 of 198 risky commands flagged, 42 of 501 ordinary ones** — against 124
+**168 of 198 risky commands flagged, 41 of 501 ordinary ones** — against 124
 and 70 before lines were scored by their parts. The trainer prints both, and names every false alarm.
 
 It knows what makes another agent's or an MCP server's launch dangerous (see
 [Risk check](#risk-check)): the flags that turn an agent's own approvals and
 sandbox off — `codex --yolo`, `claude --dangerously-skip-permissions`,
-`gemini --approval-mode yolo`, `muse exec --yolo`, `copilot --allow-all-tools`,
+`gemini --approval-mode yolo`, `muse exec --disable-sandbox`, `copilot --allow-all-tools`,
 `opencode run --dangerously-skip-permissions`, `cursor-agent --force`, this
 agent's own `-skip-permissions` — and a library slipped into a program through
 `LD_PRELOAD` or `DYLD_INSERT_LIBRARIES`. The same agents with their ordinary
 flags, and servers started with a key in their environment — any of gitleaks'
-vendors, named but never valued — stay quiet. Gaps: an agent it has never seen
+vendors, named but never valued — stay quiet, and so does an agent run with its approvals off but its sandbox
+on (`codex exec --full-auto`, `muse exec --approval-mode never`): that is
+contained. Gaps: an agent it has never seen
 (its safety-off flag is just an unknown word), and a variable that names code
 to load (`PYTHONPATH`, `NODE_OPTIONS`), which a launch line shows without its
 value and agents point outside the workspace all day.

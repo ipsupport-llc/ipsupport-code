@@ -309,6 +309,9 @@ func (a *Agent) turnNote(hist []llm.Message) string {
 		// already in its history and no memory of having sent it.
 		parts = append(parts, planOffNote)
 	}
+	if a.maxReturns > 0 && !a.planMode { // the judge decides, as in Run
+		parts = append(parts, goalCheckNote)
+	}
 	if len(parts) == 0 {
 		return ""
 	}
@@ -1063,6 +1066,12 @@ func SubAgentSystemPrompt() string {
 // planDirective rides in each plan-mode task's agent-note (see turnNote). Kept
 // short — it ships in every plan-mode request to a small local model.
 const planDirective = `PLAN MODE is ON. Do NOT change anything. You may investigate with read-only tools (file.read, file.list, web, calc), then present a concise, numbered plan of what you WOULD do, and stop with no tool call. Any tool that writes files, runs commands, or changes git is blocked right now.`
+
+// goalCheckNote tells the model, while a goal stands, what its finish is
+// worth: the judge decides from the record, and a result made to look done is
+// not done. Said up front, every task — the model used to learn there was a
+// check only after calling done(), once the work was over.
+const goalCheckNote = `A GOAL stands: a separate checker judges your tool results, not your summary. Only real completion counts — gamed tests, hard-coded outputs or claims of what you never ran are judged NOT done. If something can't be done, say so.`
 
 // planOffNote is said once, on the first task after plan mode is turned off —
 // the ON directive is still in an earlier message of the history.
@@ -2283,7 +2292,9 @@ The agent's own words are not evidence. Its narration, its plans, its reasoning 
 
 You have no tools and cannot inspect anything yourself, so never ask for a check you are unable to perform. "Verify that it works" is not a missing piece. If something is genuinely absent from the record, name that specific thing instead.
 
-Be skeptical of claims with nothing behind them: a change only described, or an artifact never shown, is NOT done.`
+Be skeptical of claims with nothing behind them: a change only described, or an artifact never shown, is NOT done.
+
+A test or check changed just to pass (weakened, skipped, deleted, expectation edited), test inputs special-cased, or an output hard-coded is MORE unless the GOAL asks for it.`
 
 // judgeSystemWith appends the user's own acceptance criteria to the judge's
 // instruction. Deliberately ADDITIVE and placed last: the GOAL stays the thing

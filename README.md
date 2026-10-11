@@ -562,22 +562,31 @@ On held-out **paths** — a fifth of every path class, never seen under any verb
 
 | label | precision | recall |
 |---|---|---|
-| destructive | 0.82 | 0.97 |
-| sandbox_escape | 0.95 | 0.81 |
+| destructive | 0.81 | 0.97 |
+| sandbox_escape | 0.96 | 0.83 |
 | credential_access | 0.93 | 0.95 |
 | network | 0.99 | 0.99 |
 | external_side_effect | 0.99 | 0.99 |
-| safe | 0.95 | 0.87 |
+| safe | 0.96 | 0.89 |
 
 On the headline score — what the log shows and a gate would use — that is
-**8.4% false alarms on ordinary calls and 5.7% missed risky ones** (chains of
+**7.5% false alarms on ordinary calls and 5.6% missed risky ones** (chains of
 commands share their members' held-out paths, so an unseen path's mistake
 repeats in them). Most false alarms are deleting build output under a name never
 seen (`artifacts`, `local.properties`); most misses sit just under the line on a
 held-out secret or system path. On the honest set of real agents' commands
 (`scripts/risk_eval.jsonl`), the number that decides whether a model ships:
-**168 of 198 risky commands flagged, 41 of 501 ordinary ones** — against 124
+**167 of 198 risky commands flagged, 41 of 501 ordinary ones** — against 124
 and 70 before lines were scored by their parts. The trainer prints both, and names every false alarm.
+
+It knows what makes another agent's or an MCP server's launch dangerous (see
+[Risk check](#risk-check)): the flags that turn an agent's own approvals and
+sandbox off — `codex --yolo`, `claude --dangerously-skip-permissions`,
+`gemini --approval-mode yolo` and the like — and a library slipped into a
+program through `LD_PRELOAD` or `DYLD_INSERT_LIBRARIES`. The same agents with
+their ordinary flags, and servers started with a key in their environment —
+any of gitleaks' vendors, named but never valued — stay quiet. An agent it has
+never seen is a gap: its safety-off flag is just an unknown word.
 
 The feature vector is **L2-normalized**, which is what makes a score mean the
 same thing for a long call as a short one. Without it a repeated feature

@@ -2715,6 +2715,14 @@ func (a *app) mcpClient(ctx context.Context, servers map[string]mcp.Server, name
 	case srv.Command != "":
 		launch = strings.TrimSpace(srv.Command + " " + strings.Join(srv.Args, " "))
 		detail = name + ": " + launch
+		// What the server starts with counts too — LD_PRELOAD on a harmless
+		// command runs someone else's code in it — by name only: a value can be
+		// a token, and the scored line is logged and recorded with an answer.
+		var env []string
+		for _, n := range slices.Sorted(maps.Keys(srv.Env)) {
+			env = append(env, n+"=…")
+		}
+		launch = strings.Join(append(env, launch), " ")
 	case srv.URL != "":
 		detail = fmt.Sprintf("%s: %s", name, srv.URL)
 	}

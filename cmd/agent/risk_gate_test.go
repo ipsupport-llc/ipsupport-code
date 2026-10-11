@@ -311,6 +311,49 @@ func TestRiskCheckScoresAnExternalAgentsLaunchLine(t *testing.T) {
 	}
 }
 
+// A flag that turns another agent's own approvals off is what makes its
+// launch dangerous; the same agent with its ordinary flags is not.
+func TestRiskCheckKnowsAnAgentsSafetyOffFlags(t *testing.T) {
+	a, _, _ := gateApp(t)
+	for _, tc := range []struct {
+		line    string
+		flagged bool
+	}{
+		{"codex exec --yolo {task}", true},
+		{"claude --dangerously-skip-permissions -p {task}", true},
+		{"gemini --approval-mode yolo -p {task}", true},
+		{"codex exec {task}", false},
+		{"claude -p {task}", false},
+		{"gemini -p {task}", false},
+	} {
+		as, ok := risk.AssessmentFrom(a.withLaunchScore(context.Background(), a.workspace, tc.line))
+		if got := ok && as.Flagged(); got != tc.flagged {
+			t.Errorf("%q flagged = %v, want %v", tc.line, got, tc.flagged)
+		}
+	}
+}
+
+// An MCP server's environment is part of what it starts with: LD_PRELOAD on a
+// harmless command stops for a person. The value never reaches the scored
+// line — it can be a token — and a token's name alone asks nothing.
+func TestRiskCheckScoresAnMCPServersEnvironmentByName(t *testing.T) {
+	for _, tc := range []struct {
+		env   map[string]string
+		asked int
+	}{
+		{map[string]string{"LD_PRELOAD": "/tmp/libhook.so"}, 1},
+		{map[string]string{"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_secretvalue"}, 0},
+	} {
+		a, _, ap := gateApp(t)
+		a.allowSession("mcp launch")
+		servers := map[string]mcp.Server{"s": {Command: "true", Env: tc.env}}
+		a.mcpClient(context.Background(), servers, "s")
+		if ap.calls != tc.asked {
+			t.Errorf("env %v: asked %d time(s), want %d", tc.env, ap.calls, tc.asked)
+		}
+	}
+}
+
 // The same for an MCP server's launch command.
 func TestRiskCheckScoresAnMCPServersLaunchLine(t *testing.T) {
 	a, _, ap := gateApp(t)

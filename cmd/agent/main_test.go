@@ -248,7 +248,7 @@ func TestAPushShowsTheGapAndWhatTheModelWasTold(t *testing.T) {
 	}
 	// Each wrapped line fits the screen, narrow ones included (the header is
 	// one line, as every event's is, and the log wraps it).
-	for _, w := range []int{30, 60, 100} {
+	for _, w := range []int{24, 30, 60, 100} {
 		m := &tuiModel{width: w}
 		for _, l := range m.renderEvent(uiEvent{kind: "continue", fields: map[string]any{"return": 1, "of": 3, "missing": gap, "told": sent}})[1:] {
 			if lw := lipgloss.Width(l); lw > w {

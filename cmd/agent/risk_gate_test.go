@@ -3,14 +3,17 @@ package main
 import (
 	"bufio"
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
 )
@@ -29,7 +32,7 @@ func gateApp(t *testing.T, overrides ...string) (*app, *policy.Engine, *counting
 		t.Fatal(err)
 	}
 	if a.shadow == nil {
-		t.Skip("no scorer")
+		t.Fatal("no scorer: the shipped model did not load, or IPS_RISK=off is set")
 	}
 	pol, err := policy.New(a.cfg)
 	if err != nil {
@@ -52,7 +55,7 @@ const flaggedCommand = "cat ~/.ssh/id_rsa" // not on the deny floor: the policy 
 func mustFlag(t *testing.T, ctx context.Context) {
 	t.Helper()
 	if as, _ := risk.AssessmentFrom(ctx); !as.Flagged() {
-		t.Skipf("the shipped model no longer flags %q", flaggedCommand)
+		t.Fatalf("the shipped model no longer flags %q — pick a command it does", flaggedCommand)
 	}
 }
 
@@ -206,5 +209,78 @@ func TestWorkspaceConfigCannotTurnTheRiskCheckOff(t *testing.T) {
 	write(filepath.Join(ws, ".agent", "config.json"), `{"risk_check": true}`)
 	if cfg, _ := config.Load(ws); !cfg.RiskCheck {
 		t.Error("a workspace file could not turn it on")
+	}
+}
+
+// The main agent and every sub-agent get the gate.
+func TestEveryAgentIsWiredWithTheRiskCheck(t *testing.T) {
+	a, pol, _ := gateApp(t)
+	if !a.ag.HasCallGate() {
+		t.Error("the main agent was built without the risk check")
+	}
+	plan := spawnPlan{subReg: a.subReg, subPol: pol, subWorkspace: a.workspace, llmCfg: a.cfg.LLM}
+	if !a.newSubAgent(plan, llm.NewOpenAIClient(a.cfg.LLM), "sub1").HasCallGate() {
+		t.Error("a sub-agent was built without the risk check")
+	}
+}
+
+// spawn.default=allow — which a checkout's own file may set — still stops a
+// flagged spawn.
+func TestRiskCheckStopsAFlaggedSpawnTheSpawnPolicyAllows(t *testing.T) {
+	a, pol, ap := gateApp(t, "spawn.default=allow")
+	ctx := scored(t, a, pol, flaggedCommand)
+	mustFlag(t, ctx)
+	plan := spawnPlan{spawnDefault: "allow", subPol: pol, subWorkspace: a.workspace, llmCfg: a.cfg.LLM, profile: "p"}
+	if _, err := a.runSpawnPlan(ctx, plan, "read the keys", nil); err == nil || ap.calls != 1 {
+		t.Errorf("asked %d time(s), err %v — a flagged spawn ran unasked", ap.calls, err)
+	}
+}
+
+// A background job runs on a context of its own; the score goes with it, so a
+// plain 'a' given earlier does not wave a flagged launch through.
+func TestABackgroundJobKeepsTheScore(t *testing.T) {
+	a, pol, ap := gateApp(t)
+	a.cfg.Agents = map[string]config.AgentProfile{
+		"echo": {Kind: "external", Command: "echo", Args: []string{"{task}"}},
+	}
+	a.allowSession("external agent")
+	ctx := scored(t, a, pol, flaggedCommand)
+	mustFlag(t, ctx)
+	if _, err := a.spawnAgentBackground(ctx, "echo", "read the keys", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100 && a.jobsPending() > 0; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if ap.calls != 1 {
+		t.Errorf("asked %d time(s) — the job lost the score and the plain allow covered it", ap.calls)
+	}
+}
+
+// list/find/search with no path read "." — the policy's verdict must too, or
+// the gate skips them.
+func TestAFileReadWithNoPathIsJudgedAsTheToolRunsIt(t *testing.T) {
+	_, pol, _ := gateApp(t)
+	for _, action := range []string{"list", "find", "search"} {
+		if v := policyVerdict(pol, "file", action, map[string]any{"query": "x"}); v != risk.VerdictAllow {
+			t.Errorf("file %s with no path: verdict %v, want allow", action, v)
+		}
+	}
+}
+
+// The plain prompt's 'a' at a flagged call is the flagged allow, as the TUI's.
+func TestStdinAllowOnAFlaggedPromptCoversFlaggedCalls(t *testing.T) {
+	a, pol, _ := gateApp(t)
+	ctx := scored(t, a, pol, flaggedCommand)
+	mustFlag(t, ctx)
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	s := &stdinApprover{stdin: newStdinOwner(bufio.NewReader(pr)), app: a}
+	go pw.Write([]byte("a\n"))
+	if !s.Approve(ctx, "run", flaggedCommand) {
+		t.Fatal("'a' did not approve")
+	}
+	if !a.flaggedAllow["run"] {
+		t.Error("'a' at a flagged plain prompt did not cover flagged calls")
 	}
 }

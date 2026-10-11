@@ -1060,7 +1060,7 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 	// behind a shared lock — the approver (TUI bridge / stdin prompt) already
 	// serializes concurrent prompts on its own, and a mutex held here would
 	// block an unrelated job's own spawn/mcp approval behind this one's.
-	if plan.spawnDefault != "allow" || plan.outsideJail {
+	if plan.spawnDefault != "allow" || plan.outsideJail || a.riskStops(ctx, "spawn agent") {
 		// Outside the workspace is its own kind of approval, not a "spawn …"
 		// one: an allow-for-this-session given to ordinary spawns must not
 		// cover a sub-agent sent outside the jail.

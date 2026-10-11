@@ -236,7 +236,12 @@ func policyVerdict(pol *policy.Engine, tool, action string, params map[string]an
 	case "file":
 		path, _ := params["path"].(string)
 		if path == "" {
-			return risk.VerdictUnknown
+			switch action {
+			case "list", "find", "search": // the tool reads these from "." then
+				path = "."
+			default:
+				return risk.VerdictUnknown
+			}
 		}
 		switch action {
 		case "write", "append", "edit", "mkdir":

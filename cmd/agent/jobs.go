@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
 	"github.com/ipsupport-llc/ipsupport-code/internal/trace"
 )
 
@@ -56,7 +57,7 @@ func (a *app) setJobProgress(id int, line string) {
 // spawnAgentBackground is the SpawnFunc for background=true: validate up front
 // (a typo must fail NOW, not silently inside the job), register the job, run the
 // normal spawn path — approval included — in a goroutine, and return at once.
-func (a *app) spawnAgentBackground(_ context.Context, profile, task, dir string) (string, error) {
+func (a *app) spawnAgentBackground(ctx context.Context, profile, task, dir string) (string, error) {
 	if strings.TrimSpace(task) == "" {
 		return "", fmt.Errorf("task is required")
 	}
@@ -78,7 +79,7 @@ func (a *app) spawnAgentBackground(_ context.Context, profile, task, dir string)
 	resolved := plan.profile                  // set on both branches of resolveSpawn
 	// Detached lifetime: the job survives its parent task (and esc). Cancelled
 	// only via /jobs kill — or process exit.
-	jctx, cancel := context.WithCancel(context.Background())
+	jctx, cancel := context.WithCancel(risk.CarryAssessment(ctx, context.Background()))
 	a.jobMu.Lock()
 	a.jobSeq++
 	j := &job{id: a.jobSeq, profile: resolved, task: task, dir: dir, started: time.Now(), cancel: cancel, tracer: plan.tracer}

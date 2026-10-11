@@ -229,3 +229,20 @@ func TestAPathParameterIsLocalizedWhole(t *testing.T) {
 		}
 	}
 }
+
+// A call not read in full teaches nothing either way: the answer is about the
+// whole call, the score only about the part that was read.
+func TestACallNotReadInFullTeachesNothing(t *testing.T) {
+	call := shellCall("ls")
+	for _, a := range []Assessment{
+		{Risk: 0.12, Top: "destructive", Incomplete: true},
+		{Risk: 0.9, Top: "destructive", Incomplete: true, Scores: map[string]float32{"destructive": 0.9}},
+	} {
+		ctx := WithAssessment(context.Background(), "run", "shell", call, a)
+		for _, approved := range []bool{true, false} {
+			if _, ok := CorrectionFrom(ctx, approved); ok {
+				t.Errorf("risk %.2f, approved %v: learned from a call not read in full", a.Risk, approved)
+			}
+		}
+	}
+}

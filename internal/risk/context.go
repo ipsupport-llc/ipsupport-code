@@ -31,6 +31,15 @@ func WithAssessment(ctx context.Context, tool, action string, params map[string]
 	return context.WithValue(ctx, assessKey{}, &scored{tool: tool, action: action, params: params, a: a})
 }
 
+// CarryAssessment puts the score on from onto to: a call that goes on in a
+// context of its own (a background job) is still the call that was scored.
+func CarryAssessment(from, to context.Context) context.Context {
+	if s, _ := from.Value(assessKey{}).(*scored); s != nil {
+		return context.WithValue(to, assessKey{}, s)
+	}
+	return to
+}
+
 // AssessmentFrom reads back the score attached to this call, for showing it to
 // the person about to answer for it.
 func AssessmentFrom(ctx context.Context) (Assessment, bool) {
@@ -86,7 +95,9 @@ func (s *scored) part() map[string]any {
 
 func CorrectionFrom(ctx context.Context, approved bool) (Correction, bool) {
 	s, _ := ctx.Value(assessKey{}).(*scored)
-	if s == nil {
+	// A call not read in full: the answer is about the whole of it, and the
+	// score only about what was read — neither y nor n says what that part does.
+	if s == nil || s.a.Incomplete {
 		return Correction{}, false
 	}
 	flagged := s.a.Risk >= Threshold

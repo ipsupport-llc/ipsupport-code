@@ -514,6 +514,10 @@ func (a *Agent) SetCallGate(f func(ctx context.Context, tool, action string, par
 	a.callGate = f
 }
 
+// HasCallGate reports whether a call gate is installed, for the wiring to be
+// assertable.
+func (a *Agent) HasCallGate() bool { return a.callGate != nil }
+
 // HasRiskObserver reports whether a shadow-mode observer is installed. For the
 // wiring to be assertable: an agent built without one silently inherits
 // whatever assessment its caller's context already carried.

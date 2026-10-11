@@ -313,8 +313,7 @@ func lead(s string) string {
 		switch w := ws[i]; {
 		case operator(w):
 			i++
-		case w == "!" || w == "time" || w == "command" || w == "builtin" || w == "-p" || w == "-v" || w == "-V" || w == "--" || assignment(w),
-			w == "if" || w == "then" || w == "do" || w == "else" || w == "elif" || w == "while" || w == "until":
+		case decorator(w) || assignment(w):
 		default:
 			if p, ok := program(w); ok {
 				return p
@@ -435,6 +434,17 @@ func hereStringVariable(cmd string) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// decorator is a word before a simple command's program that isn't one: !,
+// time, command or builtin with their flags, and the compound commands'
+// keywords a command follows (then echo "$x", do sh).
+func decorator(w string) bool {
+	switch w {
+	case "!", "time", "command", "builtin", "-p", "-v", "-V", "--", "if", "then", "do", "else", "elif", "while", "until":
+		return true
 	}
 	return false
 }
@@ -780,7 +790,7 @@ func feeds(cmd string) feed {
 		case r == "cmd":
 			f |= cmdScript
 		}
-		if !found && !assignment(w) {
+		if !found && !assignment(w) && !decorator(w) {
 			prog, found = program(w)
 			at = i
 		}

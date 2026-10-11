@@ -475,6 +475,7 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		"gh secret set FOO -e prod <<'EOF'\nvalue\nEOF",   // -e is --env there
 		read + "echo \"$x\" | grep rm",                    // handed to a data command
 		read + "grep rm <<< \"$x\"",
+		"time cat <<'EOF'\nx\nEOF",                     // time is not the reader
 		"git notes add -C HEAD -F - <<'EOF'\nmsg\nEOF", // -C reuses, no editor
 	} {
 		if p := Parse(Sh, line); p.Incomplete {
@@ -517,6 +518,8 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		read + "/usr/bin/time $x", // time the program, not the keyword
 		read + "echo \"$x\" | sh", // the value handed to a shell
 		read + "printf '%s' \"$x\" | bash",
+		read + "if true; then echo \"$x\" | sh; fi", // past a keyword
+		read + "time echo \"$x\" | sh",
 		read + "sh -s <<< \"$x\"", // or read by one as a here string
 		read + "python3 <<<\"$x\"",
 		"git notes add -c HEAD -F - <<'EOF'\nrm -rf x\nEOF", // -c reedits: the editor opens

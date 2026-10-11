@@ -343,8 +343,7 @@ def _lead(s):
         if _operator(w):
             i += 2
             continue
-        if w in ("!", "time", "command", "builtin", "-p", "-v", "-V", "--", "if", "then", "do", "else", "elif",
-                 "while", "until") or _assignment(w):
+        if w in _DECORATORS or _assignment(w):
             i += 1
             continue
         p, ok = _program(w)
@@ -423,6 +422,11 @@ def _here_string_variable(cmd):
             if _expands(op):
                 return True
     return False
+
+
+# Mirrors decorator.
+_DECORATORS = {"!", "time", "command", "builtin", "-p", "-v", "-V", "--", "if", "then", "do", "else", "elif", "while",
+               "until"}
 
 
 def _keyword(s):
@@ -676,7 +680,7 @@ def _feeds(cmd):
             f |= _PS_SCRIPT
         elif r == "cmd":
             f |= _CMD_SCRIPT
-        if not found and not _assignment(w):
+        if not found and not _assignment(w) and w not in _DECORATORS:
             prog, found = _program(w)
             at = i
         env = env or (not found and _assignment(w) and (w.startswith("GIT_") or w.startswith("GH_")))

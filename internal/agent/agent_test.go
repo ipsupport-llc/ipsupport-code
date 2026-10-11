@@ -4051,6 +4051,52 @@ func TestRiskObserverSeesEveryCallAndChangesNothing(t *testing.T) {
 	}
 }
 
+// A call gate's refusal is the call's result: the tool never runs, and the
+// gate sees the context the observer returned — that is how it reads the score.
+func TestCallGateRefusalStopsTheCall(t *testing.T) {
+	type key struct{}
+	reg := tool.NewRegistry(planFileTool())
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "file", `{"action":"read","params":{"path":"x"}}`),
+		{Role: "assistant", Content: "done"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	a.SetRiskObserver(func(ctx context.Context, _, _ string, _ map[string]any) (context.Context, string) {
+		return context.WithValue(ctx, key{}, "scored"), "0.99 credential_access"
+	})
+	var sawScore bool
+	a.SetCallGate(func(ctx context.Context, tool, action string, _ map[string]any) string {
+		sawScore = ctx.Value(key{}) == "scored"
+		return tool + " " + action + " denied by user"
+	})
+	tr, _ := a.Run(context.Background(), "read x")
+	obs := toolObservation(tr.Messages)
+	if len(obs) == 0 || obs[0].Content != "file read denied by user" {
+		t.Fatalf("result = %+v, want the gate's refusal", obs)
+	}
+	if !sawScore {
+		t.Error("the gate did not get the observer's context")
+	}
+}
+
+// Plan mode refuses a mutating call before the gate is asked: nobody is asked
+// about a call that would not run anyway.
+func TestCallGateIsNotAskedInPlanModeForACallPlanRefuses(t *testing.T) {
+	reg := tool.NewRegistry(planFileTool())
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "file", `{"action":"write","params":{"path":"x","content":"y"}}`),
+		{Role: "assistant", Content: "plan"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	a.SetPlanMode(true)
+	asked := 0
+	a.SetCallGate(func(context.Context, string, string, map[string]any) string { asked++; return "" })
+	a.Run(context.Background(), "make x")
+	if asked != 0 {
+		t.Errorf("gate asked %d time(s) about a call plan mode refuses", asked)
+	}
+}
+
 // recLLM records every request, for asserting what a caching server would see.
 type recLLM struct {
 	replies []llm.Message

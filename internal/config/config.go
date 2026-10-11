@@ -199,6 +199,10 @@ type Config struct {
 	// goal after a re-feed but then finishes without doing any work — instead of
 	// silently giving up. Set false to accept a no-progress finish immediately.
 	GoalNudge bool `json:"goal_nudge"`
+	// RiskCheck, when true (default), stops a call the risk scorer flags for a
+	// person even where the policy would run it without asking. Off, the scorer
+	// only logs. No omitempty: false must round-trip.
+	RiskCheck bool `json:"risk_check"`
 	// SessionBudgetUSD caps estimated spend for one run of the process: once this
 	// session's estimated cost reaches it, new tasks are refused until it's raised.
 	// 0 disables the guard.
@@ -375,6 +379,7 @@ func Default() Config {
 		UpdateCheck:    true,
 		GoalMaxReturns: 6,
 		GoalNudge:      true,
+		RiskCheck:      true,
 	}
 }
 
@@ -721,6 +726,11 @@ func SaveKnowledgeRetention(days int) error {
 // SaveGoalMaxReturns persists the goal-pursuit return TTL globally.
 func SaveGoalMaxReturns(n int) error {
 	return mergeGlobalKeys(map[string]any{"goal_max_returns": n})
+}
+
+// SaveRiskCheck persists risk_check globally.
+func SaveRiskCheck(on bool) error {
+	return mergeGlobalKeys(map[string]any{"risk_check": on})
 }
 
 // SaveGoalNudge persists the idle-nudge flag globally.
@@ -1103,6 +1113,9 @@ func Load(workspace string) (Config, error) {
 	for name, l := range cfg.Providers {
 		trustedProviders[name] = l
 	}
+	// The risk check is what stops a flagged command in a checkout whose own
+	// file allows everything, so that file may turn it on but never off.
+	trustedRiskCheck := cfg.RiskCheck
 
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
@@ -1112,6 +1125,7 @@ func Load(workspace string) (Config, error) {
 		return cfg, err
 	}
 	cfg.LLM, cfg.Providers, cfg.Telemetry = trustedLLM, trustedProviders, trustedTelemetry
+	cfg.RiskCheck = cfg.RiskCheck || trustedRiskCheck
 
 	cfg.Workspace = abs
 	cfg.Run.Deny = union(cfg.Run.Deny, runDenyFloor)

@@ -483,12 +483,22 @@ default**, and on a platform/kernel without a supported sandbox commands run
 unconfined as before. External CLI agents are **not** sandboxed (they run
 outside it, as documented above).
 
-## Risk scoring (shadow mode)
+## Risk check
 
-A small local classifier scores every tool call for how dangerous it looks, and
-**logs what it thought next to what the permission policy actually did**. It
-blocks nothing. The point of the first mode is to find out whether the signal is
-worth anything before it is allowed to matter:
+A small local classifier scores every tool call for how dangerous it looks. A
+call it flags — or one it could not read in full — **stops for you even where
+the permission policy would have run it without asking**: an allow glob, a
+`run.default` of `allow`, an earlier `a` on a prompt. Your answer is the
+override: `y` runs it, `n` refuses it (the model is told), and `a` stops asking
+about that kind of call for the rest of the session, flagged ones included. An
+`a` given at an ordinary prompt covers only the unflagged ones.
+
+Turn the asking off with the **risk check** row in `/config` (saved as
+`risk_check`), or for one run with `-skip-risk-check`. `-skip-permissions`
+turns it off too: nothing is asked at all. A project's own
+`.agent/config.json` can turn it on but not off — it is what stops a flagged
+command in a checkout whose file allows everything. On or off, the scorer logs
+what it thought next to what the policy did:
 
 ```
 msg="risk shadow" tool=run action=shell risk=1.00 top=credential_access
@@ -505,15 +515,16 @@ it learns from:
 ```
   ⚙ run shell cat ~/.ssh/id_rsa   ⚠ 0.98 credential_access
   ⚠ approve run: cat ~/.ssh/id_rsa   ⚠ 0.98 credential_access
-    y approve · n deny · a allow all shell commands this session
+    y approve · n deny · a allow all shell commands this session, flagged ones too
 ```
 
 Nothing is shown for a call it had nothing to say about — a number on every
 routine line is how a risk signal gets tuned out.
 
 The `disagreement` column is the whole product. **allowed-but-flagged** is what
-a risk gate could add; **gated-but-unremarkable** is the friction it would cost.
-Tail them with `IPS_LOG=debug`, and turn the whole thing off with `IPS_RISK=off`.
+the check stops; **gated-but-unremarkable** is what the policy asks about that
+the scorer would not have.
+Tail them with `IPS_LOG=debug`, and turn scoring off entirely with `IPS_RISK=off`.
 
 It is a hashed-feature linear model — `sigmoid(Wx+b)` over word and character
 n-grams, six labels (`destructive`, `sandbox_escape`, `credential_access`,
@@ -986,7 +997,7 @@ internal/config     config load/merge
 internal/mcp        MCP client (stdio + HTTP)
 internal/usage      token/cost ledger (powers /usage and /budget)
 internal/selfupdate checksum-verified in-place self-update
-internal/risk       shadow-mode risk scorer (pure-Go inference, embedded weights)
+internal/risk       risk scorer behind the risk check (pure-Go inference, embedded weights)
 internal/sandbox    opt-in OS sandbox for `run` (Seatbelt on macOS, Landlock on Linux)
 internal/procgroup  kill a command's whole process tree on cancel/timeout
 internal/filelock   cross-process lock for files shared between running sessions

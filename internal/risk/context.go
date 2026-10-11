@@ -42,15 +42,24 @@ func AssessmentFrom(ctx context.Context) (Assessment, bool) {
 }
 
 // Note renders the assessment as the one short line a prompt or a tool-call line
-// can carry: "0.98 credential_access". Empty when nothing fired, so a caller can
-// use it directly as "show this if non-empty" — a score on every routine call
-// would be noise, and noise is what makes a risk signal get ignored.
+// can carry: "0.98 credential_access", or "not fully read" for a call whose
+// parts were not all scored. Empty when nothing fired, so a caller can use it
+// directly as "show this if non-empty" — a score on every routine call would be
+// noise, and noise is what makes a risk signal get ignored.
 func (a Assessment) Note() string {
-	if a.Risk < Threshold || a.Top == "" {
-		return ""
+	switch {
+	case a.Risk >= Threshold && a.Top != "":
+		return fmt.Sprintf("%.2f %s", a.Risk, a.Top)
+	case a.Incomplete:
+		return "not fully read"
 	}
-	return fmt.Sprintf("%.2f %s", a.Risk, a.Top)
+	return ""
 }
+
+// Flagged reports whether the call should stop for a person: it scored over
+// the threshold, or part of it went unscored — a score that did not read the
+// whole call is not clearance.
+func (a Assessment) Flagged() bool { return a.Note() != "" }
 
 // CorrectionFrom reads back what was scored and reports the correction a human's
 // answer implies — ok is false when there is nothing to learn.

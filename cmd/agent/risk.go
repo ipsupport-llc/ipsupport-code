@@ -13,11 +13,8 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/shellsplit"
 )
 
-// EnvRiskOff turns shadow scoring off for a run. Shadow mode blocks nothing, so
-// it is on by default — the point of the first mode is to collect the evidence
-// that decides whether the signal is worth anything, and a signal nobody
-// enables collects none. This is the escape hatch, not a feature flag: when the
-// scorer is ready to mean something it gets a real /config row.
+// EnvRiskOff turns risk scoring off for a run, the check included. risk_check
+// (the /config row, -skip-risk-check) turns off only the asking.
 const EnvRiskOff = "IPS_RISK"
 
 // riskObserver builds the shadow-mode hook for the agent, or nil when scoring
@@ -95,6 +92,63 @@ func (a *app) riskObserver(pol *policy.Engine, shell string) func(ctx context.Co
 		// back up as a note, so the call's own line can carry it.
 		return risk.WithAssessment(ctx, tool, action, params, as), as.Note()
 	}
+}
+
+// riskStops reports whether a call has to stop for a person whatever the
+// policy or an earlier 'a' said: risk_check is on, the scorer flagged it, and
+// no 'a' was given at a flagged prompt of its category this session.
+func (a *app) riskStops(ctx context.Context, kind string) bool {
+	if !a.riskGateOn.Load() {
+		return false
+	}
+	if as, ok := risk.AssessmentFrom(ctx); !ok || !as.Flagged() {
+		return false
+	}
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	return !a.flaggedAllow[approvalCategory(kind)]
+}
+
+// riskGate is the call gate for an agent running under pol. It asks about the
+// calls the policy would run without asking anyone — the ones it can name, run
+// and file (see policyVerdict). A call the policy asks about gets its prompt
+// from the tool, with the score on it, and one it refuses never runs.
+func (a *app) riskGate(pol *policy.Engine) func(ctx context.Context, tool, action string, params map[string]any) string {
+	return func(ctx context.Context, tool, action string, params map[string]any) string {
+		kind, detail := tool, ""
+		switch tool {
+		case "run":
+			detail, _ = params["command"].(string)
+		case "file":
+			kind = action
+			detail, _ = params["path"].(string)
+		default:
+			return ""
+		}
+		if !a.riskStops(ctx, kind) || policyVerdict(pol, tool, action, params) != risk.VerdictAllow {
+			return ""
+		}
+		if a.approveGated(ctx, kind, detail) {
+			return ""
+		}
+		return fmt.Sprintf("%s %s denied by user — the risk check flagged it (%s)", kind, detail, riskNote(ctx))
+	}
+}
+
+// riskSuffix is the score as a prompt line carries it, or "".
+func riskSuffix(ctx context.Context) string {
+	if n := riskNote(ctx); n != "" {
+		return "   ⚠ " + n
+	}
+	return ""
+}
+
+// flaggedToo says what 'a' covers at a prompt the scorer flagged.
+func flaggedToo(note string) string {
+	if note != "" {
+		return ", flagged ones too"
+	}
+	return ""
 }
 
 // riskDeltaPath is where this workspace's learned corrections live, and
@@ -247,8 +301,12 @@ func (a *app) riskCommand(rest string) []string {
 	case "", "status":
 		m := a.shadow.Model()
 		calls, flagged, disagreed := a.shadow.Stats()
+		mode := "on — asks before a flagged call, even one the policy allows"
+		if !a.riskGateOn.Load() {
+			mode = "shadow — logs, asks nothing (risk_check off)"
+		}
 		out := []string{
-			fmt.Sprintf("risk scoring: shadow mode — logs, blocks nothing (threshold %.2f)", risk.Threshold),
+			fmt.Sprintf("risk check: %s (threshold %.2f)", mode, risk.Threshold),
 			fmt.Sprintf("  this run    %d call(s) scored · %d over the threshold · %d disagreed with the policy", calls, flagged, disagreed),
 			fmt.Sprintf("  learned     %d correction(s) this run · %d local adjustment(s) in total", a.shadow.Learned(), m.Adjustments()),
 			"  labels      " + strings.Join(labelSummary(m.Base()), " · "),

@@ -33,9 +33,9 @@ func (v PolicyVerdict) String() string {
 }
 
 // Threshold is where a score starts counting as "the model thinks this is
-// risky" in the shadow log. It is a reporting threshold only — nothing is
-// blocked at any value — and it exists so the log can say WHICH labels fired
-// instead of printing six numbers on every call.
+// risky": in the log, which says WHICH labels fired instead of printing six
+// numbers on every call, and for the risk check, which stops a call over it
+// for a person (see Assessment.Flagged).
 const Threshold float32 = 0.5
 
 // Shadow scores tool calls and logs what it thought, next to what the policy

@@ -658,7 +658,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.push(head)
 		m.pushLines(lines[1:])
-		m.push(cDim.Render("    y approve · n deny · a allow all " + categoryLabel(approvalCategory(req.kind)) + " this session · ↑ Yes/No · or keep typing"))
+		m.push(cDim.Render("    y approve · n deny · a allow all " + categoryLabel(approvalCategory(req.kind)) + " this session" + flaggedToo(req.risk) + " · ↑ Yes/No · or keep typing"))
 		// Go modal by default: a bare y/n/a/enter answers it, and nothing else
 		// leaks half-typed into the chat input while it's waiting. esc drops back
 		// to typing if you want to steer/queue something instead (the approval
@@ -1360,8 +1360,12 @@ func (m *tuiModel) approveSession() (tea.Model, tea.Cmd) {
 	if m.pending == nil {
 		return m, nil
 	}
-	cat := categoryLabel(approvalCategory(m.pending.kind))
-	m.app.allowSession(m.pending.kind)
+	cat := categoryLabel(approvalCategory(m.pending.kind)) + flaggedToo(m.pending.risk)
+	if m.pending.risk != "" {
+		m.app.allowFlagged(m.pending.kind)
+	} else {
+		m.app.allowSession(m.pending.kind)
+	}
 	m.state = m.preApprove
 	m.pending.reply <- true
 	m.pending = nil

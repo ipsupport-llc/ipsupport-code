@@ -82,6 +82,7 @@ func main() {
 		sessionName     string
 		resumeSession   bool
 		skipPermissions bool
+		skipRiskCheck   bool
 		overrides       overrideFlags
 		clearOnStart    bool
 		interactive     bool
@@ -96,7 +97,8 @@ func main() {
 	flag.BoolVar(&newSession, "new", false, "start a fresh session (don't restore the saved one)")
 	flag.StringVar(&sessionName, "session", "", "use a named session (a separate saved thread, its own log and goal)")
 	flag.BoolVar(&resumeSession, "resume", false, "continue a saved session instead of starting a new one (with -session <name>, that named thread)")
-	flag.BoolVar(&skipPermissions, "skip-permissions", false, "don't ask before file writes or shell commands this run (equivalent to -override run.default=allow -override file.default=allow); not persisted")
+	flag.BoolVar(&skipPermissions, "skip-permissions", false, "don't ask before file writes or shell commands this run, not even about ones the risk check flags (equivalent to -override run.default=allow -override file.default=allow -override risk_check=false); not persisted")
+	flag.BoolVar(&skipRiskCheck, "skip-risk-check", false, "don't stop to ask about calls the risk check flags this run (equivalent to -override risk_check=false); not persisted")
 	flag.Var(&overrides, "override", "override a config key for this run only, key=value (repeatable, e.g. -override llm.temperature=0.7); same dotted keys as `config set`, never persisted")
 	flag.BoolVar(&clearOnStart, "clear", false, "wipe this thread's history, learned facts and lessons, and session permissions before starting (like /clear, but at launch)")
 	flag.BoolVar(&interactive, "it", false, "with a [task] argument, open the interactive TUI and auto-submit it instead of one-shot mode (same dispatch as typing it in — a /command or !shell line works too)")
@@ -185,7 +187,10 @@ func main() {
 	// documented as — expanding it here, before build(), means there's only
 	// ONE application path (build()'s override loop) to keep correct, not two.
 	if skipPermissions {
-		overrides = append(overrides, "run.default=allow", "file.default=allow")
+		overrides = append(overrides, "run.default=allow", "file.default=allow", "risk_check=false")
+	}
+	if skipRiskCheck {
+		overrides = append(overrides, "risk_check=false")
 	}
 
 	// -session selects a named thread for this run (its own saved file); passed
@@ -549,6 +554,9 @@ type app struct {
 	// never persisted; cleared on /new and /clear. gatedApprover consults it.
 	sessionMu    sync.Mutex
 	sessionAllow map[string]bool
+	// flaggedAllow is the same, given at a prompt the risk scorer had flagged:
+	// that 'a' covers the category's flagged calls too, which a plain one doesn't.
+	flaggedAllow map[string]bool
 
 	promptHist []string          // submitted inputs (tasks + /commands), oldest→newest, persisted per workspace for ↑ recall across restarts
 	snippets   map[string]string // named prompt templates (/snip save+recall), persisted globally
@@ -647,9 +655,13 @@ type app struct {
 	// calls. shouldAutoCompact reads this instead of a.client.Context() fresh.
 	lastRealContext int
 
-	// shadow is the risk classifier's shadow-mode scorer for this run (nil when
-	// scoring is off or the model could not load). It only ever logs.
+	// shadow is the risk classifier's scorer for this run (nil when scoring is
+	// off or the model could not load).
 	shadow *risk.Shadow
+	// riskGateOn is risk_check: a call the scorer flags stops for a person even
+	// where the policy would run it. Set where a.cfg is owned (wire, /config),
+	// read by tool goroutines.
+	riskGateOn atomic.Bool
 	// riskSaveMu serializes the off-path persistence of what the scorer learned,
 	// so several sub-agents answering approvals at once don't write over each
 	// other. The learning itself is already guarded inside the model.
@@ -891,6 +903,7 @@ func (a *app) newSubAgent(plan spawnPlan, client *llm.OpenAIClient, id string) *
 	sub.SetPlanMode(plan.planMode)
 	sub.SetLabel(id)
 	sub.SetRiskObserver(a.riskObserver(plan.subPol, string(plan.shell))) // its own, against its own policy
+	sub.SetCallGate(a.riskGate(plan.subPol))
 	sub.SetContextWindow(plan.llmCfg.ContextWindow)
 	return sub
 }
@@ -1937,6 +1950,17 @@ func (a *app) setGoalNudge(on bool) error {
 		return err
 	}
 	a.cfg.GoalNudge = on
+	return nil
+}
+
+// setRiskCheck turns the risk check's asking on or off, and persists it. The
+// scorer keeps scoring either way.
+func (a *app) setRiskCheck(on bool) error {
+	if err := config.SaveRiskCheck(on); err != nil {
+		return err
+	}
+	a.cfg.RiskCheck = on
+	a.riskGateOn.Store(on)
 	return nil
 }
 
@@ -3210,7 +3234,9 @@ func (a *app) wire() error {
 		a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
 	}
 	a.ensureShadow()                                           // once per process, here on the wiring goroutine
-	a.ag.SetRiskObserver(a.riskObserver(pol, a.cfg.Run.Shell)) // shadow-mode risk scoring: logs, blocks nothing
+	a.riskGateOn.Store(a.cfg.RiskCheck)                        // read by tool goroutines, never a.cfg there
+	a.ag.SetRiskObserver(a.riskObserver(pol, a.cfg.Run.Shell)) // risk scoring
+	a.ag.SetCallGate(a.riskGate(pol))                          // a flagged call stops for a person
 	a.ag.SetContextWindow(a.activeLLM().ContextWindow)         // so a single long task can watch its OWN growing trail mid-run
 	a.wireJudge()                                              // its own connection only when /reasoning judge was set
 	a.ag.SetSideContinuation(a.isLocal())                      // judge as a continuation where the server caches the prefix
@@ -5240,7 +5266,11 @@ func (a *app) sessionAllows() []string {
 	defer a.sessionMu.Unlock()
 	out := make([]string, 0, len(a.sessionAllow))
 	for cat := range a.sessionAllow {
-		out = append(out, categoryLabel(cat))
+		l := categoryLabel(cat)
+		if a.flaggedAllow[cat] {
+			l += " (flagged ones too)"
+		}
+		out = append(out, l)
 	}
 	sort.Strings(out)
 	return out
@@ -6221,18 +6251,32 @@ func (a *app) allowSession(kind string) {
 	a.sessionAllow[approvalCategory(kind)] = true
 }
 
+// allowFlagged is allowSession given at a prompt the risk scorer flagged: the
+// category's flagged calls stop asking too.
+func (a *app) allowFlagged(kind string) {
+	a.allowSession(kind)
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	if a.flaggedAllow == nil {
+		a.flaggedAllow = map[string]bool{}
+	}
+	a.flaggedAllow[approvalCategory(kind)] = true
+}
+
 // resetSessionAllow clears every session-allow (called on /new and /clear).
 func (a *app) resetSessionAllow() {
 	a.sessionMu.Lock()
 	defer a.sessionMu.Unlock()
 	a.sessionAllow = nil
+	a.flaggedAllow = nil
 }
 
 // approveGated is the approval path the tools use: a session-allow for the kind's
-// category short-circuits the prompt, otherwise it asks the real approver. ctx is
-// the caller's own context (a job's, for a background sub-agent).
+// category short-circuits the prompt — unless the risk scorer flagged the call
+// (see riskStops) — otherwise it asks the real approver. ctx is the caller's own
+// context (a job's, for a background sub-agent).
 func (a *app) approveGated(ctx context.Context, kind, detail string) bool {
-	if a.sessionAllowed(kind) {
+	if a.sessionAllowed(kind) && !a.riskStops(ctx, kind) {
 		return true
 	}
 	start := time.Now()
@@ -6306,7 +6350,7 @@ func (s *stdinApprover) Approve(ctx context.Context, kind, detail string) bool {
 func (s *stdinApprover) ApproveAnswered(ctx context.Context, kind, detail string) (ok, answered bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fmt.Fprintf(os.Stderr, "\n[approve %s] %s\n  allow? [y/N/a=all %s this session] ", kind, detail, categoryLabel(approvalCategory(kind)))
+	fmt.Fprintf(os.Stderr, "\n[approve %s] %s%s\n  allow? [y/N/a=all %s this session%s] ", kind, detail, riskSuffix(ctx), categoryLabel(approvalCategory(kind)), flaggedToo(riskNote(ctx)))
 
 	result := make(chan lineResult, 1) // buffered: the read goroutine must never block sending here, even if abandoned
 	go func() {
@@ -6327,7 +6371,9 @@ func (s *stdinApprover) ApproveAnswered(ctx context.Context, kind, detail string
 	case "y", "yes":
 		return true, true
 	case "a", "all", "always":
-		if s.app != nil {
+		if s.app != nil && riskNote(ctx) != "" {
+			s.app.allowFlagged(kind)
+		} else if s.app != nil {
 			s.app.allowSession(kind)
 		}
 		return true, true

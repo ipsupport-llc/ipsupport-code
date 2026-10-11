@@ -347,7 +347,7 @@ def _lead(s):
 # Mirrors wrappers.
 _WRAPPERS = {"exec", "env", "sudo", "doas", "su", "ssh", "timeout", "nice", "nohup", "stdbuf", "setsid", "ionice",
              "chrt", "taskset", "xargs", "find", "watch", "flock", "chroot", "runuser", "unshare", "nsenter",
-             "strace", "ltrace", "parallel"}
+             "strace", "ltrace", "parallel", "time"}
 
 
 def _wraps_variable(s):
@@ -372,7 +372,7 @@ _CODE_FLAGS = {"python": "c", "python2": "c", "python3": "c", "perl": "eE", "rub
                "bun": "ep", "php": "rBRE", "lua": "e", "osascript": "e", "Rscript": "e"}
 
 # Mirrors codeOptions.
-_CODE_OPTIONS = {"node": ["--print"], "nodejs": ["--print"], "bun": ["--print"], "php": ["--run"]}
+_CODE_OPTIONS = {"node": ["--print"], "nodejs": ["--print"], "bun": ["--print"], "php": ["--run", "--process-begin", "--process-code", "--process-end"]}
 
 
 def _interpreter_code(prog, w):
@@ -1088,10 +1088,10 @@ def _ps_data_command(cmd):
 
 def _ps_redefines(cmd):
     """Mirrors psRedefines."""
-    ws = _fields(cmd.lower())
+    ws = _fields(cmd.replace("`", "").lower())
     while ws and ws[0] in ("&", "."):
         ws = ws[1:]
-    return bool(ws) and (ws[0] in _PS_DEFINERS or any("alias:" in w or "function:" in w for w in ws))
+    return bool(ws) and (_name(ws[0].strip("'\"")) in _PS_DEFINERS or any("alias:" in w or "function:" in w for w in ws))
 
 
 # Mirrors psDefiners.

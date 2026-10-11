@@ -507,6 +507,9 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		read + "python3 -Ic\"$x\"", // a bundle with its code attached
 		read + "perl -le\"$x\"",
 		"sort --co=sh <<'EOF'\nrm -rf x\nEOF", // the shortest form GNU sort takes
+		read + "php --process-code \"$x\"",
+		read + "php --process-begin=\"$x\"",
+		read + "/usr/bin/time $x", // time the program, not the keyword
 	} {
 		if p := Parse(Sh, line); !p.Incomplete {
 			t.Errorf("Parse(%q) = %q: marked complete", line, p.Commands)
@@ -536,6 +539,9 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		"Set-Alias sc iex\nsc @'" + body,
 		"Set-Item alias:sc iex\nsc @'" + body,
 		"& Set-Alias sc iex\nsc @'" + body, // called
+		"& 'Set-Alias' sc iex\nsc @'" + body,
+		"Se`t-Alias sc iex\nsc @'" + body, // a backtick PowerShell drops
+		"Microsoft.PowerShell.Utility\\Set-Alias sc iex\nsc @'" + body,
 		"function Set-Content { iex $args[0] }\nSet-Content @'" + body,
 	} {
 		if got := Split(PowerShell, line); !slices.Contains(got, "Remove-Item -Recurse -Force ./src") {

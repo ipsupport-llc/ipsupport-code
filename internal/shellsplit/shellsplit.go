@@ -330,7 +330,7 @@ func lead(s string) string {
 var wrappers = map[string]bool{"exec": true, "env": true, "sudo": true, "doas": true, "su": true, "ssh": true,
 	"timeout": true, "nice": true, "nohup": true, "stdbuf": true, "setsid": true, "ionice": true, "chrt": true,
 	"taskset": true, "xargs": true, "find": true, "watch": true, "flock": true, "chroot": true, "runuser": true,
-	"unshare": true, "nsenter": true, "strace": true, "ltrace": true, "parallel": true}
+	"unshare": true, "nsenter": true, "strace": true, "ltrace": true, "parallel": true, "time": true}
 
 // wrapsVariable: a word of s after its wrapper expands — not a redirection
 // (exec > "$log" runs nothing): any of them may be the program it runs.
@@ -359,7 +359,7 @@ var codeFlags = map[string]string{"python": "c", "python2": "c", "python3": "c",
 	"node": "ep", "nodejs": "ep", "bun": "ep", "php": "rBRE", "lua": "e", "osascript": "e", "Rscript": "e"}
 
 // codeOptions are the long ones, besides --eval.
-var codeOptions = map[string][]string{"node": {"--print"}, "nodejs": {"--print"}, "bun": {"--print"}, "php": {"--run"}}
+var codeOptions = map[string][]string{"node": {"--print"}, "nodejs": {"--print"}, "bun": {"--print"}, "php": {"--run", "--process-begin", "--process-code", "--process-end"}}
 
 // interpreterCode is the code interpreter prog's flag w hands it: isCode for
 // a codeFlags letter, alone or ending a bundle of flags (python3 -Ic, perl
@@ -1324,11 +1324,13 @@ var psDefiners = map[string]bool{"set-alias": true, "sal": true, "new-alias": tr
 // psRedefines: cmd defines an alias or a function — by a psDefiners command,
 // or through the alias: and function: drives (Set-Item alias:sc iex).
 func psRedefines(cmd string) bool {
-	ws := strings.Fields(strings.ToLower(cmd))
+	// Se`t-Alias, & 'Set-Alias', Microsoft.PowerShell.Utility\Set-Alias: the
+	// same command.
+	ws := strings.Fields(strings.ToLower(strings.ReplaceAll(cmd, "`", "")))
 	for len(ws) > 0 && (ws[0] == "&" || ws[0] == ".") { // & Set-Alias …: called
 		ws = ws[1:]
 	}
-	return len(ws) > 0 && (psDefiners[ws[0]] || slices.ContainsFunc(ws, func(w string) bool {
+	return len(ws) > 0 && (psDefiners[name(strings.Trim(ws[0], "'\""))] || slices.ContainsFunc(ws, func(w string) bool {
 		return strings.Contains(w, "alias:") || strings.Contains(w, "function:")
 	}))
 }

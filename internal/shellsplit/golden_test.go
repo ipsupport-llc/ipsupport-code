@@ -227,6 +227,8 @@ var casesForGolden = []string{
 	"read -r x <<'EOF'\nrm -rf x\nEOF\nnode -p \"$x\"", "read -r x <<'EOF'\nrm -rf x\nEOF\npython3 -Ic\"$x\"",
 	"sort --co=sh <<'EOF'\nrm -rf x\nEOF", "perl -c app.py | cat", "node -c app.py | cat", "sh -c'echo hi' | cat",
 	"& Set-Alias sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
+	"Se`t-Alias sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@", "& 'Set-Alias' sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
+	"read -r x <<'EOF'\nrm -rf x\nEOF\nphp --process-code \"$x\"", "read -r x <<'EOF'\nrm -rf x\nEOF\n/usr/bin/time $x",
 }
 
 var shipped = []string{"../../scripts/risk_dataset.jsonl", "../../scripts/risk_eval.jsonl"}

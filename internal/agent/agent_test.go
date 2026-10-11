@@ -3598,6 +3598,36 @@ func TestJudgePromptDiscountsTheAgentsOwnClaims(t *testing.T) {
 	}
 }
 
+// A result made to look done — a test weakened to pass, an output hard-coded —
+// is not done, and the judge is told to look for one.
+func TestJudgePromptLooksForAResultMadeToLookDone(t *testing.T) {
+	for _, want := range []string{"weakened, skipped, deleted or edited to pass while the behavior stays wrong", "hard-coded", "unless the GOAL asks"} {
+		if !strings.Contains(judgeSystem, want) {
+			t.Errorf("the judge prompt is missing %q", want)
+		}
+	}
+}
+
+// While a goal stands the model is told, every task and before it starts, that a
+// separate checker decides from the record and that only the goal done counts;
+// in plan mode, or with no goal, there is no such check to tell it about.
+func TestGoalCheckIsSaidUpFront(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		returns   int
+		plan, say bool
+	}{
+		{"a standing goal", 3, false, true},
+		{"no goal", 0, false, false},
+		{"plan mode", 3, true, false},
+	} {
+		a := &Agent{maxReturns: c.returns, planMode: c.plan}
+		if said := strings.Contains(a.turnNote(nil), goalCheckNote); said != c.say {
+			t.Errorf("%s: goal check said = %v, want %v", c.name, said, c.say)
+		}
+	}
+}
+
 // Criteria still apply, and still on top of the goal rather than in place of it.
 func TestJudgePromptKeepsTheCriteria(t *testing.T) {
 	msgs := judgePrompt("tests must have been RUN", "ship it", "done", nil)

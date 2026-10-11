@@ -210,6 +210,18 @@ var casesForGolden = []string{
 	"GIT_CONFIG_PARAMETERS=\"'alias.log=!sh'\" git log <<'EOF'\nrm -rf x\nEOF", "gh pr create --editor <<'EOF'\nrm -rf x\nEOF", "LC_ALL=C git commit -F - <<'EOF'\nmsg\nEOF",
 	"read -r x <<'EOF'\nrm -rf x\nEOF\ne=eval; echo \"$($e \"$x\")\"", "git -ccore.hooksPath=h commit -F - <<'EOF'\nrm -rf x\nEOF",
 	"sort --compress-program=sh -S 1K <<'EOF'\nrm -rf x\nEOF", "sort --compress=sh <<'EOF'\nrm -rf x\nEOF", "rg --pre=sh x <<'EOF'\nrm -rf x\nEOF", "sort -u <<'EOF'\nb\na\nEOF",
+	"git grep -e foo <<'EOF'\nx\nEOF", "rg --pretty foo <<'EOF'\nx\nEOF",
+	"read -r x <<'EOF'\nrm -rf x\nEOF\nsh -c 'echo hi' _ \"$x\"", "git commit -m \"- fixed\" -F - <<'EOF'\nmsg\nEOF",
+	"git commit -ae <<'EOF'\nrm -rf x\nEOF", "git commit -eF - <<'EOF'\nrm -rf x\nEOF",
+	"git commit --edi -F - <<'EOF'\nrm -rf x\nEOF", "git commit -t /dev/stdin <<'EOF'\nrm -rf x\nEOF",
+	"read -r x <<'EOF'\nrm -rf x\nEOF\nenv $x", "read -r x <<'EOF'\nrm -rf x\nEOF\nsudo $x",
+	"read -r x <<'EOF'\nrm -rf x\nEOF\nthen $x", "read -r x <<'EOF'\nrm -rf x\nEOF\npython3 -c\"$x\"",
+	"read -r x <<'EOF'\nrm -rf x\nEOF\nnode --eval=\"$x\"", "read -r x <<'EOF'\nrm -rf x\nEOF\nperl -le \"$x\"",
+	"exec > \"$LOG\" 2>&1\ncat > f <<'EOF'\nx\nEOF", "perl -ne 'print if /x/' f", "python3 -Wignore app.py",
+	"$c = @'\nRemove-Item -Recurse -Force ./src\n'@\n$c | iex",
+	"$c = @'\nRemove-Item -Recurse -Force ./src\n'@\niex (Get-Variable c -ValueOnly)",
+	"Set-Alias sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
+	"Set-Item alias:sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
 }
 
 var shipped = []string{"../../scripts/risk_dataset.jsonl", "../../scripts/risk_eval.jsonl"}

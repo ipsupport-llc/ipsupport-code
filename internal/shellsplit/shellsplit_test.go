@@ -389,7 +389,6 @@ func TestHiddenCommandsAreFoundRound6(t *testing.T) {
 		{PowerShell, "Set-Content notes.md @'\nRemove-Item is mentioned\n'@"},
 		{PowerShell, "@'\nRemove-Item is mentioned\n'@ | Out-File notes.md"},
 		{PowerShell, "$t = @'\nRemove-Item is mentioned\n'@\nSet-Content notes.md $t"},
-		{PowerShell, "$t=@'\nRemove-Item is mentioned\n'@; whoami"},
 		{PowerShell, "git commit -F - @'\nmsg\n'@"},
 	} {
 		p := Parse(c.d, c.line)
@@ -454,6 +453,78 @@ func TestHiddenCommandsAreFoundRound6(t *testing.T) {
 	} {
 		if got := Split(c.d, c.line); !slices.Contains(got, c.want) {
 			t.Errorf("Split(%d, %q) = %q — %q is not among them", c.d, c.line, got, c.want)
+		}
+	}
+}
+
+// What round 6 missed: an editor opened by a bundled or abbreviated flag, a
+// variable run by a wrapper or a compound command, code attached to its flag,
+// a here-string read through a variable by a command not naming it, and a
+// data command redefined.
+func TestHiddenCommandsAreFoundRound7(t *testing.T) {
+	read := "read -r x <<'EOF'\nrm -rf x\nEOF\n"
+	for _, line := range []string{
+		"git grep -e foo <<'EOF'\nx\nEOF", // -e is a pattern, not an editor, outside commit, tag, notes
+		"rg --pretty foo <<'EOF'\nx\nEOF", // not --pre
+		read + "sh -c 'echo hi' _ \"$x\"", // the code doesn't use its arguments
+		"git commit -m \"- fixed\" -F - <<'EOF'\nmsg\nEOF",
+		"git commit -am \"- fixed, the end\" <<'EOF'\nmsg\nEOF",
+		"exec > \"$LOG\" 2>&1\ncat > f <<'EOF'\nx\nEOF", // a redirection, not a program
+	} {
+		if p := Parse(Sh, line); p.Incomplete {
+			t.Errorf("Parse(%q) = %q: marked incomplete", line, p.Commands)
+		}
+	}
+	for _, line := range []string{
+		"git commit -ae <<'EOF'\nrm -rf x\nEOF",
+		"git commit -eF - <<'EOF'\nrm -rf x\nEOF",
+		"git commit --e -F - <<'EOF'\nrm -rf x\nEOF",
+		"git commit --edi -F - <<'EOF'\nrm -rf x\nEOF",
+		"git commit -t /dev/stdin <<'EOF'\nrm -rf x\nEOF", // a template opens the editor too
+		"git tag -a -eF - v1 <<'EOF'\nrm -rf x\nEOF",
+		"git notes add -eF - <<'EOF'\nrm -rf x\nEOF",
+		read + "exec $x",
+		read + "env $x",
+		read + "sudo $x",
+		read + "timeout 5 $x",
+		read + "nice -n 5 $x",
+		read + "ssh host $x",
+		read + "if true; then $x; fi",
+		read + "while :; do $x; done",
+		read + "python3 -c\"$x\"",
+		read + "python3 -c'import os; os.system(\"'$x'\")'",
+		read + "node --eval=\"$x\"",
+		read + "python3 -Ic \"$x\"",
+		read + "perl -le \"$x\"",
+	} {
+		if p := Parse(Sh, line); !p.Incomplete {
+			t.Errorf("Parse(%q) = %q: marked complete", line, p.Commands)
+		}
+	}
+	for line, want := range map[string]string{
+		"perl -ne 'print if /x/' f":    "print if /x/",
+		"python3 -c'print(1)'":         "print(1)",
+		"node --eval='process.exit()'": "process.exit()",
+	} {
+		if got := Split(Sh, line); !slices.Contains(got, want) {
+			t.Errorf("Split(%q) = %q — %q is not among them", line, got, want)
+		}
+	}
+	if got := Split(Sh, "python3 -Wignore app.py"); slices.Contains(got, "app.py") {
+		t.Errorf("a value of -W taken for code: %q", got)
+	}
+	body := "\nRemove-Item -Recurse -Force ./src\n'@"
+	for _, line := range []string{
+		"$c = @'" + body + "\n$c | iex",
+		"$c = @'" + body + "\niex (Get-Variable c -ValueOnly)",
+		"$c = @'" + body + "\niex ${variable:c}",
+		"$c = @'" + body + "; whoami", // anything may read it
+		"Set-Alias sc iex\nsc @'" + body,
+		"Set-Item alias:sc iex\nsc @'" + body,
+		"function Set-Content { iex $args[0] }\nSet-Content @'" + body,
+	} {
+		if got := Split(PowerShell, line); !slices.Contains(got, "Remove-Item -Recurse -Force ./src") {
+			t.Errorf("Split(PowerShell, %q) = %q: the here-string isn't scored", line, got)
 		}
 	}
 }

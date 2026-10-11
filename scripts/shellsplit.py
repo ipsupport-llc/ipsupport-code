@@ -165,7 +165,7 @@ class _Result:
             lead = _lead(s)
             if (self.func_name and op == ")" and s == "") or k in ("function", "coproc") or lead == "alias" or _expands(lead):
                 self.untracked = True
-            if _expands(lead):
+            if _expands(lead) or (lead in _WRAPPERS and _wraps_variable(s)):
                 self.var_prog = True
             self.func_name = op == "(" and len(_fields(s)) == 1 and not any(c in s for c in "<>=")
         pending = self.feeding
@@ -239,17 +239,22 @@ class _Result:
                 return
             elif run:
                 prog = run
-            elif prog and i + 1 < len(ws) and self.hand_off(prog, w, ws, i + 1):
+            elif prog and self.hand_off(prog, w, ws, i + 1):
                 return
             i += 1
 
     def hand_off(self, prog, w, ws, at):
         """Mirrors handOff; the flag's argument is ws[at], what follows it ws[at:]."""
         ps = prog in ("pwsh", "powershell")
+        rest = " ".join(ws[at:])
+        code_, attached = _interpreter_code(w)
+        if at >= len(ws) and not attached:
+            return False
         if prog in _SHELLS and w.startswith("-") and not w.startswith("--") and "c" in w:
             self.nest(self.inner, self.inner_g, SH, ws[at])
+            rest = ws[at]
         elif ps and w.lower() in ("-c", "-command"):
-            self.nest(self.inner, self.inner_g, POWERSHELL, " ".join(ws[at:]))
+            self.nest(self.inner, self.inner_g, POWERSHELL, rest)
         elif ps and _encoded_flag(w):
             code_ = _decode_utf16(ws[at])
             if code_ is not None:
@@ -257,14 +262,18 @@ class _Result:
             else:
                 self.incomplete = True
         elif prog == "cmd" and w.lower() in ("/c", "/k"):
-            self.nest(self.inner, self.inner_g, CMD, " ".join(ws[at:]))
-        elif prog in _INTERPRETERS and w in ("-c", "-e", "--eval"):
-            t = trim(ws[at])
+            self.nest(self.inner, self.inner_g, CMD, rest)
+        elif prog in _INTERPRETERS and code_ is not None:
+            if not attached:
+                code_ = ws[at]
+            t = trim(code_)
             if t:
                 self.inner.append(t)
+            if attached:
+                rest = code_ + " " + rest
         else:
             return False
-        if self.d == SH and _expands(" ".join(ws[at:])):
+        if self.d == SH and _expands(rest):
             self.var_prog = True
         return True
 
@@ -323,7 +332,8 @@ def _lead(s):
         if _operator(w):
             i += 2
             continue
-        if w in ("!", "time", "command", "builtin", "-p", "-v", "-V", "--") or _assignment(w):
+        if w in ("!", "time", "command", "builtin", "-p", "-v", "-V", "--", "if", "then", "do", "else", "elif",
+                 "while", "until") or _assignment(w):
             i += 1
             continue
         p, ok = _program(w)
@@ -332,6 +342,49 @@ def _lead(s):
         i += 1
     return ""
 
+
+
+# Mirrors wrappers.
+_WRAPPERS = {"exec", "env", "sudo", "doas", "su", "ssh", "timeout", "nice", "nohup", "stdbuf", "setsid", "ionice",
+             "chrt", "taskset", "xargs", "find", "watch", "flock", "chroot", "runuser", "unshare", "nsenter",
+             "strace", "ltrace", "parallel"}
+
+
+def _wraps_variable(s):
+    """Mirrors wrapsVariable."""
+    ws = _words(s)
+    i, past = 0, False
+    while i < len(ws):
+        w = ws[i]
+        if _operator(w):
+            i += 2
+            continue
+        if past and "<" not in w and ">" not in w and _expands(w):
+            return True
+        past = past or w in _WRAPPERS
+        i += 1
+    return False
+
+
+def _interpreter_code(w):
+    """Mirrors interpreterCode."""
+    if w == "--eval":
+        return "", False
+    if w.startswith("--eval="):
+        return w[7:], True
+    if len(w) < 2 or w[0] != "-" or w[1] == "-":
+        return None, False
+    if all("a" <= c <= "z" or "A" <= c <= "Z" for c in w[1:]):
+        return ("", False) if w[-1] in "ce" and not any(c in "WXMmr" for c in w[1:-1]) else (None, False)
+    if w[1] in "ce" and len(w) > 2:
+        return w[2:], True
+    return None, False
+
+
+def _abbreviates(w, flag, least):
+    """Mirrors abbreviates."""
+    n = w.partition("=")[0]
+    return len(n) >= least and flag.startswith(n)
 
 def _keyword(s):
     """Mirrors keyword: the first word past ! and time (-p, --)."""
@@ -552,7 +605,7 @@ _DATA_READERS = {":", "cat", "tee", "git", "gh", "grep", "egrep", "fgrep", "rg",
 
 
 # Mirrors readerRuns.
-_READER_RUNS = {"sort": ("--com",), "rg": ("--pre",)}
+_READER_RUNS = {"sort": ("--compress-program", 5), "rg": ("--pre", 5)}
 
 
 def _feeds(cmd):
@@ -585,7 +638,7 @@ def _feeds(cmd):
         f |= _UNKNOWN
     elif prog in ("git", "gh") and (env or not _data_subcommand(prog, ws[at + 1:])):
         f |= _UNKNOWN
-    elif any(w.startswith(f) for w in ws[at + 1:] for f in _READER_RUNS.get(prog, ())):
+    elif prog in _READER_RUNS and any(_abbreviates(w, *_READER_RUNS[prog]) for w in ws[at + 1:]):
         f |= _UNKNOWN
     elif prog in _DATA_READERS or _word_runner(prog):
         pass
@@ -641,10 +694,38 @@ def _data_subcommand(prog, ws):
             pass
         else:
             sub, ok = _program(w)
+            if prog == "git":
+                return ok and sub in _DATA_SUBCOMMANDS[prog] and not (sub in _EDITS and _git_editor(ws[i + 1:]))
             return ok and sub in _DATA_SUBCOMMANDS[prog] and not any(x in ("-e", "--edit", "--editor") for x in ws[i + 1:])
         i += 1
     return False
 
+
+
+# Mirrors edits.
+_EDITS = {"commit", "tag", "notes"}
+
+
+def _git_editor(ws):
+    """Mirrors gitEditor."""
+    i = 0
+    while i < len(ws):
+        w = ws[i]
+        if w == "--":
+            break
+        if w.startswith("--"):
+            if _abbreviates(w, "--edit", 3) or _abbreviates(w, "--template", 3):
+                return True
+        elif w.startswith("-"):
+            for j, c in enumerate(w[1:], 1):
+                if c in "et":
+                    return True
+                if c in "mFCcuS":
+                    if j == len(w) - 1 and c in "mFCc":
+                        i += 1
+                    break
+        i += 1
+    return False
 
 def _split_sh(line, out):
     rs = line
@@ -947,9 +1028,12 @@ def _ps_reads(out, nested, k):
         if not out.piped[j] or j + 1 >= len(out.cmds):
             break
         j += 1
+    every = out.cmds + nested
+    if any(_ps_redefines(c) for c in every):
+        return False
     if _ps_assignment(out.cmds[k]) is None:
         return True
-    return not any("$" in c and not _ps_data_command(c) for c in out.cmds + nested)
+    return all(_ps_data_command(c) for c in every)
 
 
 def _ps_assignment(cmd):
@@ -987,6 +1071,16 @@ def _ps_data_command(cmd):
     if prog in ("git", "gh"):
         return _data_subcommand(prog, ws[1:])
     return prog in _PS_DATA_COMMANDS
+
+
+def _ps_redefines(cmd):
+    """Mirrors psRedefines."""
+    ws = _fields(cmd.lower())
+    return bool(ws) and (ws[0] in _PS_DEFINERS or any("alias:" in w or "function:" in w for w in ws))
+
+
+# Mirrors psDefiners.
+_PS_DEFINERS = {"set-alias", "sal", "new-alias", "nal", "import-alias", "ipal", "function", "filter"}
 
 
 def _ps_variable(w):

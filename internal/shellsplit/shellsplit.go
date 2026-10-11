@@ -1334,15 +1334,37 @@ func psReads(out *result, nested []string, k int) bool {
 var psDefiners = map[string]bool{"set-alias": true, "sal": true, "new-alias": true, "nal": true,
 	"import-alias": true, "ipal": true, "function": true, "filter": true}
 
-// psRedefines: cmd defines an alias or a function — by a psDefiners command,
-// or through the alias: and function: drives (Set-Item alias:sc iex). Any
-// word may: & 'Set-Alias', &Set-Alias, Se`t-Alias,
-// Microsoft.PowerShell.Utility\Set-Alias, iex "Set-Alias sc iex".
+// psRunners run code given as a string or a script block.
+var psRunners = map[string]bool{"iex": true, "invoke-expression": true, "icm": true, "invoke-command": true}
+
+// psRedefines: cmd may change what a command name runs, or run what can't be
+// read — it defines an alias or a function (a psDefiners command, the alias:
+// and function: drives), runs code made at run time (psRunners, a script
+// block, InvokeScript), or calls a command named by a variable or an
+// expression (& $a, & ('Set' + '-Alias')). Any word may: &Set-Alias,
+// Se`t-Alias, Microsoft.PowerShell.Utility\Set-Alias, iex "Set-Alias sc iex".
 func psRedefines(cmd string) bool {
-	return slices.ContainsFunc(strings.Fields(strings.ToLower(strings.ReplaceAll(cmd, "`", ""))), func(w string) bool {
-		w = strings.NewReplacer("'", "", "\"", "", "+", "", "(", "", ")", "").Replace(w) // ('Set'+'-Alias')
-		return psDefiners[name(strings.Trim(w, "&.{};"))] || strings.Contains(w, "alias:") || strings.Contains(w, "function:")
-	})
+	var ws []string // its words, a concatenation ('Set' + '-Alias') joined into one
+	for _, w := range strings.Fields(strings.ToLower(strings.NewReplacer("`", "", "'", "", "\"", "").Replace(cmd))) {
+		if n := len(ws); n > 0 && (strings.HasSuffix(ws[n-1], "+") || strings.HasPrefix(w, "+")) {
+			ws[n-1] += w
+		} else {
+			ws = append(ws, w)
+		}
+	}
+	for i, w := range ws {
+		if (w == "&" || w == ".") && i+1 < len(ws) && strings.ContainsAny(ws[i+1][:1], "$(") ||
+			strings.HasPrefix(w, "&$") || strings.HasPrefix(w, "&(") || strings.HasPrefix(w, ".$") {
+			return true
+		}
+		w = strings.NewReplacer("+", "", "(", "", ")", "").Replace(w)
+		n := name(strings.Trim(w, "&.{};"))
+		if psDefiners[n] || psRunners[n] || slices.ContainsFunc([]string{"alias:", "function:", "scriptblock", "invokecommand", "invokescript"},
+			func(s string) bool { return strings.Contains(w, s) }) {
+			return true
+		}
+	}
+	return false
 }
 
 // psAssignment: cmd assigns to a variable ($c = …, $c=…, $c += …); rest is

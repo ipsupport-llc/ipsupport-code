@@ -1096,12 +1096,28 @@ def _ps_data_command(cmd):
     return prog in _PS_DATA_COMMANDS
 
 
+# Mirrors psRunners.
+_PS_RUNNERS = {"iex", "invoke-expression", "icm", "invoke-command"}
+
+
 def _ps_redefines(cmd):
     """Mirrors psRedefines."""
-    def defines(w):
-        w = w.replace("'", "").replace('"', "").replace("+", "").replace("(", "").replace(")", "")
-        return _name(w.strip("&.{};")) in _PS_DEFINERS or "alias:" in w or "function:" in w
-    return any(defines(w) for w in _fields(cmd.replace("`", "").lower()))
+    ws = []
+    for w in _fields(cmd.replace("`", "").replace("'", "").replace('"', "").lower()):
+        if ws and (ws[-1].endswith("+") or w.startswith("+")):
+            ws[-1] += w
+        else:
+            ws.append(w)
+    for i, w in enumerate(ws):
+        if ((w in ("&", ".") and i + 1 < len(ws) and ws[i + 1][0] in "$(") or
+                w.startswith("&$") or w.startswith("&(") or w.startswith(".$")):
+            return True
+        w = w.replace("+", "").replace("(", "").replace(")", "")
+        n = _name(w.strip("&.{};"))
+        if n in _PS_DEFINERS or n in _PS_RUNNERS or any(
+                s in w for s in ("alias:", "function:", "scriptblock", "invokecommand", "invokescript")):
+            return True
+    return False
 
 
 # Mirrors psDefiners.

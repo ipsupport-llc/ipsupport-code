@@ -550,6 +550,9 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		"&Set-Alias sc iex\nsc @'" + body,
 		"iex \"Set-Alias sc iex\"\nsc @'" + body, // defined by a string run
 		"& ('Set'+'-Alias') sc iex\nsc @'" + body,
+		"& ('Set' + '-Alias') sc iex\nsc @'" + body,
+		"$a = 'Set-Alias'; & $a sc iex\nsc @'" + body,   // a command named by a variable
+		"$s = 'Set-Alias sc iex'; iex $s\nsc @'" + body, // code run from a string
 		"Microsoft.PowerShell.Utility\\Set-Alias sc iex\nsc @'" + body,
 		"function Set-Content { iex $args[0] }\nSet-Content @'" + body,
 	} {

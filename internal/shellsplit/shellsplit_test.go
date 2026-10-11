@@ -470,6 +470,7 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		"git commit -m \"- fixed\" -F - <<'EOF'\nmsg\nEOF",
 		"git commit -am \"- fixed, the end\" <<'EOF'\nmsg\nEOF",
 		"exec > \"$LOG\" 2>&1\ncat > f <<'EOF'\nx\nEOF", // a redirection, not a program
+		"exec >\"$LOG\" 2>&1\ncat > f <<'EOF'\nx\nEOF",
 	} {
 		if p := Parse(Sh, line); p.Incomplete {
 			t.Errorf("Parse(%q) = %q: marked incomplete", line, p.Commands)
@@ -481,6 +482,7 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		"git commit --e -F - <<'EOF'\nrm -rf x\nEOF",
 		"git commit --edi -F - <<'EOF'\nrm -rf x\nEOF",
 		"git commit -t /dev/stdin <<'EOF'\nrm -rf x\nEOF", // a template opens the editor too
+		"git commit --templ=/dev/stdin <<'EOF'\nrm -rf x\nEOF",
 		"git tag -a -eF - v1 <<'EOF'\nrm -rf x\nEOF",
 		"git notes add -eF - <<'EOF'\nrm -rf x\nEOF",
 		read + "exec $x",

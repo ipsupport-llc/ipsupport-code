@@ -804,6 +804,7 @@
 {"dialect":0,"line":"eval 'rm -rf x'","parts":["eval 'rm -rf x'","rm -rf x"],"groups":[],"code":"eval 'rm -rf x'"}
 {"dialect":0,"line":"exec \u003e \"$LOG\" 2\u003e\u00261\ncat \u003e f \u003c\u003c'EOF'\nx\nEOF","parts":["exec \u003e \"$LOG\" 2\u003e\u00261","cat \u003e f \u003c\u003c'EOF'"],"groups":[],"code":"exec \u003e \"$LOG\" 2\u003e\u00261 ; cat \u003e f \u003c\u003c'EOF'"}
 {"dialect":0,"line":"exec \u003e \u003e(sh); cat \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["exec \u003e \u003e","sh","cat \u003c\u003c'EOF'"],"groups":[],"code":"exec \u003e \u003e ( sh ) ; cat \u003c\u003c'EOF'","incomplete":true}
+{"dialect":0,"line":"exec \u003e\"$LOG\" 2\u003e\u00261\ncat \u003e f \u003c\u003c'EOF'\nx\nEOF","parts":["exec \u003e\"$LOG\" 2\u003e\u00261","cat \u003e f \u003c\u003c'EOF'"],"groups":[],"code":"exec \u003e\"$LOG\" 2\u003e\u00261 ; cat \u003e f \u003c\u003c'EOF'"}
 {"dialect":0,"line":"exec \u003elog; cat \u003e f \u003c\u003c'EOF'\nx\nEOF","parts":["exec \u003elog","cat \u003e f \u003c\u003c'EOF'"],"groups":[],"code":"exec \u003elog ; cat \u003e f \u003c\u003c'EOF'"}
 {"dialect":0,"line":"exec\u003e \u003e(sh); cat \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["exec\u003e \u003e","sh","cat \u003c\u003c'EOF'"],"groups":[],"code":"exec\u003e \u003e ( sh ) ; cat \u003c\u003c'EOF'","incomplete":true}
 {"dialect":0,"line":"exit 0 || od -c tests/test_api.py; head -20 tmp","parts":["exit 0","od -c tests/test_api.py","head -20 tmp"],"groups":["exit 0 || od -c tests/test_api.py"],"code":"exit 0 || od -c tests/test_api.py ; head -20 tmp"}
@@ -923,6 +924,7 @@
 {"dialect":0,"line":"git apply\u003c\u003c'EOF'\n--- a/x\n+++ b/x\nEOF","parts":["git apply\u003c\u003c'EOF'"],"groups":[],"code":"git apply\u003c\u003c'EOF'","incomplete":true}
 {"dialect":0,"line":"git commit --edi -F - \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["git commit --edi -F - \u003c\u003c'EOF'"],"groups":[],"code":"git commit --edi -F - \u003c\u003c'EOF'","incomplete":true}
 {"dialect":0,"line":"git commit --edit -F - \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["git commit --edit -F - \u003c\u003c'EOF'"],"groups":[],"code":"git commit --edit -F - \u003c\u003c'EOF'","incomplete":true}
+{"dialect":0,"line":"git commit --templ=/dev/stdin \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["git commit --templ=/dev/stdin \u003c\u003c'EOF'"],"groups":[],"code":"git commit --templ=/dev/stdin \u003c\u003c'EOF'","incomplete":true}
 {"dialect":0,"line":"git commit -F - \u003c\u003c'EOF'\nmsg\nEOF","parts":["git commit -F - \u003c\u003c'EOF'"],"groups":[],"code":"git commit -F - \u003c\u003c'EOF'"}
 {"dialect":0,"line":"git commit -ae \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["git commit -ae \u003c\u003c'EOF'"],"groups":[],"code":"git commit -ae \u003c\u003c'EOF'","incomplete":true}
 {"dialect":0,"line":"git commit -eF - \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["git commit -eF - \u003c\u003c'EOF'"],"groups":[],"code":"git commit -eF - \u003c\u003c'EOF'","incomplete":true}
@@ -3553,6 +3555,7 @@
 {"dialect":1,"line":"eval 'rm -rf x'","parts":["eval 'rm -rf x'","rm -rf x"],"groups":[],"code":"eval 'rm -rf x'"}
 {"dialect":1,"line":"exec \u003e \"$LOG\" 2\u003e\u00261\ncat \u003e f \u003c\u003c'EOF'\nx\nEOF","parts":["exec \u003e \"$LOG\" 2\u003e\u00261","cat \u003e f \u003c\u003c'EOF'","x","EOF"],"groups":[],"code":"exec \u003e \"$LOG\" 2\u003e\u00261 ; cat \u003e f \u003c\u003c'EOF' ; x ; EOF"}
 {"dialect":1,"line":"exec \u003e \u003e(sh); cat \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["exec \u003e \u003e(sh)","cat \u003c\u003c'EOF'","rm -rf x","EOF","sh"],"groups":[],"code":"exec \u003e \u003e(sh) ; cat \u003c\u003c'EOF' ; rm -rf x ; EOF"}
+{"dialect":1,"line":"exec \u003e\"$LOG\" 2\u003e\u00261\ncat \u003e f \u003c\u003c'EOF'\nx\nEOF","parts":["exec \u003e\"$LOG\" 2\u003e\u00261","cat \u003e f \u003c\u003c'EOF'","x","EOF"],"groups":[],"code":"exec \u003e\"$LOG\" 2\u003e\u00261 ; cat \u003e f \u003c\u003c'EOF' ; x ; EOF"}
 {"dialect":1,"line":"exec \u003elog; cat \u003e f \u003c\u003c'EOF'\nx\nEOF","parts":["exec \u003elog","cat \u003e f \u003c\u003c'EOF'","x","EOF"],"groups":[],"code":"exec \u003elog ; cat \u003e f \u003c\u003c'EOF' ; x ; EOF"}
 {"dialect":1,"line":"exec\u003e \u003e(sh); cat \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["exec\u003e \u003e(sh)","cat \u003c\u003c'EOF'","rm -rf x","EOF","sh"],"groups":[],"code":"exec\u003e \u003e(sh) ; cat \u003c\u003c'EOF' ; rm -rf x ; EOF"}
 {"dialect":1,"line":"exit 0\nGet-Content -Tail 20 app\\models.py","parts":["exit 0","Get-Content -Tail 20 app\\models.py"],"groups":[],"code":"exit 0 ; Get-Content -Tail 20 app\\models.py"}
@@ -3625,6 +3628,7 @@
 {"dialect":1,"line":"git apply\u003c\u003c'EOF'\n--- a/x\n+++ b/x\nEOF","parts":["git apply\u003c\u003c'EOF'","--- a/x","+++ b/x","EOF"],"groups":[],"code":"git apply\u003c\u003c'EOF' ; --- a/x ; +++ b/x ; EOF"}
 {"dialect":1,"line":"git commit --edi -F - \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["git commit --edi -F - \u003c\u003c'EOF'","rm -rf x","EOF"],"groups":[],"code":"git commit --edi -F - \u003c\u003c'EOF' ; rm -rf x ; EOF"}
 {"dialect":1,"line":"git commit --edit -F - \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["git commit --edit -F - \u003c\u003c'EOF'","rm -rf x","EOF"],"groups":[],"code":"git commit --edit -F - \u003c\u003c'EOF' ; rm -rf x ; EOF"}
+{"dialect":1,"line":"git commit --templ=/dev/stdin \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["git commit --templ=/dev/stdin \u003c\u003c'EOF'","rm -rf x","EOF"],"groups":[],"code":"git commit --templ=/dev/stdin \u003c\u003c'EOF' ; rm -rf x ; EOF"}
 {"dialect":1,"line":"git commit -F - \u003c\u003c'EOF'\nmsg\nEOF","parts":["git commit -F - \u003c\u003c'EOF'","msg","EOF"],"groups":[],"code":"git commit -F - \u003c\u003c'EOF' ; msg ; EOF"}
 {"dialect":1,"line":"git commit -F - @'\nmsg\n'@","parts":["git commit -F - @'…'@"],"groups":[],"code":"git commit -F - @'…'@"}
 {"dialect":1,"line":"git commit -ae \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["git commit -ae \u003c\u003c'EOF'","rm -rf x","EOF"],"groups":[],"code":"git commit -ae \u003c\u003c'EOF' ; rm -rf x ; EOF"}
@@ -4183,6 +4187,7 @@
 {"dialect":2,"line":"eval 'rm -rf x'","parts":["eval 'rm -rf x'","'rm -rf x'"],"groups":[],"code":"eval 'rm -rf x'"}
 {"dialect":2,"line":"exec \u003e \"$LOG\" 2\u003e\u00261\ncat \u003e f \u003c\u003c'EOF'\nx\nEOF","parts":["exec \u003e \"$LOG\" 2\u003e\u00261","cat \u003e f \u003c\u003c'EOF'","x","EOF"],"groups":[],"code":"exec \u003e \"$LOG\" 2\u003e\u00261 \u0026 cat \u003e f \u003c\u003c'EOF' \u0026 x \u0026 EOF"}
 {"dialect":2,"line":"exec \u003e \u003e(sh); cat \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["exec \u003e \u003e","sh","; cat \u003c\u003c'EOF'","rm -rf x","EOF"],"groups":[],"code":"exec \u003e \u003e ( sh ) ; cat \u003c\u003c'EOF' \u0026 rm -rf x \u0026 EOF"}
+{"dialect":2,"line":"exec \u003e\"$LOG\" 2\u003e\u00261\ncat \u003e f \u003c\u003c'EOF'\nx\nEOF","parts":["exec \u003e\"$LOG\" 2\u003e\u00261","cat \u003e f \u003c\u003c'EOF'","x","EOF"],"groups":[],"code":"exec \u003e\"$LOG\" 2\u003e\u00261 \u0026 cat \u003e f \u003c\u003c'EOF' \u0026 x \u0026 EOF"}
 {"dialect":2,"line":"exec \u003elog; cat \u003e f \u003c\u003c'EOF'\nx\nEOF","parts":["exec \u003elog; cat \u003e f \u003c\u003c'EOF'","x","EOF"],"groups":[],"code":"exec \u003elog; cat \u003e f \u003c\u003c'EOF' \u0026 x \u0026 EOF"}
 {"dialect":2,"line":"exec\u003e \u003e(sh); cat \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["exec\u003e \u003e","sh","; cat \u003c\u003c'EOF'","rm -rf x","EOF"],"groups":[],"code":"exec\u003e \u003e ( sh ) ; cat \u003c\u003c'EOF' \u0026 rm -rf x \u0026 EOF"}
 {"dialect":2,"line":"f () { cat \u003c\u003c'EOF'; }\nrm -rf x\nEOF\nf | sh","parts":["f","{ cat \u003c\u003c'EOF'; }","rm -rf x","EOF","f","sh"],"groups":["f | sh"],"code":"f ( ) { cat \u003c\u003c'EOF'; } \u0026 rm -rf x \u0026 EOF \u0026 f | sh"}
@@ -4231,6 +4236,7 @@
 {"dialect":2,"line":"git apply\u003c\u003c'EOF'\n--- a/x\n+++ b/x\nEOF","parts":["git apply\u003c\u003c'EOF'","--- a/x","+++ b/x","EOF"],"groups":[],"code":"git apply\u003c\u003c'EOF' \u0026 --- a/x \u0026 +++ b/x \u0026 EOF"}
 {"dialect":2,"line":"git commit --edi -F - \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["git commit --edi -F - \u003c\u003c'EOF'","rm -rf x","EOF"],"groups":[],"code":"git commit --edi -F - \u003c\u003c'EOF' \u0026 rm -rf x \u0026 EOF"}
 {"dialect":2,"line":"git commit --edit -F - \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["git commit --edit -F - \u003c\u003c'EOF'","rm -rf x","EOF"],"groups":[],"code":"git commit --edit -F - \u003c\u003c'EOF' \u0026 rm -rf x \u0026 EOF"}
+{"dialect":2,"line":"git commit --templ=/dev/stdin \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["git commit --templ=/dev/stdin \u003c\u003c'EOF'","rm -rf x","EOF"],"groups":[],"code":"git commit --templ=/dev/stdin \u003c\u003c'EOF' \u0026 rm -rf x \u0026 EOF"}
 {"dialect":2,"line":"git commit -F - \u003c\u003c'EOF'\nmsg\nEOF","parts":["git commit -F - \u003c\u003c'EOF'","msg","EOF"],"groups":[],"code":"git commit -F - \u003c\u003c'EOF' \u0026 msg \u0026 EOF"}
 {"dialect":2,"line":"git commit -F - @'\nmsg\n'@","parts":["git commit -F - @'","msg","'@"],"groups":[],"code":"git commit -F - @' \u0026 msg \u0026 '@"}
 {"dialect":2,"line":"git commit -ae \u003c\u003c'EOF'\nrm -rf x\nEOF","parts":["git commit -ae \u003c\u003c'EOF'","rm -rf x","EOF"],"groups":[],"code":"git commit -ae \u003c\u003c'EOF' \u0026 rm -rf x \u0026 EOF"}

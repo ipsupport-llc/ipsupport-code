@@ -217,6 +217,7 @@ var casesForGolden = []string{
 	"read -r x <<'EOF'\nrm -rf x\nEOF\nenv $x", "read -r x <<'EOF'\nrm -rf x\nEOF\nsudo $x",
 	"read -r x <<'EOF'\nrm -rf x\nEOF\nthen $x", "read -r x <<'EOF'\nrm -rf x\nEOF\npython3 -c\"$x\"",
 	"read -r x <<'EOF'\nrm -rf x\nEOF\nnode --eval=\"$x\"", "read -r x <<'EOF'\nrm -rf x\nEOF\nperl -le \"$x\"",
+	"exec >\"$LOG\" 2>&1\ncat > f <<'EOF'\nx\nEOF", "git commit --templ=/dev/stdin <<'EOF'\nrm -rf x\nEOF",
 	"exec > \"$LOG\" 2>&1\ncat > f <<'EOF'\nx\nEOF", "perl -ne 'print if /x/' f", "python3 -Wignore app.py",
 	"$c = @'\nRemove-Item -Recurse -Force ./src\n'@\n$c | iex",
 	"$c = @'\nRemove-Item -Recurse -Force ./src\n'@\niex (Get-Variable c -ValueOnly)",

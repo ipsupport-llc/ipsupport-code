@@ -247,7 +247,7 @@ class _Result:
         """Mirrors handOff; the flag's argument is ws[at], what follows it ws[at:]."""
         ps = prog in ("pwsh", "powershell")
         rest = " ".join(ws[at:])
-        code_, attached = _interpreter_code(w)
+        code_, attached = _interpreter_code(prog, w)
         if at >= len(ws) and not attached:
             return False
         if prog in _SHELLS and w.startswith("-") and not w.startswith("--") and "c" in w:
@@ -361,23 +361,37 @@ def _wraps_variable(s):
             continue
         if past and "<" not in w and ">" not in w and _expands(w):
             return True
-        past = past or w in _WRAPPERS
+        p, ok = _program(w)
+        past = past or (ok and p in _WRAPPERS)
         i += 1
     return False
 
 
-def _interpreter_code(w):
-    """Mirrors interpreterCode."""
-    if w == "--eval":
-        return "", False
-    if w.startswith("--eval="):
-        return w[7:], True
+# Mirrors codeFlags.
+_CODE_FLAGS = {"python": "c", "python2": "c", "python3": "c", "perl": "eE", "ruby": "e", "node": "ep", "nodejs": "ep",
+               "bun": "ep", "php": "rBRE", "lua": "e", "osascript": "e", "Rscript": "e"}
+
+# Mirrors codeOptions.
+_CODE_OPTIONS = {"node": ["--print"], "nodejs": ["--print"], "bun": ["--print"], "php": ["--run"]}
+
+
+def _interpreter_code(prog, w):
+    """Mirrors interpreterCode: (code, attached), code None when w hands none."""
+    if prog not in _INTERPRETERS:
+        return None, False
+    for o in ["--eval"] + _CODE_OPTIONS.get(prog, []):
+        if w == o:
+            return "", False
+        if w.startswith(o + "="):
+            return w[len(o) + 1:], True
     if len(w) < 2 or w[0] != "-" or w[1] == "-":
         return None, False
-    if all("a" <= c <= "z" or "A" <= c <= "Z" for c in w[1:]):
-        return ("", False) if w[-1] in "ce" and not any(c in "WXMmr" for c in w[1:-1]) else (None, False)
-    if w[1] in "ce" and len(w) > 2:
-        return w[2:], True
+    for j in range(1, len(w)):
+        c = w[j]
+        if c in _CODE_FLAGS.get(prog, ""):
+            return ("", False) if j == len(w) - 1 else (w[j + 1:], True)
+        if not ("a" <= c <= "z" or "A" <= c <= "Z") or c in "WXMmr":
+            return None, False
     return None, False
 
 
@@ -385,6 +399,7 @@ def _abbreviates(w, flag, least):
     """Mirrors abbreviates."""
     n = w.partition("=")[0]
     return len(n) >= least and flag.startswith(n)
+
 
 def _keyword(s):
     """Mirrors keyword: the first word past ! and time (-p, --)."""
@@ -605,7 +620,7 @@ _DATA_READERS = {":", "cat", "tee", "git", "gh", "grep", "egrep", "fgrep", "rg",
 
 
 # Mirrors readerRuns.
-_READER_RUNS = {"sort": ("--compress-program", 5), "rg": ("--pre", 5)}
+_READER_RUNS = {"sort": ("--compress-program", 4), "rg": ("--pre", 5)}
 
 
 def _feeds(cmd):
@@ -1076,6 +1091,8 @@ def _ps_data_command(cmd):
 def _ps_redefines(cmd):
     """Mirrors psRedefines."""
     ws = _fields(cmd.lower())
+    while ws and ws[0] in ("&", "."):
+        ws = ws[1:]
     return bool(ws) and (ws[0] in _PS_DEFINERS or any("alias:" in w or "function:" in w for w in ws))
 
 

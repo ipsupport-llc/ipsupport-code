@@ -498,6 +498,15 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		read + "node --eval=\"$x\"",
 		read + "python3 -Ic \"$x\"",
 		read + "perl -le \"$x\"",
+		read + "/usr/bin/sudo $x", // a wrapper by its path
+		read + "sudo>log $x",      // or carrying a redirection
+		read + "php -r \"$x\"",    // each interpreter's own code flag
+		read + "node -p \"$x\"",
+		read + "node --print \"$x\"",
+		read + "perl -E \"$x\"",
+		read + "python3 -Ic\"$x\"", // a bundle with its code attached
+		read + "perl -le\"$x\"",
+		"sort --co=sh <<'EOF'\nrm -rf x\nEOF", // the shortest form GNU sort takes
 	} {
 		if p := Parse(Sh, line); !p.Incomplete {
 			t.Errorf("Parse(%q) = %q: marked complete", line, p.Commands)
@@ -512,9 +521,12 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 			t.Errorf("Split(%q) = %q — %q is not among them", line, got, want)
 		}
 	}
-	if got := Split(Sh, "python3 -Wignore app.py"); slices.Contains(got, "app.py") {
-		t.Errorf("a value of -W taken for code: %q", got)
+	for _, line := range []string{"python3 -Wignore app.py", "perl -c app.py", "node -c app.py", "php -c app.py x"} {
+		if got := Split(Sh, line); slices.Contains(got, "app.py") {
+			t.Errorf("Split(%q) = %q: a file taken for code", line, got)
+		}
 	}
+	Parse(Sh, "sh -c'echo hi'") // no code a shell takes attached, and no panic
 	body := "\nRemove-Item -Recurse -Force ./src\n'@"
 	for _, line := range []string{
 		"$c = @'" + body + "\n$c | iex",
@@ -523,6 +535,7 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		"$c = @'" + body + "; whoami", // anything may read it
 		"Set-Alias sc iex\nsc @'" + body,
 		"Set-Item alias:sc iex\nsc @'" + body,
+		"& Set-Alias sc iex\nsc @'" + body, // called
 		"function Set-Content { iex $args[0] }\nSet-Content @'" + body,
 	} {
 		if got := Split(PowerShell, line); !slices.Contains(got, "Remove-Item -Recurse -Force ./src") {

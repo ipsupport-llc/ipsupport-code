@@ -1,0 +1,1 @@
+printf: usage: printf [-v var] format [arguments]

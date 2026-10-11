@@ -345,28 +345,54 @@ func wrapsVariable(s string) bool {
 		if past && !strings.ContainsAny(w, "<>") && expands(w) {
 			return true
 		}
-		past = past || wrappers[w]
+		if p, ok := program(w); ok {
+			past = past || wrappers[p] // /usr/bin/sudo, sudo>log
+		}
 	}
 	return false
 }
 
-// interpreterCode is the code an interpreter's flag w hands it: isCode for
-// -c, -e, --eval and a bundle ending in one (python3 -Ic, perl -le, -ne), the
-// code in the next word; attached, the code is w's own (python3 -c"…",
-// node --eval=…). A bundle with an option that takes a value (-Wignore,
-// -Mstrict) is not one.
-func interpreterCode(w string) (code string, attached, isCode bool) {
-	switch {
-	case w == "--eval":
-		return "", false, true
-	case strings.HasPrefix(w, "--eval="):
-		return w[len("--eval="):], true, true
-	case len(w) < 2 || w[0] != '-' || w[1] == '-':
+// codeFlags are the one-letter flags that hand each interpreter its code:
+// python -c, but perl -c and node -c only check a file's syntax, and php -c
+// names its ini file.
+var codeFlags = map[string]string{"python": "c", "python2": "c", "python3": "c", "perl": "eE", "ruby": "e",
+	"node": "ep", "nodejs": "ep", "bun": "ep", "php": "rBRE", "lua": "e", "osascript": "e", "Rscript": "e"}
+
+// codeOptions are the long ones, besides --eval.
+var codeOptions = map[string][]string{"node": {"--print"}, "nodejs": {"--print"}, "bun": {"--print"}, "php": {"--run"}}
+
+// interpreterCode is the code interpreter prog's flag w hands it: isCode for
+// a codeFlags letter, alone or ending a bundle of flags (python3 -Ic, perl
+// -le, -ne), or --eval and the codeOptions, the code in the next word;
+// attached, the code is w's own (python3 -c"…", perl -le"…", node
+// --eval=…). A bundle stops at an option that takes a value (-Wignore,
+// -Mstrict).
+func interpreterCode(prog, w string) (code string, attached, isCode bool) {
+	if !interpreters[prog] {
 		return "", false, false
-	case strings.Trim(w[1:], "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") == "":
-		return "", false, strings.ContainsAny(w[len(w)-1:], "ce") && !strings.ContainsAny(w[1:len(w)-1], "WXMmr")
-	case (w[1] == 'c' || w[1] == 'e') && len(w) > 2:
-		return w[2:], true, true
+	}
+	for _, o := range append([]string{"--eval"}, codeOptions[prog]...) {
+		if w == o {
+			return "", false, true
+		}
+		if strings.HasPrefix(w, o+"=") {
+			return w[len(o)+1:], true, true
+		}
+	}
+	if len(w) < 2 || w[0] != '-' || w[1] == '-' {
+		return "", false, false
+	}
+	for j := 1; j < len(w); j++ {
+		c := w[j]
+		switch {
+		case strings.IndexByte(codeFlags[prog], c) >= 0:
+			if j == len(w)-1 {
+				return "", false, true
+			}
+			return w[j+1:], true, true
+		case !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') || strings.IndexByte("WXMmr", c) >= 0:
+			return "", false, false
+		}
 	}
 	return "", false, false
 }
@@ -446,7 +472,7 @@ func (r *result) innerCode(cmd string) {
 func (r *result) handOff(prog, w string, rest []string) bool {
 	ps := prog == "pwsh" || prog == "powershell"
 	runs := strings.Join(rest, " ") // what runs: the code, and what it is handed
-	code, attached, isCode := interpreterCode(w)
+	code, attached, isCode := interpreterCode(prog, w)
 	if len(rest) == 0 && !attached {
 		return false
 	}
@@ -676,13 +702,13 @@ var dataReaders = map[string]bool{":": true, "cat": true, "tee": true, "git": tr
 	"md5sum": true, "sha256sum": true, "shasum": true}
 
 // readerRuns are the flags that make a data reader run a program on what it
-// reads (sort --compress-program, which GNU sort takes abbreviated to --com)
+// reads (sort --compress-program, which GNU sort takes abbreviated to --co)
 // or on the files it is given (rg --pre, not --pretty), with the shortest
 // form each takes.
 var readerRuns = map[string]struct {
 	flag  string
 	least int
-}{"sort": {"--compress-program", 5}, "rg": {"--pre", 5}}
+}{"sort": {"--compress-program", 4}, "rg": {"--pre", 5}}
 
 // feeds is what cmd runs what it reads as: every interpreter among its words
 // counts (see runner) — a match adds what is scored, never takes it away —
@@ -1302,6 +1328,9 @@ var psDefiners = map[string]bool{"set-alias": true, "sal": true, "new-alias": tr
 // or through the alias: and function: drives (Set-Item alias:sc iex).
 func psRedefines(cmd string) bool {
 	ws := strings.Fields(strings.ToLower(cmd))
+	for len(ws) > 0 && (ws[0] == "&" || ws[0] == ".") { // & Set-Alias …: called
+		ws = ws[1:]
+	}
 	return len(ws) > 0 && (psDefiners[ws[0]] || slices.ContainsFunc(ws, func(w string) bool {
 		return strings.Contains(w, "alias:") || strings.Contains(w, "function:")
 	}))

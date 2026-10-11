@@ -21,6 +21,10 @@ func available(mode string) bool {
 	return resolveMode(mode) == Seatbelt && hasSandboxExec()
 }
 
+// strict: Seatbelt's deny file-write* covers content, mode, times and
+// extended attributes, and deny network* every socket.
+func strict(mode string) bool { return mode == Seatbelt }
+
 func hasSandboxExec() bool {
 	fi, err := os.Stat(sandboxExec)
 	return err == nil && !fi.IsDir()

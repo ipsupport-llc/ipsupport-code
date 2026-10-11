@@ -920,3 +920,29 @@ func TestGitPushApprovalShowsThePushURL(t *testing.T) {
 		t.Errorf("approval did not name the push URL: %q", detail)
 	}
 }
+
+// A wrapper given to the git tool is what runs git: a read-only run confines a
+// status or diff with it, since those run the filters the repository's config
+// names.
+func TestGitRunsThroughItsWrapper(t *testing.T) {
+	dir := initRepo(t)
+	c := config.Default()
+	c.Workspace = dir
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	e, err := policy.New(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	wrap := func(name string, args []string) (string, []string) {
+		got = append([]string{name}, args...)
+		return name, args
+	}
+	tl := NewGitLive(e, yes(), 0, func() bool { return false }, wrap)
+	if r := tl.Call(context.Background(), "status", nil); r.IsError {
+		t.Fatalf("status: %s", r.Content)
+	}
+	if len(got) == 0 || got[0] != "git" || !strings.Contains(strings.Join(got, " "), "status") {
+		t.Errorf("the wrapper saw %q, want git … status", got)
+	}
+}

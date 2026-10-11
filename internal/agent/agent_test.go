@@ -1599,6 +1599,54 @@ func TestSetSystemDropsQueuedNotes(t *testing.T) {
 	}
 }
 
+// Read-only mode refuses what plan mode does, but lets run through when its
+// commands are sandboxed — and says which on the task's message.
+func TestReadOnlyLetsOnlyASandboxedRunThrough(t *testing.T) {
+	runTool := func(ran *int) tool.Tool {
+		return tool.NewDomain(tool.DomainSpec{
+			Name: "run", Summary: "shell",
+			Actions: []tool.Action{{Name: "shell", Mutates: true, Run: func(context.Context, tool.Args) tool.Result {
+				*ran++
+				return tool.Ok("ran")
+			}}},
+		})
+	}
+	for _, sandboxed := range []bool{true, false} {
+		ran := 0
+		reg := tool.NewRegistry(planFileTool(), runTool(&ran))
+		fake := &scriptLLM{replies: []llm.Message{
+			toolCallReply("c1", "run", `{"action":"shell","params":{"command":"go test ./..."}}`),
+			toolCallReply("c2", "file", `{"action":"write","params":{"path":"x","content":"y"}}`),
+			{Role: "assistant", Content: "looks fine"},
+		}}
+		a := New(fake, reg, nil, nil, "", 5)
+		a.SetReadOnly(sandboxed)
+
+		tr, _ := a.Run(context.Background(), "review this")
+		obs := toolObservation(tr.Messages)
+		if len(obs) != 2 {
+			t.Fatalf("sandboxed=%v: %d observations, want 2: %+v", sandboxed, len(obs), obs)
+		}
+		if want := map[bool]int{true: 1, false: 0}[sandboxed]; ran != want {
+			t.Errorf("sandboxed=%v: run ran %d time(s), want %d", sandboxed, ran, want)
+		}
+		if !strings.Contains(obs[1].Content, "read-only mode") {
+			t.Errorf("sandboxed=%v: write was not refused: %+v", sandboxed, obs[1])
+		}
+		var task llm.Message
+		for i := len(fake.lastMsgs) - 1; i >= 0; i-- {
+			if fake.lastMsgs[i].Role == "user" {
+				task = fake.lastMsgs[i]
+				break
+			}
+		}
+		note := map[bool]string{true: readOnlyRunNote, false: readOnlyNoRunNote}[sandboxed]
+		if !strings.Contains(task.Content, readOnlyDirective+note) || strings.Contains(task.Content, "PLAN MODE") {
+			t.Errorf("sandboxed=%v: task message lacks the read-only directive:\n%s", sandboxed, task.Content)
+		}
+	}
+}
+
 func TestPlanModeAllowsReadOnly(t *testing.T) {
 	reg := tool.NewRegistry(planFileTool())
 	fake := &scriptLLM{replies: []llm.Message{

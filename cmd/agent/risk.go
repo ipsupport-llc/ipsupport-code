@@ -135,6 +135,26 @@ func (a *app) riskGate(pol *policy.Engine) func(ctx context.Context, tool, actio
 	}
 }
 
+// withLaunchScore scores a command line a call is about to start: an external
+// agent's or an MCP server's. It comes from config, not from the call the model
+// made, so the call's own score never saw it — a checkout's file can put
+// anything there. The launch's score goes on ctx when it is flagged and the
+// call's own is not, or is lower: the prompt shows it, the check stops it even
+// past an earlier 'a', and an answer teaches about it.
+func (a *app) withLaunchScore(ctx context.Context, dir, line string) context.Context {
+	if a.shadow == nil || line == "" {
+		return ctx
+	}
+	params := map[string]any{"command": line}
+	// Unknown, not Ask: a launch is always asked about by design, not by the
+	// policy, and an ordinary one is no disagreement with it.
+	as := a.shadow.Observe(risk.Scope{Workspace: dir, Shell: shellsplit.Sh}, "run", "shell", params, risk.VerdictUnknown)
+	if cur, _ := risk.AssessmentFrom(ctx); !as.Flagged() || cur.Flagged() && cur.Risk >= as.Risk {
+		return ctx
+	}
+	return risk.WithAssessment(ctx, "run", "shell", params, as)
+}
+
 // riskSuffix is the score as a prompt line carries it, or "".
 func riskSuffix(ctx context.Context) string {
 	if n := riskNote(ctx); n != "" {

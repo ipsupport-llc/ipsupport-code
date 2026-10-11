@@ -495,7 +495,10 @@ the permission policy would have run it without asking**: an allow glob, a
 `run.default` of `allow`, an earlier `a` on a prompt. Your answer is the
 override: `y` runs it, `n` refuses it (the model is told), and `a` stops asking
 about that kind of call for the rest of the session, flagged ones included. An
-`a` given at an ordinary prompt covers only the unflagged ones.
+`a` given at an ordinary prompt covers only the unflagged ones. An external
+agent's or an MCP server's launch command comes from config, not from the call
+the model made — a checkout's own file can set it — so it is scored too, as it
+starts.
 
 Turn the asking off with the **risk check** row in `/config` (saved as
 `risk_check`), or for one run with `-skip-risk-check`. `-skip-permissions`

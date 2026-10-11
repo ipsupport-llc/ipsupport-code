@@ -396,9 +396,11 @@ whatever `sandbox` is set to) with the workspace read-only like the rest of the
 disk: only temp dirs and the user cache dir are writable, and there is no
 network. The git tool's own git runs there too, since a status or diff runs the
 filters the repository's config names. Where there is no such sandbox, or the
-workspace or its repository sits in a temp or cache dir, commands are refused
-too, and the run says why. The session is neither restored nor saved, and
-nothing is learned from it — not even from an approval answer. On Linux a
+workspace or its repository sits in a temp or cache dir, commands and the git
+tool are refused too, and the run says why. The session is neither restored nor
+saved, and nothing is learned from it — not even from an approval answer; a run
+whose own files (trace, usage, skills, lessons, settings) would land in the
+workspace or its repository doesn't start. On Linux a
 command can still change a file's mode and times (Landlock doesn't cover them),
 never its contents.
 

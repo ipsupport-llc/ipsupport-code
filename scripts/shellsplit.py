@@ -253,7 +253,7 @@ class _Result:
         if prog in _SHELLS and w.startswith("-") and not w.startswith("--") and "c" in w:
             self.nest(self.inner, self.inner_g, SH, ws[at])
             rest = ws[at]
-        elif ps and w.lower() in ("-c", "-command"):
+        elif ps and _command_flag(w):
             self.nest(self.inner, self.inner_g, POWERSHELL, rest)
         elif ps and _encoded_flag(w):
             code_ = _decode_utf16(ws[at])
@@ -359,7 +359,8 @@ def _wraps_variable(s):
         if _operator(w):
             i += 2
             continue
-        if past and "<" not in w and ">" not in w and _expands(w):
+        cut = [k for k in (w.find("<"), w.find(">")) if k >= 0]
+        if past and _expands(w[:min(cut)] if cut else w):
             return True
         p, ok = _program(w)
         past = past or (ok and p in _WRAPPERS)
@@ -405,6 +406,14 @@ def _keyword(s):
         if w not in ("!", "time", "-p", "--"):
             return w
     return ""
+
+
+def _command_flag(w):
+    """Mirrors commandFlag."""
+    l = w.lower()
+    if len(l) < 2 or l[0] not in "-/":
+        return False
+    return l[1:] == "cwa" or "commandwithargs".startswith(l[1:])
 
 
 def _encoded_flag(w):
@@ -709,7 +718,8 @@ def _data_subcommand(prog, ws):
             sub, ok = _program(w)
             if prog == "git":
                 return ok and sub in _DATA_SUBCOMMANDS[prog] and not (sub in _EDITS and _git_editor(ws[i + 1:]))
-            return ok and sub in _DATA_SUBCOMMANDS[prog] and not any(x in ("-e", "--edit", "--editor") for x in ws[i + 1:])
+            return ok and sub in _DATA_SUBCOMMANDS[prog] and (sub in ("secret", "variable") or
+                                                             not any(x in ("-e", "--edit", "--editor") for x in ws[i + 1:]))
         i += 1
     return False
 
@@ -1088,8 +1098,10 @@ def _ps_data_command(cmd):
 
 def _ps_redefines(cmd):
     """Mirrors psRedefines."""
-    return any(_name(w.strip("&.'\"(){};")) in _PS_DEFINERS or "alias:" in w or "function:" in w
-               for w in _fields(cmd.replace("`", "").lower()))
+    def defines(w):
+        w = w.replace("'", "").replace('"', "").replace("+", "").replace("(", "").replace(")", "")
+        return _name(w.strip("&.{};")) in _PS_DEFINERS or "alias:" in w or "function:" in w
+    return any(defines(w) for w in _fields(cmd.replace("`", "").lower()))
 
 
 # Mirrors psDefiners.

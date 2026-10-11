@@ -229,6 +229,9 @@ var casesForGolden = []string{
 	"& Set-Alias sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
 	"Se`t-Alias sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@", "& 'Set-Alias' sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
 	"&Set-Alias sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@", "iex \"Set-Alias sc iex\"\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
+	"read -r x <<'EOF'\nrm -rf x\nEOF\nsudo $x>log", "read -r x <<'EOF'\nrm -rf x\nEOF\npwsh -Com \"$x\"",
+	"read -r x <<'EOF'\nrm -rf x\nEOF\npowershell /Command \"$x\"", "gh secret set FOO -e prod <<'EOF'\nvalue\nEOF",
+	"& ('Set'+'-Alias') sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
 	"read -r x <<'EOF'\nrm -rf x\nEOF\nphp --process-code \"$x\"", "read -r x <<'EOF'\nrm -rf x\nEOF\n/usr/bin/time $x",
 }
 

@@ -471,6 +471,8 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		"git commit -am \"- fixed, the end\" <<'EOF'\nmsg\nEOF",
 		"exec > \"$LOG\" 2>&1\ncat > f <<'EOF'\nx\nEOF", // a redirection, not a program
 		"exec >\"$LOG\" 2>&1\ncat > f <<'EOF'\nx\nEOF",
+		"cat > f <<'EOF'\nx\nEOF\nsudo cp 2>\"$err\" f g", // a redirection, not a program
+		"gh secret set FOO -e prod <<'EOF'\nvalue\nEOF",   // -e is --env there
 	} {
 		if p := Parse(Sh, line); p.Incomplete {
 			t.Errorf("Parse(%q) = %q: marked incomplete", line, p.Commands)
@@ -510,6 +512,10 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		read + "php --process-code \"$x\"",
 		read + "php --process-begin=\"$x\"",
 		read + "/usr/bin/time $x", // time the program, not the keyword
+		read + "sudo $x>log",      // the program before a redirection it carries
+		read + "pwsh -Com \"$x\"", // -Command however it is written
+		read + "powershell /Command \"$x\"",
+		read + "pwsh -cwa \"$x\"",
 	} {
 		if p := Parse(Sh, line); !p.Incomplete {
 			t.Errorf("Parse(%q) = %q: marked complete", line, p.Commands)
@@ -543,6 +549,7 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		"Se`t-Alias sc iex\nsc @'" + body, // a backtick PowerShell drops
 		"&Set-Alias sc iex\nsc @'" + body,
 		"iex \"Set-Alias sc iex\"\nsc @'" + body, // defined by a string run
+		"& ('Set'+'-Alias') sc iex\nsc @'" + body,
 		"Microsoft.PowerShell.Utility\\Set-Alias sc iex\nsc @'" + body,
 		"function Set-Content { iex $args[0] }\nSet-Content @'" + body,
 	} {

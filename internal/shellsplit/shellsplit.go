@@ -342,7 +342,11 @@ func wrapsVariable(s string) bool {
 			i++
 			continue
 		}
-		if past && !strings.ContainsAny(w, "<>") && expands(w) {
+		prog := w // before a redirection it carries ($x>log); one alone (2>"$err") names no program
+		if i := strings.IndexAny(w, "<>"); i >= 0 {
+			prog = w[:i]
+		}
+		if past && expands(prog) {
 			return true
 		}
 		if p, ok := program(w); ok {
@@ -477,7 +481,7 @@ func (r *result) handOff(prog, w string, rest []string) bool {
 	case shells[prog] && strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.Contains(w, "c"):
 		r.nest(&r.inner, &r.innerG, Sh, rest[0])
 		runs = rest[0] // sh -c 'echo hi' _ "$x": the arguments run only as the code says, with a $
-	case ps && (strings.EqualFold(w, "-c") || strings.EqualFold(w, "-command")):
+	case ps && commandFlag(w):
 		r.nest(&r.inner, &r.innerG, PowerShell, runs)
 	case ps && encodedFlag(w):
 		if code, ok := decodeUTF16(rest[0]); ok {
@@ -514,6 +518,16 @@ func encodedFlag(w string) bool {
 		return false
 	}
 	return l[1:] == "ec" || strings.HasPrefix("encodedcommand", l[1:])
+}
+
+// commandFlag is PowerShell's -Command as it may be written: any prefix of it
+// (-c, -com), with - or /; and -CommandWithArgs (-cwa), which also takes code.
+func commandFlag(w string) bool {
+	l := strings.ToLower(w)
+	if len(l) < 2 || (l[0] != '-' && l[0] != '/') {
+		return false
+	}
+	return l[1:] == "cwa" || strings.HasPrefix("commandwithargs", l[1:])
 }
 
 // decodeUTF16 reads -EncodedCommand's argument: base64 of UTF-16LE text.
@@ -814,9 +828,8 @@ func dataSubcommand(prog string, ws []string) bool {
 			if prog == "git" {
 				return ok && dataSubcommands[prog][sub] && !(edits[sub] && gitEditor(ws[i+1:]))
 			}
-			return ok && dataSubcommands[prog][sub] && !slices.ContainsFunc(ws[i+1:], func(w string) bool {
-				return w == "-e" || w == "--edit" || w == "--editor"
-			})
+			return ok && dataSubcommands[prog][sub] && (sub == "secret" || sub == "variable" || // -e: --env
+				!slices.ContainsFunc(ws[i+1:], func(w string) bool { return w == "-e" || w == "--edit" || w == "--editor" }))
 		}
 	}
 	return false
@@ -1327,7 +1340,8 @@ var psDefiners = map[string]bool{"set-alias": true, "sal": true, "new-alias": tr
 // Microsoft.PowerShell.Utility\Set-Alias, iex "Set-Alias sc iex".
 func psRedefines(cmd string) bool {
 	return slices.ContainsFunc(strings.Fields(strings.ToLower(strings.ReplaceAll(cmd, "`", ""))), func(w string) bool {
-		return psDefiners[name(strings.Trim(w, "&.'\"(){};"))] || strings.Contains(w, "alias:") || strings.Contains(w, "function:")
+		w = strings.NewReplacer("'", "", "\"", "", "+", "", "(", "", ")", "").Replace(w) // ('Set'+'-Alias')
+		return psDefiners[name(strings.Trim(w, "&.{};"))] || strings.Contains(w, "alias:") || strings.Contains(w, "function:")
 	})
 }
 

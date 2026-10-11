@@ -167,6 +167,11 @@ def _go_float(f):
     return sign + digits[:dp] + "." + digits[dp:]
 
 
+# Mirrors fileBody in internal/risk/call.go: the text a file change writes is
+# rendered as the "x" every dataset write carries — the path decides.
+FILE_BODY = {"content", "find", "replace", "edits"}
+
+
 def call_text(tool, action, params):
     """Mirrors CallText: sorted params, values and the whole capped head+tail,
     trimmed as Go's TrimSpace trims."""
@@ -176,6 +181,8 @@ def call_text(tool, action, params):
         v = shellsplit.trim(go_sprint(params[k]))
         if not v:
             continue
+        if tool == "file" and k in FILE_BODY:
+            v = "x"
         s += " " + k + "=" + head_tail(v, MAX_VALUE)
         if len(s) > MAX_TEXT:
             break

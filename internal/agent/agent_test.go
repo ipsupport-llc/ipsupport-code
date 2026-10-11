@@ -715,10 +715,14 @@ type recTracer struct {
 	judgeDone       bool
 	judgeMissing    string
 	continueMissing string // last "continue" event's missing text
+	judgingWhy      string // last "judging" event's reason
 }
 
 func (r *recTracer) Emit(kind string, f map[string]any) {
 	r.kinds = append(r.kinds, kind)
+	if kind == "judging" {
+		r.judgingWhy, _ = f["why"].(string)
+	}
 	if kind == "tool_call" {
 		r.toolCallRisk, _ = f["risk"].(string)
 	}
@@ -2138,6 +2142,30 @@ func TestJudgeGoalEmitsJudgingExactlyOnceEvenAcrossARetry(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("\"judging\" emitted %d times, want exactly 1 (not once per internal retry)", n)
+	}
+}
+
+// The judging event says how the run got there: the model called done, or it
+// replied without — the screen tells "it says it's done" from "it stopped".
+func TestJudgingSaysWhetherTheModelCalledDone(t *testing.T) {
+	for _, tc := range []struct {
+		finish llm.Message
+		want   string
+	}{
+		{toolCallReply("d1", "done", `{"action":"done","params":{}}`), "done"},
+		{llm.Message{Role: "assistant", Content: "all done"}, "stopped"},
+	} {
+		reg := tool.NewRegistry(tool.NewCalc(), tool.NewDone())
+		rt := &recTracer{}
+		fake := &scriptLLM{replies: []llm.Message{calcCall(), tc.finish, {Role: "assistant", Content: "DONE"}}}
+		a := New(fake, reg, nil, rt, "", 20)
+		a.SetGoalLoop(3, false)
+		if _, err := a.Run(context.Background(), "do the thing"); err != nil {
+			t.Fatal(err)
+		}
+		if rt.judgingWhy != tc.want {
+			t.Errorf("judging why = %q, want %q", rt.judgingWhy, tc.want)
+		}
 	}
 }
 

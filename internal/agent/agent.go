@@ -1410,7 +1410,11 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// it nothing to judge. actionsDigest gives it the real record
 					// (files touched / commands run) instead, same fix already applied
 					// to the give-up paths (see judgeOnGiveUp).
-					verdict, missing := a.judgeGoal(ctx, a.acceptanceTarget(goal), clean+actionsDigest(msgs)+a.priorGapNote(returns), msgs)
+					why := "stopped" // a reply with no tool call: it stopped, without saying it was done
+					if isDoneOnly(assistant.ToolCalls) {
+						why = "done"
+					}
+					verdict, missing := a.judgeGoal(ctx, why, a.acceptanceTarget(goal), clean+actionsDigest(msgs)+a.priorGapNote(returns), msgs)
 					// Reported live: the judge's own decision (a separate LLM call)
 					// was entirely invisible in the debug log for its two NORMAL
 					// verdicts — only its failure ("goal judge failed") and
@@ -2014,7 +2018,7 @@ func (a *Agent) judgeOnGiveUp(ctx context.Context, goal string, returns int, had
 	if a.planMode || a.maxReturns == 0 || !(hadProductiveTurn || a.priorGoalProgress) {
 		return false, ""
 	}
-	verdict, missing := a.judgeGoal(ctx, goal, result, convo)
+	verdict, missing := a.judgeGoal(ctx, reason, goal, result, convo)
 	slog.Debug("goal judge", a.debugArgs("verdict", verdict, "missing", missing, "return", returns, "of", a.maxReturns, "reason", reason)...)
 	met = verdict == judgeDone
 	// judgeUnclear carries no real signal (met=false, missing="") — stay silent on
@@ -2067,13 +2071,17 @@ func goalNotConfirmedNote(maxReturns int, met bool, missing string) string {
 // reply=\"\""), which otherwise permanently stalls the goal as "incomplete" on
 // pure noise — a single cheap, tools-free retry costs little and can turn a
 // wrongly-unclear verdict into a real one.
-func (a *Agent) judgeGoal(ctx context.Context, goal, result string, convo []llm.Message) (judgeVerdict, string) {
+//
+// why is how the run got here, for the screen: "done" (the model called done),
+// "stopped" (it replied without), or a give-up reason — stuck_stop,
+// step_exhaustion, turn_failed.
+func (a *Agent) judgeGoal(ctx context.Context, why, goal, result string, convo []llm.Message) (judgeVerdict, string) {
 	// Reported live: from the TUI, the isolated judge call was indistinguishable
 	// from the main model still "thinking" — no visible sign a separate check was
 	// even happening, let alone which one. One event per judgeGoal call (not per
 	// judgeGoalOnce attempt) — the internal retry on judgeUnclear is plumbing,
 	// not something the user needs a second "now judging" line for.
-	a.emit("judging", map[string]any{})
+	a.emit("judging", map[string]any{"why": why})
 	verdict, missing := a.judgeGoalOnce(ctx, goal, result, convo)
 	if verdict == judgeUnclear {
 		verdict, missing = a.judgeGoalOnce(ctx, goal, result, convo)

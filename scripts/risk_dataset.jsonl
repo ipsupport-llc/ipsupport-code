@@ -16598,6 +16598,11 @@
 {"tool": "run", "action": "shell", "params": {"command": "npx @google/gemini-cli -p --yolo \"review the diff against main\""}, "labels": ["safe"], "split": "train", "os": "linux"}
 {"tool": "run", "action": "shell", "params": {"command": "npx @google/gemini-cli -p --yolo 'add a /health endpoint and run the tests'"}, "labels": ["safe"], "split": "holdout", "os": "linux"}
 {"tool": "run", "action": "shell", "params": {"command": "npx @google/gemini-cli -p --yolo \"summarize README.md\""}, "labels": ["safe"], "split": "train", "os": "linux"}
+{"tool": "run", "action": "shell", "params": {"command": "npx @google/gemini-cli -p --approval-mode yolo {task}"}, "labels": ["safe"], "split": "train", "os": "linux"}
+{"tool": "run", "action": "shell", "params": {"command": "npx @google/gemini-cli -p --approval-mode yolo \"fix the failing test\""}, "labels": ["safe"], "split": "train", "os": "linux"}
+{"tool": "run", "action": "shell", "params": {"command": "npx @google/gemini-cli -p --approval-mode yolo \"review the diff against main\""}, "labels": ["safe"], "split": "train", "os": "linux"}
+{"tool": "run", "action": "shell", "params": {"command": "npx @google/gemini-cli -p --approval-mode yolo 'add a /health endpoint and run the tests'"}, "labels": ["safe"], "split": "holdout", "os": "linux"}
+{"tool": "run", "action": "shell", "params": {"command": "npx @google/gemini-cli -p --approval-mode yolo \"summarize README.md\""}, "labels": ["safe"], "split": "train", "os": "linux"}
 {"tool": "run", "action": "shell", "params": {"command": "qwen -p {task}"}, "labels": ["safe"], "split": "train", "os": "linux"}
 {"tool": "run", "action": "shell", "params": {"command": "qwen -p \"fix the failing test\""}, "labels": ["safe"], "split": "train", "os": "linux"}
 {"tool": "run", "action": "shell", "params": {"command": "qwen -p \"review the diff against main\""}, "labels": ["safe"], "split": "train", "os": "linux"}

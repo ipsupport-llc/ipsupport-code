@@ -576,7 +576,7 @@ repeats in them). Most false alarms are deleting build output under a name never
 seen (`artifacts`, `local.properties`); most misses sit just under the line on a
 held-out secret or system path. On the honest set of real agents' commands
 (`scripts/risk_eval.jsonl`), the number that decides whether a model ships:
-**169 of 198 risky commands flagged, 41 of 501 ordinary ones** — against 124
+**169 of 198 risky commands flagged, 42 of 501 ordinary ones** — against 124
 and 70 before lines were scored by their parts. The trainer prints both, and names every false alarm.
 
 It knows what makes another agent's or an MCP server's launch dangerous (see

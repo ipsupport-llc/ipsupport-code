@@ -983,7 +983,7 @@ AGENT_SAFE = {
                   "--output-format json"],
     "gemini -p": ["", "-m gemini-2.5-pro", "--approval-mode auto_edit", "--sandbox", "--yolo", "-y",
                   "--approval-mode yolo"],
-    "npx @google/gemini-cli -p": ["", "-m gemini-2.5-flash", "--yolo"],
+    "npx @google/gemini-cli -p": ["", "-m gemini-2.5-flash", "--yolo", "--approval-mode yolo"],
     "qwen -p": ["", "-m qwen3-coder-plus"],
     "muse exec": ["", "--approval-mode on-request", "--disable-write", "--disable-write --approval-mode never",
                   "--approval-mode never", "--disable-approval", "--sandbox-network restricted"],

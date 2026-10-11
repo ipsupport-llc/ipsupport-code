@@ -408,6 +408,9 @@ func abbreviates(w, flag string, least int) bool {
 // on by a data command (echo "$x" | sh, printf %s "$x" | bash) or as a here
 // string (sh -s <<< "$x", python3 <<< "$x").
 func (r *result) feedsVariable() bool {
+	if !slices.ContainsFunc(r.cmds, expands) {
+		return false
+	}
 	fed := r.readers(0)
 	for j, c := range r.cmds {
 		if !expands(c) {
@@ -1056,7 +1059,9 @@ func splitSh(line string, out *result) {
 		}
 	}
 	cut("")
-	if out.dropped && !out.varProg && out.feedsVariable() { // before the nested commands join cmds
+	// Before the nested commands join cmds; not only after a dropped body on
+	// this line: echo "$(echo "$x" | sh)" runs one dropped outside it.
+	if !out.varProg && out.feedsVariable() {
 		out.varProg = true
 	}
 	out.cmds = append(out.cmds, nested...)

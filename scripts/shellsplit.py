@@ -279,6 +279,8 @@ class _Result:
 
     def feeds_variable(self):
         """Mirrors feedsVariable."""
+        if not any(_expands(c) for c in self.cmds):
+            return False
         fed = self.readers(0)
         for j, c in enumerate(self.cmds):
             if not _expands(c):
@@ -896,7 +898,7 @@ def _split_sh(line, out):
             b.write(r, False)
         i += 1
     cut("")
-    if out.dropped and not out.var_prog and out.feeds_variable():
+    if not out.var_prog and out.feeds_variable():
         out.var_prog = True
     out.cmds += nested
     out.groups += ngroups

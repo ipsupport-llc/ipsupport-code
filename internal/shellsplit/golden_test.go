@@ -238,6 +238,7 @@ var casesForGolden = []string{
 	"$s = 'Set-' + 'Alias sc ri'; [ScriptBlock]::Create($s).Invoke()\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
 	"$a = 'Set-' + 'Alias'; &$a sc ri\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
 	"read -r x <<'EOF'\nrm -rf x\nEOF\nphp --process-code \"$x\"", "read -r x <<'EOF'\nrm -rf x\nEOF\n/usr/bin/time $x",
+	"read -r x <<'EOF'\nrm -rf x\nEOF\necho \"$(echo \"$x\" | sh)\"", "echo \"$x\" | sh",
 	"read -r x <<'EOF'\nrm -rf x\nEOF\nif true; then echo \"$x\" | sh; fi", "time cat <<'EOF'\nx\nEOF",
 	"read -r x <<'EOF'\nrm -rf x\nEOF\necho \"$x\" | sh", "read -r x <<'EOF'\nrm -rf x\nEOF\nsh -s <<< \"$x\"",
 	"read -r x <<'EOF'\nrm -rf x\nEOF\necho \"$x\" | grep rm", "git notes add -c HEAD -F - <<'EOF'\nrm -rf x\nEOF",

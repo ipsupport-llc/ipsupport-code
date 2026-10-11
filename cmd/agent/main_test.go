@@ -225,6 +225,39 @@ func TestStatusLineSaysTheJudgeIsChecking(t *testing.T) {
 	}
 }
 
+// A push shows the judge's whole gap and what the model was told — not a
+// 60-character clip of the gap and nothing else.
+func TestAPushShowsTheGapAndWhatTheModelWasTold(t *testing.T) {
+	m := &tuiModel{width: 100}
+	gap := "the /health endpoint has no test, and README still documents the old /status route at the end"
+	sent := "keep going now\n\nStill missing: " + gap + "\n\nGOAL: ship it"
+	joined := stripAnsi(strings.Join(m.renderEvent(uiEvent{kind: "continue", fields: map[string]any{
+		"return": 1, "of": 3, "missing": gap, "told": sent}}), " "))
+	joined = strings.Join(strings.Fields(joined), " ")
+	if strings.Contains(joined, "ship it") {
+		t.Errorf("the re-fed goal was repeated on screen: %q", joined)
+	}
+	for _, want := range []string{"pushing on (1/3)", gap, "told the model: keep going now (then what's missing and the goal again)"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("continue rendered %q, missing %q", joined, want)
+		}
+	}
+	nudge := stripAnsi(strings.Join(m.renderEvent(uiEvent{kind: "nudge", fields: map[string]any{"idle": true, "told": "do the next step"}}), " "))
+	if !strings.Contains(nudge, "did nothing this turn") || !strings.Contains(nudge, "told the model: do the next step") {
+		t.Errorf("idle nudge rendered %q", nudge)
+	}
+	// Each wrapped line fits the screen, narrow ones included (the header is
+	// one line, as every event's is, and the log wraps it).
+	for _, w := range []int{24, 30, 60, 100} {
+		m := &tuiModel{width: w}
+		for _, l := range m.renderEvent(uiEvent{kind: "continue", fields: map[string]any{"return": 1, "of": 3, "missing": gap, "told": sent}})[1:] {
+			if lw := lipgloss.Width(l); lw > w {
+				t.Errorf("width %d: line is %d wide: %q", w, lw, stripAnsi(l))
+			}
+		}
+	}
+}
+
 func TestSubagentRenderShowsFullTask(t *testing.T) {
 	m := &tuiModel{width: 60}
 	task := "Fix ALL issues identified in the code review of the notecli repository and then open a pull request"

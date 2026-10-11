@@ -420,9 +420,13 @@ func (a *Agent) target(runGoal string, msgs []llm.Message) string {
 }
 
 // deliverSteers appends any /steer notes waiting for this run and announces
-// them, reporting whether there were any.
+// them, reporting whether there were any. A detached run takes none: the queue
+// now feeds the fresh agent the UI moved on to, and this run's events go
+// nowhere, so a note it took would vanish unannounced. The loop's own detached
+// check does not cover the final-answer call, which runs after a model call
+// that may have been abandoned midway.
 func (a *Agent) deliverSteers(msgs *[]llm.Message, step int) bool {
-	if a.steers == nil {
+	if a.steers == nil || a.detached.Load() {
 		return false
 	}
 	notes := a.steers()

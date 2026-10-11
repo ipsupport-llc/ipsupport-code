@@ -3702,6 +3702,35 @@ func TestASteerAmendsTheGoalForTheJudgeTheReFeedAndHistory(t *testing.T) {
 	}
 }
 
+// detachingLLM force-detaches its agent in the middle of a model call — the
+// esc-esc on a wedged request — and a note is typed for the fresh agent while
+// that call is still out.
+type detachingLLM struct {
+	a     *Agent
+	queue *[]string
+}
+
+func (d *detachingLLM) Chat(context.Context, []llm.Message, []map[string]any) (llm.Message, error) {
+	d.a.Detach()
+	*d.queue = append(*d.queue, "use tabs")
+	return llm.Message{Role: "assistant", Content: "late answer"}, nil
+}
+
+// A run detached mid-call came back with its answer and took the next task's
+// steer at the final-answer check, into messages nobody reads, with its event
+// silenced — the note was gone without a trace.
+func TestADetachedRunLeavesTheSteersAlone(t *testing.T) {
+	var queue []string
+	d := &detachingLLM{queue: &queue}
+	a := New(d, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
+	d.a = a
+	a.SetSteers(func() []string { q := queue; queue = nil; return q })
+	a.Run(context.Background(), "anything")
+	if !slices.Equal(queue, []string{"use tabs"}) {
+		t.Errorf("queue = %q — the detached run took the fresh agent's steer", queue)
+	}
+}
+
 // A goal carries at most the latest corrections forward.
 func TestCorrectionsBlockKeepsTheLatest(t *testing.T) {
 	if CorrectionsBlock(nil) != "" {

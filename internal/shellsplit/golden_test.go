@@ -236,7 +236,7 @@ var casesForGolden = []string{
 	"$a = 'Set-' + 'Alias'; & $a sc ri\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
 	"$s = 'Set-' + 'Alias sc ri'; iex $s\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
 	"$s = 'Set-' + 'Alias sc ri'; [ScriptBlock]::Create($s).Invoke()\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
-	"(Set-Alias sc ri)\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
+	"$a = 'Set-' + 'Alias'; &$a sc ri\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
 	"read -r x <<'EOF'\nrm -rf x\nEOF\nphp --process-code \"$x\"", "read -r x <<'EOF'\nrm -rf x\nEOF\n/usr/bin/time $x",
 }
 

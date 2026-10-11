@@ -1350,7 +1350,7 @@ func psRedefines(cmd string) bool {
 			strings.HasPrefix(w, "&$") || strings.HasPrefix(w, "&(") || strings.HasPrefix(w, ".$") {
 			return true
 		}
-		n := name(strings.Trim(w, "&.{};()"))
+		n := name(strings.Trim(w, "&.{};"))
 		if psDefiners[n] || psRunners[n] || slices.ContainsFunc([]string{"alias:", "function:", "scriptblock", "invokecommand", "invokescript"},
 			func(s string) bool { return strings.Contains(w, s) }) {
 			return true

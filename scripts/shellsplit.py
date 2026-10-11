@@ -1107,7 +1107,7 @@ def _ps_redefines(cmd):
         if ((w in ("&", ".") and i + 1 < len(ws) and ws[i + 1][0] in "$(") or
                 w.startswith("&$") or w.startswith("&(") or w.startswith(".$")):
             return True
-        n = _name(w.strip("&.{};()"))
+        n = _name(w.strip("&.{};"))
         if n in _PS_DEFINERS or n in _PS_RUNNERS or any(
                 s in w for s in ("alias:", "function:", "scriptblock", "invokecommand", "invokescript")):
             return True

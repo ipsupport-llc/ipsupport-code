@@ -554,7 +554,7 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		"$a = 'Set-' + 'Alias'; & $a sc ri\nsc @'" + body,                               // a command named by a variable
 		"$s = 'Set-' + 'Alias sc ri'; iex $s\nsc @'" + body,                             // code run from a string
 		"$s = 'Set-' + 'Alias sc ri'; [ScriptBlock]::Create($s).Invoke()\nsc @'" + body, // or a script block
-		"(Set-Alias sc ri)\nsc @'" + body,
+		"$a = 'Set-' + 'Alias'; &$a sc ri\nsc @'" + body,
 		"Microsoft.PowerShell.Utility\\Set-Alias sc iex\nsc @'" + body,
 		"function Set-Content { iex $args[0] }\nSet-Content @'" + body,
 	} {

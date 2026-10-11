@@ -9336,7 +9336,7 @@ func TestRiskNoteIsEmptyBelowTheThreshold(t *testing.T) {
 		a    risk.Assessment
 		want string
 	}{
-		{"over", risk.Assessment{Risk: 0.98, Top: "credential_access"}, "0.98 credential_access"},
+		{"over", risk.Assessment{Risk: 0.98, Top: "credential_access"}, "possible credential access (0.98)"},
 		{"under", risk.Assessment{Risk: 0.12, Top: "destructive"}, ""},
 		{"nothing scored", risk.Assessment{}, ""},
 		{"not all of it scored", risk.Assessment{Risk: 0.12, Top: "destructive", Incomplete: true}, "not fully read"},

@@ -3,6 +3,7 @@ package risk
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // The assessment travels on the CONTEXT from the point a call is scored to the
@@ -51,14 +52,15 @@ func AssessmentFrom(ctx context.Context) (Assessment, bool) {
 }
 
 // Note renders the assessment as the one short line a prompt or a tool-call line
-// can carry: "0.98 credential_access", or "not fully read" for a call whose
+// can carry: "possible credential access (0.98)" — worded as a suspicion, since
+// a score is a guess, not a finding — or "not fully read" for a call whose
 // parts were not all scored. Empty when nothing fired, so a caller can use it
 // directly as "show this if non-empty" — a score on every routine call would be
 // noise, and noise is what makes a risk signal get ignored.
 func (a Assessment) Note() string {
 	switch {
 	case a.Risk >= Threshold && a.Top != "":
-		return fmt.Sprintf("%.2f %s", a.Risk, a.Top)
+		return fmt.Sprintf("possible %s (%.2f)", strings.ReplaceAll(a.Top, "_", " "), a.Risk)
 	case a.Incomplete:
 		return "not fully read"
 	}

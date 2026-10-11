@@ -515,13 +515,13 @@ msg="risk shadow: scored 1 call(s), 1 over 0.50, 1 disagreed with the policy"
 ```
 
 You see it where it matters, not only in the log. A call the scorer is unhappy
-about carries its verdict on its own line, and again at the approval prompt —
+about carries its suspicion on its own line, and again at the approval prompt —
 which is the moment it is worth anything, since your answer there is the label
 it learns from:
 
 ```
-  ⚙ run shell cat ~/.ssh/id_rsa   ⚠ 0.98 credential_access
-  ⚠ approve run: cat ~/.ssh/id_rsa   ⚠ 0.98 credential_access
+  ⚙ run shell cat ~/.ssh/id_rsa   ⚠ possible credential access (0.98)
+  ⚠ approve run: cat ~/.ssh/id_rsa   ⚠ possible credential access (0.98)
     y approve · n deny · a allow all shell commands this session, flagged ones too
 ```
 

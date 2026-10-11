@@ -131,7 +131,7 @@ func (a *app) riskGate(pol *policy.Engine) func(ctx context.Context, tool, actio
 		if a.approveGated(ctx, kind, detail) {
 			return ""
 		}
-		return fmt.Sprintf("%s %s denied by user — the risk check flagged it (%s)", kind, detail, riskNote(ctx))
+		return fmt.Sprintf("%s %s denied by user — the risk check flagged it: %s", kind, detail, riskNote(ctx))
 	}
 }
 

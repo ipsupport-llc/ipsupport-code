@@ -9302,21 +9302,21 @@ func TestTheScoreReachesTheApprovalPromptAndTheCallLine(t *testing.T) {
 	m.vp = viewport.New(100, 10)
 
 	// The prompt, while answering.
-	m.pending = &approvalReq{kind: "run", detail: "cat ~/.ssh/id_rsa", risk: "0.98 credential_access"}
-	if got := m.approvePrompt(); !strings.Contains(got, "0.98 credential_access") {
+	m.pending = &approvalReq{kind: "run", detail: "cat ~/.ssh/id_rsa", risk: "possible credential access (0.98)"}
+	if got := m.approvePrompt(); !strings.Contains(got, "possible credential access (0.98)") {
 		t.Errorf("the approval prompt hides the score:\n%s", got)
 	}
 	// …and a call the scorer said nothing about stays clean.
 	m.pending = &approvalReq{kind: "run", detail: "go test ./..."}
-	if got := m.approvePrompt(); strings.Contains(got, "⚠ 0.") {
+	if got := m.approvePrompt(); strings.Count(got, "⚠") > 1 { // the ⚠ APPROVE header only
 		t.Errorf("an unremarkable call got a score anyway:\n%s", got)
 	}
 
 	// The call's own line in the log.
 	flagged := m.renderEvent(uiEvent{kind: "tool_call", fields: map[string]any{
 		"tool": "run", "action": "shell", "params": map[string]any{"command": "cat ~/.ssh/id_rsa"},
-		"risk": "0.98 credential_access"}})
-	if !strings.Contains(strings.Join(flagged, "\n"), "0.98 credential_access") {
+		"risk": "possible credential access (0.98)"}})
+	if !strings.Contains(strings.Join(flagged, "\n"), "possible credential access (0.98)") {
 		t.Errorf("the tool-call line hides the score:\n%s", strings.Join(flagged, "\n"))
 	}
 	quiet := m.renderEvent(uiEvent{kind: "tool_call", fields: map[string]any{
@@ -9336,7 +9336,7 @@ func TestRiskNoteIsEmptyBelowTheThreshold(t *testing.T) {
 		a    risk.Assessment
 		want string
 	}{
-		{"over", risk.Assessment{Risk: 0.98, Top: "credential_access"}, "0.98 credential_access"},
+		{"over", risk.Assessment{Risk: 0.98, Top: "credential_access"}, "possible credential access (0.98)"},
 		{"under", risk.Assessment{Risk: 0.12, Top: "destructive"}, ""},
 		{"nothing scored", risk.Assessment{}, ""},
 		{"not all of it scored", risk.Assessment{Risk: 0.12, Top: "destructive", Incomplete: true}, "not fully read"},

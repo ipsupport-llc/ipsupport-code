@@ -2169,6 +2169,19 @@ func TestJudgingSaysWhetherTheModelCalledDone(t *testing.T) {
 	}
 }
 
+// A give-up's reason reaches the judging event as its why.
+func TestJudgingCarriesTheGiveUpReason(t *testing.T) {
+	for _, reason := range []string{"stuck_stop", "step_exhaustion", "turn_failed"} {
+		rt := &recTracer{}
+		a := New(&scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "DONE"}}}, tool.NewRegistry(tool.NewCalc()), nil, rt, "", 5)
+		a.SetGoalLoop(3, false)
+		a.judgeOnGiveUp(context.Background(), "do it", 0, true, reason, "did some", nil)
+		if rt.judgingWhy != reason {
+			t.Errorf("judging why = %q, want %q", rt.judgingWhy, reason)
+		}
+	}
+}
+
 // The judge can express its verdict as a structured tool call instead of
 // plain text — OR, not instead of, the existing "DONE"/"MORE: ..." text
 // convention (see judgeSystem/parseJudgeReply). A judge model that's itself

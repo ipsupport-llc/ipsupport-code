@@ -205,9 +205,23 @@ func TestStatusLineSaysTheJudgeIsChecking(t *testing.T) {
 	if s := stripAnsi(m.View()); !strings.Contains(s, "· ⚖ judge checking the goal… (") {
 		t.Errorf("status while judging does not say so:\n%s", s)
 	}
-	m.Update(eventMsg(uiEvent{kind: "judge", fields: map[string]any{"done": true}}))
-	if s := stripAnsi(m.View()); strings.Contains(s, "· ⚖ judge checking the goal… (") {
-		t.Errorf("status after the verdict still says judging:\n%s", s)
+	// A transport retry or a sub-agent's own step is not the verdict.
+	m.Update(eventMsg(uiEvent{kind: "retry", fields: map[string]any{"attempt": 1, "wait_ms": 0}}))
+	m.Update(eventMsg(uiEvent{kind: "tool_call", fields: map[string]any{"agent": "sub1", "tool": "file"}}))
+	m.retry = nil
+	if s := stripAnsi(m.View()); !strings.Contains(s, "· ⚖ judge checking the goal… (") {
+		t.Errorf("a retry or a sub-agent's step cleared the judging status:\n%s", s)
+	}
+	for _, after := range []uiEvent{
+		{kind: "judge", fields: map[string]any{"done": true}},
+		{kind: "continue", fields: map[string]any{"return": 1, "of": 3}},
+		{kind: "final", fields: map[string]any{"text": "ok"}},
+	} {
+		m.Update(eventMsg(uiEvent{kind: "judging", fields: map[string]any{"why": "done"}}))
+		m.Update(eventMsg(after))
+		if s := stripAnsi(m.View()); strings.Contains(s, "· ⚖ judge checking the goal… (") {
+			t.Errorf("status after %q still says judging:\n%s", after.kind, s)
+		}
 	}
 }
 

@@ -316,10 +316,7 @@ func checkReadOnlyPaths(cfg config.Config) error {
 	}
 	for key, p := range map[string]string{"trace_path": cfg.TracePath, "usage_path": cfg.UsagePath, "skills_path": cfg.SkillsPath,
 		"kb_path": cfg.KBPath, "the settings dir": filepath.Dir(config.GlobalPath())} {
-		if p == "" {
-			continue
-		}
-		p = absPath(p) // as the store opens it: relative to the working directory
+		p = absPath(p) // as the store opens it: relative to the working directory, which an empty one is
 		// Where it leads, and the dir it is in, where a lock, a temp file and
 		// the rename over it land: a symlink in the workspace to a ledger
 		// outside is replaced by that rename.
@@ -3059,6 +3056,14 @@ func (a *app) readOnlyRunIn(root string) (ok bool, why string) {
 	}
 	// The repositories too: a worktree's .git, or a --separate-git-dir, can be
 	// anywhere — in a temp dir, say — and git update-ref there rewrites history.
+	// Without git there is no telling where such a .git file points.
+	if _, err := exec.LookPath("git"); err != nil {
+		for _, d := range []string{a.cfg.Workspace, root} {
+			if gitFileAbove(d) {
+				return false, d + " is in a repository whose git dir is elsewhere, and without git installed there is no telling where"
+			}
+		}
+	}
 	for _, p := range slices.Concat([]string{a.cfg.Workspace, root}, gitDirs(a.cfg.Workspace), gitDirs(root)) {
 		if sandbox.Reaches(mode, spec, p) {
 			return false, p + " is in or holds a temp or cache dir, which sandboxed commands may write"
@@ -3086,6 +3091,19 @@ func (a *app) gitWrapperFor(root string) tool.CmdWrapper {
 		return nil
 	}
 	return a.sandboxWrapperFor(root)
+}
+
+// gitFileAbove: dir or a dir above it has a .git that is a file, pointing to
+// a git dir kept elsewhere — a linked worktree's, a --separate-git-dir's.
+func gitFileAbove(dir string) bool {
+	for d := dir; ; d = filepath.Dir(d) {
+		if fi, err := os.Lstat(filepath.Join(d, ".git")); err == nil {
+			return !fi.IsDir()
+		}
+		if filepath.Dir(d) == d {
+			return false
+		}
+	}
 }
 
 // gitDirs is the git directory and common directory of the repository dir is

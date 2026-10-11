@@ -400,7 +400,8 @@ workspace or its repository sits in a temp or cache dir, commands and the git
 tool are refused too, and the run says why. The session is neither restored nor
 saved, and nothing is learned from it — not even from an approval answer; a run
 whose own files (trace, usage, skills, lessons, settings) would land in the
-workspace or its repository doesn't start. On Linux a
+workspace or its repository doesn't start. A repository nested inside the
+workspace with its git dir kept elsewhere is not looked for. On Linux a
 command can still change a file's mode and times (Landlock doesn't cover them),
 never its contents.
 

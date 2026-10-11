@@ -10014,6 +10014,29 @@ func TestReadOnlyRefusesCommandsWhereTheRepositoryIsWritable(t *testing.T) {
 	}
 }
 
+// Without git, a .git file says only that the git dir is somewhere else:
+// commands are refused rather than run where it may be writable.
+func TestReadOnlyRefusesCommandsWhereNoGitCanSayWhereTheRepositoryIs(t *testing.T) {
+	if !sandbox.Strict(sandbox.Auto) {
+		t.Skip("no strict OS sandbox on this host")
+	}
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, ".git"), []byte("gitdir: /tmp/elsewhere\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	a, cleanup, err := build(ws, "", nil, true, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if ok, why := a.readOnlyRun(); ok || !strings.Contains(why, "without git installed") {
+		t.Errorf("readOnlyRun = %v %q, want refused for want of git", ok, why)
+	}
+}
+
 // gitDirs keeps a path with a space whole.
 func TestGitDirsKeepsAPathWhole(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
@@ -10123,7 +10146,8 @@ func TestReadOnlyRefusesStoresInTheWorkspace(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	ws := t.TempDir()
 	t.Chdir(ws)
-	for _, kv := range []string{"trace_path=.agent/trace.jsonl", "usage_path=" + filepath.Join(ws, "u.json"), "skills_path=skills", "kb_path=./kb.json"} {
+	for _, kv := range []string{"trace_path=.agent/trace.jsonl", "usage_path=" + filepath.Join(ws, "u.json"), "skills_path=skills", "kb_path=./kb.json",
+		"skills_path=", "trace_path="} { // empty: the working directory
 		if _, _, err := build(ws, "", []string{kv}, true, bufio.NewReader(strings.NewReader(""))); err == nil {
 			t.Errorf("%s: a read-only build started", kv)
 		}

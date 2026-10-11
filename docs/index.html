@@ -3,11 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ipsupport-code — a self-learning coding agent for any OpenAI-compatible model</title>
-<meta name="description" content="A self-learning coding agent in a single static binary. Drives your own model — any OpenAI-compatible server, local (LLMTray on a Mac, Ollama, vLLM) or cloud (OpenAI, Anthropic, Grok, Groq, OpenRouter, Z.ai) — through a reason → act → observe loop, learns from past runs, and runs under a permission policy you control.">
+<title>ipsupport-code — a lightweight, self-learning coding agent with a built-in risk guardrail</title>
+<meta name="description" content="A lightweight, self-learning coding agent in a single static binary, with a built-in risk model that stops a dangerous tool call for you. Drives your own model — any OpenAI-compatible server, local (LLMTray on a Mac, Ollama, vLLM) or cloud (OpenAI, Anthropic, Grok, Groq, OpenRouter, Z.ai) — through a reason → act → observe loop, learns from past runs, and runs under a permission policy you control.">
 <meta name="google-site-verification" content="vPSnv-ACweVU7zedD6wmncgyS5txK4xSHu5ZJ_OzHII" />
 <meta property="og:title" content="ipsupport-code — a self-learning coding agent for any OpenAI-compatible model">
-<meta property="og:description" content="A self-learning coding agent for your own model — any OpenAI-compatible server, local or cloud. Single static binary, your machine, your keys.">
+<meta property="og:description" content="A lightweight, self-learning coding agent for your own model — any OpenAI-compatible server, local or cloud. A ~2k-token prompt, a built-in risk guardrail, one static binary. Your machine, your keys.">
 <meta property="og:site_name" content="ipsupport-code">
 <meta property="og:locale" content="en_US">
 <meta property="og:image" content="https://ipsupport-llc.github.io/ipsupport-code/og.png">
@@ -161,10 +161,11 @@
 <div class="wrap">
 
   <header>
-    <div class="mark">single static binary · zero dependencies · local-first</div>
+    <div class="mark">single static binary · ~2k-token prompt · built-in risk guardrail · local-first</div>
     <h1><span class="star">✦</span> ipsupport-code</h1>
-    <p class="tagline">A <b>self-learning</b> coding agent that drives <b>your own model</b> —
-       any OpenAI-compatible server, local or cloud, in a single static binary.</p>
+    <p class="tagline">A <b>lightweight, self-learning</b> coding agent that drives <b>your own model</b> —
+       any OpenAI-compatible server, local or cloud, in a single static binary, with a
+       <b>built-in risk model</b> watching every tool call.</p>
     <p class="sub">It runs a reason → act → observe loop over a handful of fat tools, recovers from
        errors using lessons it learned on past runs, and gets better over time. Local-first —
        <a href="https://github.com/ipsupport-llc/llmtray">LLMTray</a> on a Mac (ours — native mlx-lm in the menu bar),
@@ -243,7 +244,9 @@ cwd    ~/myproject</span>
       <div class="card"><h3><span class="i">▮</span>Permission policy</h3><p>Allow/deny globs, a workspace jail, and a non-overridable safety floor. A <span class="mono">plan</span> / <span class="mono">auto</span> toggle and non-stealing approval prompts. Opt-in OS sandbox for shell commands — Seatbelt on macOS, Landlock on Linux.</p></div>
       <div class="card"><h3><span class="i">◎</span>Goals with a judge</h3><p><span class="mono">/goal</span> sets a multi-turn objective. When the agent thinks it's done, a separate judge decides — and re-feeds the gap until the goal is actually met.</p></div>
       <div class="card"><h3><span class="i">↪</span>Steer it live</h3><p><span class="mono">/steer</span> folds a note into a running task without stopping it; <span class="mono">/btw</span> asks a quick side question while the task keeps going.</p></div>
-      <div class="card"><h3><span class="i">⚠</span>Risk score, in shadow mode</h3><p>A small local model scores every tool call — pure Go, weights in the binary, ~28µs a call. It blocks nothing yet: it shows its verdict at the approval prompt and learns from your answers.</p></div>
+      <div class="card"><h3><span class="i">⚠</span>Built-in risk guardrail</h3><p>A small risk model ships inside the binary — pure Go, 768 KB of weights, ~28µs a call, nothing sent anywhere. It scores every tool call, and one it flags stops for you <em>even when your policy would allow it</em>: <span class="mono">y</span>, <span class="mono">n</span>, or <span class="mono">a</span> for the session. It learns from your answers, per project. Off in <span class="mono">/config</span> or with <span class="mono">-skip-risk-check</span>.</p></div>
+      <div class="card"><h3><span class="i">◇</span>A minimal prompt</h3><p>The built-in system prompt is ~2.7 KB and the whole tool catalog ~5 KB — about 2,000 tokens before your task, so a small local model keeps its context for the work. Skills, sub-agents, MCP and history each add a tool only when there is something for it.</p></div>
+      <div class="card"><h3><span class="i">◌</span>Read-only runs</h3><p><span class="mono">-read-only</span> answers a review or a question with nothing allowed to change: no file writes, no git changes, and commands run in the OS sandbox with the workspace read-only and no network.</p></div>
       <div class="card"><h3><span class="i">◆</span>Skills</h3><p>Downloadable, toggleable instruction packs — load extra know-how only when the topic fits, so the prompt stays lean.</p></div>
       <div class="card"><h3><span class="i">⌘</span>Interactive /config &amp; /usage</h3><p>A settings panel you navigate with the arrow keys, plus a local token ledger broken down by day and provider/model.</p></div>
       <div class="card"><h3><span class="i">▷</span>A real TUI</h3><p>Live-streamed tool calls, markdown answers, syntax-highlighted diffs, multi-line paste, and a status bar with model · context · tokens.</p></div>

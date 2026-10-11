@@ -9,8 +9,9 @@
 
 **Website: [ipsupport-llc.github.io/ipsupport-code](https://ipsupport-llc.github.io/ipsupport-code/)**
 
-A small **self-learning coding agent** for your own model — any OpenAI-compatible
-server, local or cloud — in a single static binary. It drives that model through a
+A small, lightweight **self-learning coding agent** for your own model — any
+OpenAI-compatible server, local or cloud — in a single static binary, with a
+**built-in risk model** that stops a dangerous tool call for you. It drives that model through a
 reason → act → observe loop over a handful of fat tools (`file`, `run`, `git`, `web`, `calc`),
 recovers from tool errors using lessons it learned on past runs, and — after each
 task — reflects and writes new lessons to disk so it actually gets better over
@@ -42,6 +43,9 @@ machine, with your own model, under a permission policy you control.
 - 🌐 Any model — local first ([LLMTray](https://github.com/ipsupport-llc/llmtray) on a Mac, LM Studio, Ollama, vLLM — keyless local servers included), or any OpenAI-compatible provider
 - 🤝 Sub-agents — delegate/fan-out across other models **or local CLI agents** (codex/claude/…) and merge the results
 - 🛎️ Steer live — `/steer <note>` nudges a running task mid-flight (and `/btw <question>` asks a quick side question), without stopping it (esc still cancels)
+- 🛡️ Built-in risk guardrail — a local model inside the binary scores every tool call; a flagged one stops for you even when the policy allows it, and it learns from your y/n ([Risk check](#risk-check))
+- 🪶 Lightweight — a ~2.7 KB system prompt and a ~5 KB tool catalog, about 2,000 tokens before your task; one ~20 MB binary, no runtime
+- 🔒 Read-only runs — `-read-only` answers a review or a question with nothing allowed to change
 - 💰 Guardrails — `/budget` spend cap per run · `/diff` to review what the agent changed
 - 🧩 Plan/auto modes · ⏪ `/rewind` · 🔌 MCP · 📦 skills · ♻️ self-updating
 

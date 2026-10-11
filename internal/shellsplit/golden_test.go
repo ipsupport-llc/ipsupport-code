@@ -233,8 +233,10 @@ var casesForGolden = []string{
 	"read -r x <<'EOF'\nrm -rf x\nEOF\npowershell /Command \"$x\"", "gh secret set FOO -e prod <<'EOF'\nvalue\nEOF",
 	"& ('Set'+'-Alias') sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
 	"& ('Set' + '-Alias') sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
-	"$a = 'Set-Alias'; & $a sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
-	"$s = 'Set-Alias sc iex'; iex $s\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
+	"$a = 'Set-' + 'Alias'; & $a sc iex\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
+	"$s = 'Set-' + 'Alias sc iex'; iex $s\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
+	"$s = 'Set-' + 'Alias sc iex'; [ScriptBlock]::Create($s).Invoke()\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
+	"(Set-Alias sc iex)\nsc @'\nRemove-Item -Recurse -Force ./src\n'@",
 	"read -r x <<'EOF'\nrm -rf x\nEOF\nphp --process-code \"$x\"", "read -r x <<'EOF'\nrm -rf x\nEOF\n/usr/bin/time $x",
 }
 

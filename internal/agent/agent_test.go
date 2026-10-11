@@ -3165,12 +3165,12 @@ func TestAPushCarriesWhatTheModelWasTold(t *testing.T) {
 	a := New(fake, reg, nil, rt, "", 20)
 	a.SetGoalLoop(3, false)
 	tr, _ := a.Run(context.Background(), "write the report")
-	if len(rt.told) != 1 || rt.told[0] != goalReturnPush {
-		t.Fatalf("told = %q, want the re-feed's push", rt.told)
+	if len(rt.told) != 1 || !strings.HasPrefix(rt.told[0], goalReturnPush) {
+		t.Fatalf("told = %q, want the re-feed", rt.told)
 	}
 	var sent bool
 	for _, m := range tr.Messages {
-		sent = sent || m.Role == "user" && strings.HasPrefix(m.Content, rt.told[0])
+		sent = sent || m.Role == "user" && m.Content == rt.told[0]
 	}
 	if !sent {
 		t.Error("what the screen says the model was told is not what it was sent")

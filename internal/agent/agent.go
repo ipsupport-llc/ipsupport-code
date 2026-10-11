@@ -1254,8 +1254,9 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					if !met && returns < a.maxReturns && llm.IsDegenerateOutput(err) {
 						returns++
 						actedSinceReturn, idleNudged, degenerateNudged = false, false, false
-						msgs = append(msgs, llm.User(goalReturn(a.acceptanceTarget(goal), missing)))
-						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing, "told": goalReturnPush})
+						told := goalReturn(a.acceptanceTarget(goal), missing)
+						msgs = append(msgs, llm.User(told))
+						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing, "told": told})
 						continue
 					}
 					tr.Final += goalNotConfirmedNote(a.maxReturns, met, tr.Missing)
@@ -1443,8 +1444,9 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					} else if lastMissing = missing; returns < a.maxReturns {
 						returns++
 						actedSinceReturn, idleNudged = false, false
-						msgs = append(msgs, llm.User(goalReturn(a.acceptanceTarget(goal), missing)))
-						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing, "told": goalReturnPush})
+						told := goalReturn(a.acceptanceTarget(goal), missing)
+						msgs = append(msgs, llm.User(told))
+						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing, "told": told})
 						continue
 					}
 					// lastMissing is set above for BOTH branches: the gap is the
@@ -1879,8 +1881,7 @@ func GoalReturnForTest(goal, missing string) string { return goalReturn(goal, mi
 // goalReturn re-states the goal when the judge finds it unmet, keeping the
 // objective in focus (recency) instead of letting it sink under the transcript,
 // and naming the gap so the model finishes the remaining work with tools.
-// goalReturnPush is the push a re-fed goal opens with — shown on screen as what
-// the model was told, beside the judge's gap.
+// goalReturnPush is the push a re-fed goal opens with.
 const goalReturnPush = goalReturnOpening + " — keep going. Do the remaining work now with tools (don't stop early, don't just describe it), and only finish once it's actually done."
 
 func goalReturn(goal, missing string) string {

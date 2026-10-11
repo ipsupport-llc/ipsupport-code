@@ -3033,10 +3033,7 @@ func (m *tuiModel) toldLines(label, told string) []string {
 
 // indented wraps label+text to the screen, four spaces in, in one style.
 func (m *tuiModel) indented(style lipgloss.Style, label, text string) []string {
-	w := m.width - 6
-	if w < 20 {
-		w = 60
-	}
+	w := max(m.width-6, 20)
 	lines := strings.Split(lipgloss.NewStyle().Width(w).Render(label+text), "\n")
 	for i, l := range lines {
 		lines[i] = style.Render("    " + strings.TrimRight(l, " "))
@@ -3165,13 +3162,18 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		return append([]string{cToolCall.Render(head)}, m.toldLines("told the model: ", told)...)
 	case "continue":
 		// The whole push, not a 60-character clip of it: what the judge found
-		// missing, and what the model was told — the re-fed goal is the user's
-		// own, so it is not repeated here.
+		// missing, and what the model was told. told is the message as sent; its
+		// gap is the line above and its goal the user's own, so only the push
+		// itself is shown, with a note of what followed it.
 		out := []string{cToolCall.Render(fmt.Sprintf("  ↻ goal not met yet — pushing on (%d/%d)", toInt(e.fields["return"]), toInt(e.fields["of"])))}
-		if miss, _ := e.fields["missing"].(string); strings.TrimSpace(miss) != "" {
+		miss, _ := e.fields["missing"].(string)
+		if strings.TrimSpace(miss) != "" {
 			out = append(out, m.indented(cToolCall, "judge — still missing: ", strings.TrimSpace(miss))...)
 		}
 		told, _ := e.fields["told"].(string)
+		if push, _, more := strings.Cut(told, "\n\n"); more {
+			told = push + " (then " + map[bool]string{true: "what's missing and "}[strings.TrimSpace(miss) != ""] + "the goal again)"
+		}
 		return append(out, m.toldLines("told the model: ", told)...)
 	case "judging":
 		// Reported live: the isolated judge call was indistinguishable from the

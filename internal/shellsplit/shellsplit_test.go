@@ -541,6 +541,8 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		"& Set-Alias sc iex\nsc @'" + body, // called
 		"& 'Set-Alias' sc iex\nsc @'" + body,
 		"Se`t-Alias sc iex\nsc @'" + body, // a backtick PowerShell drops
+		"&Set-Alias sc iex\nsc @'" + body,
+		"iex \"Set-Alias sc iex\"\nsc @'" + body, // defined by a string run
 		"Microsoft.PowerShell.Utility\\Set-Alias sc iex\nsc @'" + body,
 		"function Set-Content { iex $args[0] }\nSet-Content @'" + body,
 	} {

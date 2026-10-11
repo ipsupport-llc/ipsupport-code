@@ -1088,10 +1088,8 @@ def _ps_data_command(cmd):
 
 def _ps_redefines(cmd):
     """Mirrors psRedefines."""
-    ws = _fields(cmd.replace("`", "").lower())
-    while ws and ws[0] in ("&", "."):
-        ws = ws[1:]
-    return bool(ws) and (_name(ws[0].strip("'\"")) in _PS_DEFINERS or any("alias:" in w or "function:" in w for w in ws))
+    return any(_name(w.strip("&.'\"(){};")) in _PS_DEFINERS or "alias:" in w or "function:" in w
+               for w in _fields(cmd.replace("`", "").lower()))
 
 
 # Mirrors psDefiners.

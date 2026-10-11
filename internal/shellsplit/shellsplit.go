@@ -1322,17 +1322,13 @@ var psDefiners = map[string]bool{"set-alias": true, "sal": true, "new-alias": tr
 	"import-alias": true, "ipal": true, "function": true, "filter": true}
 
 // psRedefines: cmd defines an alias or a function — by a psDefiners command,
-// or through the alias: and function: drives (Set-Item alias:sc iex).
+// or through the alias: and function: drives (Set-Item alias:sc iex). Any
+// word may: & 'Set-Alias', &Set-Alias, Se`t-Alias,
+// Microsoft.PowerShell.Utility\Set-Alias, iex "Set-Alias sc iex".
 func psRedefines(cmd string) bool {
-	// Se`t-Alias, & 'Set-Alias', Microsoft.PowerShell.Utility\Set-Alias: the
-	// same command.
-	ws := strings.Fields(strings.ToLower(strings.ReplaceAll(cmd, "`", "")))
-	for len(ws) > 0 && (ws[0] == "&" || ws[0] == ".") { // & Set-Alias …: called
-		ws = ws[1:]
-	}
-	return len(ws) > 0 && (psDefiners[name(strings.Trim(ws[0], "'\""))] || slices.ContainsFunc(ws, func(w string) bool {
-		return strings.Contains(w, "alias:") || strings.Contains(w, "function:")
-	}))
+	return slices.ContainsFunc(strings.Fields(strings.ToLower(strings.ReplaceAll(cmd, "`", ""))), func(w string) bool {
+		return psDefiners[name(strings.Trim(w, "&.'\"(){};"))] || strings.Contains(w, "alias:") || strings.Contains(w, "function:")
+	})
 }
 
 // psAssignment: cmd assigns to a variable ($c = …, $c=…, $c += …); rest is

@@ -1344,21 +1344,13 @@ var psRunners = map[string]bool{"iex": true, "invoke-expression": true, "icm": t
 // expression (& $a, & ('Set' + '-Alias')). Any word may: &Set-Alias,
 // Se`t-Alias, Microsoft.PowerShell.Utility\Set-Alias, iex "Set-Alias sc iex".
 func psRedefines(cmd string) bool {
-	var ws []string // its words, a concatenation ('Set' + '-Alias') joined into one
-	for _, w := range strings.Fields(strings.ToLower(strings.NewReplacer("`", "", "'", "", "\"", "").Replace(cmd))) {
-		if n := len(ws); n > 0 && (strings.HasSuffix(ws[n-1], "+") || strings.HasPrefix(w, "+")) {
-			ws[n-1] += w
-		} else {
-			ws = append(ws, w)
-		}
-	}
+	ws := strings.Fields(strings.ToLower(strings.NewReplacer("`", "", "'", "", "\"", "").Replace(cmd)))
 	for i, w := range ws {
 		if (w == "&" || w == ".") && i+1 < len(ws) && strings.ContainsAny(ws[i+1][:1], "$(") ||
 			strings.HasPrefix(w, "&$") || strings.HasPrefix(w, "&(") || strings.HasPrefix(w, ".$") {
 			return true
 		}
-		w = strings.NewReplacer("+", "", "(", "", ")", "").Replace(w)
-		n := name(strings.Trim(w, "&.{};"))
+		n := name(strings.Trim(w, "&.{};()"))
 		if psDefiners[n] || psRunners[n] || slices.ContainsFunc([]string{"alias:", "function:", "scriptblock", "invokecommand", "invokescript"},
 			func(s string) bool { return strings.Contains(w, s) }) {
 			return true

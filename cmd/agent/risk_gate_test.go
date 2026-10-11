@@ -311,6 +311,86 @@ func TestRiskCheckScoresAnExternalAgentsLaunchLine(t *testing.T) {
 	}
 }
 
+// A flag that turns another agent's own approvals off is what makes its
+// launch dangerous; the same agent with its ordinary flags is not.
+func TestRiskCheckKnowsAnAgentsSafetyOffFlags(t *testing.T) {
+	a, _, _ := gateApp(t)
+	for _, tc := range []struct {
+		line    string
+		flagged bool
+	}{
+		{"codex exec --yolo {task}", true},
+		{"codex exec -s danger-full-access {task}", true},
+		{"npx @openai/codex exec --dangerously-bypass-approvals-and-sandbox {task}", true},
+		{"claude --dangerously-skip-permissions -p {task}", true},
+		{"claude -p --permission-mode bypassPermissions {task}", true},
+		{"gemini -p --approval-mode yolo {task}", false}, // sandbox on by default under yolo
+		{"qwen -y -p {task}", true},
+		{"muse exec --yolo {task}", true},
+		{"copilot -p --allow-all-tools {task}", true},
+		{"opencode run --dangerously-skip-permissions {task}", true},
+		{"cursor-agent --force -p {task}", true},
+		{"ipco -skip-permissions {task}", true},
+		{"LD_PRELOAD=… node dist/index.js", true},
+		{"codex exec {task}", false},
+		{"codex exec --full-auto {task}", false},
+		{"claude -p {task}", false},
+		{"claude --permission-mode plan -p {task}", false},
+		{"gemini -p {task}", false},
+		{"muse exec --disable-write --approval-mode never {task}", false},
+		{"muse exec --disable-approval {task}", false},
+		{"muse exec --disable-sandbox {task}", true},
+		{"copilot -p {task}", false},
+		{"cursor-agent -p {task}", false},
+		{"ipco -read-only {task}", false},
+		{"LINEAR_API_KEY=… npx -y linear-mcp", false},
+		{"AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=… uvx awslabs.aws-mcp", false},
+	} {
+		as, ok := risk.AssessmentFrom(a.withLaunchScore(context.Background(), a.workspace, tc.line))
+		if got := ok && as.Flagged(); got != tc.flagged {
+			t.Errorf("%q flagged = %v, want %v", tc.line, got, tc.flagged)
+		}
+	}
+}
+
+// An MCP server's environment is part of what it starts with: LD_PRELOAD on a
+// harmless command stops for a person. The value never reaches the scored
+// line — it can be a token — and a token's name alone asks nothing.
+func TestRiskCheckScoresAnMCPServersEnvironmentByName(t *testing.T) {
+	for _, tc := range []struct {
+		env   map[string]string
+		asked int
+	}{
+		{map[string]string{"LD_PRELOAD": "/tmp/libhook.so"}, 1},
+		{map[string]string{"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_secretvalue"}, 0},
+	} {
+		a, _, ap := gateApp(t)
+		a.allowSession("mcp launch")
+		servers := map[string]mcp.Server{"s": {Command: "true", Env: tc.env}}
+		a.mcpClient(context.Background(), servers, "s")
+		if ap.calls != tc.asked {
+			t.Errorf("env %v: asked %d time(s), want %d", tc.env, ap.calls, tc.asked)
+		}
+	}
+}
+
+// An MCP server's environment reaches the launch line by name, sorted, never by
+// value — and the prompt shows the same line, so the reason is on screen.
+func TestAnMCPLaunchLineNamesItsEnvironmentWithoutValues(t *testing.T) {
+	srv := mcp.Server{Command: "npx", Args: []string{"-y", "server"},
+		Env: map[string]string{"STRIPE_SECRET_KEY": "sk_live_abc123", "LD_PRELOAD": "/tmp/libhook.so"}}
+	if got, want := mcpLaunchLine(srv), "LD_PRELOAD=… STRIPE_SECRET_KEY=… npx -y server"; got != want {
+		t.Errorf("launch line %q, want %q", got, want)
+	}
+	a, _, _ := gateApp(t)
+	rec := &recordingApprover{}
+	a.approver = rec
+	a.mcpClient(context.Background(), map[string]mcp.Server{"s": srv}, "s")
+	if len(rec.details) != 1 || !strings.Contains(rec.details[0], "LD_PRELOAD=…") || strings.Contains(rec.details[0], "sk_live_abc123") {
+		t.Errorf("prompt detail %q: want the env's names and none of its values", rec.details)
+	}
+}
+
 // The same for an MCP server's launch command.
 func TestRiskCheckScoresAnMCPServersLaunchLine(t *testing.T) {
 	a, _, ap := gateApp(t)

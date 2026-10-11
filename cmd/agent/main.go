@@ -2713,8 +2713,8 @@ func (a *app) mcpClient(ctx context.Context, servers map[string]mcp.Server, name
 	detail, launch := name, ""
 	switch {
 	case srv.Command != "":
-		launch = strings.TrimSpace(srv.Command + " " + strings.Join(srv.Args, " "))
-		detail = name + ": " + launch
+		launch = mcpLaunchLine(srv)
+		detail = name + ": " + launch // what was scored is what is asked about
 	case srv.URL != "":
 		detail = fmt.Sprintf("%s: %s", name, srv.URL)
 	}
@@ -6307,6 +6307,18 @@ func (a *app) ask(ctx context.Context, kind, detail string) (ok, answered bool) 
 		return aa.ApproveAnswered(ctx, kind, detail)
 	}
 	return a.approver.Approve(ctx, kind, detail), false
+}
+
+// mcpLaunchLine is a command server's launch as scored and shown: its
+// environment, then its command. What it starts with counts — LD_PRELOAD on a
+// harmless command runs someone else's code in it — by name only: a value can
+// be a token, and the line is logged and recorded with an answer.
+func mcpLaunchLine(srv mcp.Server) string {
+	var env []string
+	for _, n := range slices.Sorted(maps.Keys(srv.Env)) {
+		env = append(env, n+"=…")
+	}
+	return strings.Join(append(env, strings.TrimSpace(srv.Command+" "+strings.Join(srv.Args, " "))), " ")
 }
 
 // gatedApprover adapts approveGated to the tool.Approver interface.

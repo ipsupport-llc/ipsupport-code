@@ -3601,7 +3601,7 @@ func TestJudgePromptDiscountsTheAgentsOwnClaims(t *testing.T) {
 // A result made to look done — a test weakened to pass, an output hard-coded —
 // is not done, and the judge is told to look for one.
 func TestJudgePromptLooksForAResultMadeToLookDone(t *testing.T) {
-	for _, want := range []string{"changed just to pass", "weakened, skipped, deleted", "hard-coded", "unless the GOAL asks"} {
+	for _, want := range []string{"weakened, skipped, deleted or edited to pass while the behavior stays wrong", "hard-coded", "unless the GOAL asks"} {
 		if !strings.Contains(judgeSystem, want) {
 			t.Errorf("the judge prompt is missing %q", want)
 		}

@@ -2323,7 +2323,7 @@ You have no tools and cannot inspect anything yourself, so never ask for a check
 
 Be skeptical of claims with nothing behind them: a change only described, or an artifact never shown, is NOT done.
 
-A test or check changed just to pass (weakened, skipped, deleted, expectation edited), test inputs special-cased, or an output hard-coded is MORE unless the GOAL asks for it.`
+A test or check weakened, skipped, deleted or edited to pass while the behavior stays wrong, test inputs special-cased, or an output hard-coded is MORE unless the GOAL asks for it.`
 
 // judgeSystemWith appends the user's own acceptance criteria to the judge's
 // instruction. Deliberately ADDITIVE and placed last: the GOAL stays the thing

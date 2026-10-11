@@ -3022,6 +3022,25 @@ func (m *tuiModel) subUpdate(e uiEvent) {
 	}
 }
 
+// toldLines is what the model was told, dim and wrapped under the line that
+// says why — or nothing, for an event that carries no text.
+func (m *tuiModel) toldLines(label, told string) []string {
+	if strings.TrimSpace(told) == "" {
+		return nil
+	}
+	return m.indented(cDim, "↳ "+label, strings.TrimSpace(told))
+}
+
+// indented wraps label+text to the screen, four spaces in, in one style.
+func (m *tuiModel) indented(style lipgloss.Style, label, text string) []string {
+	w := max(m.width-6, 20)
+	lines := strings.Split(lipgloss.NewStyle().Width(w).Render(label+text), "\n")
+	for i, l := range lines {
+		lines[i] = style.Render("    " + strings.TrimRight(l, " "))
+	}
+	return lines
+}
+
 // judgingLine is the line the judge's check opens with: how the run got there.
 func judgingLine(why string) string {
 	switch why {
@@ -3135,13 +3154,27 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 			return append([]string{""}, strings.Split(renderMarkdown(c, m.width), "\n")...)
 		}
 	case "nudge":
-		return []string{cToolCall.Render("  ↻ that's not working — asking it to rethink")}
-	case "continue":
-		line := fmt.Sprintf("  ↻ goal not met yet — pushing on (%d/%d)", toInt(e.fields["return"]), toInt(e.fields["of"]))
-		if miss, _ := e.fields["missing"].(string); strings.TrimSpace(miss) != "" {
-			line += ": " + oneLine(miss, 60)
+		head := "  ↻ that's not working — asking it to rethink"
+		if idle, _ := e.fields["idle"].(bool); idle {
+			head = "  ↻ it did nothing this turn — pushing it once"
 		}
-		return []string{cToolCall.Render(line)}
+		told, _ := e.fields["told"].(string)
+		return append([]string{cToolCall.Render(head)}, m.toldLines("told the model: ", told)...)
+	case "continue":
+		// The whole push, not a 60-character clip of it: what the judge found
+		// missing, and what the model was told. told is the message as sent; its
+		// gap is the line above and its goal the user's own, so only the push
+		// itself is shown, with a note of what followed it.
+		out := []string{cToolCall.Render(fmt.Sprintf("  ↻ goal not met yet — pushing on (%d/%d)", toInt(e.fields["return"]), toInt(e.fields["of"])))}
+		miss, _ := e.fields["missing"].(string)
+		if strings.TrimSpace(miss) != "" {
+			out = append(out, m.indented(cToolCall, "judge — still missing: ", strings.TrimSpace(miss))...)
+		}
+		told, _ := e.fields["told"].(string)
+		if push, _, more := strings.Cut(told, "\n\n"); more {
+			told = push + " (then " + map[bool]string{true: "what's missing and "}[strings.TrimSpace(miss) != ""] + "the goal again)"
+		}
+		return append(out, m.toldLines("told the model: ", told)...)
 	case "judging":
 		// Reported live: the isolated judge call was indistinguishable from the
 		// main model still "thinking" — nothing on screen said a separate check

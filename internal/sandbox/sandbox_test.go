@@ -98,6 +98,7 @@ func TestReaches(t *testing.T) {
 		{"a root holding it", []string{home}, proj, true},
 		{"a root inside it", []string{cache}, home, true},
 		{"through a symlink", []string{proj}, link, true},
+		{"not there yet, through a symlink", []string{proj}, filepath.Join(link, "new", "file"), true}, // /tmp/x on macOS
 		{"a sibling sharing a prefix", []string{proj + "x"}, proj, false},
 	} {
 		if got := reaches("", Spec{WritableRoots: c.roots}, c.path); got != c.want {

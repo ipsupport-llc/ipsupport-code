@@ -61,10 +61,16 @@ func resolved(path string) string {
 	if err != nil {
 		return path
 	}
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r
+	for dir, rest := p, ""; ; {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(r, rest)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		dir, rest = parent, filepath.Join(filepath.Base(dir), rest)
 	}
-	return p
 }
 
 // within reports whether p is dir or inside it.

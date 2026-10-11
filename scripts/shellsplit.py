@@ -377,8 +377,6 @@ _CODE_OPTIONS = {"node": ["--print"], "nodejs": ["--print"], "bun": ["--print"],
 
 def _interpreter_code(prog, w):
     """Mirrors interpreterCode: (code, attached), code None when w hands none."""
-    if prog not in _INTERPRETERS:
-        return None, False
     for o in ["--eval"] + _CODE_OPTIONS.get(prog, []):
         if w == o:
             return "", False

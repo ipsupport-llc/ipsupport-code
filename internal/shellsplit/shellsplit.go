@@ -368,9 +368,6 @@ var codeOptions = map[string][]string{"node": {"--print"}, "nodejs": {"--print"}
 // --eval=…). A bundle stops at an option that takes a value (-Wignore,
 // -Mstrict).
 func interpreterCode(prog, w string) (code string, attached, isCode bool) {
-	if !interpreters[prog] {
-		return "", false, false
-	}
 	for _, o := range append([]string{"--eval"}, codeOptions[prog]...) {
 		if w == o {
 			return "", false, true

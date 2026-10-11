@@ -244,8 +244,14 @@ continue in the main loop.
 - **`/steer <note>` folds a note into the running task** — it lands on the very
   next step to redirect the work ("`/steer the loader is in internal/config, not
   cmd`"), without waiting for the task to finish or queuing as a follow-up. The
-  note is pinned above the input for the rest of the run. Typed while idle, it
-  steers the next task you start.
+  note stays pinned above the input until it lands, then the log says so:
+  `↪ steer delivered (step 7): …`. One typed while the model writes its final
+  answer still reaches this task — it goes on with your note instead of
+  finishing. If the task ends before the note lands (esc, a stop), the note
+  comes back into the input rather than opening your next task. While a
+  [goal](#goals) stands, a delivered note amends it: the judge checks the
+  work against your corrections too, and they survive a `/goal go` after a
+  restart. Typed while idle, `/steer` steers the next task you start.
 - **`/btw <question>` asks a quick side question** while the task keeps going —
   it's answered in **one turn, no tools**, from the live conversation, then work
   resumes ("`/btw what test framework is this repo using?`"). The answer doesn't
@@ -820,7 +826,7 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 | `/status` | config, knowledge base, and trace paths |
 | `/budget [usd]` | cap estimated spend per run — refuses new tasks once hit; `off` disables |
 | `/diff` | show uncommitted workspace changes (what the agent changed), colorized |
-| `/steer <note>` | fold a note into a **running** task without stopping it — lands on its next step (esc cancels instead) |
+| `/steer <note>` | fold a note into a **running** task without stopping it — lands on its next step, and the log shows when (esc cancels instead) |
 | `/btw <question>` | ask a quick side question mid-task — one-turn answer, **no tools**, the task keeps going |
 | `/snip [name]` | prompt templates — `/snip <name>` pulls a saved template into the input to edit & send; `save <name> [text]` (omit text → your last prompt) · `list` · `rm <name>` |
 | `/usage` | token spend + **estimated $** (today / 7d / 30d / all, by day, by model); `clear` · `purge <days>` · `retain <days>` |

@@ -115,9 +115,10 @@ type Agent struct {
 
 	// beforeTurn, if set, is called at the top of every loop iteration and its
 	// messages are folded into the working set before the next model call. It's
-	// the seam for side-channel steering (/btw) that must reach the model between
+	// the seam for finished background jobs that must reach the model between
 	// turns WITHOUT interrupting the run. Must be safe to call concurrently.
 	beforeTurn func() []llm.Message
+	steers     func() []string // /steer notes typed mid-run — see SetSteers
 
 	// Goal pursuit: when the model finalizes but a judge (judgeGoal) decides the
 	// goal isn't met, it's re-fed the goal and continues, up to maxReturns (a TTL).
@@ -412,6 +413,33 @@ func (a *Agent) acceptanceTarget(runGoal string) string {
 	return runGoal
 }
 
+// target is acceptanceTarget with the corrections the user steered this run
+// with — what a re-feed restates and the judge accepts against.
+func (a *Agent) target(runGoal string, msgs []llm.Message) string {
+	return a.acceptanceTarget(runGoal) + CorrectionsBlock(steersIn(msgs))
+}
+
+// deliverSteers appends any /steer notes waiting for this run and announces
+// them, reporting whether there were any. A detached run takes none: the queue
+// now feeds the fresh agent the UI moved on to, and this run's events go
+// nowhere, so a note it took would vanish unannounced. The loop's own detached
+// check does not cover the final-answer call, which runs after a model call
+// that may have been abandoned midway.
+func (a *Agent) deliverSteers(msgs *[]llm.Message, step int) bool {
+	if a.steers == nil || a.detached.Load() {
+		return false
+	}
+	notes := a.steers()
+	if len(notes) == 0 {
+		return false
+	}
+	for _, n := range notes {
+		*msgs = append(*msgs, llm.User(steerMessage(n)))
+	}
+	a.emit("steer", map[string]any{"notes": notes, "step": step + 1})
+	return true
+}
+
 // SetJudgeLLM points the goal judge at its own connection instead of the main
 // one. nil (the default) means the judge shares a.llm.
 //
@@ -449,9 +477,17 @@ func (a *Agent) SetLabel(s string) { a.label = s }
 
 // SetBeforeTurn registers a hook called at the top of every loop iteration; the
 // messages it returns are appended to the working set before the next model
-// call. Used for /btw side-channel steering. The hook must be concurrency-safe —
+// call. Used for finished background jobs. The hook must be concurrency-safe —
 // it's invoked from the run goroutine while the UI goroutine may be feeding it.
 func (a *Agent) SetBeforeTurn(fn func() []llm.Message) { a.beforeTurn = fn }
+
+// SetSteers registers the /steer channel: fn returns and clears the notes the
+// user typed while this task ran. Each lands as its own user message before the
+// next model call — and before a final answer is accepted, so a note typed
+// while the answer was being written still reaches this task rather than the
+// next one. Every delivery is announced with a "steer" event. The hook must be
+// concurrency-safe, like SetBeforeTurn's.
+func (a *Agent) SetSteers(fn func() []string) { a.steers = fn }
 
 // SetAsides registers the /btw side-channel: fn is drained between steps of a
 // running task, and each question gets a one-turn, no-tools answer (emitted as an
@@ -951,7 +987,7 @@ func (a *Agent) remember(goal, sent, final string, msgs []llm.Message) {
 	if a.detached.Load() {
 		return
 	}
-	entry := final + actionsDigest(msgs)
+	entry := final + actionsDigest(msgs) + steersDigest(msgs)
 	if a.archiver != nil {
 		a.archiver.Archive(goal, entry) // the archive is for the user to search: the goal as they typed it
 	}
@@ -969,6 +1005,18 @@ func (a *Agent) remember(goal, sent, final string, msgs []llm.Message) {
 		a.frontTrim.Add(int64(dropped))
 	}
 	a.historyMu.Unlock()
+}
+
+// steersDigest records the corrections the user steered a finished task with,
+// for the same reason actionsDigest records what it did: session memory keeps
+// only the task and its answer, and a "don't touch X" given mid-run was lost
+// with the rest of the run's messages.
+func steersDigest(msgs []llm.Message) string {
+	notes := steersIn(msgs)
+	if len(notes) == 0 {
+		return ""
+	}
+	return "\n\n(the user corrected course during this task: " + strings.Join(notes, "; ") + ")"
 }
 
 // actionsDigest scans a finished turn's tool calls for a short, deterministic
@@ -1171,9 +1219,10 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	degenerateNudged := false // already pushed back on ONE collapsed generation?
 	idleNudged := false       // already pushed a no-progress model once since the last re-feed?
 	promptTokens := 0         // last known real prompt size from a MAIN-turn Chat call — see Transcript.PromptTokens
-	for step := 0; step < a.maxSteps; step++ {
+	extra := 0                // steps owed past the budget to a steer that arrived with the final answer
+	for step := 0; step < a.maxSteps+extra; step++ {
 		// Force-detached (see Detach): the UI has moved on to a fresh agent.
-		// Going on would run this step's hooks, which drain /btw notes and
+		// Going on would run this step's hooks, which drain /steer notes and
 		// finished-job results that now belong to that agent, and make more
 		// model calls nobody is waiting for. Stop as a cancellation would.
 		if a.detached.Load() {
@@ -1182,9 +1231,10 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		}
 		tr.Steps = step + 1
 
-		// Side-channel steering (/btw): fold any notes the user dropped mid-run into
-		// the working set before this turn's model call, so they land between
-		// iterations instead of interrupting the stream.
+		// /steer notes the user typed mid-run, then finished background jobs:
+		// folded into the working set before this turn's model call, so they land
+		// between iterations instead of interrupting the stream.
+		a.deliverSteers(&msgs, step)
 		if a.beforeTurn != nil {
 			if extra := a.beforeTurn(); len(extra) > 0 {
 				msgs = append(msgs, extra...)
@@ -1235,7 +1285,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 				// disk. Cancellation is excluded: esc means give control back, not
 				// spend another model call.
 				if !cancelled {
-					met, missing := a.judgeOnGiveUp(ctx, a.acceptanceTarget(goal), returns, hadProductiveTurn,
+					met, missing := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn,
 						"turn_failed", stopNote(msgs, false, err)+actionsDigest(msgs)+a.priorGapNote(returns), msgs)
 					goalMet = met
 					if !met {
@@ -1254,7 +1304,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					if !met && returns < a.maxReturns && llm.IsDegenerateOutput(err) {
 						returns++
 						actedSinceReturn, idleNudged, degenerateNudged = false, false, false
-						told := goalReturn(a.acceptanceTarget(goal), missing)
+						told := goalReturn(a.target(goal, msgs), missing)
 						msgs = append(msgs, llm.User(told))
 						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing, "told": told})
 						continue
@@ -1326,6 +1376,19 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			if isDoneOnly(assistant.ToolCalls) {
 				msgs = append(msgs, llm.ToolResult(assistant.ToolCalls[0].ID, "done",
 					"(noted — this only signals you think you're finished; whether the goal is met is decided separately)"))
+			}
+			// A steer typed while this answer was being written belongs to THIS
+			// task: it used to wait in the queue and open the next, unrelated one.
+			// Hand it over and go on — before the judge, which would otherwise
+			// grade an answer the user has already corrected. On the last step
+			// the budget stretches by one, or the note would land with no turn to
+			// act on it.
+			if a.deliverSteers(&msgs, step) {
+				a.emit("assistant", map[string]any{"content": assistant.Content, "tool_calls": 0})
+				if step == a.maxSteps+extra-1 {
+					extra++
+				}
+				continue
 			}
 			clean, suggest := splitSuggestion(assistant.Content)
 			// Reported live: a single genuinely empty reply (no content, no tool
@@ -1415,7 +1478,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					if isDoneOnly(assistant.ToolCalls) {
 						why = "done"
 					}
-					verdict, missing := a.judgeGoal(ctx, why, a.acceptanceTarget(goal), clean+actionsDigest(msgs)+a.priorGapNote(returns), msgs)
+					verdict, missing := a.judgeGoal(ctx, why, a.target(goal, msgs), clean+actionsDigest(msgs)+a.priorGapNote(returns), msgs)
 					// Reported live: the judge's own decision (a separate LLM call)
 					// was entirely invisible in the debug log for its two NORMAL
 					// verdicts — only its failure ("goal judge failed") and
@@ -1444,7 +1507,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					} else if lastMissing = missing; returns < a.maxReturns {
 						returns++
 						actedSinceReturn, idleNudged = false, false
-						told := goalReturn(a.acceptanceTarget(goal), missing)
+						told := goalReturn(a.target(goal, msgs), missing)
 						msgs = append(msgs, llm.User(told))
 						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing, "told": told})
 						continue
@@ -1571,7 +1634,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// actionsDigest gives it something real to go on instead: the actual
 					// files touched / commands run (and why they failed), the same record
 					// remember() below stores as cross-task memory.
-					met, missing := a.judgeOnGiveUp(ctx, a.acceptanceTarget(goal), returns, hadProductiveTurn, "stuck_stop",
+					met, missing := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn, "stuck_stop",
 						"(the agent got stuck repeating or failing tool calls before producing a coherent final answer.)"+actionsDigest(msgs)+a.priorGapNote(returns),
 						msgs)
 					// Reported live: a single bad tool call, repeated until this stop,
@@ -1626,7 +1689,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	// is an isolated call with no access to msgs, so actionsDigest gives it
 	// something real to go on (files touched / commands run) instead of just
 	// the model's own possibly-empty final text.
-	met, missing := a.judgeOnGiveUp(ctx, a.acceptanceTarget(goal), returns, hadProductiveTurn, "step_exhaustion",
+	met, missing := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn, "step_exhaustion",
 		judgeResult+actionsDigest(msgs)+a.priorGapNote(returns), msgs)
 	tr.GoalMet = met
 	tr.Missing = missing
@@ -1805,13 +1868,69 @@ var harnessPrefixes = []string{
 	refusalNudge[:40],
 	idleNudge[:40],
 	degenerateNudge[:40], // one collapsed generation's push-back (found missing by review)
-	// Delivered background-job results and /btw notes. The doc comment above
-	// always claimed these were covered and the list never included them, so a
-	// finished sub-agent's entire answer — and every /btw the user dropped
-	// mid-run — reached the learning pass labelled as the user's own goal.
-	// Matched on the bracketed opening these are built with (cmd/agent/jobs.go).
+	// Delivered background-job results. The doc comment above always claimed
+	// these were covered and the list never included them, so a finished
+	// sub-agent's entire answer reached the learning pass labelled as the
+	// user's own goal. Matched on the bracketed opening they are built with
+	// (cmd/agent/jobs.go). A /steer note is NOT here: it arrives the same way
+	// but it is the user's own words — see IsSteerMessage.
 	"[background job #",
-	"[by the way]",
+}
+
+// A /steer note as the model receives it. It used to open "[by the way]", which
+// reads as optional, and is the wording of /btw — a side question that must not
+// change the task, the opposite of what a steer is for.
+const (
+	steerPrefix = "[the user, mid-task] "
+	steerSuffix = "\n\n(The user wrote this while you were working. It corrects or adds to the task; where it conflicts with earlier instructions, it wins.)"
+	legacySteer = "[by the way] " // how a steer opened before; still read as one
+)
+
+func steerMessage(note string) string { return steerPrefix + note + steerSuffix }
+
+// SteerMessageForTest exposes a /steer note's exact wording to tests in other
+// packages, as GoalReturnForTest does for the re-feed.
+func SteerMessageForTest(note string) string { return steerMessage(note) }
+
+// IsSteerMessage reports whether a user-role message is a /steer note — the
+// user's own correction, delivered mid-run — rather than the task or anything
+// the harness injected.
+func IsSteerMessage(content string) bool {
+	c := strings.TrimSpace(content)
+	return strings.HasPrefix(c, steerPrefix) || strings.HasPrefix(c, legacySteer)
+}
+
+// steersIn returns the notes the user steered this conversation with, oldest
+// first, as they typed them.
+func steersIn(msgs []llm.Message) []string {
+	var out []string
+	for _, m := range msgs {
+		if m.Role != "user" || !IsSteerMessage(m.Content) {
+			continue
+		}
+		c := strings.TrimSpace(m.Content)
+		c = strings.TrimPrefix(strings.TrimPrefix(c, legacySteer), steerPrefix)
+		out = append(out, strings.TrimSpace(strings.TrimSuffix(c, steerSuffix)))
+	}
+	return out
+}
+
+// maxCorrections caps how many steers a goal carries forward: the latest ones,
+// since a later correction is the one most likely to still hold.
+const maxCorrections = 8
+
+// CorrectionsBlock renders steers as an amendment to a goal, or "" for none. A
+// goal re-feed restates the goal and the judge accepts against it — without
+// this, both kept to the original wording, and a run told "don't touch X"
+// midway was pushed back toward a goal that never said so.
+func CorrectionsBlock(notes []string) string {
+	if len(notes) == 0 {
+		return ""
+	}
+	if len(notes) > maxCorrections {
+		notes = notes[len(notes)-maxCorrections:]
+	}
+	return "\n\nThe user's corrections since (they override the above where they conflict):\n- " + strings.Join(notes, "\n- ")
 }
 
 // goalReturnOpening is the fixed opening of every goal re-feed (see goalReturn).

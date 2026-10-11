@@ -406,6 +406,23 @@ func TestSummarizeDoesNotPassOffHarnessTextAsTheGoal(t *testing.T) {
 	}
 }
 
+// A /steer note is the user's own correction, typed mid-run. It was labelled as
+// ours, so the learning pass read what the user asked for as scaffolding.
+func TestSummarizeLabelsASteerAsTheUsersCorrection(t *testing.T) {
+	tr := agent.Transcript{Messages: []llm.Message{
+		llm.User("fix the parser"),
+		llm.User(agent.SteerMessageForTest("keep the old API")),
+		llm.User("[by the way] no new deps"),
+	}}
+	out := summarize(tr)
+	if n := strings.Count(out, "USER CORRECTION (mid-task):"); n != 2 {
+		t.Errorf("%d steers labelled as the user's corrections, want 2:\n%s", n, out)
+	}
+	if strings.Contains(out, "HARNESS") || strings.Count(out, "GOAL:") != 1 {
+		t.Errorf("a steer passed off as ours or as the goal:\n%s", out)
+	}
+}
+
 // The judge's verdict is the sharpest signal in a run, and the learning pass
 // never saw it although it sat on the very struct it was handed.
 func TestSummarizeCarriesTheJudgesVerdict(t *testing.T) {

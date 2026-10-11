@@ -50,13 +50,13 @@ def parse(dialect, line, depth=0, budget=None):
 
 
 def _parse(dialect, line, depth=0, budget=None):
-    """parse, and whether a coproc, function or alias was set up (untracked)."""
+    """parse, and the _Result fields every nesting hands on: untracked, var_prog, dropped."""
     if budget is None:
         budget = [MAX_PARSES]
     budget[0] -= 1
     if depth >= MAX_DEPTH or budget[0] < 0:
         s = trim(line)
-        return ([s] if s else []), [], trim(line), True, False
+        return ([s] if s else []), [], trim(line), True, False, False, False
     r = _Result(dialect, depth, budget)
     if dialect == POWERSHELL:
         _split_powershell(line, r)
@@ -65,10 +65,12 @@ def _parse(dialect, line, depth=0, budget=None):
     else:
         _split_sh(line, r)
     r.end_group()
+    if r.dropped and (r.untracked or r.var_prog):
+        r.incomplete = True
     c = "".join(r.code)
     if c.endswith(" ;"):
         c = c[:-2]
-    return r.cmds + r.inner, r.groups + r.inner_g, trim(c), r.incomplete, r.untracked
+    return r.cmds + r.inner, r.groups + r.inner_g, trim(c), r.incomplete, r.untracked, r.var_prog, r.dropped
 
 
 def split(dialect, line):
@@ -100,6 +102,8 @@ class _Result:
         self.input = []
         self.func_name = False
         self.untracked = False
+        self.var_prog = False
+        self.dropped = False
         self.opens = []  # [start, end word, feeders], innermost last
         self.closed = None
         self.groups = []
@@ -161,6 +165,8 @@ class _Result:
             lead = _lead(s)
             if (self.func_name and op == ")" and s == "") or k in ("function", "coproc") or lead == "alias" or _expands(lead):
                 self.untracked = True
+            if _expands(lead) or (lead in _WRAPPERS and _wraps_variable(s)):
+                self.var_prog = True
             self.func_name = op == "(" and len(_fields(s)) == 1 and not any(c in s for c in "<>=")
         pending = self.feeding
         self.feeding = []
@@ -206,10 +212,12 @@ class _Result:
         self.gtext = []
 
     def nest(self, nested, ngroups, dialect, code_):
-        c, g, _, inc, untracked = _parse(dialect, code_, self.depth + 1, self.budget)
+        c, g, _, inc, untracked, var_prog, dropped = _parse(dialect, code_, self.depth + 1, self.budget)
         nested += c
         ngroups += g
         self.incomplete = self.incomplete or inc
+        self.var_prog = self.var_prog or var_prog
+        self.dropped = self.dropped or dropped
         return untracked
 
     def inner_code(self, cmd):
@@ -231,17 +239,22 @@ class _Result:
                 return
             elif run:
                 prog = run
-            elif prog and i + 1 < len(ws) and self.hand_off(prog, w, ws, i + 1):
+            elif prog and self.hand_off(prog, w, ws, i + 1):
                 return
             i += 1
 
     def hand_off(self, prog, w, ws, at):
         """Mirrors handOff; the flag's argument is ws[at], what follows it ws[at:]."""
         ps = prog in ("pwsh", "powershell")
+        rest = " ".join(ws[at:])
+        code_, attached = _interpreter_code(prog, w)
+        if at >= len(ws) and not attached:
+            return False
         if prog in _SHELLS and w.startswith("-") and not w.startswith("--") and "c" in w:
             self.nest(self.inner, self.inner_g, SH, ws[at])
-        elif ps and w.lower() in ("-c", "-command"):
-            self.nest(self.inner, self.inner_g, POWERSHELL, " ".join(ws[at:]))
+            rest = ws[at]
+        elif ps and _command_flag(w):
+            self.nest(self.inner, self.inner_g, POWERSHELL, rest)
         elif ps and _encoded_flag(w):
             code_ = _decode_utf16(ws[at])
             if code_ is not None:
@@ -249,14 +262,33 @@ class _Result:
             else:
                 self.incomplete = True
         elif prog == "cmd" and w.lower() in ("/c", "/k"):
-            self.nest(self.inner, self.inner_g, CMD, " ".join(ws[at:]))
-        elif prog in _INTERPRETERS and w in ("-c", "-e", "--eval"):
-            t = trim(ws[at])
+            self.nest(self.inner, self.inner_g, CMD, rest)
+        elif prog in _INTERPRETERS and code_ is not None:
+            if not attached:
+                code_ = ws[at]
+            t = trim(code_)
             if t:
                 self.inner.append(t)
+            if attached:
+                rest = code_ + " " + rest
         else:
             return False
+        if self.d == SH and _expands(rest):
+            self.var_prog = True
         return True
+
+    def feeds_variable(self):
+        """Mirrors feedsVariable."""
+        if not any(_expands(c) for c in self.cmds):
+            return False
+        fed = self.readers(0)
+        for j, c in enumerate(self.cmds):
+            if not _expands(c):
+                continue
+            f = _feeds(c)
+            if (f == 0 and fed[j] & (_SCORED | _UNKNOWN)) or (f & (_SCORED | _UNKNOWN) and _here_string_variable(c)):
+                return True
+        return False
 
     def readers(self, first):
         """Mirrors readers: through pipes and piped blocks; open ones are unknown."""
@@ -313,7 +345,7 @@ def _lead(s):
         if _operator(w):
             i += 2
             continue
-        if w in ("!", "time", "command", "builtin", "-p", "-v", "-V", "--") or _assignment(w):
+        if w in _DECORATORS or _assignment(w):
             i += 1
             continue
         p, ok = _program(w)
@@ -323,12 +355,96 @@ def _lead(s):
     return ""
 
 
+
+# Mirrors wrappers.
+_WRAPPERS = {"exec", "env", "sudo", "doas", "su", "ssh", "timeout", "nice", "nohup", "stdbuf", "setsid", "ionice",
+             "chrt", "taskset", "xargs", "find", "watch", "flock", "chroot", "runuser", "unshare", "nsenter",
+             "strace", "ltrace", "parallel", "time"}
+
+
+def _wraps_variable(s):
+    """Mirrors wrapsVariable."""
+    ws = _words(s)
+    i, past = 0, False
+    while i < len(ws):
+        w = ws[i]
+        if _operator(w):
+            i += 2
+            continue
+        cut = [k for k in (w.find("<"), w.find(">")) if k >= 0]
+        if past and _expands(w[:min(cut)] if cut else w):
+            return True
+        p, ok = _program(w)
+        past = past or (ok and p in _WRAPPERS)
+        i += 1
+    return False
+
+
+# Mirrors codeFlags.
+_CODE_FLAGS = {"python": "c", "python2": "c", "python3": "c", "perl": "eE", "ruby": "e", "node": "ep", "nodejs": "ep",
+               "bun": "ep", "php": "rBRE", "lua": "e", "osascript": "e", "Rscript": "e"}
+
+# Mirrors codeOptions.
+_CODE_OPTIONS = {"node": ["--print"], "nodejs": ["--print"], "bun": ["--print"], "php": ["--run", "--process-begin", "--process-code", "--process-end"]}
+
+
+def _interpreter_code(prog, w):
+    """Mirrors interpreterCode: (code, attached), code None when w hands none."""
+    for o in ["--eval"] + _CODE_OPTIONS.get(prog, []):
+        if w == o:
+            return "", False
+        if w.startswith(o + "="):
+            return w[len(o) + 1:], True
+    if len(w) < 2 or w[0] != "-" or w[1] == "-":
+        return None, False
+    for j in range(1, len(w)):
+        c = w[j]
+        if c in _CODE_FLAGS.get(prog, ""):
+            return ("", False) if j == len(w) - 1 else (w[j + 1:], True)
+        if not ("a" <= c <= "z" or "A" <= c <= "Z") or c in "WXMmr":
+            return None, False
+    return None, False
+
+
+def _abbreviates(w, flag, least):
+    """Mirrors abbreviates."""
+    n = w.partition("=")[0]
+    return len(n) >= least and flag.startswith(n)
+
+
+def _here_string_variable(cmd):
+    """Mirrors hereStringVariable."""
+    ws = _words(cmd)
+    for i, w in enumerate(ws):
+        k = w.find("<<<")
+        if k >= 0:
+            op = w[k + 3:]
+            if op == "" and i + 1 < len(ws):
+                op = ws[i + 1]
+            if _expands(op):
+                return True
+    return False
+
+
+# Mirrors decorator.
+_DECORATORS = {"!", "time", "command", "builtin", "-p", "-v", "-V", "--", "if", "then", "do", "else", "elif", "while",
+               "until"}
+
+
 def _keyword(s):
     """Mirrors keyword: the first word past ! and time (-p, --)."""
     for w in _fields(s):
         if w not in ("!", "time", "-p", "--"):
             return w
     return ""
+
+
+def _command_flag(w):
+    """Mirrors commandFlag."""
+    l = w.lower()
+    if len(l) < 2 or l[0] not in "-/":
+        return False
+    return l[1:] == "cwa" or "commandwithargs".startswith(l[1:])
 
 
 def _encoded_flag(w):
@@ -531,7 +647,8 @@ def _word_runner(w):
     return _runner(w)
 
 
-_SCRIPT, _CODE, _UNKNOWN = 1, 2, 4
+_SCRIPT, _CODE, _UNKNOWN, _PS_SCRIPT, _CMD_SCRIPT = 1, 2, 4, 8, 16
+_SCORED = _SCRIPT | _CODE | _PS_SCRIPT | _CMD_SCRIPT
 
 # Mirrors dataReaders.
 _DATA_READERS = {":", "cat", "tee", "git", "gh", "grep", "egrep", "fgrep", "rg", "sort", "uniq", "wc", "head",
@@ -540,11 +657,15 @@ _DATA_READERS = {":", "cat", "tee", "git", "gh", "grep", "egrep", "fgrep", "rg",
                  "md5sum", "sha256sum", "shasum"}
 
 
+# Mirrors readerRuns.
+_READER_RUNS = {"sort": ("--compress-program", 4), "rg": ("--pre", 5)}
+
+
 def _feeds(cmd):
     """Mirrors feeds: interpreters among the words add what is scored; a program
     neither an interpreter nor a data reader makes the reader unknown."""
     f = 0
-    prog, found = "", False
+    prog, found, at, env = "", False, 0, False
     ws = _words(cmd)
     i = 0
     while i < len(ws):
@@ -557,12 +678,20 @@ def _feeds(cmd):
             f |= _SCRIPT
         elif r in _INTERPRETERS:
             f |= _CODE
-        if not found and not _assignment(w):
+        elif r in ("pwsh", "powershell"):
+            f |= _PS_SCRIPT
+        elif r == "cmd":
+            f |= _CMD_SCRIPT
+        if not found and not _assignment(w) and w not in _DECORATORS:
             prog, found = _program(w)
+            at = i
+        env = env or (not found and _assignment(w) and (w.startswith("GIT_") or w.startswith("GH_")))
         i += 1
     if not found:
         f |= _UNKNOWN
-    elif prog == "git" and _git_writes(ws):
+    elif prog in ("git", "gh") and (env or not _data_subcommand(prog, ws[at + 1:])):
+        f |= _UNKNOWN
+    elif prog in _READER_RUNS and any(_abbreviates(w, *_READER_RUNS[prog]) for w in ws[at + 1:]):
         f |= _UNKNOWN
     elif prog in _DATA_READERS or _word_runner(prog):
         pass
@@ -593,16 +722,64 @@ def _assignment(w):
     return True
 
 
-def _git_writes(ws):
-    """Mirrors gitWrites."""
-    for w in ws:
-        cut = [k for k in (w.find("<"), w.find(">")) if k >= 0]
-        if cut:
-            w = w[:min(cut)]
-        if w in ("apply", "am", "fast-import", "update-index", "update-ref"):
-            return True
+# Mirrors dataSubcommands.
+_DATA_SUBCOMMANDS = {
+    "git": {"commit", "tag", "notes", "hash-object", "cat-file", "check-ignore", "check-attr", "check-mailmap",
+            "rev-list", "log", "diff", "show", "status", "stripspace", "interpret-trailers", "mktree", "mktag",
+            "commit-tree", "rev-parse", "ls-files", "grep", "shortlog", "blame"},
+    "gh": {"api", "issue", "pr", "release", "gist", "secret", "variable", "repo", "label", "workflow", "run",
+           "search"},
+}
+
+
+def _data_subcommand(prog, ws):
+    """Mirrors dataSubcommand."""
+    i = 0
+    while i < len(ws):
+        w = ws[i]
+        if _operator(w):
+            i += 1
+        elif w.startswith("-c") or w.startswith("--config-env") or w.startswith("--exec-path"):
+            return False
+        elif w in ("-C", "--git-dir", "--work-tree", "--namespace", "-R", "--repo"):
+            i += 1
+        elif w.startswith("-"):
+            pass
+        else:
+            sub, ok = _program(w)
+            if prog == "git":
+                return ok and sub in _DATA_SUBCOMMANDS[prog] and not (sub in _EDITS and _git_editor(ws[i + 1:]))
+            return ok and sub in _DATA_SUBCOMMANDS[prog] and (sub in ("secret", "variable") or
+                                                             not any(x in ("-e", "--edit", "--editor") for x in ws[i + 1:]))
+        i += 1
     return False
 
+
+
+# Mirrors edits.
+_EDITS = {"commit", "tag", "notes"}
+
+
+def _git_editor(ws):
+    """Mirrors gitEditor."""
+    i = 0
+    while i < len(ws):
+        w = ws[i]
+        if w == "--":
+            break
+        if w.startswith("--"):
+            if _abbreviates(w, "--edit", 3) or _abbreviates(w, "--template", 3) or _abbreviates(w, "--reedit-message", 3):
+                return True
+        elif w.startswith("-"):
+            for j, c in enumerate(w[1:], 1):
+                if c in "etc":
+                    return True
+                if c in "mFCcuS":
+                    if j == len(w) - 1 and c in "mFCc":
+                        i += 1
+                    break
+        i += 1
+    return False
 
 def _split_sh(line, out):
     rs = line
@@ -683,14 +860,20 @@ def _split_sh(line, out):
                 body = rs[start:end]
                 if not h["quoted"]:
                     _substitutions(body, out, nested, ngroups)
-                if f & _UNKNOWN and not f & (_SCRIPT | _CODE):
+                if f & _UNKNOWN and not f & _SCORED:
                     out.incomplete = True
+                elif not f & _SCORED:
+                    out.dropped = True
                 if f & _SCRIPT:
                     out.nest(nested, ngroups, SH, body)
                 if f & _CODE:
                     s = trim(body)
                     if s:
                         nested.append(s)
+                if f & _PS_SCRIPT:
+                    out.nest(nested, ngroups, POWERSHELL, body)
+                if f & _CMD_SCRIPT:
+                    out.nest(nested, ngroups, CMD, body)
                 i = nxt - 1
             heredocs = []
         elif r in ";()":
@@ -715,6 +898,8 @@ def _split_sh(line, out):
             b.write(r, False)
         i += 1
     cut("")
+    if not out.var_prog and out.feeds_variable():
+        out.var_prog = True
     out.cmds += nested
     out.groups += ngroups
 
@@ -801,6 +986,7 @@ def _split_powershell(line, out):
     rs = line
     b = _Buf()
     nested, ngroups = [], []
+    hs = []  # (body, the index of the command it is in)
 
     def cut(op):
         out.cut(b, op)
@@ -817,6 +1003,8 @@ def _split_powershell(line, out):
             end = _here_string_end(rs, i + 2, q)
             if q == '"':
                 _subexpressions(rs[i + 2:min(end, len(rs))], out, nested, ngroups)
+            stop = end - 1 if end < len(rs) else len(rs)
+            hs.append((rs[i + 2:stop], len(out.cmds)))
             b.write_str("@" + q + "…" + q + "@")
             i = end
         elif r == "'":
@@ -874,8 +1062,100 @@ def _split_powershell(line, out):
             b.write(r, False)
         i += 1
     cut("")
+    for body, k in hs:
+        if _ps_reads(out, nested, k):
+            continue
+        t = trim(body)
+        if t:
+            nested.append(t)
+            out.nest(nested, ngroups, POWERSHELL, body)
     out.cmds += nested
     out.groups += ngroups
+
+
+def _ps_reads(out, nested, k):
+    """Mirrors psReads."""
+    if k >= len(out.cmds):
+        return True
+    j = k
+    while True:
+        if not _ps_data_command(out.cmds[j]):
+            return False
+        if not out.piped[j] or j + 1 >= len(out.cmds):
+            break
+        j += 1
+    every = out.cmds + nested
+    if any(_ps_redefines(c) for c in every):
+        return False
+    if _ps_assignment(out.cmds[k]) is None:
+        return True
+    return all(_ps_data_command(c) for c in every)
+
+
+def _ps_assignment(cmd):
+    """Mirrors psAssignment: the words assigned, or None."""
+    ws = _fields(cmd)
+    if not ws:
+        return None
+    v, eq, after = ws[0].partition("=")
+    if eq:
+        return _fields(after) + ws[1:] if _ps_variable(v.rstrip("+-*/")) else None
+    if len(ws) < 2 or not _ps_variable(ws[0]):
+        return None
+    op = ws[1].lstrip("+-*/")
+    if op.startswith("="):
+        return _fields(op[1:]) + ws[2:]
+    return None
+
+
+# Mirrors psDataCommands.
+_PS_DATA_COMMANDS = {"set-content", "add-content", "out-file", "new-item", "write-output", "write-host", "write",
+                     "echo", "write-verbose", "write-information", "out-string", "out-null", "set-clipboard", "sc",
+                     "ac", "convertfrom-json", "convertfrom-csv", "convertfrom-stringdata", "select-string",
+                     "measure-object", "sort-object", "git", "gh"}
+
+
+def _ps_data_command(cmd):
+    """Mirrors psDataCommand."""
+    ws = _fields(cmd)
+    rest = _ps_assignment(cmd)
+    if rest is not None:
+        ws = rest
+    if not ws or _ps_variable(ws[0]) or ws[0][0] in "'\"@":
+        return True
+    prog = _name(ws[0]).lower()
+    if prog in ("git", "gh"):
+        return _data_subcommand(prog, ws[1:])
+    return prog in _PS_DATA_COMMANDS
+
+
+# Mirrors psRunners.
+_PS_RUNNERS = {"iex", "invoke-expression", "icm", "invoke-command"}
+
+
+def _ps_redefines(cmd):
+    """Mirrors psRedefines."""
+    ws = _fields(cmd.replace("`\r\n", "").replace("`\n", "").replace("`", "").replace("'", "").replace('"', "").lower())
+    for i, w in enumerate(ws):
+        if ((w in ("&", ".") and i + 1 < len(ws) and ws[i + 1][0] in "$(") or
+                w.startswith("&$") or w.startswith("&(") or w.startswith(".$")):
+            return True
+        n = _name(w.strip("&.{};"))
+        if n in _PS_DEFINERS or n in _PS_RUNNERS or any(
+                s in w for s in ("alias:", "function:", "scriptblock", "invokecommand", "invokescript")):
+            return True
+    return False
+
+
+# Mirrors psDefiners.
+_PS_DEFINERS = {"set-alias", "sal", "new-alias", "nal", "import-alias", "ipal", "function", "filter"}
+
+
+def _ps_variable(w):
+    """Mirrors psVariable."""
+    if len(w) < 2 or w[0] != "$":
+        return False
+    return all(c == "_" or c == ":" or "a" <= c <= "z" or "A" <= c <= "Z" or "0" <= c <= "9" for c in w[1:])
 
 
 def _here_string_start(rs, i):

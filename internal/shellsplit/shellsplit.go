@@ -17,6 +17,7 @@ package shellsplit
 import (
 	"encoding/base64"
 	"path"
+	"slices"
 	"strings"
 	"unicode/utf16"
 )
@@ -46,6 +47,8 @@ type Parsed struct {
 	Incomplete bool
 
 	untracked bool // see result.untracked: eval hands it on
+	varProg   bool // see result.varProg: every nesting hands it on
+	dropped   bool // see result.dropped: every nesting hands it on
 }
 
 // maxDepth bounds nesting — $( $( $( … ) ) ), script blocks, heredocs fed to
@@ -86,8 +89,14 @@ func parse(d Dialect, line string, depth int, budget *int) Parsed {
 		splitSh(line, r)
 	}
 	r.endGroup()
+	// read x <<EOF … EOF; $e "$x": a body dropped as data can still be run by
+	// a variable, or a name, set up after it was read.
+	if r.dropped && (r.untracked || r.varProg) {
+		r.incomplete = true
+	}
 	code := strings.TrimSuffix(r.code.String(), " ;")
-	return Parsed{Commands: append(r.cmds, r.inner...), Groups: append(r.groups, r.innerG...), Code: Trim(code), Incomplete: r.incomplete, untracked: r.untracked}
+	return Parsed{Commands: append(r.cmds, r.inner...), Groups: append(r.groups, r.innerG...), Code: Trim(code), Incomplete: r.incomplete,
+		untracked: r.untracked, varProg: r.varProg, dropped: r.dropped}
 }
 
 // Trim is strings.TrimSpace — named so the Python port can match it exactly
@@ -111,6 +120,8 @@ type result struct {
 	input      []bool   // cmds[i] is in a <( … ): what it writes is read as a file
 	funcName   bool     // the last cut was a single word before (: name () …
 	untracked  bool     // a function, coproc or alias was set up: a heredoc's output can reach a reader later, unseen
+	varProg    bool     // a variable's value runs as code: $e "$x", sh -c "$x"
+	dropped    bool     // a heredoc was read as data, its body scored as nothing
 	groups     []string
 	inner      []string // what a command runs inside it: sh -c '…', eval …
 	innerG     []string
@@ -218,6 +229,9 @@ func (r *result) block(s, op string, pipe bool) {
 		if r.funcName && op == ")" && s == "" || keyword(s) == "function" || keyword(s) == "coproc" || l == "alias" || expands(l) {
 			r.untracked = true
 		}
+		if expands(l) || wrappers[l] && wrapsVariable(s) {
+			r.varProg = true // and env $x, sudo $x, exec $x: the value is the program
+		}
 		r.funcName = op == "(" && len(strings.Fields(s)) == 1 && !strings.ContainsAny(s, "<>=") // not arr=( )
 	}
 	pending := r.feeding
@@ -299,7 +313,7 @@ func lead(s string) string {
 		switch w := ws[i]; {
 		case operator(w):
 			i++
-		case w == "!" || w == "time" || w == "command" || w == "builtin" || w == "-p" || w == "-v" || w == "-V" || w == "--" || assignment(w):
+		case decorator(w) || assignment(w):
 		default:
 			if p, ok := program(w); ok {
 				return p
@@ -307,6 +321,135 @@ func lead(s string) string {
 		}
 	}
 	return ""
+}
+
+// wrappers run the command their arguments make: env $x, sudo $x, exec $x,
+// timeout 5 $x run a value not on the line. Like dataReaders' opposite, the
+// list is never complete; a wrapper missing from it is a residual.
+var wrappers = map[string]bool{"exec": true, "env": true, "sudo": true, "doas": true, "su": true, "ssh": true,
+	"timeout": true, "nice": true, "nohup": true, "stdbuf": true, "setsid": true, "ionice": true, "chrt": true,
+	"taskset": true, "xargs": true, "find": true, "watch": true, "flock": true, "chroot": true, "runuser": true,
+	"unshare": true, "nsenter": true, "strace": true, "ltrace": true, "parallel": true, "time": true}
+
+// wrapsVariable: a word of s after its wrapper expands — not a redirection
+// (exec > "$log" runs nothing): any of them may be the program it runs.
+func wrapsVariable(s string) bool {
+	ws, past := words(s), false
+	for i := 0; i < len(ws); i++ {
+		w := ws[i]
+		if operator(w) {
+			i++
+			continue
+		}
+		prog := w // before a redirection it carries ($x>log); one alone (2>"$err") names no program
+		if i := strings.IndexAny(w, "<>"); i >= 0 {
+			prog = w[:i]
+		}
+		if past && expands(prog) {
+			return true
+		}
+		if p, ok := program(w); ok {
+			past = past || wrappers[p] // /usr/bin/sudo, sudo>log
+		}
+	}
+	return false
+}
+
+// codeFlags are the one-letter flags that hand each interpreter its code:
+// python -c, but perl -c and node -c only check a file's syntax, and php -c
+// names its ini file.
+var codeFlags = map[string]string{"python": "c", "python2": "c", "python3": "c", "perl": "eE", "ruby": "e",
+	"node": "ep", "nodejs": "ep", "bun": "ep", "php": "rBRE", "lua": "e", "osascript": "e", "Rscript": "e"}
+
+// codeOptions are the long ones, besides --eval.
+var codeOptions = map[string][]string{"node": {"--print"}, "nodejs": {"--print"}, "bun": {"--print"}, "php": {"--run", "--process-begin", "--process-code", "--process-end"}}
+
+// interpreterCode is the code interpreter prog's flag w hands it: isCode for
+// a codeFlags letter, alone or ending a bundle of flags (python3 -Ic, perl
+// -le, -ne), or --eval and the codeOptions, the code in the next word;
+// attached, the code is w's own (python3 -c"…", perl -le"…", node
+// --eval=…). A bundle stops at an option that takes a value (-Wignore,
+// -Mstrict).
+func interpreterCode(prog, w string) (code string, attached, isCode bool) {
+	for _, o := range append([]string{"--eval"}, codeOptions[prog]...) {
+		if w == o {
+			return "", false, true
+		}
+		if strings.HasPrefix(w, o+"=") {
+			return w[len(o)+1:], true, true
+		}
+	}
+	if len(w) < 2 || w[0] != '-' || w[1] == '-' {
+		return "", false, false
+	}
+	for j := 1; j < len(w); j++ {
+		c := w[j]
+		switch {
+		case strings.IndexByte(codeFlags[prog], c) >= 0:
+			if j == len(w)-1 {
+				return "", false, true
+			}
+			return w[j+1:], true, true
+		case !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') || strings.IndexByte("WXMmr", c) >= 0:
+			return "", false, false
+		}
+	}
+	return "", false, false
+}
+
+// abbreviates: w (its name, before an =) is flag, or a prefix of it that is
+// at least least long, as getopt-style parsers take one.
+func abbreviates(w, flag string, least int) bool {
+	n, _, _ := strings.Cut(w, "=")
+	return len(n) >= least && strings.HasPrefix(flag, n)
+}
+
+// feedsVariable: a variable's value reaches what runs what it reads — handed
+// on by a data command (echo "$x" | sh, printf %s "$x" | bash) or as a here
+// string (sh -s <<< "$x", python3 <<< "$x").
+func (r *result) feedsVariable() bool {
+	if !slices.ContainsFunc(r.cmds, expands) {
+		return false
+	}
+	fed := r.readers(0)
+	for j, c := range r.cmds {
+		if !expands(c) {
+			continue
+		}
+		f := feeds(c)
+		if f == 0 && fed[j]&(scored|unknown) != 0 || f&(scored|unknown) != 0 && hereStringVariable(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// hereStringVariable: cmd reads a here string (<<< word) that expands.
+func hereStringVariable(cmd string) bool {
+	ws := words(cmd)
+	for i, w := range ws {
+		if k := strings.Index(w, "<<<"); k >= 0 {
+			op := w[k+3:]
+			if op == "" && i+1 < len(ws) {
+				op = ws[i+1]
+			}
+			if expands(op) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// decorator is a word before a simple command's program that isn't one: !,
+// time, command or builtin with their flags, and the compound commands'
+// keywords a command follows (then echo "$x", do sh).
+func decorator(w string) bool {
+	switch w {
+	case "!", "time", "command", "builtin", "-p", "-v", "-V", "--", "if", "then", "do", "else", "elif", "while", "until":
+		return true
+	}
+	return false
 }
 
 // readBy adds cmds[t] as a reader of cmds[from:to].
@@ -333,6 +476,8 @@ func (r *result) nest(n *[]string, ng *[]string, d Dialect, code string) Parsed 
 	*n = append(*n, p.Commands...)
 	*ng = append(*ng, p.Groups...)
 	r.incomplete = r.incomplete || p.Incomplete
+	r.varProg = r.varProg || p.varProg
+	r.dropped = r.dropped || p.dropped
 	return p
 }
 
@@ -364,7 +509,7 @@ func (r *result) innerCode(cmd string) {
 			return
 		case wordRunner(w) != "":
 			prog = wordRunner(w)
-		case prog != "" && i+1 < len(ws) && r.handOff(prog, w, ws[i+1:]):
+		case prog != "" && r.handOff(prog, w, ws[i+1:]):
 			return
 		}
 	}
@@ -374,11 +519,17 @@ func (r *result) innerCode(cmd string) {
 // flag; whether w was such a flag.
 func (r *result) handOff(prog, w string, rest []string) bool {
 	ps := prog == "pwsh" || prog == "powershell"
+	runs := strings.Join(rest, " ") // what runs: the code, and what it is handed
+	code, attached, isCode := interpreterCode(prog, w)
+	if len(rest) == 0 && !attached {
+		return false
+	}
 	switch {
 	case shells[prog] && strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "--") && strings.Contains(w, "c"):
 		r.nest(&r.inner, &r.innerG, Sh, rest[0])
-	case ps && (strings.EqualFold(w, "-c") || strings.EqualFold(w, "-command")):
-		r.nest(&r.inner, &r.innerG, PowerShell, strings.Join(rest, " "))
+		runs = rest[0] // sh -c 'echo hi' _ "$x": the arguments run only as the code says, with a $
+	case ps && commandFlag(w):
+		r.nest(&r.inner, &r.innerG, PowerShell, runs)
 	case ps && encodedFlag(w):
 		if code, ok := decodeUTF16(rest[0]); ok {
 			r.nest(&r.inner, &r.innerG, PowerShell, code)
@@ -386,13 +537,22 @@ func (r *result) handOff(prog, w string, rest []string) bool {
 			r.incomplete = true // a script in a form that can't be read
 		}
 	case prog == "cmd" && (strings.EqualFold(w, "/c") || strings.EqualFold(w, "/k")):
-		r.nest(&r.inner, &r.innerG, Cmd, strings.Join(rest, " "))
-	case interpreters[prog] && (w == "-c" || w == "-e" || w == "--eval"):
-		if t := Trim(rest[0]); t != "" {
+		r.nest(&r.inner, &r.innerG, Cmd, runs)
+	case interpreters[prog] && isCode:
+		if !attached {
+			code = rest[0]
+		}
+		if t := Trim(code); t != "" {
 			r.inner = append(r.inner, t) // another language: scored as itself
+		}
+		if attached {
+			runs = code + " " + runs
 		}
 	default:
 		return false
+	}
+	if r.d == Sh && expands(runs) {
+		r.varProg = true // sh -c "$x", python3 -c "$x": a value not on the line runs
 	}
 	return true
 }
@@ -405,6 +565,16 @@ func encodedFlag(w string) bool {
 		return false
 	}
 	return l[1:] == "ec" || strings.HasPrefix("encodedcommand", l[1:])
+}
+
+// commandFlag is PowerShell's -Command as it may be written: any prefix of it
+// (-c, -com), with - or /; and -CommandWithArgs (-cwa), which also takes code.
+func commandFlag(w string) bool {
+	l := strings.ToLower(w)
+	if len(l) < 2 || (l[0] != '-' && l[0] != '/') {
+		return false
+	}
+	return l[1:] == "cwa" || strings.HasPrefix("commandwithargs", l[1:])
 }
 
 // decodeUTF16 reads -EncodedCommand's argument: base64 of UTF-16LE text.
@@ -568,12 +738,17 @@ const (
 	script feed = 1 << iota
 	code
 	unknown
+	psScript  // read by PowerShell: pwsh -Command -, pwsh -File -
+	cmdScript // read by cmd
 )
+
+// scored is what has a heredoc's body scored.
+const scored = script | code | psScript | cmdScript
 
 // dataReaders are programs that read a heredoc as data: they store, show,
 // search or transform it, and run none of it. Not sed (its e command runs
 // lines), awk (system), patch (writes the files the body names), less
-// (LESSOPEN); git, but not git apply, am or fast-import. A heredoc is data only for one
+// (LESSOPEN); git and gh only for the subcommands in dataSubcommands. A heredoc is data only for one
 // of them; any other reader — sudo, xargs, psql, docker, $SH — is unknown, and
 // the parse incomplete: the list of what runs its input is never complete,
 // the list of what doesn't can be.
@@ -584,6 +759,15 @@ var dataReaders = map[string]bool{":": true, "cat": true, "tee": true, "git": tr
 	"read": true, "echo": true, "printf": true, "tac": true, "rev": true, "paste": true, "envsubst": true,
 	"md5sum": true, "sha256sum": true, "shasum": true}
 
+// readerRuns are the flags that make a data reader run a program on what it
+// reads (sort --compress-program, which GNU sort takes abbreviated to --co)
+// or on the files it is given (rg --pre, not --pretty), with the shortest
+// form each takes.
+var readerRuns = map[string]struct {
+	flag  string
+	least int
+}{"sort": {"--compress-program", 4}, "rg": {"--pre", 5}}
+
 // feeds is what cmd runs what it reads as: every interpreter among its words
 // counts (see runner) — a match adds what is scored, never takes it away —
 // and a program that is neither an interpreter nor a data reader makes it
@@ -591,7 +775,7 @@ var dataReaders = map[string]bool{":": true, "cat": true, "tee": true, "git": tr
 // that: see block.)
 func feeds(cmd string) feed {
 	var f feed
-	prog, found := "", false
+	prog, found, at, env := "", false, 0, false
 	ws := words(cmd)
 	for i := 0; i < len(ws); i++ {
 		w := ws[i]
@@ -604,16 +788,26 @@ func feeds(cmd string) feed {
 			f |= script
 		case interpreters[r]:
 			f |= code
+		case r == "pwsh" || r == "powershell":
+			f |= psScript
+		case r == "cmd":
+			f |= cmdScript
 		}
-		if !found && !assignment(w) {
+		if !found && !assignment(w) && !decorator(w) {
 			prog, found = program(w)
+			at = i
 		}
+		env = env || !found && assignment(w) && (strings.HasPrefix(w, "GIT_") || strings.HasPrefix(w, "GH_"))
 	}
 	switch {
 	case !found:
 		f |= unknown
-	case prog == "git" && gitWrites(ws):
-		f |= unknown // the body names the files it changes
+	case (prog == "git" || prog == "gh") && (env || !dataSubcommand(prog, ws[at+1:])):
+		f |= unknown // git apply, an alias (git -c alias.x='!sh' x), a gh extension, GIT_EDITOR=sh
+	case readerRuns[prog].flag != "" && slices.ContainsFunc(ws[at+1:], func(w string) bool {
+		return abbreviates(w, readerRuns[prog].flag, readerRuns[prog].least)
+	}):
+		f |= unknown // sort --compress-program=sh pipes what it reads through sh
 	case dataReaders[prog], wordRunner(prog) != "":
 	default:
 		f |= unknown
@@ -647,16 +841,77 @@ func assignment(w string) bool {
 	return true
 }
 
-// gitWrites: git apply, am, fast-import, update-index, update-ref — the
-// heredoc says what they change. A word may carry a redirection (apply<<EOF).
-func gitWrites(ws []string) bool {
-	for _, w := range ws {
-		if i := strings.IndexAny(w, "<>"); i >= 0 {
-			w = w[:i]
+// dataSubcommands are what git and gh do with a heredoc as data: a message,
+// an object, a request body, paths to check. Not git apply, am, fast-import,
+// update-index or update-ref — the body says what they change — nor an alias
+// or a gh extension, which can be anything.
+var dataSubcommands = map[string]map[string]bool{
+	"git": {"commit": true, "tag": true, "notes": true, "hash-object": true, "cat-file": true, "check-ignore": true,
+		"check-attr": true, "check-mailmap": true, "rev-list": true, "log": true, "diff": true, "show": true,
+		"status": true, "stripspace": true, "interpret-trailers": true, "mktree": true, "mktag": true,
+		"commit-tree": true, "rev-parse": true, "ls-files": true, "grep": true, "shortlog": true, "blame": true},
+	"gh": {"api": true, "issue": true, "pr": true, "release": true, "gist": true, "secret": true, "variable": true,
+		"repo": true, "label": true, "workflow": true, "run": true, "search": true},
+}
+
+// dataSubcommand: ws, the words after git or gh, name one of its
+// dataSubcommands — past the options before it, but no -c or --config-env,
+// which can define an alias or a command to run — and don't open an editor
+// (git commit -e, gh pr create --editor): git commit -e -F - hands the body to
+// whatever core.editor is, and sh as an editor runs it.
+func dataSubcommand(prog string, ws []string) bool {
+	for i := 0; i < len(ws); i++ {
+		w := ws[i]
+		switch {
+		case operator(w):
+			i++
+		case strings.HasPrefix(w, "-c") || strings.HasPrefix(w, "--config-env") || strings.HasPrefix(w, "--exec-path"):
+			return false
+		case w == "-C" || w == "--git-dir" || w == "--work-tree" || w == "--namespace" || w == "-R" || w == "--repo":
+			i++
+		case strings.HasPrefix(w, "-"):
+		default:
+			sub, ok := program(w)
+			if prog == "git" {
+				return ok && dataSubcommands[prog][sub] && !(edits[sub] && gitEditor(ws[i+1:]))
+			}
+			return ok && dataSubcommands[prog][sub] && (sub == "secret" || sub == "variable" || // -e: --env
+				!slices.ContainsFunc(ws[i+1:], func(w string) bool { return w == "-e" || w == "--edit" || w == "--editor" }))
 		}
-		switch w {
-		case "apply", "am", "fast-import", "update-index", "update-ref":
-			return true
+	}
+	return false
+}
+
+// edits are the git subcommands that may open an editor on the message they
+// are given.
+var edits = map[string]bool{"commit": true, "tag": true, "notes": true}
+
+// gitEditor: ws, a commit, tag or notes' words, open an editor on what it
+// reads: -e, --edit and any prefix of it git takes (--e, --ed), -t or
+// --template (/dev/stdin), alone or in a bundle (-ae, -eF) up to an option
+// that takes a value (-mfix, -F -), whose value it passes over.
+func gitEditor(ws []string) bool {
+	for i := 0; i < len(ws); i++ {
+		w := ws[i]
+		switch {
+		case w == "--":
+			return false
+		case strings.HasPrefix(w, "--"):
+			if abbreviates(w, "--edit", 3) || abbreviates(w, "--template", 3) || abbreviates(w, "--reedit-message", 3) {
+				return true
+			}
+		case strings.HasPrefix(w, "-"):
+			for j := 1; j < len(w); j++ {
+				if w[j] == 'e' || w[j] == 't' || w[j] == 'c' { // -c: reedit, in notes beside -F -
+					return true
+				}
+				if strings.IndexByte("mFCcuS", w[j]) >= 0 {
+					if j == len(w)-1 && strings.IndexByte("mFCc", w[j]) >= 0 {
+						i++ // -m <message>
+					}
+					break
+				}
+			}
 		}
 	}
 	return false
@@ -754,8 +1009,11 @@ func splitSh(line string, out *result) {
 				if !h.quoted {
 					substitutions(body, out, &nested, &ngroups) // expanded first: its $( ) and ` ` run, whatever reads it
 				}
-				if f&unknown != 0 && f&(script|code) == 0 {
+				switch {
+				case f&unknown != 0 && f&scored == 0:
 					out.incomplete = true // read by a program that may run it, and scored as nothing
+				case f&scored == 0:
+					out.dropped = true
 				}
 				if f&script != 0 {
 					out.nest(&nested, &ngroups, Sh, body) // its commands run
@@ -764,6 +1022,12 @@ func splitSh(line string, out *result) {
 					if s := Trim(body); s != "" {
 						nested = append(nested, s) // code in another language: scored as itself
 					}
+				}
+				if f&psScript != 0 {
+					out.nest(&nested, &ngroups, PowerShell, body)
+				}
+				if f&cmdScript != 0 {
+					out.nest(&nested, &ngroups, Cmd, body)
 				}
 				i = next - 1
 			}
@@ -795,6 +1059,11 @@ func splitSh(line string, out *result) {
 		}
 	}
 	cut("")
+	// Before the nested commands join cmds; not only after a dropped body on
+	// this line: echo "$(echo "$x" | sh)" runs one dropped outside it.
+	if !out.varProg && out.feedsVariable() {
+		out.varProg = true
+	}
 	out.cmds = append(out.cmds, nested...)
 	out.groups = append(out.groups, ngroups...)
 }
@@ -968,13 +1237,16 @@ func continued(l string) bool {
 // splitPowerShell follows PowerShell: ; | && || and newlines separate
 // commands (& is the call operator, not a separator); '…' (” escapes) hides
 // everything, "…" and the backtick escape hide separators; # at a word's start
-// and <# … #> are comments; here-strings (@'…'@, @"…"@) are data; $( ), @( ),
+// and <# … #> are comments; here-strings (@'…'@, @"…"@) are data when what
+// reads them is a psDataCommand, and scored as code when not (see psReads);
+// $( ), @( ),
 // ( ) and { } hold code of their own, as does $( ) inside "…" and @"…"@ —
 // quotes of its own included.
 func splitPowerShell(line string, out *result) {
 	rs := []rune(line)
 	var b buf
 	var nested, ngroups []string
+	var hs []hereString
 	cut := func(op string) { out.cut(&b, op) }
 	for i := 0; i < len(rs); i++ {
 		r := rs[i]
@@ -989,7 +1261,12 @@ func splitPowerShell(line string, out *result) {
 			if q == '"' {
 				subexpressions(rs[i+2:min(end, len(rs))], out, &nested, &ngroups)
 			}
-			b.writeStr("@" + string(q) + "…" + string(q) + "@") // the body is data
+			stop := len(rs) // the body ends before the \n'@ closing it
+			if end < len(rs) {
+				stop = end - 1
+			}
+			hs = append(hs, hereString{body: string(rs[i+2 : stop]), cmd: len(out.cmds)})
+			b.writeStr("@" + string(q) + "…" + string(q) + "@") // the body is left out of the command
 			i = end                                             // the line after it goes on
 		case r == '\'':
 			j := i + 1
@@ -1059,8 +1336,139 @@ func splitPowerShell(line string, out *result) {
 		}
 	}
 	cut("")
+	for _, h := range hs {
+		if psReads(out, nested, h.cmd) {
+			continue
+		}
+		if t := Trim(h.body); t != "" {
+			nested = append(nested, t) // as itself: it may be another language
+			out.nest(&nested, &ngroups, PowerShell, h.body)
+		}
+	}
 	out.cmds = append(out.cmds, nested...)
 	out.groups = append(out.groups, ngroups...)
+}
+
+type hereString struct {
+	body string
+	cmd  int // the index of the command it is in
+}
+
+// psReads: what reads the here-string in out.cmds[k] reads it as data — that
+// command, and every one it is piped into (@'…'@ | Out-File f), each a
+// psDataCommand, and nothing on the line redefines one. Assigned to a
+// variable ($c = @'…'@), it may be read by any command, by its name or not
+// (iex $c, $c | iex, iex (Get-Variable c -ValueOnly)): every command of the
+// line must be one.
+func psReads(out *result, nested []string, k int) bool {
+	if k >= len(out.cmds) {
+		return true // nothing reads it
+	}
+	for j := k; ; j++ {
+		if !psDataCommand(out.cmds[j]) {
+			return false
+		}
+		if !out.piped[j] || j+1 >= len(out.cmds) {
+			break
+		}
+	}
+	every := slices.Concat(out.cmds, nested)
+	if slices.ContainsFunc(every, psRedefines) {
+		return false // Set-Alias sc iex: a data command's name may not be its own
+	}
+	if _, ok := psAssignment(out.cmds[k]); !ok {
+		return true
+	}
+	return !slices.ContainsFunc(every, func(c string) bool { return !psDataCommand(c) })
+}
+
+// psDefiners define a name a command is run by: an alias or a function.
+var psDefiners = map[string]bool{"set-alias": true, "sal": true, "new-alias": true, "nal": true,
+	"import-alias": true, "ipal": true, "function": true, "filter": true}
+
+// psRunners run code given as a string or a script block.
+var psRunners = map[string]bool{"iex": true, "invoke-expression": true, "icm": true, "invoke-command": true}
+
+// psRedefines: cmd may change what a command name runs, or run what can't be
+// read — it defines an alias or a function (a psDefiners command, the alias:
+// and function: drives), runs code made at run time (psRunners, a script
+// block, InvokeScript), or calls a command named by a variable or an
+// expression (& $a, & ('Set' + '-Alias')). Any word may: &Set-Alias,
+// Se`t-Alias, Microsoft.PowerShell.Utility\Set-Alias, iex "Set-Alias sc iex".
+func psRedefines(cmd string) bool {
+	// Set-`⏎Alias: a backtick before a newline continues the word.
+	ws := strings.Fields(strings.ToLower(strings.NewReplacer("`\r\n", "", "`\n", "", "`", "", "'", "", "\"", "").Replace(cmd)))
+	for i, w := range ws {
+		if (w == "&" || w == ".") && i+1 < len(ws) && strings.ContainsAny(ws[i+1][:1], "$(") ||
+			strings.HasPrefix(w, "&$") || strings.HasPrefix(w, "&(") || strings.HasPrefix(w, ".$") {
+			return true
+		}
+		n := name(strings.Trim(w, "&.{};"))
+		if psDefiners[n] || psRunners[n] || slices.ContainsFunc([]string{"alias:", "function:", "scriptblock", "invokecommand", "invokescript"},
+			func(s string) bool { return strings.Contains(w, s) }) {
+			return true
+		}
+	}
+	return false
+}
+
+// psAssignment: cmd assigns to a variable ($c = …, $c=…, $c += …); rest is
+// the words of what it assigns.
+func psAssignment(cmd string) (rest []string, ok bool) {
+	ws := strings.Fields(cmd)
+	if len(ws) == 0 {
+		return nil, false
+	}
+	if v, after, eq := strings.Cut(ws[0], "="); eq {
+		return append(strings.Fields(after), ws[1:]...), psVariable(strings.TrimRight(v, "+-*/"))
+	}
+	if len(ws) < 2 || !psVariable(ws[0]) {
+		return nil, false
+	}
+	if op := strings.TrimLeft(ws[1], "+-*/"); strings.HasPrefix(op, "=") {
+		return append(strings.Fields(op[1:]), ws[2:]...), true
+	}
+	return nil, false
+}
+
+// psDataCommands are PowerShell commands that take a here-string as data:
+// they write, show, parse or search it, and run none of it.
+var psDataCommands = map[string]bool{"set-content": true, "add-content": true, "out-file": true, "new-item": true,
+	"write-output": true, "write-host": true, "write": true, "echo": true, "write-verbose": true,
+	"write-information": true, "out-string": true, "out-null": true, "set-clipboard": true, "sc": true, "ac": true,
+	"convertfrom-json": true, "convertfrom-csv": true, "convertfrom-stringdata": true, "select-string": true,
+	"measure-object": true, "sort-object": true, "git": true, "gh": true}
+
+// psDataCommand: cmd, past an assignment to a variable ($c = …), is nothing,
+// a string or a bare variable, or a psDataCommands one (git and gh only for
+// their dataSubcommands).
+func psDataCommand(cmd string) bool {
+	ws := strings.Fields(cmd)
+	if rest, ok := psAssignment(cmd); ok {
+		ws = rest
+	}
+	if len(ws) == 0 || psVariable(ws[0]) || strings.ContainsRune("'\"@", rune(ws[0][0])) {
+		return true
+	}
+	prog := strings.ToLower(name(ws[0]))
+	if prog == "git" || prog == "gh" {
+		return dataSubcommand(prog, ws[1:])
+	}
+	return psDataCommands[prog]
+}
+
+// psVariable: w is a bare variable, $name or $scope:name — not a member or a
+// call on one ($x.Invoke(), $ExecutionContext.InvokeCommand…).
+func psVariable(w string) bool {
+	if len(w) < 2 || w[0] != '$' {
+		return false
+	}
+	for _, c := range w[1:] {
+		if !(c == '_' || c == ':' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // hereStringStart: a here-string's opening @' or @" ends its line.

@@ -146,7 +146,9 @@ func (a *app) withLaunchScore(ctx context.Context, dir, line string) context.Con
 		return ctx
 	}
 	params := map[string]any{"command": line}
-	as := a.shadow.Observe(risk.Scope{Workspace: dir, Shell: shellsplit.Sh}, "run", "shell", params, risk.VerdictAsk)
+	// Unknown, not Ask: a launch is always asked about by design, not by the
+	// policy, and an ordinary one is no disagreement with it.
+	as := a.shadow.Observe(risk.Scope{Workspace: dir, Shell: shellsplit.Sh}, "run", "shell", params, risk.VerdictUnknown)
 	if cur, _ := risk.AssessmentFrom(ctx); !as.Flagged() || cur.Flagged() && cur.Risk >= as.Risk {
 		return ctx
 	}

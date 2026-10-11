@@ -122,8 +122,42 @@ func TestSessionAllowCoversFlaggedCallsOnlyFromAFlaggedPrompt(t *testing.T) {
 		t.Errorf("'a' at a flagged prompt still asks (%d)", ap.calls)
 	}
 	a.resetSessionAllow()
+	a.allowSession("run") // a plain 'a' after /new
 	if a.approveGated(ctx, "run", flaggedCommand); ap.calls != 2 {
 		t.Errorf("/new must drop the flagged allow too (%d)", ap.calls)
+	}
+}
+
+// answeringApprover's test double: a person answered, with reply.
+type personApprover struct {
+	calls int
+	reply bool
+}
+
+func (p *personApprover) Approve(ctx context.Context, kind, detail string) bool {
+	ok, _ := p.ApproveAnswered(ctx, kind, detail)
+	return ok
+}
+
+func (p *personApprover) ApproveAnswered(context.Context, string, string) (ok, answered bool) {
+	p.calls++
+	return p.reply, true
+}
+
+// The check's prompt is an approval like any other: a flagged call approved
+// there is a false alarm, and the scorer learns it for this workspace.
+func TestRiskCheckLearnsFromTheAnswer(t *testing.T) {
+	a, pol, _ := gateApp(t, "run.default=allow")
+	ap := &personApprover{reply: true}
+	a.approver = ap
+	ctx := scored(t, a, pol, flaggedCommand)
+	mustFlag(t, ctx)
+	if msg := a.riskGate(pol)(ctx, "run", "shell", map[string]any{"command": flaggedCommand}); msg != "" || ap.calls != 1 {
+		t.Fatalf("asked %d time(s), result %q", ap.calls, msg)
+	}
+	a.waitRiskSaves()
+	if a.shadow.Model().Adjustments() == 0 {
+		t.Error("approving a flagged call at the risk check taught nothing")
 	}
 }
 

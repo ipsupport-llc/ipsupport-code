@@ -4097,6 +4097,23 @@ func TestCallGateIsNotAskedInPlanModeForACallPlanRefuses(t *testing.T) {
 	}
 }
 
+// Plan mode reads still pass the gate: the check is on in every mode.
+func TestCallGateIsAskedInPlanModeForACallThatRuns(t *testing.T) {
+	reg := tool.NewRegistry(planFileTool())
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "file", `{"action":"read","params":{"path":"x"}}`),
+		{Role: "assistant", Content: "plan"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	a.SetPlanMode(true)
+	asked := 0
+	a.SetCallGate(func(context.Context, string, string, map[string]any) string { asked++; return "" })
+	a.Run(context.Background(), "read x")
+	if asked != 1 {
+		t.Errorf("gate asked %d time(s) about a plan-mode read, want 1", asked)
+	}
+}
+
 // recLLM records every request, for asserting what a caching server would see.
 type recLLM struct {
 	replies []llm.Message

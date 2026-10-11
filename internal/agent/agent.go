@@ -109,7 +109,9 @@ type Agent struct {
 	// riskObserver is the optional shadow-mode hook (see SetRiskObserver). nil
 	// in every path that does not wire one, which is every test in this package.
 	riskObserver func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string)
-	label        string // non-empty for a sub-agent; tags its events so the UI can group them
+	// callGate is the optional last word before a tool runs (see SetCallGate).
+	callGate func(ctx context.Context, tool, action string, params map[string]any) string
+	label    string // non-empty for a sub-agent; tags its events so the UI can group them
 
 	// beforeTurn, if set, is called at the top of every loop iteration and its
 	// messages are folded into the working set before the next model call. It's
@@ -503,6 +505,18 @@ func (a *Agent) AnswerAside(ctx context.Context, base []llm.Message, question st
 func (a *Agent) SetRiskObserver(f func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string)) {
 	a.riskObserver = f
 }
+
+// SetCallGate installs a hook asked just before a tool call runs, after the
+// plan-mode backstop — so nothing is asked about a call that would be refused
+// anyway. A non-empty return refuses the call and is what the model is told.
+// It runs on the context the observer returned, so it can read what was scored.
+func (a *Agent) SetCallGate(f func(ctx context.Context, tool, action string, params map[string]any) string) {
+	a.callGate = f
+}
+
+// HasCallGate reports whether a call gate is installed, for the wiring to be
+// assertable.
+func (a *Agent) HasCallGate() bool { return a.callGate != nil }
 
 // HasRiskObserver reports whether a shadow-mode observer is installed. For the
 // wiring to be assertable: an agent built without one silently inherits
@@ -2445,11 +2459,11 @@ func (a *Agent) anyMutating(calls []llm.ToolCall) bool {
 func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool) {
 	action, params, argWarn := parseArgs(c.Arguments)
 
-	// Shadow-mode risk scoring, if anything is listening. Called with the parsed
-	// call and nothing else: the observer decides what to score and what to
-	// compare it against, so this package stays free of both the classifier and
-	// the permission policy. It cannot influence what happens next — the call
-	// proceeds exactly as it would have.
+	// Risk scoring, if anything is listening. Called with the parsed call and
+	// nothing else: the observer decides what to score and what to compare it
+	// against, so this package stays free of both the classifier and the
+	// permission policy. It only scores; whether the call may run is asked of
+	// the call gate further down.
 	//
 	// Runs BEFORE the event below so the note can go into it. The note is an
 	// opaque string this package only forwards, which is what lets the UI mark a
@@ -2474,6 +2488,13 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool)
 		}
 		a.emit("observation", map[string]any{"tool": c.Name, "action": action, "is_error": true, "content": msg})
 		return llm.ToolResult(c.ID, c.Name, msg), true
+	}
+
+	if f := a.callGate; f != nil {
+		if msg := f(ctx, c.Name, action, params); msg != "" {
+			a.emit("observation", map[string]any{"tool": c.Name, "action": action, "is_error": true, "content": msg})
+			return llm.ToolResult(c.ID, c.Name, msg), true
+		}
 	}
 
 	res := a.reg.Dispatch(ctx, c.Name, action, params)

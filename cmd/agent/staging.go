@@ -299,6 +299,7 @@ var cycleRows = map[string]cycleRow{
 	"goal_ttl": {func(s *shadow) string { return strconv.Itoa(s.cfg.GoalMaxReturns) },
 		func(s *shadow) { s.cfg.GoalMaxReturns = nextInt(s.cfg.GoalMaxReturns, goalTTLCycle) }},
 	"goal_nudge": {func(s *shadow) string { return strconv.FormatBool(s.cfg.GoalNudge) }, func(s *shadow) { flip(&s.cfg.GoalNudge) }},
+	"risk_check": {func(s *shadow) string { return strconv.FormatBool(s.cfg.RiskCheck) }, func(s *shadow) { flip(&s.cfg.RiskCheck) }},
 	"reflection": {func(s *shadow) string { return strconv.FormatBool(s.cfg.ReflectDisabled) },
 		func(s *shadow) { flip(&s.cfg.ReflectDisabled) }},
 	"knowledge_retention": {func(s *shadow) string { return strconv.Itoa(s.cfg.KnowledgeRetentionDays) },

@@ -9147,7 +9147,7 @@ func TestRiskCommandReportsAndResets(t *testing.T) {
 	a.waitRiskSaves()
 
 	status := strings.Join(a.riskCommand(""), "\n")
-	for _, want := range []string{"shadow mode", "correction(s)", "adjustment(s)", "informational"} {
+	for _, want := range []string{"asks before a flagged call", "correction(s)", "adjustment(s)", "informational"} {
 		if !strings.Contains(status, want) {
 			t.Errorf("/risk status is missing %q:\n%s", want, status)
 		}
@@ -9255,6 +9255,7 @@ func TestRiskNoteIsEmptyBelowTheThreshold(t *testing.T) {
 		{"over", risk.Assessment{Risk: 0.98, Top: "credential_access"}, "0.98 credential_access"},
 		{"under", risk.Assessment{Risk: 0.12, Top: "destructive"}, ""},
 		{"nothing scored", risk.Assessment{}, ""},
+		{"not all of it scored", risk.Assessment{Risk: 0.12, Top: "destructive", Incomplete: true}, "not fully read"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.a.Note(); got != tc.want {

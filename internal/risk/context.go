@@ -31,6 +31,15 @@ func WithAssessment(ctx context.Context, tool, action string, params map[string]
 	return context.WithValue(ctx, assessKey{}, &scored{tool: tool, action: action, params: params, a: a})
 }
 
+// CarryAssessment puts the score on from onto to: a call that goes on in a
+// context of its own (a background job) is still the call that was scored.
+func CarryAssessment(from, to context.Context) context.Context {
+	if s, _ := from.Value(assessKey{}).(*scored); s != nil {
+		return context.WithValue(to, assessKey{}, s)
+	}
+	return to
+}
+
 // AssessmentFrom reads back the score attached to this call, for showing it to
 // the person about to answer for it.
 func AssessmentFrom(ctx context.Context) (Assessment, bool) {
@@ -42,15 +51,24 @@ func AssessmentFrom(ctx context.Context) (Assessment, bool) {
 }
 
 // Note renders the assessment as the one short line a prompt or a tool-call line
-// can carry: "0.98 credential_access". Empty when nothing fired, so a caller can
-// use it directly as "show this if non-empty" — a score on every routine call
-// would be noise, and noise is what makes a risk signal get ignored.
+// can carry: "0.98 credential_access", or "not fully read" for a call whose
+// parts were not all scored. Empty when nothing fired, so a caller can use it
+// directly as "show this if non-empty" — a score on every routine call would be
+// noise, and noise is what makes a risk signal get ignored.
 func (a Assessment) Note() string {
-	if a.Risk < Threshold || a.Top == "" {
-		return ""
+	switch {
+	case a.Risk >= Threshold && a.Top != "":
+		return fmt.Sprintf("%.2f %s", a.Risk, a.Top)
+	case a.Incomplete:
+		return "not fully read"
 	}
-	return fmt.Sprintf("%.2f %s", a.Risk, a.Top)
+	return ""
 }
+
+// Flagged reports whether the call should stop for a person: it scored over
+// the threshold, or part of it went unscored — a score that did not read the
+// whole call is not clearance.
+func (a Assessment) Flagged() bool { return a.Note() != "" }
 
 // CorrectionFrom reads back what was scored and reports the correction a human's
 // answer implies — ok is false when there is nothing to learn.
@@ -77,7 +95,9 @@ func (s *scored) part() map[string]any {
 
 func CorrectionFrom(ctx context.Context, approved bool) (Correction, bool) {
 	s, _ := ctx.Value(assessKey{}).(*scored)
-	if s == nil {
+	// A call not read in full: the answer is about the whole of it, and the
+	// score only about what was read — neither y nor n says what that part does.
+	if s == nil || s.a.Incomplete {
 		return Correction{}, false
 	}
 	flagged := s.a.Risk >= Threshold

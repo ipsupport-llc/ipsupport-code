@@ -1,0 +1,286 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/charmbracelet/bubbles/textarea"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
+	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
+	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
+)
+
+// gateApp builds a wired app with these overrides and a refusing approver that
+// counts how often a person was asked.
+func gateApp(t *testing.T, overrides ...string) (*app, *policy.Engine, *countingApprover) {
+	t.Helper()
+	setHome(t, t.TempDir())
+	a, cleanup, err := build(t.TempDir(), "", overrides, false, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(cleanup)
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	if a.shadow == nil {
+		t.Fatal("no scorer: the shipped model did not load, or IPS_RISK=off is set")
+	}
+	pol, err := policy.New(a.cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ap := &countingApprover{}
+	a.approver = ap
+	return a, pol, ap
+}
+
+// scored is the context a call runs under once the observer scored it.
+func scored(t *testing.T, a *app, pol *policy.Engine, command string) context.Context {
+	t.Helper()
+	ctx, _ := a.riskObserver(pol, "")(context.Background(), "run", "shell", map[string]any{"command": command})
+	return ctx
+}
+
+const flaggedCommand = "cat ~/.ssh/id_rsa" // not on the deny floor: the policy alone would run it
+
+func mustFlag(t *testing.T, ctx context.Context) {
+	t.Helper()
+	if as, _ := risk.AssessmentFrom(ctx); !as.Flagged() {
+		t.Fatalf("the shipped model no longer flags %q — pick a command it does", flaggedCommand)
+	}
+}
+
+// The policy allows every command, and the scorer flags this one: it stops for
+// a person, and a refusal is what the model is told. An unremarkable command
+// still runs without anyone being asked.
+func TestRiskCheckAsksAboutAFlaggedCallThePolicyAllows(t *testing.T) {
+	a, pol, ap := gateApp(t, "run.default=allow")
+	gate := a.riskGate(pol)
+	params := map[string]any{"command": flaggedCommand}
+	ctx := scored(t, a, pol, flaggedCommand)
+	mustFlag(t, ctx)
+
+	msg := gate(ctx, "run", "shell", params)
+	if ap.calls != 1 || !strings.Contains(msg, "denied by user") {
+		t.Fatalf("asked %d time(s), result %q — a flagged call the policy allows must be asked about", ap.calls, msg)
+	}
+	ls := map[string]any{"command": "ls"}
+	if msg := gate(scored(t, a, pol, "ls"), "run", "shell", ls); msg != "" || ap.calls != 1 {
+		t.Errorf("an unremarkable call was stopped: asked %d time(s), result %q", ap.calls, msg)
+	}
+}
+
+// Where the policy asks anyway, the tool's own prompt is the one — the gate
+// must not ask a second time.
+func TestRiskCheckLeavesAskingToThePolicyWhenItAsks(t *testing.T) {
+	a, pol, ap := gateApp(t)
+	ctx := scored(t, a, pol, flaggedCommand)
+	mustFlag(t, ctx)
+	if msg := a.riskGate(pol)(ctx, "run", "shell", map[string]any{"command": flaggedCommand}); msg != "" || ap.calls != 0 {
+		t.Errorf("gate asked %d time(s) about a call the policy asks about itself (%q)", ap.calls, msg)
+	}
+}
+
+// risk_check off — the /config row, -skip-risk-check, and -skip-permissions,
+// which expands to it — leaves only the scoring.
+func TestRiskCheckOffAsksNothing(t *testing.T) {
+	for _, overrides := range [][]string{
+		{"run.default=allow", "risk_check=false"},
+		{"run.default=allow", "file.default=allow", "risk_check=false"},
+	} {
+		a, pol, ap := gateApp(t, overrides...)
+		ctx := scored(t, a, pol, flaggedCommand)
+		mustFlag(t, ctx)
+		if msg := a.riskGate(pol)(ctx, "run", "shell", map[string]any{"command": flaggedCommand}); msg != "" || ap.calls != 0 {
+			t.Errorf("%v: asked %d time(s), result %q", overrides, ap.calls, msg)
+		}
+	}
+}
+
+// 'a' at a plain prompt lets the category's unremarkable calls through, not
+// its flagged ones; 'a' at a flagged prompt lets both through.
+func TestSessionAllowCoversFlaggedCallsOnlyFromAFlaggedPrompt(t *testing.T) {
+	a, pol, ap := gateApp(t)
+	ctx := scored(t, a, pol, flaggedCommand)
+	mustFlag(t, ctx)
+
+	a.allowSession("run")
+	if a.approveGated(scored(t, a, pol, "ls"), "run", "ls"); ap.calls != 0 {
+		t.Fatalf("a plain 'a' did not cover an unremarkable command")
+	}
+	if a.approveGated(ctx, "run", flaggedCommand); ap.calls != 1 {
+		t.Fatalf("a plain 'a' let a flagged command through without asking")
+	}
+	a.allowFlagged("run")
+	if !a.approveGated(ctx, "run", flaggedCommand) || ap.calls != 1 {
+		t.Errorf("'a' at a flagged prompt still asks (%d)", ap.calls)
+	}
+	a.resetSessionAllow()
+	a.allowSession("run") // a plain 'a' after /new
+	if a.approveGated(ctx, "run", flaggedCommand); ap.calls != 2 {
+		t.Errorf("/new must drop the flagged allow too (%d)", ap.calls)
+	}
+}
+
+// answeringApprover's test double: a person answered, with reply.
+type personApprover struct {
+	calls int
+	reply bool
+}
+
+func (p *personApprover) Approve(ctx context.Context, kind, detail string) bool {
+	ok, _ := p.ApproveAnswered(ctx, kind, detail)
+	return ok
+}
+
+func (p *personApprover) ApproveAnswered(context.Context, string, string) (ok, answered bool) {
+	p.calls++
+	return p.reply, true
+}
+
+// The check's prompt is an approval like any other: a flagged call approved
+// there is a false alarm, and the scorer learns it for this workspace.
+func TestRiskCheckLearnsFromTheAnswer(t *testing.T) {
+	a, pol, _ := gateApp(t, "run.default=allow")
+	ap := &personApprover{reply: true}
+	a.approver = ap
+	ctx := scored(t, a, pol, flaggedCommand)
+	mustFlag(t, ctx)
+	if msg := a.riskGate(pol)(ctx, "run", "shell", map[string]any{"command": flaggedCommand}); msg != "" || ap.calls != 1 {
+		t.Fatalf("asked %d time(s), result %q", ap.calls, msg)
+	}
+	a.waitRiskSaves()
+	if a.shadow.Model().Adjustments() == 0 {
+		t.Error("approving a flagged call at the risk check taught nothing")
+	}
+}
+
+// The TUI's 'a' on a prompt carrying a score is the flagged allow.
+func TestTUIAllowOnAFlaggedPromptCoversFlaggedCalls(t *testing.T) {
+	for _, tc := range []struct {
+		risk    string
+		flagged bool
+	}{{"0.98 destructive", true}, {"", false}} {
+		a := &app{}
+		m := &tuiModel{app: a, bridge: newBridge(), state: stRunning, input: textarea.New()}
+		m.Update(approvalMsg(approvalReq{kind: "run", detail: flaggedCommand, risk: tc.risk, reply: make(chan bool, 1)}))
+		m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+		if !a.sessionAllowed("run") {
+			t.Errorf("risk %q: 'a' did not allow the category", tc.risk)
+		}
+		if a.flaggedAllow["run"] != tc.flagged {
+			t.Errorf("risk %q: flagged allow = %v, want %v", tc.risk, a.flaggedAllow["run"], tc.flagged)
+		}
+	}
+}
+
+// A checkout's own .agent/config.json may turn the check on, never off: it is
+// what stops a flagged command in a checkout whose file allows everything.
+func TestWorkspaceConfigCannotTurnTheRiskCheckOff(t *testing.T) {
+	home := t.TempDir()
+	setHome(t, home)
+	ws := t.TempDir()
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(ws, ".agent", "config.json"), `{"risk_check": false}`)
+	if cfg, err := config.Load(ws); err != nil || !cfg.RiskCheck {
+		t.Fatalf("a workspace file turned the risk check off (%v)", err)
+	}
+	write(config.GlobalPath(), `{"risk_check": false}`)
+	if cfg, _ := config.Load(ws); cfg.RiskCheck {
+		t.Error("the user's own config could not turn it off")
+	}
+	write(filepath.Join(ws, ".agent", "config.json"), `{"risk_check": true}`)
+	if cfg, _ := config.Load(ws); !cfg.RiskCheck {
+		t.Error("a workspace file could not turn it on")
+	}
+}
+
+// The main agent and every sub-agent get the gate.
+func TestEveryAgentIsWiredWithTheRiskCheck(t *testing.T) {
+	a, pol, _ := gateApp(t)
+	if !a.ag.HasCallGate() {
+		t.Error("the main agent was built without the risk check")
+	}
+	plan := spawnPlan{subReg: a.subReg, subPol: pol, subWorkspace: a.workspace, llmCfg: a.cfg.LLM}
+	if !a.newSubAgent(plan, llm.NewOpenAIClient(a.cfg.LLM), "sub1").HasCallGate() {
+		t.Error("a sub-agent was built without the risk check")
+	}
+}
+
+// spawn.default=allow — which a checkout's own file may set — still stops a
+// flagged spawn.
+func TestRiskCheckStopsAFlaggedSpawnTheSpawnPolicyAllows(t *testing.T) {
+	a, pol, ap := gateApp(t, "spawn.default=allow")
+	ctx := scored(t, a, pol, flaggedCommand)
+	mustFlag(t, ctx)
+	plan := spawnPlan{spawnDefault: "allow", subPol: pol, subWorkspace: a.workspace, llmCfg: a.cfg.LLM, profile: "p"}
+	if _, err := a.runSpawnPlan(ctx, plan, "read the keys", nil); err == nil || ap.calls != 1 {
+		t.Errorf("asked %d time(s), err %v — a flagged spawn ran unasked", ap.calls, err)
+	}
+}
+
+// A background job runs on a context of its own; the score goes with it, so a
+// plain 'a' given earlier does not wave a flagged launch through.
+func TestABackgroundJobKeepsTheScore(t *testing.T) {
+	a, pol, ap := gateApp(t)
+	a.cfg.Agents = map[string]config.AgentProfile{
+		"echo": {Kind: "external", Command: "echo", Args: []string{"{task}"}},
+	}
+	a.allowSession("external agent")
+	ctx := scored(t, a, pol, flaggedCommand)
+	mustFlag(t, ctx)
+	if _, err := a.spawnAgentBackground(ctx, "echo", "read the keys", ""); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100 && a.jobsPending() > 0; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if ap.calls != 1 {
+		t.Errorf("asked %d time(s) — the job lost the score and the plain allow covered it", ap.calls)
+	}
+}
+
+// list/find/search with no path read "." — the policy's verdict must too, or
+// the gate skips them.
+func TestAFileReadWithNoPathIsJudgedAsTheToolRunsIt(t *testing.T) {
+	_, pol, _ := gateApp(t)
+	for _, action := range []string{"list", "find", "search"} {
+		if v := policyVerdict(pol, "file", action, map[string]any{"query": "x"}); v != risk.VerdictAllow {
+			t.Errorf("file %s with no path: verdict %v, want allow", action, v)
+		}
+	}
+}
+
+// The plain prompt's 'a' at a flagged call is the flagged allow, as the TUI's.
+func TestStdinAllowOnAFlaggedPromptCoversFlaggedCalls(t *testing.T) {
+	a, pol, _ := gateApp(t)
+	ctx := scored(t, a, pol, flaggedCommand)
+	mustFlag(t, ctx)
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	s := &stdinApprover{stdin: newStdinOwner(bufio.NewReader(pr)), app: a}
+	go pw.Write([]byte("a\n"))
+	if !s.Approve(ctx, "run", flaggedCommand) {
+		t.Fatal("'a' did not approve")
+	}
+	if !a.flaggedAllow["run"] {
+		t.Error("'a' at a flagged plain prompt did not cover flagged calls")
+	}
+}

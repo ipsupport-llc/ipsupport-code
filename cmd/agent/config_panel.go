@@ -52,6 +52,7 @@ var configRows = []cfgRow{
 	{key: "mode"},
 	{key: "perm_files"},
 	{key: "perm_run"},
+	{key: "risk_check"},
 	{key: "timeout"},
 	{key: "budget"},
 	{key: "offline"},
@@ -115,7 +116,7 @@ var cfgRowSetting = map[string]string{
 	"budget": "session_budget_usd", "offline": "offline", "memory": "memory",
 	"compact_threshold": "compact_threshold", "max_steps": "goal_max_steps",
 	"max_history": "max_history", "max_stuck_turns": "max_stuck_turns",
-	"goal_ttl": "goal_max_returns", "goal_nudge": "goal_nudge",
+	"goal_ttl": "goal_max_returns", "goal_nudge": "goal_nudge", "risk_check": "risk_check",
 	"judge_max_output_tokens": "judge_max_output_tokens", "reflection": "reflect_disabled",
 	"knowledge_retention": "knowledge_retention_days", "agents": "agents",
 	"spawn": "spawn", "subexec": "spawn", "color": "color", "channel": "channel", "name": "name",
@@ -436,6 +437,8 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		return "file writes", m.app.cfg.File.Default, "enter: ask/allow/deny"
 	case "perm_run":
 		return "shell run", m.app.cfg.Run.Default, "enter: ask/allow/deny"
+	case "risk_check":
+		return "risk check", onOff(m.app.cfg.RiskCheck), "enter: toggle (ask before a call the risk model flags, even an allowed one)"
 	case "timeout":
 		return "run timeout", runTimeoutLabel(m.app.cfg.Run.TimeoutSeconds), "enter: cycle"
 	case "budget":
@@ -669,6 +672,12 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 		m.cfgEdit = &cfgEditor{key: key, f: newTextField(m.app.numberValue(key), false)}
 	case "goal_ttl":
 		m.pushLines(m.app.goalTTL("ttl", []string{"ttl", fmt.Sprint(nextInt(m.app.cfg.GoalMaxReturns, goalTTLCycle))}))
+	case "risk_check":
+		if err := m.app.setRiskCheck(!m.app.cfg.RiskCheck); err != nil {
+			m.push(cErr.Render("  could not persist: " + err.Error()))
+		} else {
+			m.push(cDim.Render("  risk check → " + onOff(m.app.cfg.RiskCheck)))
+		}
 	case "goal_nudge":
 		if err := m.app.setGoalNudge(!m.app.cfg.GoalNudge); err != nil {
 			m.push(cErr.Render("  could not persist: " + err.Error()))

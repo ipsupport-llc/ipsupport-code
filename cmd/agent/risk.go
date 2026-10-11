@@ -115,7 +115,7 @@ func (a *app) riskFeedbackPath() string { return a.statePath("risk-feedback.json
 // the delta's total influence is capped. A pattern moves the model; a one-off
 // does not.
 func (a *app) learnFromApproval(ctx context.Context, approved bool) {
-	if a.shadow == nil {
+	if a.shadow == nil || a.readOnly { // a read-only run changes nothing, the model included
 		return
 	}
 	c, ok := risk.CorrectionFrom(ctx, approved)

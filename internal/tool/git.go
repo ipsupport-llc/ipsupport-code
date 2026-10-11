@@ -20,6 +20,7 @@ type gitTool struct {
 	ap      Approver
 	maxOut  int         // per-call output cap in bytes (see OutputBudget)
 	offline func() bool // asked on every call: see NewGitLive
+	wrap    CmdWrapper  // optional OS-sandbox wrapper (nil = run directly)
 }
 
 // gitNetTimeout bounds the actions that talk to a server. The 60s a local action
@@ -37,8 +38,15 @@ func NewGit(p *policy.Engine, ap Approver, ctxWindow int, offline bool) Tool {
 
 // NewGitLive is NewGit with offline mode read on every networked call, for the
 // same reason as NewWebLive.
-func NewGitLive(p *policy.Engine, ap Approver, ctxWindow int, offline func() bool) Tool {
+//
+// wrap, when given, confines git as the run tool's commands are: a read action
+// still runs what the repository's config names — a clean filter, a textconv
+// — and a read-only run wants that sandboxed too.
+func NewGitLive(p *policy.Engine, ap Approver, ctxWindow int, offline func() bool, wrap ...CmdWrapper) Tool {
 	g := &gitTool{pol: p, ap: ap, maxOut: OutputBudget(ctxWindow), offline: offline}
+	if len(wrap) > 0 {
+		g.wrap = wrap[0]
+	}
 	return NewDomain(DomainSpec{
 		Name:    "git",
 		Summary: "Git in the workspace. Mutating actions (add/commit/clone/pull/push…) ask approval.",
@@ -474,7 +482,7 @@ func (g *gitTool) show(ctx context.Context, a Args) Result {
 		// form goes through the same jail and secret checks file.read applies.
 		return Err("show a file as <rev>:<path> (e.g. HEAD:main.go), not by its object ID — the path is what the jail and secret checks need")
 	}
-	return g.run(ctx, "show", false, "show", "--stat", ref)
+	return g.run(ctx, "show", false, "show", "--stat", "--no-textconv", "--no-ext-diff", ref)
 }
 
 // blobPath extracts the <path> portion of a git "<rev>:<path>" blob/tree ref,
@@ -636,7 +644,11 @@ func (g *gitTool) runWith(ctx context.Context, action string, mutating bool, tim
 	// diff's --no-textconv/--no-ext-diff, which are the diff subcommand's own
 	// flags and stay action-specific since they'd be invalid on e.g. commit).
 	gitArgs := append(append([]string{"-c", "core.fsmonitor="}, gitFlags...), args...)
-	cmd := exec.CommandContext(cctx, "git", gitArgs...)
+	name := "git"
+	if g.wrap != nil {
+		name, gitArgs = g.wrap(name, gitArgs)
+	}
+	cmd := exec.CommandContext(cctx, name, gitArgs...)
 	cmd.Dir = dir
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)

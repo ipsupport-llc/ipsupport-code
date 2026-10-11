@@ -1,6 +1,8 @@
 package sandbox
 
 import (
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -67,5 +69,50 @@ func TestWrapSeatbeltPassthroughOffDarwin(t *testing.T) {
 	n, args, wrapped := Wrap(Seatbelt, Spec{WritableRoots: []string{"/w"}, AllowNetwork: true}, "sh", []string{"-c", "echo"})
 	if wrapped || n != "sh" || len(args) != 2 {
 		t.Fatalf("seatbelt must pass through off darwin, got %s %v (wrapped=%v)", n, args, wrapped)
+	}
+}
+
+func TestReaches(t *testing.T) {
+	ws := t.TempDir() // under a temp dir on most hosts: build the cases from a root of its own
+	home := filepath.Join(ws, "home")
+	proj := filepath.Join(home, "proj")
+	cache := filepath.Join(home, ".cache")
+	for _, d := range []string{proj, cache} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(ws, "link")
+	if err := os.Symlink(proj, link); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name  string
+		roots []string
+		path  string
+		want  bool
+	}{
+		{"no roots", nil, proj, false},
+		{"a root elsewhere", []string{cache}, proj, false},
+		{"the path itself", []string{proj}, proj, true},
+		{"a root holding it", []string{home}, proj, true},
+		{"a root inside it", []string{cache}, home, true},
+		{"through a symlink", []string{proj}, link, true},
+		{"not there yet, through a symlink", []string{proj}, filepath.Join(link, "new", "file"), true}, // /tmp/x on macOS
+		{"a sibling sharing a prefix", []string{proj + "x"}, proj, false},
+	} {
+		if got := reaches("", Spec{WritableRoots: c.roots}, c.path); got != c.want {
+			t.Errorf("%s: reaches = %v, want %v", c.name, got, c.want)
+		}
+	}
+	// The temp dirs every spec allows: a workspace in one is writable whatever the roots.
+	if !reaches(Landlock, Spec{}, "/tmp/proj") || !reaches(Seatbelt, Spec{}, "/private/var/folders/x/T/proj") {
+		t.Error("a path in a scratch dir must be reachable")
+	}
+	if reaches(Landlock, Spec{}, "/home/u/proj") {
+		t.Error("a path outside every writable dir must not be reachable")
+	}
+	if !Reaches(Off, Spec{}, proj) {
+		t.Error("an unconfined mode reaches everything")
 	}
 }

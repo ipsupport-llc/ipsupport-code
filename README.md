@@ -383,6 +383,28 @@ $ ./ipsupport-code -session review
 error: session "review" already exists — -resume to continue it, or -new to start over (overwrites it)
 ```
 
+**Read-only runs** — for a review, or a question about the code, with nothing
+allowed to change:
+
+```sh
+./ipsupport-code -read-only "review the diff against main"
+```
+
+File writes, git changes and MCP servers are refused. Commands run without
+asking, inside the OS sandbox (Landlock on Linux 6.7 or later, Seatbelt on macOS,
+whatever `sandbox` is set to) with the workspace read-only like the rest of the
+disk: only temp dirs and the user cache dir are writable, and there is no
+network. The git tool's own git runs there too, since a status or diff runs the
+filters the repository's config names. Where there is no such sandbox, or the
+workspace or its repository sits in a temp or cache dir, commands and the git
+tool are refused too, and the run says why. The session is neither restored nor
+saved, and nothing is learned from it — not even from an approval answer; a run
+whose own files (trace, usage, skills, lessons, settings) would land in the
+workspace or its repository doesn't start. A repository nested inside the
+workspace with its git dir kept elsewhere is not looked for. On Linux a
+command can still change a file's mode and times (Landlock doesn't cover them),
+never its contents.
+
 Each named session keeps its own saved thread, its own **standing goal** and its
 own input history, so two of them can work the same checkout at once — a local
 model in one terminal, a cloud model in another — without stealing each other's

@@ -904,7 +904,7 @@ func TestManualContextWindowSurvivesRestart(t *testing.T) {
 
 	// Simulate a restart: a brand-new app, windowDetected back at its Go
 	// zero-value before build() seeds it from the persisted flag.
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -927,7 +927,7 @@ func TestBuildAppliesOverridesInMemoryNotToFile(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	ws := t.TempDir()
 
-	a, cleanup, err := build(ws, "", []string{"run.default=allow", "llm.temperature=0.7"}, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", []string{"run.default=allow", "llm.temperature=0.7"}, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -952,7 +952,7 @@ func TestBuildAppliesOverridesInMemoryNotToFile(t *testing.T) {
 
 	// A fresh build with NO overrides must see the untouched defaults — proving
 	// the overrides above never reached disk.
-	plain, cleanup2, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	plain, cleanup2, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -971,7 +971,7 @@ func TestBuildRejectsMalformedOverride(t *testing.T) {
 	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	_, _, err := build(t.TempDir(), "", []string{"not-a-key-value-pair"}, bufio.NewReader(strings.NewReader("")))
+	_, _, err := build(t.TempDir(), "", []string{"not-a-key-value-pair"}, false, bufio.NewReader(strings.NewReader("")))
 	if err == nil {
 		t.Error("want an error for a malformed -override, got nil")
 	}
@@ -4734,7 +4734,7 @@ func TestBuildAppliesSessionNameBeforeWire(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, cleanup, err := build(ws, "myname", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "myname", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4770,7 +4770,7 @@ func TestRenameRebindsArchive(t *testing.T) {
 	}
 
 	ws := t.TempDir()
-	a, cleanup, err := build(ws, "old-name", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "old-name", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5011,7 +5011,7 @@ func TestRunOneFailedFirstRequestSignalsErrorAndRecordsUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5043,7 +5043,7 @@ func TestRunOneRecordsDurationInUsageLedger(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5124,7 +5124,7 @@ func TestReflectionTokensFlushedBeforeRunOneReturns(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5170,7 +5170,7 @@ func TestRunTaskStreamingLeavesTheLearningPassToItsCaller(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5223,7 +5223,7 @@ func TestReflectionBilledToTheModelThatRanIt(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5286,7 +5286,7 @@ func TestModelSwitchDoesNotMisattributeReflectionTokens(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6728,7 +6728,7 @@ func TestLastRealContextSurvivesReflectionClobber(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6782,7 +6782,7 @@ func TestDetectContextWindowReWiresLiveAgentOnChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7635,7 +7635,7 @@ func TestSaveSessionHappensBeforeSlowReflection(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8572,7 +8572,7 @@ func TestANewTaskLetsTheLearningPassFinish(t *testing.T) {
 // pass, but a call already returning at that instant still lands.)
 func TestLessonsLandingUnderARunningTaskAreHeldUntilItEnds(t *testing.T) {
 	setHome(t, t.TempDir())
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8629,7 +8629,7 @@ func cfgCursorTo(t *testing.T, m *tuiModel, key string) {
 // not the only way to avoid that: stage it, and replay it when the task ends.
 func TestConfigEditsStageWhileATaskRunsAndApplyWhenItEnds(t *testing.T) {
 	setHome(t, t.TempDir())
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8675,7 +8675,7 @@ func TestConfigEditsStageWhileATaskRunsAndApplyWhenItEnds(t *testing.T) {
 // keystrokes — and it lands where pressing it twice live would have.
 func TestStagedConfigEditsReplayInOrder(t *testing.T) {
 	setHome(t, t.TempDir())
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8832,7 +8832,7 @@ func TestTwoSessionsDoNotClobberEachOthersFacts(t *testing.T) {
 	ws := t.TempDir()
 	open := func(session string) *app {
 		t.Helper()
-		a, cleanup, err := build(ws, session, nil, bufio.NewReader(strings.NewReader("")))
+		a, cleanup, err := build(ws, session, nil, false, bufio.NewReader(strings.NewReader("")))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -8878,7 +8878,7 @@ func TestTwoRunsDoNotClobberEachOthersPromptHistory(t *testing.T) {
 	ws := t.TempDir()
 	open := func() *app {
 		t.Helper()
-		a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+		a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -9071,7 +9071,7 @@ func TestRiskShadowCanBeTurnedOff(t *testing.T) {
 func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 	setHome(t, t.TempDir())
 	ws := t.TempDir()
-	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9133,7 +9133,7 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 func TestRiskCommandReportsAndResets(t *testing.T) {
 	setHome(t, t.TempDir())
 	ws := t.TempDir()
-	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9180,7 +9180,7 @@ func TestRiskCommandReportsAndResets(t *testing.T) {
 func TestRiskResetIsNotUndoneByAnInFlightSave(t *testing.T) {
 	setHome(t, t.TempDir())
 	ws := t.TempDir()
-	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9272,7 +9272,7 @@ func TestRiskNoteIsEmptyBelowTheThreshold(t *testing.T) {
 func TestLearningDoesNotBlockTheApproval(t *testing.T) {
 	setHome(t, t.TempDir())
 	ws := t.TempDir()
-	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9355,7 +9355,7 @@ func TestOnlyARealAnswerTeaches(t *testing.T) {
 func TestASubAgentGetsItsOwnRiskObserver(t *testing.T) {
 	setHome(t, t.TempDir())
 	ws := t.TempDir()
-	a, cleanup, err := build(ws, "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9448,7 +9448,7 @@ func TestLearningKeepsTheCachedPrefix(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9789,5 +9789,378 @@ func TestTelemetryStatusSurvivesAShortInstallID(t *testing.T) {
 	lines := a.telemetryStatusLines()
 	if !strings.Contains(strings.Join(lines, "\n"), "install ID  abc") {
 		t.Fatalf("lines = %q", lines)
+	}
+}
+
+func TestCheckReadOnly(t *testing.T) {
+	for _, c := range []struct {
+		name                  string
+		args                  []string
+		interactive, res, clr bool
+		init                  bool
+		session               string
+		ok                    bool
+	}{
+		{name: "a task", args: []string{"review", "it"}, ok: true},
+		{name: "no task", args: nil},
+		{name: "a blank task", args: []string{" "}},
+		{name: "-it", args: []string{"x"}, interactive: true},
+		{name: "-resume", args: []string{"x"}, res: true},
+		{name: "-clear", args: []string{"x"}, clr: true},
+		{name: "-session", args: []string{"x"}, session: "review"},
+		{name: "config set", args: []string{"config", "set", "run.default", "allow"}},
+		{name: "update", args: []string{"update"}},
+		{name: "-init", args: []string{"x"}, init: true},
+		{name: "a task that starts with a command's word", args: []string{"configure", "nothing"}, ok: true},
+	} {
+		if err := checkReadOnly(c.args, c.interactive, c.res, c.clr, c.init, c.session); (err == nil) != c.ok {
+			t.Errorf("%s: err = %v, want ok=%v", c.name, err, c.ok)
+		}
+	}
+}
+
+// A read-only build answers in read-only mode, gives its commands a sandbox
+// that can't write the workspace or reach the network whatever the settings
+// say, and leaves nothing of its session behind — not even the one-time move
+// of an old install's state out of the workspace.
+func TestReadOnlyBuild(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ws := t.TempDir()
+	legacy := filepath.Join(config.LegacyStateDir(ws), "session.json")
+	if err := os.MkdirAll(filepath.Dir(legacy), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte(`{"history":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a, cleanup, err := build(ws, "", []string{"sandbox=off", "offline=false"}, true, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if on, _ := a.ag.ReadOnly(); !on || !a.ag.PlanMode() {
+		t.Error("the agent is not in read-only mode")
+	}
+	mode, spec := a.sandboxSpec(a.hostSandboxRoot())
+	if mode != sandbox.Auto {
+		t.Errorf("sandbox mode = %q, want %q whatever the setting", mode, sandbox.Auto)
+	}
+	if spec.AllowNetwork {
+		t.Error("read-only commands must have no network")
+	}
+	for _, r := range spec.WritableRoots {
+		if r == ws || r == a.hostSandboxRoot() {
+			t.Errorf("the workspace is a writable root: %v", spec.WritableRoots)
+		}
+	}
+	// t.TempDir is under a temp dir every sandbox leaves writable: so commands
+	// must be refused here, and the agent told so.
+	if ok, why := a.readOnlyRun(); ok || why == "" {
+		t.Errorf("readOnlyRun = %v %q, want refused with a reason for a workspace in a temp dir", ok, why)
+	}
+	if _, run := a.ag.ReadOnly(); run {
+		t.Error("the agent lets run through though commands could write the workspace")
+	}
+
+	if _, err := os.Stat(legacy); err != nil {
+		t.Errorf("the legacy state was moved out of the workspace: %v", err)
+	}
+	a.saveSession()
+	if _, err := os.Stat(a.sessionPath()); !os.IsNotExist(err) {
+		t.Errorf("a read-only session was saved: %v", err)
+	}
+
+	// Without -read-only nothing of this applies.
+	plain, cleanup2, err := build(t.TempDir(), "", []string{"sandbox=off"}, false, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup2()
+	if on, _ := plain.ag.ReadOnly(); on || plain.ag.PlanMode() {
+		t.Error("a plain build is in read-only or plan mode")
+	}
+	if mode, spec := plain.sandboxSpec(plain.hostSandboxRoot()); mode != sandbox.Off || len(spec.WritableRoots) == 0 || spec.WritableRoots[0] != plain.hostSandboxRoot() {
+		t.Errorf("a plain build's sandbox changed: %q %+v", mode, spec)
+	}
+}
+
+// A workspace no sandboxed command can write is where read-only lets run through.
+func TestReadOnlyRunsCommandsWhereTheSandboxHoldsTheWorkspace(t *testing.T) {
+	if !sandbox.Available(sandbox.Auto) {
+		t.Skip("no OS sandbox on this host")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	ws, err := os.MkdirTemp(home, ".ipsupport-read-only-test-") // outside every temp dir
+	if err != nil {
+		t.Skipf("cannot create a workspace in home: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(ws) })
+	setHome(t, t.TempDir()) // the cache dir follows, into a temp dir away from ws
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+	a, cleanup, err := build(ws, "", nil, true, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if ok, why := a.readOnlyRun(); !ok {
+		t.Fatalf("commands refused: %s", why)
+	}
+	if _, run := a.ag.ReadOnly(); !run {
+		t.Error("the agent does not let run through")
+	}
+}
+
+// A read-only run starts no MCP server — listing one launches it, outside any
+// sandbox — and learns nothing from an approval answer.
+func TestReadOnlyStartsNoServerAndLearnsNothing(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	hasMCP := func(a *app) bool {
+		for _, s := range a.ag.ToolSchemas() {
+			if fn, _ := s["function"].(map[string]any); fn != nil && fn["name"] == "mcp" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, readOnly := range []bool{false, true} {
+		a, cleanup, err := build(t.TempDir(), "", nil, readOnly, bufio.NewReader(strings.NewReader("")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		a.cfg.McpServers = map[string]mcp.Server{"test": {URL: "http://mcp.invalid"}}
+		if err := a.wire(); err != nil {
+			t.Fatal(err)
+		}
+		if hasMCP(a) == readOnly {
+			t.Errorf("readOnly=%v: the mcp tool registered = %v", readOnly, hasMCP(a))
+		}
+		if a.shadow == nil {
+			continue
+		}
+		params := map[string]any{"command": "truncate -s 0 install_manifest.txt"}
+		as := a.shadow.Model().Assess("run", "shell", params)
+		if as.Risk < risk.Threshold {
+			t.Skipf("the shipped model no longer flags %v — pick another false alarm", params)
+		}
+		a.learnFromApproval(risk.WithAssessment(context.Background(), "run", "shell", params, as), true)
+		a.waitRiskSaves()
+		if learned := a.shadow.Learned() > 0; learned == readOnly {
+			t.Errorf("readOnly=%v: learned from an approval = %v", readOnly, learned)
+		}
+	}
+}
+
+// A worktree whose repository lives in a temp dir: commands could rewrite its
+// history there, so read-only refuses them.
+func TestReadOnlyRefusesCommandsWhereTheRepositoryIsWritable(t *testing.T) {
+	if !sandbox.Strict(sandbox.Auto) {
+		t.Skip("no strict OS sandbox on this host")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skip("no home dir")
+	}
+	parent, err := os.MkdirTemp(home, ".ipsupport-read-only-test-")
+	if err != nil {
+		t.Skipf("cannot create a dir in home: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(parent) })
+	repo, ws := t.TempDir(), filepath.Join(parent, "wt")
+	for _, args := range [][]string{
+		{"-C", repo, "init", "-q"},
+		{"-C", repo, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x"},
+		{"-C", repo, "worktree", "add", "-q", ws},
+	} {
+		if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	a, cleanup, err := build(ws, "", nil, true, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if ok, why := a.readOnlyRun(); ok || !strings.Contains(why, ".git") {
+		t.Errorf("readOnlyRun = %v %q, want refused over the repository in a temp dir", ok, why)
+	}
+	// A jail elsewhere leaves the workspace's own repository as writable.
+	jail := filepath.Join(parent, "jail")
+	if err := os.Mkdir(jail, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	b, cleanupB, err := build(ws, "", []string{"file.jail=" + jail}, true, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanupB()
+	if ok, why := b.readOnlyRun(); ok || !strings.Contains(why, ".git") {
+		t.Errorf("with a jail elsewhere: readOnlyRun = %v %q, want refused over the workspace's repository", ok, why)
+	}
+}
+
+// Without git, a .git file says only that the git dir is somewhere else:
+// commands are refused rather than run where it may be writable.
+func TestReadOnlyRefusesCommandsWhereNoGitCanSayWhereTheRepositoryIs(t *testing.T) {
+	if !sandbox.Strict(sandbox.Auto) {
+		t.Skip("no strict OS sandbox on this host")
+	}
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, ".git"), []byte("gitdir: /tmp/elsewhere\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", t.TempDir())
+	a, cleanup, err := build(ws, "", nil, true, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if ok, why := a.readOnlyRun(); ok || !strings.Contains(why, "without git installed") {
+		t.Errorf("readOnlyRun = %v %q, want refused for want of git", ok, why)
+	}
+}
+
+// gitDirs keeps a path with a space whole.
+func TestGitDirsKeepsAPathWhole(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	repo := filepath.Join(t.TempDir(), "a repo")
+	if out, err := exec.Command("git", "init", "-q", repo).CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	for _, d := range gitDirs(repo) {
+		if _, err := os.Stat(d); err != nil {
+			t.Errorf("gitDirs = %q: %v", gitDirs(repo), err)
+		}
+	}
+	if n := len(gitDirs(repo)); n != 2 {
+		t.Errorf("gitDirs = %q, want the git dir and the common dir", gitDirs(repo))
+	}
+}
+
+// A read-only run rewrites none of the stores on its way in: an expired usage
+// entry stays until a run that may change things purges it. And its git, like
+// its commands, runs in the sandbox.
+func TestReadOnlyLeavesTheStoresAndSandboxesGit(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ws := t.TempDir()
+	seed, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed.usage.Add("2001-01-01", "local", "m", 10, 10, 0)
+	if err := seed.usage.Save(); err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	for _, readOnly := range []bool{true, false} {
+		a, cleanup, err := build(ws, "", []string{"usage_retention_days=1"}, readOnly, bufio.NewReader(strings.NewReader("")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer cleanup()
+		if kept := a.usage.Total().Tokens() > 0; kept != readOnly {
+			t.Errorf("readOnly=%v: the expired entry kept = %v", readOnly, kept)
+		}
+		if wrapped := a.gitWrapperFor(a.hostSandboxRoot()) != nil; wrapped != (readOnly && sandbox.Available(sandbox.Auto)) {
+			t.Errorf("readOnly=%v: git wrapped = %v", readOnly, wrapped)
+		}
+		// The workspace is in a temp dir, which the sandbox lets commands
+		// write: no commands, and no git, the host's or a sub-agent's.
+		if ok, _ := a.readOnlyRun(); readOnly && ok {
+			t.Fatal("commands allowed in a temp dir")
+		}
+		if git := a.subReg.Actions("git") != nil || a.gitTools(a.pol, a.hostSandboxRoot()) != nil; git == readOnly {
+			t.Errorf("readOnly=%v: a git tool = %v", readOnly, git)
+		}
+	}
+}
+
+// What a read-only run writes on its own lands outside the workspace and its
+// repositories however the path is written: relative to a working directory
+// below the workspace, through a symlink in it, in the git dir of a linked
+// worktree, or in a settings dir inside it.
+func TestReadOnlyRefusesStoresThatLeadIntoTheWorkspace(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ws := t.TempDir()
+	sub := filepath.Join(ws, "sub")
+	outside := filepath.Join(t.TempDir(), "usage.json")
+	main := t.TempDir()
+	for _, args := range [][]string{{"-C", main, "init", "-q"}, {"-C", main, "commit", "-q", "--allow-empty", "-m", "x"},
+		{"-C", main, "worktree", "add", "-q", filepath.Join(ws, "wt")}} {
+		if out, err := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t"}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outside, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(ws, "u.json")); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(sub)
+	for _, c := range []struct{ ws, kv string }{
+		{ws, "trace_path=../t.jsonl"},                                                  // the working directory's ../, not the workspace's
+		{ws, "usage_path=" + filepath.Join(ws, "u.json")},                              // a symlink out: the rename over it lands here
+		{filepath.Join(ws, "wt"), "trace_path=" + filepath.Join(main, ".git", "HEAD")}, // the worktree's common git dir
+	} {
+		if _, _, err := build(c.ws, "", []string{c.kv}, true, bufio.NewReader(strings.NewReader(""))); err == nil {
+			t.Errorf("%s: a read-only build started", c.kv)
+		}
+	}
+	setHome(t, ws) // the settings dir, where the rating state is kept, in the workspace
+	if _, _, err := build(ws, "", []string{"trace_path=" + filepath.Join(t.TempDir(), "t.jsonl"), "usage_path=" + outside,
+		"skills_path=" + t.TempDir(), "kb_path=" + filepath.Join(t.TempDir(), "kb.json")}, true, bufio.NewReader(strings.NewReader(""))); err == nil {
+		t.Error("a settings dir in the workspace: a read-only build started")
+	}
+}
+
+// A store a repository's config points into the workspace is refused: a
+// read-only run would otherwise write it there. A relative path is the
+// working directory's, as the store opens it.
+func TestReadOnlyRefusesStoresInTheWorkspace(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	ws := t.TempDir()
+	t.Chdir(ws)
+	for _, kv := range []string{"trace_path=.agent/trace.jsonl", "usage_path=" + filepath.Join(ws, "u.json"), "skills_path=skills", "kb_path=./kb.json",
+		"skills_path=", "trace_path="} { // empty: the working directory
+		if _, _, err := build(ws, "", []string{kv}, true, bufio.NewReader(strings.NewReader(""))); err == nil {
+			t.Errorf("%s: a read-only build started", kv)
+		}
+		_, cleanup, err := build(ws, "", []string{kv}, false, bufio.NewReader(strings.NewReader("")))
+		if err != nil {
+			t.Errorf("%s: a plain build failed: %v", kv, err)
+			continue
+		}
+		cleanup()
+	}
+	if _, cleanup, err := build(ws, "", []string{"trace_path=" + filepath.Join(t.TempDir(), "t.jsonl")}, true, bufio.NewReader(strings.NewReader(""))); err != nil {
+		t.Errorf("a store outside the workspace was refused: %v", err)
+	} else {
+		cleanup()
 	}
 }

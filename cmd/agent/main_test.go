@@ -165,12 +165,63 @@ func TestJudgeRenderShowsNotDoneWithMissingGap(t *testing.T) {
 
 // Reported live: from the TUI, the isolated judge call looked identical to
 // the main model still "thinking" — nothing distinguished them on screen.
+// It also says how the run got there — done, stopped, or given up — since
+// those read the same in one dim grey line.
 func TestJudgingRenderShowsALiveIndicator(t *testing.T) {
 	m := &tuiModel{width: 60}
-	lines := m.renderEvent(uiEvent{kind: "judging"})
-	joined := stripAnsi(strings.Join(lines, " "))
-	if !strings.Contains(joined, "checking if the goal is actually done") {
-		t.Errorf("judging indicator not rendered:\n%v", lines)
+	for why, want := range map[string]string{
+		"done":            "says it's done (called done)",
+		"stopped":         "stopped without calling done",
+		"stuck_stop":      "got stuck",
+		"step_exhaustion": "out of steps",
+		"turn_failed":     "reply failed",
+		"":                "judge checking the goal",
+	} {
+		joined := stripAnsi(strings.Join(m.renderEvent(uiEvent{kind: "judging", fields: map[string]any{"why": why}}), " "))
+		if !strings.Contains(joined, want) || !strings.Contains(joined, "⚖ judge checking") {
+			t.Errorf("why %q: rendered %q, want %q", why, joined, want)
+		}
+	}
+}
+
+// While the judge is asked, the status line says so instead of "thinking…".
+func TestStatusLineSaysTheJudgeIsChecking(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	m := &tuiModel{app: a, ctx: context.Background(), bridge: newBridge(),
+		state: stIdle, input: textarea.New(), spin: spinner.New()}
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 140, Height: 40})
+	m = model.(*tuiModel)
+	m.state, m.taskStart = stRunning, time.Now()
+	if s := stripAnsi(m.View()); !strings.Contains(s, "· thinking… (") {
+		t.Fatalf("status before the judge:\n%s", s)
+	}
+	m.Update(eventMsg(uiEvent{kind: "judging", fields: map[string]any{"why": "done"}}))
+	if s := stripAnsi(m.View()); !strings.Contains(s, "· ⚖ judge checking the goal… (") {
+		t.Errorf("status while judging does not say so:\n%s", s)
+	}
+	// A transport retry or a sub-agent's own step is not the verdict.
+	m.Update(eventMsg(uiEvent{kind: "retry", fields: map[string]any{"attempt": 1, "wait_ms": 0}}))
+	m.Update(eventMsg(uiEvent{kind: "tool_call", fields: map[string]any{"agent": "sub1", "tool": "file"}}))
+	m.retry = nil
+	if s := stripAnsi(m.View()); !strings.Contains(s, "· ⚖ judge checking the goal… (") {
+		t.Errorf("a retry or a sub-agent's step cleared the judging status:\n%s", s)
+	}
+	for _, after := range []uiEvent{
+		{kind: "judge", fields: map[string]any{"done": true}},
+		{kind: "continue", fields: map[string]any{"return": 1, "of": 3}},
+		{kind: "final", fields: map[string]any{"text": "ok"}},
+	} {
+		m.Update(eventMsg(uiEvent{kind: "judging", fields: map[string]any{"why": "done"}}))
+		m.Update(eventMsg(after))
+		if s := stripAnsi(m.View()); strings.Contains(s, "· ⚖ judge checking the goal… (") {
+			t.Errorf("status after %q still says judging:\n%s", after.kind, s)
+		}
 	}
 }
 

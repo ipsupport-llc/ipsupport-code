@@ -107,6 +107,7 @@ type tuiModel struct {
 	chooseCursor  int             // selected row (0..len = the "new session" row)
 	cancel        context.CancelFunc
 	learning      bool           // a learning pass is running in the background — shown in the status line
+	judging       bool           // the goal's judge is being asked — the status line says so, not "thinking"
 	heldLessons   *reflectResult // a pass that landed while a task was running; applied when that task ends
 	taskStart     time.Time
 	startTok      int
@@ -633,6 +634,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case e.fields["agent"] != nil: // a sub-agent's own step — update its line only
 			m.subUpdate(e)
 		default:
+			m.judging = e.kind == "judging" // until the next event: the verdict, a re-feed, the final
 			m.push(m.renderEvent(e)...)
 			if e.kind == "final" {
 				m.subs = nil // a stray sub-agent line can't outlive the task
@@ -2024,7 +2026,8 @@ func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
 	m.state = stRunning
 	m.taskStart = time.Now()
 	m.busyMsg = "" // a real model task → "thinking", not a labelled chore
-	m.subs = nil   // no sub-agents from a previous task linger
+	m.judging = false
+	m.subs = nil // no sub-agents from a previous task linger
 	_, c := m.app.client.Usage()
 	m.startTok = c // count completion (generated) tokens for this task
 	m.suggestion = ""
@@ -2225,7 +2228,11 @@ func (m *tuiModel) View() string {
 					detail += fmt.Sprintf(" (%.1f tok/s)", float64(gen)/raw.Seconds())
 				}
 			}
-			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" %s · thinking… (%s)", m.app.providerModel(), detail))
+			doing := "thinking…"
+			if m.judging {
+				doing = "⚖ judge checking the goal…"
+			}
+			status = m.spin.View() + cToolCall.Render(fmt.Sprintf(" %s · %s (%s)", m.app.providerModel(), doing, detail))
 			if meter := m.ctxMeter(); meter != "" { // watch the window fill during a long task
 				status += cDim.Render(" · ") + meter
 			}
@@ -3015,6 +3022,23 @@ func (m *tuiModel) subUpdate(e uiEvent) {
 	}
 }
 
+// judgingLine is the line the judge's check opens with: how the run got there.
+func judgingLine(why string) string {
+	switch why {
+	case "done":
+		return cOk.Render("  ■ the model says it's done (called done)") + cToolCall.Render(" — ⚖ judge checking the goal…")
+	case "stopped":
+		return cToolCall.Render("  ■ the model stopped without calling done — ⚖ judge checking the goal…")
+	case "stuck_stop":
+		return cErr.Render("  ■ the model got stuck and was stopped") + cToolCall.Render(" — ⚖ judge checking what got done…")
+	case "step_exhaustion":
+		return cErr.Render("  ■ out of steps") + cToolCall.Render(" — ⚖ judge checking what got done…")
+	case "turn_failed":
+		return cErr.Render("  ■ the model's reply failed") + cToolCall.Render(" — ⚖ judge checking what got done…")
+	}
+	return cToolCall.Render("  ⚖ judge checking the goal…")
+}
+
 // subDone closes a sub-agent's live line and returns its outcome marker for the log.
 func (m *tuiModel) subDone(e uiEvent) []string {
 	id, _ := e.fields["agent"].(string)
@@ -3123,8 +3147,10 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		// main model still "thinking" — nothing on screen said a separate check
 		// was even happening. Fires right before the call; the eventual verdict
 		// (or its absence, on the normal re-feed path with no gap) is its own
-		// "judge"/"continue" line below.
-		return []string{cDim.Render("  ⚖ checking if the goal is actually done…")}
+		// "judge"/"continue" line below. It says how the run got here, bright:
+		// "the model is done" and "the model gave up" read the same in dim grey.
+		why, _ := e.fields["why"].(string)
+		return []string{judgingLine(why)}
 	case "judge":
 		if done, _ := e.fields["done"].(bool); done {
 			return []string{cOk.Render("  ✓ judge: goal met")}

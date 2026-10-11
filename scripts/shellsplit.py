@@ -277,6 +277,17 @@ class _Result:
             self.var_prog = True
         return True
 
+    def feeds_variable(self):
+        """Mirrors feedsVariable."""
+        fed = self.readers(0)
+        for j, c in enumerate(self.cmds):
+            if not _expands(c):
+                continue
+            f = _feeds(c)
+            if (f == 0 and fed[j] & (_SCORED | _UNKNOWN)) or (f & (_SCORED | _UNKNOWN) and _here_string_variable(c)):
+                return True
+        return False
+
     def readers(self, first):
         """Mirrors readers: through pipes and piped blocks; open ones are unknown."""
         if first >= len(self.cmds):
@@ -398,6 +409,20 @@ def _abbreviates(w, flag, least):
     """Mirrors abbreviates."""
     n = w.partition("=")[0]
     return len(n) >= least and flag.startswith(n)
+
+
+def _here_string_variable(cmd):
+    """Mirrors hereStringVariable."""
+    ws = _words(cmd)
+    for i, w in enumerate(ws):
+        k = w.find("<<<")
+        if k >= 0:
+            op = w[k + 3:]
+            if op == "" and i + 1 < len(ws):
+                op = ws[i + 1]
+            if _expands(op):
+                return True
+    return False
 
 
 def _keyword(s):
@@ -737,11 +762,11 @@ def _git_editor(ws):
         if w == "--":
             break
         if w.startswith("--"):
-            if _abbreviates(w, "--edit", 3) or _abbreviates(w, "--template", 3):
+            if _abbreviates(w, "--edit", 3) or _abbreviates(w, "--template", 3) or _abbreviates(w, "--reedit-message", 3):
                 return True
         elif w.startswith("-"):
             for j, c in enumerate(w[1:], 1):
-                if c in "et":
+                if c in "etc":
                     return True
                 if c in "mFCcuS":
                     if j == len(w) - 1 and c in "mFCc":
@@ -867,6 +892,8 @@ def _split_sh(line, out):
             b.write(r, False)
         i += 1
     cut("")
+    if out.dropped and not out.var_prog and out.feeds_variable():
+        out.var_prog = True
     out.cmds += nested
     out.groups += ngroups
 
@@ -1102,7 +1129,7 @@ _PS_RUNNERS = {"iex", "invoke-expression", "icm", "invoke-command"}
 
 def _ps_redefines(cmd):
     """Mirrors psRedefines."""
-    ws = _fields(cmd.replace("`", "").replace("'", "").replace('"', "").lower())
+    ws = _fields(cmd.replace("`\r\n", "").replace("`\n", "").replace("`", "").replace("'", "").replace('"', "").lower())
     for i, w in enumerate(ws):
         if ((w in ("&", ".") and i + 1 < len(ws) and ws[i + 1][0] in "$(") or
                 w.startswith("&$") or w.startswith("&(") or w.startswith(".$")):

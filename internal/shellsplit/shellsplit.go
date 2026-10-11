@@ -405,6 +405,40 @@ func abbreviates(w, flag string, least int) bool {
 	return len(n) >= least && strings.HasPrefix(flag, n)
 }
 
+// feedsVariable: a variable's value reaches what runs what it reads — handed
+// on by a data command (echo "$x" | sh, printf %s "$x" | bash) or as a here
+// string (sh -s <<< "$x", python3 <<< "$x").
+func (r *result) feedsVariable() bool {
+	fed := r.readers(0)
+	for j, c := range r.cmds {
+		if !expands(c) {
+			continue
+		}
+		f := feeds(c)
+		if f == 0 && fed[j]&(scored|unknown) != 0 || f&(scored|unknown) != 0 && hereStringVariable(c) {
+			return true
+		}
+	}
+	return false
+}
+
+// hereStringVariable: cmd reads a here string (<<< word) that expands.
+func hereStringVariable(cmd string) bool {
+	ws := words(cmd)
+	for i, w := range ws {
+		if k := strings.Index(w, "<<<"); k >= 0 {
+			op := w[k+3:]
+			if op == "" && i+1 < len(ws) {
+				op = ws[i+1]
+			}
+			if expands(op) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // readBy adds cmds[t] as a reader of cmds[from:to].
 func (r *result) readBy(from, to, t int) {
 	if !r.link(to - from) {
@@ -850,12 +884,12 @@ func gitEditor(ws []string) bool {
 		case w == "--":
 			return false
 		case strings.HasPrefix(w, "--"):
-			if abbreviates(w, "--edit", 3) || abbreviates(w, "--template", 3) {
+			if abbreviates(w, "--edit", 3) || abbreviates(w, "--template", 3) || abbreviates(w, "--reedit-message", 3) {
 				return true
 			}
 		case strings.HasPrefix(w, "-"):
 			for j := 1; j < len(w); j++ {
-				if w[j] == 'e' || w[j] == 't' {
+				if w[j] == 'e' || w[j] == 't' || w[j] == 'c' { // -c: reedit, in notes beside -F -
 					return true
 				}
 				if strings.IndexByte("mFCcuS", w[j]) >= 0 {
@@ -1012,6 +1046,9 @@ func splitSh(line string, out *result) {
 		}
 	}
 	cut("")
+	if out.dropped && !out.varProg && out.feedsVariable() { // before the nested commands join cmds
+		out.varProg = true
+	}
 	out.cmds = append(out.cmds, nested...)
 	out.groups = append(out.groups, ngroups...)
 }
@@ -1344,7 +1381,8 @@ var psRunners = map[string]bool{"iex": true, "invoke-expression": true, "icm": t
 // expression (& $a, & ('Set' + '-Alias')). Any word may: &Set-Alias,
 // Se`t-Alias, Microsoft.PowerShell.Utility\Set-Alias, iex "Set-Alias sc iex".
 func psRedefines(cmd string) bool {
-	ws := strings.Fields(strings.ToLower(strings.NewReplacer("`", "", "'", "", "\"", "").Replace(cmd)))
+	// Set-`⏎Alias: a backtick before a newline continues the word.
+	ws := strings.Fields(strings.ToLower(strings.NewReplacer("`\r\n", "", "`\n", "", "`", "", "'", "", "\"", "").Replace(cmd)))
 	for i, w := range ws {
 		if (w == "&" || w == ".") && i+1 < len(ws) && strings.ContainsAny(ws[i+1][:1], "$(") ||
 			strings.HasPrefix(w, "&$") || strings.HasPrefix(w, "&(") || strings.HasPrefix(w, ".$") {

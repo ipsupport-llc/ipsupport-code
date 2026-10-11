@@ -473,6 +473,9 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		"exec >\"$LOG\" 2>&1\ncat > f <<'EOF'\nx\nEOF",
 		"cat > f <<'EOF'\nx\nEOF\nsudo cp 2>\"$err\" f g", // a redirection, not a program
 		"gh secret set FOO -e prod <<'EOF'\nvalue\nEOF",   // -e is --env there
+		read + "echo \"$x\" | grep rm",                    // handed to a data command
+		read + "grep rm <<< \"$x\"",
+		"git notes add -C HEAD -F - <<'EOF'\nmsg\nEOF", // -C reuses, no editor
 	} {
 		if p := Parse(Sh, line); p.Incomplete {
 			t.Errorf("Parse(%q) = %q: marked incomplete", line, p.Commands)
@@ -512,6 +515,12 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		read + "php --process-code \"$x\"",
 		read + "php --process-begin=\"$x\"",
 		read + "/usr/bin/time $x", // time the program, not the keyword
+		read + "echo \"$x\" | sh", // the value handed to a shell
+		read + "printf '%s' \"$x\" | bash",
+		read + "sh -s <<< \"$x\"", // or read by one as a here string
+		read + "python3 <<<\"$x\"",
+		"git notes add -c HEAD -F - <<'EOF'\nrm -rf x\nEOF", // -c reedits: the editor opens
+		"git notes add --reedit-message=HEAD -F - <<'EOF'\nrm -rf x\nEOF",
 		read + "sudo $x>log",      // the program before a redirection it carries
 		read + "pwsh -Com \"$x\"", // -Command however it is written
 		read + "powershell /Command \"$x\"",
@@ -546,7 +555,8 @@ func TestHiddenCommandsAreFoundRound7(t *testing.T) {
 		"Set-Item alias:sc iex\nsc @'" + body,
 		"& Set-Alias sc iex\nsc @'" + body, // called
 		"& 'Set-Alias' sc iex\nsc @'" + body,
-		"Se`t-Alias sc iex\nsc @'" + body, // a backtick PowerShell drops
+		"Se`t-Alias sc iex\nsc @'" + body,  // a backtick PowerShell drops
+		"Set-`\nAlias sc ri\nsc @'" + body, // or continues the word
 		"&Set-Alias sc iex\nsc @'" + body,
 		"iex \"Set-Alias sc iex\"\nsc @'" + body, // defined by a string run
 		"& ('Set'+'-Alias') sc iex\nsc @'" + body,

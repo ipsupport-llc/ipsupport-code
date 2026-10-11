@@ -1212,7 +1212,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		if err != nil && ctx.Err() == nil && !degenerateNudged && llm.IsDegenerateOutput(err) {
 			slog.Debug("degenerate turn", a.debugArgs("step", step+1, "err", err)...)
 			msgs = append(msgs, llm.User(degenerateNudge))
-			a.emit("nudge", map[string]any{})
+			a.emit("nudge", map[string]any{"told": degenerateNudge})
 			degenerateNudged = true
 			continue
 		}
@@ -1255,7 +1255,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 						returns++
 						actedSinceReturn, idleNudged, degenerateNudged = false, false, false
 						msgs = append(msgs, llm.User(goalReturn(a.acceptanceTarget(goal), missing)))
-						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing})
+						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing, "told": goalReturnPush})
 						continue
 					}
 					tr.Final += goalNotConfirmedNote(a.maxReturns, met, tr.Missing)
@@ -1336,7 +1336,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// treatment before being accepted as a real (if silent) answer.
 			if !a.planMode && !emptyNudged && !acted && strings.TrimSpace(clean) == "" {
 				msgs = append(msgs, llm.User(emptyReplyNudge))
-				a.emit("nudge", map[string]any{})
+				a.emit("nudge", map[string]any{"told": emptyReplyNudge})
 				emptyNudged = true
 				continue
 			}
@@ -1345,7 +1345,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// via tools this run. Push back once, hard, before accepting it.
 			if !a.planMode && !refusalNudged && !acted && looksLikeRefusal(clean) {
 				msgs = append(msgs, llm.User(refusalNudge))
-				a.emit("nudge", map[string]any{})
+				a.emit("nudge", map[string]any{"told": refusalNudge})
 				refusalNudged = true
 				continue
 			}
@@ -1389,7 +1389,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 				if a.nudgeIdle && !idleNudged && returns > 0 && !actedSinceReturn {
 					idleNudged = true
 					msgs = append(msgs, llm.User(idleNudge))
-					a.emit("nudge", map[string]any{"idle": true})
+					a.emit("nudge", map[string]any{"idle": true, "told": idleNudge})
 					continue
 				}
 				// Everything else goes to the judge — including a model that
@@ -1444,7 +1444,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 						returns++
 						actedSinceReturn, idleNudged = false, false
 						msgs = append(msgs, llm.User(goalReturn(a.acceptanceTarget(goal), missing)))
-						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing})
+						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing, "told": goalReturnPush})
 						continue
 					}
 					// lastMissing is set above for BOTH branches: the gap is the
@@ -1555,7 +1555,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			if stuck++; stuck >= a.maxStuckTurns {
 				if !nudged {
 					msgs = append(msgs, llm.User(stuckNudgeFor(repeating)))
-					a.emit("nudge", map[string]any{})
+					a.emit("nudge", map[string]any{"told": stuckNudgeFor(repeating)})
 					nudged = true // keep stuck high: one more dud turn now stops it
 				} else {
 					msg := "Stopped — it kept repeating the same tool calls without progress (or they kept failing) even after a nudge to rethink. Steer it (a different approach), or use a stronger model."
@@ -1879,8 +1879,12 @@ func GoalReturnForTest(goal, missing string) string { return goalReturn(goal, mi
 // goalReturn re-states the goal when the judge finds it unmet, keeping the
 // objective in focus (recency) instead of letting it sink under the transcript,
 // and naming the gap so the model finishes the remaining work with tools.
+// goalReturnPush is the push a re-fed goal opens with — shown on screen as what
+// the model was told, beside the judge's gap.
+const goalReturnPush = goalReturnOpening + " — keep going. Do the remaining work now with tools (don't stop early, don't just describe it), and only finish once it's actually done."
+
 func goalReturn(goal, missing string) string {
-	s := goalReturnOpening + " — keep going. Do the remaining work now with tools (don't stop early, don't just describe it), and only finish once it's actually done."
+	s := goalReturnPush
 	if strings.TrimSpace(missing) != "" {
 		s += "\n\nStill missing: " + strings.TrimSpace(missing)
 	}

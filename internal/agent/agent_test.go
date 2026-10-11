@@ -714,8 +714,9 @@ type recTracer struct {
 	sawJudge        bool
 	judgeDone       bool
 	judgeMissing    string
-	continueMissing string // last "continue" event's missing text
-	judgingWhy      string // last "judging" event's reason
+	continueMissing string   // last "continue" event's missing text
+	judgingWhy      string   // last "judging" event's reason
+	told            []string // what each push (continue, nudge) said it told the model
 }
 
 func (r *recTracer) Emit(kind string, f map[string]any) {
@@ -731,6 +732,10 @@ func (r *recTracer) Emit(kind string, f map[string]any) {
 	}
 	if kind == "continue" {
 		r.continueMissing, _ = f["missing"].(string)
+	}
+	if kind == "continue" || kind == "nudge" {
+		told, _ := f["told"].(string)
+		r.told = append(r.told, told)
 	}
 	if kind == "judge" {
 		r.sawJudge = true
@@ -3141,6 +3146,34 @@ func TestRunNeverMarksAGoalMetFromAWordInTheJudgesThinking(t *testing.T) {
 	tr, _ := a.Run(context.Background(), "add two numbers")
 	if tr.GoalMet {
 		t.Error("GoalMet = true from a DONE found in the judge's draft — only Content or done() may end a goal")
+	}
+}
+
+// A push shows what the model was told, and that is what it was told: the
+// re-feed's opening is in the message the model got next.
+func TestAPushCarriesWhatTheModelWasTold(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	rt := &recTracer{}
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "all set"},
+		{Role: "assistant", Content: "MORE: the report is missing"},
+		calcCall(),
+		{Role: "assistant", Content: "now done"},
+		{Role: "assistant", Content: "DONE"},
+	}}
+	a := New(fake, reg, nil, rt, "", 20)
+	a.SetGoalLoop(3, false)
+	tr, _ := a.Run(context.Background(), "write the report")
+	if len(rt.told) != 1 || rt.told[0] != goalReturnPush {
+		t.Fatalf("told = %q, want the re-feed's push", rt.told)
+	}
+	var sent bool
+	for _, m := range tr.Messages {
+		sent = sent || m.Role == "user" && strings.HasPrefix(m.Content, rt.told[0])
+	}
+	if !sent {
+		t.Error("what the screen says the model was told is not what it was sent")
 	}
 }
 

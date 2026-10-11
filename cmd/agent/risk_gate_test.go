@@ -324,7 +324,7 @@ func TestRiskCheckKnowsAnAgentsSafetyOffFlags(t *testing.T) {
 		{"npx @openai/codex exec --dangerously-bypass-approvals-and-sandbox {task}", true},
 		{"claude --dangerously-skip-permissions -p {task}", true},
 		{"claude -p --permission-mode bypassPermissions {task}", true},
-		{"gemini --approval-mode yolo -p {task}", true},
+		{"gemini -p --approval-mode yolo {task}", false}, // sandbox on by default under yolo
 		{"qwen -y -p {task}", true},
 		{"muse exec --yolo {task}", true},
 		{"copilot -p --allow-all-tools {task}", true},

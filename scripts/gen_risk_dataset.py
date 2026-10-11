@@ -956,17 +956,17 @@ OS = "linux"
 # above, so they are drawn from the same rows as before.
 AGENT_TASKS = ["{task}", '"fix the failing test"', '"review the diff against main"',
                "'add a /health endpoint and run the tests'", '"summarize README.md"']
-# Which flags count: one that drops the agent's sandbox, or that drops its
-# approvals where it has no sandbox to fall back on (copilot, gemini's -y,
-# cursor's --force). Approvals off with the sandbox still on is contained —
-# `codex exec --full-auto`, `muse exec --approval-mode never` — and is safe.
+# Which flags count: one that drops the agent's sandbox (codex's bypass,
+# cursor's --force), or that drops its approvals where it has no sandbox to
+# fall back on (claude, copilot, opencode, qwen's --yolo). Approvals off with
+# the sandbox still on is contained, and safe: `codex exec --full-auto`,
+# `muse exec --approval-mode never`, and gemini's --yolo, which its docs say
+# turns gemini's sandbox on by default — unlike qwen's, which does not.
 AGENT_UNSAFE = {  # documented flags (each CLI's --help or docs)
     "codex exec": ["--dangerously-bypass-approvals-and-sandbox", "--yolo", "--sandbox danger-full-access",
                    "-s danger-full-access"],
     "npx @openai/codex exec": ["--dangerously-bypass-approvals-and-sandbox", "--yolo"],
     "claude -p": ["--dangerously-skip-permissions", "--permission-mode bypassPermissions"],
-    "gemini -p": ["--yolo", "-y", "--approval-mode yolo"],
-    "npx @google/gemini-cli -p": ["--yolo", "--approval-mode yolo"],
     "qwen -p": ["--yolo", "-y", "--approval-mode yolo"],
     "muse exec": ["--yolo", "--disable-sandbox"],
     "copilot -p": ["--allow-all", "--allow-all-tools", "--allow-all-paths"],
@@ -981,8 +981,9 @@ AGENT_SAFE = {
     "npx @openai/codex exec": ["", "--full-auto"],
     "claude -p": ["", "--permission-mode plan", "--permission-mode acceptEdits", "--model sonnet",
                   "--output-format json"],
-    "gemini -p": ["", "-m gemini-2.5-pro", "--approval-mode auto_edit", "--sandbox"],
-    "npx @google/gemini-cli -p": ["", "-m gemini-2.5-flash"],
+    "gemini -p": ["", "-m gemini-2.5-pro", "--approval-mode auto_edit", "--sandbox", "--yolo", "-y",
+                  "--approval-mode yolo"],
+    "npx @google/gemini-cli -p": ["", "-m gemini-2.5-flash", "--yolo"],
     "qwen -p": ["", "-m qwen3-coder-plus"],
     "muse exec": ["", "--approval-mode on-request", "--disable-write", "--disable-write --approval-mode never",
                   "--approval-mode never", "--disable-approval", "--sandbox-network restricted"],

@@ -151,12 +151,13 @@ func (a *app) injectJobResults() {
 	}
 }
 
-// beforeTurn is the agent's between-steps hook (SetBeforeTurn): it folds both
-// /btw asides and any just-finished background-job results into the model's
-// working set, so a job that completes MID-task lands on the next
-// reason→act→observe step instead of waiting for the next task boundary.
+// beforeTurn is the agent's between-steps hook (SetBeforeTurn): it folds any
+// just-finished background-job results into the model's working set, so a job
+// that completes MID-task lands on the next reason→act→observe step instead of
+// waiting for the next task boundary. /steer notes have their own hook,
+// drainSteers.
 func (a *app) beforeTurn() []llm.Message {
-	return append(a.drainBtw(), a.drainJobResults()...)
+	return a.drainJobResults()
 }
 
 // drainJobResults is the between-steps counterpart of injectJobResults: it
@@ -171,13 +172,14 @@ func (a *app) drainJobResults() []llm.Message {
 	return notes
 }
 
-// --- /btw side-channel steering --------------------------------------------
+// --- /steer ------------------------------------------------------------------
 //
-// /btw drops a note into a RUNNING task without stopping it (esc cancels; /btw
-// steers). The note is buffered under btwMu and the agent's beforeTurn hook
-// (drainBtw) folds it into the model's working set between turns, so it lands on
-// the next reason→act→observe step instead of interrupting the stream. Typed
-// while idle, it simply steers the next run.
+// /steer drops a note into a RUNNING task without stopping it (esc cancels). The
+// note is buffered under btwMu and the agent's steer hook (drainSteers) hands it
+// to the model between turns, so it lands on the next reason→act→observe step
+// instead of interrupting the stream. Typed while idle, it steers the next run.
+// A note still waiting when its task ends is taken back (takeSteers) — never
+// left for the next, unrelated task to pick up.
 
 // addBtw queues a user aside. Safe to call from the UI goroutine while the run
 // goroutine drains it.
@@ -192,22 +194,24 @@ func (a *app) addBtw(note string) bool {
 	return true
 }
 
-// drainBtw is the agent's beforeTurn hook: it returns queued /btw notes as
-// user-role messages (prefixed so the model reads them as an aside, not a new
-// task) and clears the buffer.
-func (a *app) drainBtw() []llm.Message {
+// takeSteers returns the queued /steer notes and clears the queue.
+func (a *app) takeSteers() []string {
 	a.btwMu.Lock()
+	defer a.btwMu.Unlock()
 	notes := a.pendingBtw
 	a.pendingBtw = nil
-	a.btwMu.Unlock()
-	if len(notes) == 0 {
-		return nil
+	return notes
+}
+
+// drainSteers is the agent's steer hook (SetSteers): the notes go to the model,
+// and while a goal stands they amend it, so a /goal go after a restart still
+// pursues the goal as corrected.
+func (a *app) drainSteers() []string {
+	notes := a.takeSteers()
+	if len(notes) > 0 && !a.readOnly {
+		a.amendGoal(notes)
 	}
-	msgs := make([]llm.Message, 0, len(notes))
-	for _, n := range notes {
-		msgs = append(msgs, llm.User("[by the way] "+n))
-	}
-	return msgs
+	return notes
 }
 
 // btwPending reports how many /btw notes are queued (for /status).

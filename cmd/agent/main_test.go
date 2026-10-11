@@ -89,19 +89,18 @@ func TestBeforeTurnDeliversFinishedJob(t *testing.T) {
 	}
 
 	a.jobs = append(a.jobs, &job{id: 1, profile: "codex", task: "fix the repo", done: true, ok: true, result: "codex report: patched"})
-	a.addBtw("also check the tests") // both channels fold through beforeTurn
+	a.addBtw("also check the tests") // a steer goes through its own hook, not this one
 
 	before := a.ag.SessionLen()
 	msgs := a.beforeTurn()
-	if len(msgs) != 2 {
-		t.Fatalf("beforeTurn returned %d messages, want 2 (btw + job)", len(msgs))
+	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "codex report: patched") {
+		t.Fatalf("beforeTurn = %v, want only the job note", msgs)
 	}
-	joined := msgs[0].Content + "\n" + msgs[1].Content
-	if !strings.Contains(joined, "also check the tests") || !strings.Contains(joined, "codex report: patched") {
-		t.Fatalf("beforeTurn missing btw or job note: %q", joined)
+	if a.btwPending() != 1 {
+		t.Fatal("beforeTurn took the steer — it would reach the model unannounced")
 	}
 
-	// The job note is durable (folded into history); the btw aside is not.
+	// The job note is durable (folded into history).
 	h := a.ag.History()
 	if len(h) != before+1 || !strings.Contains(h[len(h)-1].Content, "codex report: patched") {
 		t.Fatalf("job note not persisted to history")
@@ -7218,10 +7217,10 @@ func TestExitCommandQuits(t *testing.T) {
 	}
 }
 
-// TestBtwSteeringDrainsOnce covers the /btw side-channel: a note is buffered
-// (safe from the UI goroutine), the agent's beforeTurn hook folds it in as a
-// prefixed user aside exactly once, and the buffer clears so it can't repeat.
-func TestBtwSteeringDrainsOnce(t *testing.T) {
+// TestSteerDrainsOnce covers /steer: a note is buffered (safe from the UI
+// goroutine), the agent's steer hook hands it over exactly once, and the buffer
+// clears so it can't repeat.
+func TestSteerDrainsOnce(t *testing.T) {
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
 	kb, _ := knowledge.Open("")
@@ -7240,21 +7239,84 @@ func TestBtwSteeringDrainsOnce(t *testing.T) {
 		t.Fatalf("btwPending = %d, want 2", n)
 	}
 
-	msgs := a.drainBtw() // this is the agent's beforeTurn hook
-	if len(msgs) != 2 {
-		t.Fatalf("drainBtw returned %d messages, want 2", len(msgs))
+	notes := a.drainSteers() // this is the agent's steer hook
+	if len(notes) != 2 || notes[0] != "look in internal/tool, not cmd" {
+		t.Fatalf("drainSteers = %q, want both notes as typed, in order", notes)
 	}
-	if msgs[0].Role != "user" || !strings.HasPrefix(msgs[0].Content, "[by the way] ") {
-		t.Errorf("note not delivered as a prefixed user aside: %+v", msgs[0])
-	}
-	if !strings.Contains(msgs[0].Content, "internal/tool") {
-		t.Errorf("note content lost: %q", msgs[0].Content)
-	}
-	if got := a.drainBtw(); got != nil { // drained once — never repeats
+	if got := a.drainSteers(); got != nil { // drained once — never repeats
 		t.Errorf("second drain must be empty, got %v", got)
 	}
 	if a.btwPending() != 0 {
 		t.Error("buffer not cleared after drain")
+	}
+	if got := a.beforeTurn(); len(got) != 0 {
+		t.Errorf("beforeTurn delivered %v — steers have their own hook now", got)
+	}
+}
+
+func steerTUI(t *testing.T) *tuiModel {
+	t.Helper()
+	setHome(t, t.TempDir())
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	m := &tuiModel{state: stRunning, accent: lipgloss.Color("13"), input: textarea.New(), width: 100,
+		bridge: newBridge(), ctx: context.Background(), app: &app{cfg: cfg, workspace: cfg.Workspace}}
+	m.app.windowDetected = true // detectWindowCmd → nil (no probe)
+	m.app.client = llm.NewOpenAIClient(config.LLM{})
+	m.app.ag = agent.New(m.app.client, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
+	return m
+}
+
+// A steer still waiting when its task ended stayed queued, and opened the next
+// task — one it was never written for. It comes back to the input instead.
+func TestASteerTheTaskNeverGotComesBackToTheInput(t *testing.T) {
+	m := steerTUI(t)
+	m.addSteer("use tabs")
+	m.Update(taskDoneMsg{})
+	if got := m.input.Value(); got != "use tabs" {
+		t.Errorf("input = %q, want the undelivered steer back", got)
+	}
+	if m.app.btwPending() != 0 || len(m.steer) != 0 {
+		t.Errorf("pending=%d pinned=%v — the next task would still get it", m.app.btwPending(), m.steer)
+	}
+	if !strings.Contains(strings.Join(m.history, "\n"), "before your steer reached it") {
+		t.Error("the log doesn't say why the note is back")
+	}
+}
+
+// The pinned note said only that it would land; nothing said that it did. A
+// delivery is logged with its step, and its pinned copy goes — one copy per
+// delivery, so a note typed twice stays until both have landed.
+func TestADeliveredSteerIsLoggedAndUnpinned(t *testing.T) {
+	m := steerTUI(t)
+	m.addSteer("use tabs")
+	m.addSteer("use tabs")
+	m.Update(eventMsg{kind: "steer", fields: map[string]any{"notes": []string{"use tabs"}, "step": 3}})
+	if len(m.steer) != 1 {
+		t.Errorf("pinned = %q, want the one copy not yet delivered", m.steer)
+	}
+	if !strings.Contains(strings.Join(m.history, "\n"), "steer delivered (step 3): use tabs") {
+		t.Errorf("no delivery line in the log:\n%s", strings.Join(m.history, "\n"))
+	}
+}
+
+// While a goal stands, a delivered steer amends it — on disk, so a /goal go
+// after a restart still pursues the goal as corrected. A new goal starts clean.
+func TestASteerAmendsTheStandingGoal(t *testing.T) {
+	m := steerTUI(t)
+	a := m.app
+	a.setGoal("add login")
+	a.addBtw("no OAuth")
+	a.drainSteers()
+	if g := a.goalSnapshot(); !slices.Equal(g.Corrections, []string{"no OAuth"}) || !strings.Contains(g.target(), "no OAuth") {
+		t.Errorf("goal = %+v, target %q — the correction is lost", g, g.target())
+	}
+	if data, _ := os.ReadFile(a.goalPath()); !strings.Contains(string(data), "no OAuth") {
+		t.Error("the correction is not persisted")
+	}
+	a.setGoal("write docs")
+	if g := a.goalSnapshot(); len(g.Corrections) != 0 {
+		t.Errorf("a new goal kept the old one's corrections: %q", g.Corrections)
 	}
 }
 

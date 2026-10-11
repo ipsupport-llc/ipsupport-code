@@ -566,7 +566,7 @@ type app struct {
 	jobSeq int
 
 	btwMu      sync.Mutex // guards pendingBtw — /steer notes folded into a running task
-	pendingBtw []string   // steering notes awaiting the running task's next turn (see jobs.go drainBtw)
+	pendingBtw []string   // /steer notes awaiting the running task's next turn (see jobs.go drainSteers)
 
 	asideMu      sync.Mutex // guards pendingAside — /btw side questions answered in one no-tools turn
 	pendingAside []string
@@ -1647,6 +1647,33 @@ type goalState struct {
 	// resume) and Agent.SetPriorGoalProgress. Cleared only when the goal is
 	// done or replaced with different text.
 	Progressed bool `json:"progressed,omitempty"`
+	// Corrections are the /steer notes delivered while this goal stood: they
+	// amend it for the judge and every re-feed, across resumes. Cleared with
+	// the goal, or when it is replaced with different text.
+	Corrections []string `json:"corrections,omitempty"`
+}
+
+// target is the goal as the judge accepts it: its text, amended by the user's
+// corrections.
+func (g goalState) target() string {
+	if g.Text == "" {
+		return ""
+	}
+	return g.Text + agent.CorrectionsBlock(g.Corrections)
+}
+
+// amendGoal records steers delivered while a goal stands.
+func (a *app) amendGoal(notes []string) {
+	a.statusMu.Lock()
+	if a.goal.Status == "" || a.goal.Text == "" {
+		a.statusMu.Unlock()
+		return
+	}
+	a.goal.Corrections = append(a.goal.Corrections, notes...)
+	a.statusMu.Unlock()
+	if err := a.saveGoal(); err != nil {
+		slog.Warn("goal correction not persisted", "err", err)
+	}
 }
 
 // statePath locates one of this workspace's runtime-state files — the standing
@@ -3229,7 +3256,8 @@ func (a *app) wire() error {
 		run, _ := a.readOnlyRun()
 		a.ag.SetReadOnly(run)
 	}
-	a.ag.SetBeforeTurn(a.beforeTurn) // /steer notes + finished background jobs fold in between steps of a running task
+	a.ag.SetBeforeTurn(a.beforeTurn) // finished background jobs fold in between steps of a running task
+	a.ag.SetSteers(a.drainSteers)    // so do /steer notes, and before a final answer is accepted
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
 	if !a.readOnly {                 // a throwaway session leaves nothing behind
 		a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
@@ -4377,7 +4405,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalLoopBudget(), a.cfg.GoalNudge)  // in force whenever a standing goal exists (any status) — see goalLoopBudget
-	a.ag.SetGoalText(a.goalSnapshot().Text)                // the judge accepts against the GOAL, never against this run's errand
+	a.ag.SetGoalText(a.goalSnapshot().target())            // the judge accepts against the GOAL, never against this run's errand
 	a.ag.SetJudgeCriteria(loadJudgeCriteria(a.workspace))  // project acceptance criteria, re-read each run
 	a.ag.SetGoalGap(a.goalSnapshot().Missing)              // what the last attempt was found to be missing — see SetGoalGap
 	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again
@@ -4456,7 +4484,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) (a
 	cp := a.beginCheckpoint(goal)
 	defer a.endCheckpoint(cp)
 	a.ag.SetGoalLoop(a.goalLoopBudget(), a.cfg.GoalNudge)  // in force whenever a standing goal exists (any status) — see goalLoopBudget
-	a.ag.SetGoalText(a.goalSnapshot().Text)                // the judge accepts against the GOAL, never against this run's errand
+	a.ag.SetGoalText(a.goalSnapshot().target())            // the judge accepts against the GOAL, never against this run's errand
 	a.ag.SetJudgeCriteria(loadJudgeCriteria(a.workspace))  // project acceptance criteria, re-read each run
 	a.ag.SetGoalGap(a.goalSnapshot().Missing)              // what the last attempt was found to be missing — see SetGoalGap
 	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again

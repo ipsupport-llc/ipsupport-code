@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -635,6 +636,9 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.subUpdate(e)
 		default:
 			m.judging = e.kind == "judging" // until the next event: the verdict, a re-feed, the final
+			if e.kind == "steer" {
+				m.steerDelivered(e)
+			}
 			m.push(m.renderEvent(e)...)
 			if e.kind == "final" {
 				m.subs = nil // a stray sub-agent line can't outlive the task
@@ -682,7 +686,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.cancel = nil
 		m.retry = nil
-		m.steer = nil                                      // steering notes belonged to the run that just ended
+		m.restoreSteers()                                  // steering notes belonged to the run that just ended
 		m.applyPendingMode()                               // a shift+tab during the task takes effect now, before the next one
 		detect := m.detectWindowCmd()                      // model is loaded now — confirm the real window
 		detect = tea.Batch(detect, m.applyPendingConfig()) // settings staged in /config while this task was running
@@ -2059,7 +2063,7 @@ func (m *tuiModel) forceDetach() (tea.Model, tea.Cmd) {
 	m.state = stIdle
 	m.cancel = nil
 	m.retry = nil
-	m.steer = nil
+	m.restoreSteers() // the abandoned run will never take them
 	m.busyMsg = ""
 	m.taskCancelled = false
 	staged := m.applyPendingConfig() // a detached run emits no taskDoneMsg — don't strand staged settings
@@ -2418,6 +2422,38 @@ func (m *tuiModel) addSteer(note string) {
 	m.syncViewport()
 }
 
+// steerDelivered drops the notes a "steer" event delivered from the pinned
+// block — one pinned copy per delivered note, oldest first, so a note typed
+// twice stays pinned until both have gone.
+func (m *tuiModel) steerDelivered(e uiEvent) {
+	notes, _ := e.fields["notes"].([]string)
+	for _, n := range notes {
+		if i := slices.Index(m.steer, strings.TrimSpace(n)); i >= 0 {
+			m.steer = slices.Delete(m.steer, i, i+1)
+		}
+	}
+	m.syncViewport()
+}
+
+// restoreSteers runs when a task ends: the /steer notes it never received come
+// back into the input, where enter sends them as a follow-up. They used to stay
+// queued and open the next task — one they were never written for.
+func (m *tuiModel) restoreSteers() {
+	m.steer = nil
+	left := m.app.takeSteers()
+	if len(left) == 0 {
+		return
+	}
+	text := strings.Join(left, "\n")
+	if cur := strings.TrimSpace(m.input.Value()); cur != "" {
+		text += "\n" + cur
+	}
+	m.input.SetValue(text)
+	m.input.CursorEnd()
+	m.syncInputHeight()
+	m.push(cDim.Render("  ↩ the task ended before your steer reached it — it's back in the input; enter sends it as a follow-up"))
+}
+
 // thinkingView renders the model's live output when toggled on with ctrl+t —
 // a look into what it's doing while it's still generating, not a transcript
 // to scroll back through. This is reasoning text for a model that streams a
@@ -2476,7 +2512,7 @@ func (m *tuiModel) steerView() []string {
 	if len(m.steer) == 0 {
 		return nil
 	}
-	verb := "folds into this task on its next step"
+	verb := "waiting — lands when the current step finishes"
 	if m.state != stRunning {
 		verb = "steers the next run you start"
 	}
@@ -3228,6 +3264,15 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		}
 		return []string{cOk.Render(fmt.Sprintf("  ✓ job #%d (%v) finished", id, e.fields["profile"])) +
 			cDim.Render("  — result lands next turn · /jobs result "+strconv.Itoa(id)+" to read now")}
+	case "steer":
+		// The moment a /steer note reached the model — the pinned note said only
+		// that it would, and nothing in the log said when, or that it ever did.
+		var out []string
+		notes, _ := e.fields["notes"].([]string)
+		for _, n := range notes {
+			out = append(out, m.indented(cToolCall, fmt.Sprintf("↪ steer delivered (step %d): ", toInt(e.fields["step"])), n)...)
+		}
+		return out
 	case "aside":
 		// A /btw side answer: the question on one line, the answer wrapped below.
 		q, _ := e.fields["q"].(string)

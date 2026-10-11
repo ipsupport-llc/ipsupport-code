@@ -337,6 +337,13 @@ func summarize(t agent.Transcript) string {
 			// distill into a "fact" about the project.
 			// agent-notes ride on top of the goal; they are ours, not the user's.
 			content := agent.StripNotes(m.Content)
+			// A /steer note is the user's own words, typed mid-run: not the goal,
+			// and not ours either. It was labelled HARNESS, so the learning pass
+			// read the user's corrections as our scaffolding.
+			if agent.IsSteerMessage(content) {
+				fmt.Fprintf(&b, "USER CORRECTION (mid-task): %s\n", oneLine(content))
+				continue
+			}
 			if agent.IsHarnessMessage(content) {
 				fmt.Fprintf(&b, "HARNESS (not the user): %s\n", oneLine(content))
 				continue

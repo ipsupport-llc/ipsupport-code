@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -3570,21 +3571,149 @@ func TestTranscriptCarriesTheGapOnTheNormalPath(t *testing.T) {
 }
 
 // The doc comment on IsHarnessMessage always claimed it covered job notes, and
-// the list never included them — so a finished sub-agent's entire answer, and
-// every /btw the user dropped mid-run, reached the learning pass labelled as
-// the user's own goal.
-func TestIsHarnessMessageCoversDeliveredJobNotesAndAsides(t *testing.T) {
-	ours := []string{
-		"[background job #3 finished — codex · 2m1s]\nHere is the whole report it wrote…",
-		"[by the way] also check the tests",
-	}
-	for _, m := range ours {
-		if !IsHarnessMessage(m) {
-			t.Errorf("not recognized as ours: %q", clip(m, 60))
-		}
+// the list never included them — so a finished sub-agent's entire answer
+// reached the learning pass labelled as the user's own goal. A /steer note is
+// the user's own words, so it is a steer, never ours — in either wording.
+func TestIsHarnessMessageCoversDeliveredJobNotesNotSteers(t *testing.T) {
+	if m := "[background job #3 finished — codex · 2m1s]\nHere is the whole report it wrote…"; !IsHarnessMessage(m) {
+		t.Errorf("not recognized as ours: %q", clip(m, 60))
 	}
 	if IsHarnessMessage("background jobs keep failing, please look") {
 		t.Error("a real user message mentioning background jobs was taken for harness text")
+	}
+	for _, m := range []string{steerMessage("also check the tests"), "[by the way] also check the tests"} {
+		if IsHarnessMessage(m) || !IsSteerMessage(m) {
+			t.Errorf("%q: harness=%v steer=%v, want a steer and not ours", clip(m, 60), IsHarnessMessage(m), IsSteerMessage(m))
+		}
+	}
+	if IsSteerMessage("by the way, the tests fail") {
+		t.Error("a plain user message was taken for a steer")
+	}
+}
+
+// steerOn returns a steer hook that hands over note on its nth call and nothing
+// otherwise — a note the user typed at that moment of the run.
+func steerOn(n int, note string) (func() []string, *int) {
+	calls := 0
+	return func() []string {
+		calls++
+		if calls == n {
+			return []string{note}
+		}
+		return nil
+	}, &calls
+}
+
+func hasSteer(msgs []llm.Message, note string) bool {
+	for _, m := range msgs {
+		if m.Role == "user" && m.Content == steerMessage(note) {
+			return true
+		}
+	}
+	return false
+}
+
+// A steer typed while the model wrote its final answer used to wait in the
+// queue and open the next, unrelated task. It belongs to this one: the run
+// hands it over and goes on, and the judge grades the answer that followed it.
+func TestASteerSentDuringTheFinalAnswerReachesThisTask(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	main := &scriptLLM{replies: []llm.Message{
+		calcCall(), // the judge only grades a run that did something
+		{Role: "assistant", Content: "v1, with spaces"},
+		{Role: "assistant", Content: "v2, with tabs"},
+	}}
+	judge := &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "DONE"}}}
+	rt := &recTracer{}
+	a := New(main, reg, nil, rt, "", 10)
+	a.SetGoalLoop(3, false)
+	a.SetJudgeLLM(judge)
+	steers, _ := steerOn(3, "use tabs") // 1, 2: before each turn; 3: as the answer arrives
+	a.SetSteers(steers)
+
+	tr, err := a.Run(context.Background(), "format the file")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Final != "v2, with tabs" {
+		t.Errorf("Final = %q — the run ended on the answer the steer corrected", tr.Final)
+	}
+	if !hasSteer(main.lastMsgs, "use tabs") {
+		t.Error("the steer never reached the model")
+	}
+	if judge.i != 1 || !strings.Contains(fmt.Sprint(judge.lastMsgs), "v2, with tabs") {
+		t.Errorf("judge calls = %d — it must grade only the answer after the steer", judge.i)
+	}
+	if !slices.Contains(rt.kinds, "steer") {
+		t.Error("no steer event — the UI cannot say it was delivered")
+	}
+}
+
+// On the last step the budget stretches by one: a steer handed over with no turn
+// left to act on it would be dropped in all but name.
+func TestASteerOnTheLastStepStillGetsATurn(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	main := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "v1"},
+		{Role: "assistant", Content: "v2"},
+	}}
+	a := New(main, reg, nil, nil, "", 1)
+	steers, _ := steerOn(2, "shorter")
+	a.SetSteers(steers)
+	tr, _ := a.Run(context.Background(), "write it")
+	if tr.Final != "v2" {
+		t.Errorf("Final = %q, want the turn after the steer", tr.Final)
+	}
+}
+
+// A goal re-feed restated the original goal and the judge accepted against it,
+// so a correction given midway was pushed back against. Both carry it now, and
+// so does the session's memory of the task.
+func TestASteerAmendsTheGoalForTheJudgeTheReFeedAndHistory(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	main := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "v1"},
+		{Role: "assistant", Content: "v2"},
+	}}
+	judge := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "MORE: no summary"},
+		{Role: "assistant", Content: "DONE"},
+	}}
+	rt := &recTracer{}
+	a := New(main, reg, nil, rt, "", 10)
+	a.SetGoalLoop(3, false)
+	a.SetJudgeLLM(judge)
+	steers, _ := steerOn(2, "do not touch README") // before the second turn
+	a.SetSteers(steers)
+
+	if _, err := a.Run(context.Background(), "add two numbers"); err != nil {
+		t.Fatal(err)
+	}
+	if len(rt.told) == 0 || !strings.Contains(rt.told[len(rt.told)-1], "do not touch README") {
+		t.Errorf("the re-feed restated the goal without the correction: %q", rt.told)
+	}
+	if !strings.Contains(fmt.Sprint(judge.lastMsgs), "The user's corrections since") {
+		t.Error("the judge accepted against the goal without the correction")
+	}
+	h := a.History()
+	if len(h) == 0 || !strings.Contains(h[len(h)-1].Content, "do not touch README") {
+		t.Error("session memory lost the correction with the rest of the run")
+	}
+}
+
+// A goal carries at most the latest corrections forward.
+func TestCorrectionsBlockKeepsTheLatest(t *testing.T) {
+	if CorrectionsBlock(nil) != "" {
+		t.Error("no corrections must add nothing")
+	}
+	var notes []string
+	for i := range maxCorrections + 2 {
+		notes = append(notes, fmt.Sprintf("note-%d", i))
+	}
+	b := CorrectionsBlock(notes)
+	if strings.Contains(b, "note-0\n") || strings.Contains(b, "note-1\n") || !strings.Contains(b, fmt.Sprintf("note-%d", maxCorrections+1)) {
+		t.Errorf("want only the latest %d:\n%s", maxCorrections, b)
 	}
 }
 

@@ -44,6 +44,9 @@ func CallText(tool, action string, params map[string]any) string {
 		if v == "" {
 			continue
 		}
+		if tool == "file" && fileBody[k] {
+			v = "x"
+		}
 		r := headTail([]rune(v), maxValue)
 		b = append(b, ' ')
 		b = append(b, []rune(k)...)
@@ -55,6 +58,14 @@ func CallText(tool, action string, params map[string]any) string {
 	}
 	return string(headTail(b, maxText))
 }
+
+// fileBody names the file tool's parameters that carry the text being written
+// rather than where it goes. The model judges a file change by its path — every
+// write in the dataset carries the body "x" — so it has never seen real text
+// there, and that text's n-grams, outweighing a short path, scored at random:
+// an English paragraph edited into a novel's chapter scored 0.93 sandbox_escape.
+// The body is rendered as the "x" the model was trained on.
+var fileBody = map[string]bool{"content": true, "find": true, "replace": true, "edits": true}
 
 // headTail keeps the first and last halves of what is too long, joined by
 // " … ": a cap that kept only the head let a long harmless start hide what

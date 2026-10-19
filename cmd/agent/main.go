@@ -6391,18 +6391,25 @@ func (s *stdinApprover) Approve(ctx context.Context, kind, detail string) bool {
 func (s *stdinApprover) ApproveAnswered(ctx context.Context, kind, detail string) (ok, answered bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	fmt.Fprintf(os.Stderr, "\n[approve %s] %s%s\n  allow? [y/N/a=all %s this session%s] ", kind, detail, riskSuffix(ctx), categoryLabel(approvalCategory(kind)), flaggedToo(riskNote(ctx)))
+	fmt.Fprintf(os.Stderr, "\n[approve %s] %s%s\n  allow? [y/N/a=all %s this session%s] (no answer in %s is a no) ", kind, detail, riskSuffix(ctx), categoryLabel(approvalCategory(kind)), flaggedToo(riskNote(ctx)), approvalWait())
 
+	// The read gives up with the deadline too, so a line typed after it goes to
+	// whoever asks next, not to this expired prompt.
+	wait, cancel := context.WithTimeout(ctx, approvalTimeout)
+	defer cancel()
 	result := make(chan lineResult, 1) // buffered: the read goroutine must never block sending here, even if abandoned
 	go func() {
-		line, err := s.stdin.readApproveLineCtx(ctx)
+		line, err := s.stdin.readApproveLineCtx(wait)
 		result <- lineResult{line, err}
 	}()
 
 	var res lineResult
 	select {
 	case res = <-result:
-	case <-ctx.Done():
+	case <-wait.Done():
+		if ctx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "\n  no answer in %s — denied; the task goes on without it\n", approvalWait())
+		}
 		return false, false
 	}
 	if res.err != nil {

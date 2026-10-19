@@ -244,6 +244,16 @@ func TestTheModelIsToldNobodyAnswered(t *testing.T) {
 	if gone := <-got; gone != "" {
 		t.Errorf("an explicit no came back as %q, want the plain refusal", gone)
 	}
+	// esc is someone there, not someone away — even for a prompt asked before
+	// the task, which esc denies by closing its own channel, not the abort.
+	got = ask()
+	m.bridge.arm()
+	m.state, m.cancel = stRunning, func() {}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if gone := <-got; gone != "" {
+		t.Errorf("a prompt esc dropped told the model %q, want no claim the user is away", gone)
+	}
+	m.cancel, m.taskCancelled = nil, false
 
 	defer func(d time.Duration) { approvalTimeout = d }(approvalTimeout)
 	approvalTimeout = 50 * time.Millisecond

@@ -40,6 +40,9 @@ type approvalReq struct {
 	// expire is closed by the UI when nobody answered within approvalTimeout:
 	// the call is denied, and — like esc — that is nobody's judgement of it.
 	expire chan struct{}
+	// dismiss is closed when esc drops the prompt: denied too, but someone was
+	// there, so the tool is not told the user is away.
+	dismiss chan struct{}
 	// aborted is the task's abort signal as of the ask. Once it is closed the
 	// tool has already been told no, so the UI does not show the prompt: an
 	// answer to it would change nothing, and its countdown would run for a
@@ -96,9 +99,9 @@ func (b *uiBridge) ApproveAnswered(ctx context.Context, kind, detail string) (ok
 	abort := b.abort
 	b.mu.Unlock()
 
-	reply, expire := make(chan bool, 1), make(chan struct{})
+	reply, expire, dismiss := make(chan bool, 1), make(chan struct{}), make(chan struct{})
 	select {
-	case b.approvals <- approvalReq{kind: kind, detail: detail, risk: riskNote(ctx), reply: reply, expire: expire, aborted: abort}:
+	case b.approvals <- approvalReq{kind: kind, detail: detail, risk: riskNote(ctx), reply: reply, expire: expire, dismiss: dismiss, aborted: abort}:
 	case <-abort:
 		return false, false
 	case <-ctx.Done():
@@ -109,6 +112,8 @@ func (b *uiBridge) ApproveAnswered(ctx context.Context, kind, detail string) (ok
 		return ok, true
 	case <-expire:
 		tool.NoAnswer(ctx)
+		return false, false
+	case <-dismiss:
 		return false, false
 	case <-abort:
 		return false, false

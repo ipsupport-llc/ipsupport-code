@@ -6420,9 +6420,10 @@ func (s *stdinApprover) ApproveAnswered(ctx context.Context, kind, detail string
 	}
 	// No line: the deadline passed — the read gives up with it, so this is
 	// reached by either branch — or stdin is closed and nobody can answer at
-	// all. A cancelled task is neither, and is told nothing.
+	// all. A cancelled task is neither, and is told nothing; nor is a last
+	// line typed without its newline ("n" then EOF), which is someone's answer.
 	if res.err != nil {
-		if ctx.Err() == nil {
+		if ctx.Err() == nil && strings.TrimSpace(res.line) == "" {
 			if wait.Err() != nil {
 				fmt.Fprintf(os.Stderr, "\n  no answer in %s — denied; the task goes on without it\n", approvalWait())
 			}

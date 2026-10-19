@@ -269,6 +269,11 @@ func TestTheModelIsToldNobodyAnswered(t *testing.T) {
 	if _, gone := tool.Ask(context.Background(), closed, "run", "make deploy"); !strings.Contains(gone, "nobody answered") {
 		t.Errorf("closed stdin told the model %q, want that nobody answered", gone)
 	}
+	// Nor is a refusal typed without its newline before stdin closed.
+	unterminated := &stdinApprover{stdin: newStdinOwner(bufio.NewReader(strings.NewReader("n")))}
+	if _, gone := tool.Ask(context.Background(), unterminated, "run", "make deploy"); gone != "" {
+		t.Errorf("a refusal before EOF told the model %q, want no claim nobody answered", gone)
+	}
 	// A cancelled task is not told anyone was away.
 	cctx, cancel := context.WithCancel(context.Background())
 	cancel()

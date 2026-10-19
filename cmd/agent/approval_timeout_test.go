@@ -253,6 +253,18 @@ func TestTheModelIsToldNobodyAnswered(t *testing.T) {
 	if _, gone := tool.Ask(context.Background(), s, "run", "make deploy"); !strings.Contains(gone, "nobody answered") {
 		t.Errorf("plain timeout told the model %q, want that nobody answered", gone)
 	}
+
+	// A closed stdin: nobody can answer at all.
+	closed := &stdinApprover{stdin: newStdinOwner(bufio.NewReader(strings.NewReader("")))}
+	if _, gone := tool.Ask(context.Background(), closed, "run", "make deploy"); !strings.Contains(gone, "nobody answered") {
+		t.Errorf("closed stdin told the model %q, want that nobody answered", gone)
+	}
+	// A cancelled task is not told anyone was away.
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, gone := tool.Ask(cctx, closed, "run", "make deploy"); gone != "" {
+		t.Errorf("a cancelled task was told %q, want nothing", gone)
+	}
 }
 
 // The calls asked about outside the tools say it too: the risk check's own stop,
@@ -262,7 +274,7 @@ func TestEveryAskerSaysNobodyAnswered(t *testing.T) {
 	a.approver = silentApprover{}
 	ctx := scored(t, a, pol, flaggedCommand)
 	mustFlag(t, ctx)
-	if msg := a.riskGate(pol)(ctx, "run", "shell", map[string]any{"command": flaggedCommand}); !strings.Contains(msg, "nobody answered") {
+	if msg := a.riskGate(pol)(ctx, "run", "shell", map[string]any{"command": flaggedCommand}); !strings.Contains(msg, "nobody answered") || !strings.Contains(msg, "risk check had flagged it") {
 		t.Errorf("risk check: %q", msg)
 	}
 

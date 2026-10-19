@@ -43,6 +43,9 @@ func TestAnUnansweredPromptIsNotReportedAsTheUsersNo(t *testing.T) {
 			if !r.IsError || !strings.Contains(r.Content, "nobody answered") || strings.Contains(r.Content, "denied by user") {
 				t.Errorf("result = %+v, want it to say nobody answered — not that the user denied it", r)
 			}
+			if strings.Contains(r.Content, "git git") {
+				t.Errorf("result = %q names the call twice", r.Content)
+			}
 		})
 	}
 }

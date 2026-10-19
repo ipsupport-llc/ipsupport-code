@@ -91,7 +91,10 @@ func AskWith(ctx context.Context, kind, detail string, approve func(ctx context.
 		return false, ""
 	}
 	what, _, _ := strings.Cut(detail, "\n")
-	return false, kind + " " + what + " was not run: nobody answered the approval prompt in time — the user may be away. " +
+	if !strings.HasPrefix(what, kind+" ") { // git's detail already opens "git …"
+		what = kind + " " + what
+	}
+	return false, what + " was not run: nobody answered the approval prompt in time — the user may be away. " +
 		"Don't ask for it again now; carry on with whatever doesn't need it, and when you finish, say it is still waiting on the user."
 }
 

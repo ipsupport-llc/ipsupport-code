@@ -6416,13 +6416,18 @@ func (s *stdinApprover) ApproveAnswered(ctx context.Context, kind, detail string
 	select {
 	case res = <-result:
 	case <-wait.Done():
+		res.err = wait.Err()
+	}
+	// No line: the deadline passed — the read gives up with it, so this is
+	// reached by either branch — or stdin is closed and nobody can answer at
+	// all. A cancelled task is neither, and is told nothing.
+	if res.err != nil {
 		if ctx.Err() == nil {
-			fmt.Fprintf(os.Stderr, "\n  no answer in %s — denied; the task goes on without it\n", approvalWait())
+			if wait.Err() != nil {
+				fmt.Fprintf(os.Stderr, "\n  no answer in %s — denied; the task goes on without it\n", approvalWait())
+			}
 			tool.NoAnswer(ctx)
 		}
-		return false, false
-	}
-	if res.err != nil {
 		return false, false
 	}
 	switch strings.TrimSpace(strings.ToLower(res.line)) {

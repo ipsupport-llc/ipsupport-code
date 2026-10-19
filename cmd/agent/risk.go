@@ -134,7 +134,7 @@ func (a *app) riskGate(pol *policy.Engine) func(ctx context.Context, tool, actio
 			return ""
 		}
 		if gone != "" {
-			return gone
+			return gone + " (The risk check had flagged it: " + riskNote(ctx) + ".)"
 		}
 		return fmt.Sprintf("%s %s denied by user — the risk check flagged it: %s", kind, detail, riskNote(ctx))
 	}

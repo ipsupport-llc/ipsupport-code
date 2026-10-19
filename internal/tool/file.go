@@ -391,7 +391,10 @@ func (f *fileTool) writeFile(ctx context.Context, action string, a Args, appendM
 	case policy.Deny:
 		return Err(action + " " + path + " denied by workspace policy")
 	case policy.Ask:
-		if !f.ap.Approve(ctx, action, path) {
+		if ok, gone := Ask(ctx, f.ap, action, path); !ok {
+			if gone != "" {
+				return Err(gone)
+			}
 			return Err(action + " " + path + " denied by user")
 		}
 	}
@@ -529,7 +532,10 @@ func (f *fileTool) edit(ctx context.Context, a Args) Result {
 	case policy.Deny:
 		return Err("edit " + path + " denied by workspace policy")
 	case policy.Ask:
-		if !f.ap.Approve(ctx, "edit", path) {
+		if ok, gone := Ask(ctx, f.ap, "edit", path); !ok {
+			if gone != "" {
+				return Err(gone)
+			}
 			return Err("edit " + path + " denied by user")
 		}
 	}
@@ -668,7 +674,10 @@ func (f *fileTool) mkdir(ctx context.Context, a Args) Result {
 	case policy.Deny:
 		return Err("mkdir " + path + " denied by workspace policy")
 	case policy.Ask:
-		if !f.ap.Approve(ctx, "mkdir", path) {
+		if ok, gone := Ask(ctx, f.ap, "mkdir", path); !ok {
+			if gone != "" {
+				return Err(gone)
+			}
 			return Err("mkdir " + path + " denied by user")
 		}
 	}

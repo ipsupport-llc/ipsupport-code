@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
+	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 )
 
 // uiBridge is the seam between the agent (running in a background goroutine) and
@@ -107,6 +108,7 @@ func (b *uiBridge) ApproveAnswered(ctx context.Context, kind, detail string) (ok
 	case ok := <-reply:
 		return ok, true
 	case <-expire:
+		tool.NoAnswer(ctx)
 		return false, false
 	case <-abort:
 		return false, false

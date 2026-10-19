@@ -622,8 +622,13 @@ func (g *gitTool) run(ctx context.Context, action string, mutating bool, args ..
 // part of the approval text — what the user is asked to approve is the command
 // they would have typed, not our hardening.
 func (g *gitTool) runWith(ctx context.Context, action string, mutating bool, timeout time.Duration, extraEnv, gitFlags []string, note string, args ...string) Result {
-	if mutating && !g.ap.Approve(ctx, "git", "git "+strings.Join(args, " ")+note) {
-		return Err("git " + action + " denied by user")
+	if mutating {
+		if ok, gone := Ask(ctx, g.ap, "git", "git "+strings.Join(args, " ")+note); !ok {
+			if gone != "" {
+				return Err(gone)
+			}
+			return Err("git " + action + " denied by user")
+		}
 	}
 	dir, err := g.pol.Resolve(".")
 	if err != nil {

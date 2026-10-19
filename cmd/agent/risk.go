@@ -11,6 +11,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/policy"
 	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
 	"github.com/ipsupport-llc/ipsupport-code/internal/shellsplit"
+	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 )
 
 // EnvRiskOff turns risk scoring off for a run, the check included. risk_check
@@ -114,9 +115,9 @@ func (a *app) riskStops(ctx context.Context, kind string) bool {
 // and file (see policyVerdict). A call the policy asks about gets its prompt
 // from the tool, with the score on it, and one it refuses never runs.
 func (a *app) riskGate(pol *policy.Engine) func(ctx context.Context, tool, action string, params map[string]any) string {
-	return func(ctx context.Context, tool, action string, params map[string]any) string {
-		kind, detail := tool, ""
-		switch tool {
+	return func(ctx context.Context, name, action string, params map[string]any) string {
+		kind, detail := name, ""
+		switch name {
 		case "run":
 			detail, _ = params["command"].(string)
 		case "file":
@@ -125,11 +126,15 @@ func (a *app) riskGate(pol *policy.Engine) func(ctx context.Context, tool, actio
 		default:
 			return ""
 		}
-		if !a.riskStops(ctx, kind) || policyVerdict(pol, tool, action, params) != risk.VerdictAllow {
+		if !a.riskStops(ctx, kind) || policyVerdict(pol, name, action, params) != risk.VerdictAllow {
 			return ""
 		}
-		if a.approveGated(ctx, kind, detail) {
+		ok, gone := tool.AskWith(ctx, kind, detail, a.approveGated)
+		if ok {
 			return ""
+		}
+		if gone != "" {
+			return gone
 		}
 		return fmt.Sprintf("%s %s denied by user — the risk check flagged it: %s", kind, detail, riskNote(ctx))
 	}

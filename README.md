@@ -473,8 +473,10 @@ always enforced.
 **No answer is a no.** A prompt waits two minutes, with the countdown in the
 status line. Then the call is denied and the task goes on without it, instead
 of sitting on the prompt until you come back. Only an explicit yes runs
-anything. The risk model learns nothing from a prompt that ran out, because
-nobody judged that call.
+anything. The model is told that nobody answered, not that you said no. It goes
+on without the call and says at the end that the call is still waiting on you.
+The risk model learns nothing from a prompt that ran out, because nobody judged
+that call.
 
 **Grant it for the session.** Press **`a`** on any prompt to stop asking about
 that whole *kind* of action (file changes, shell, git, sub-agent spawns, MCP) for

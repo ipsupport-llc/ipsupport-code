@@ -11,6 +11,9 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 )
 
 // askThroughTheUI starts an approval on the bridge and shows it on m, the way
@@ -209,5 +212,67 @@ func TestAnUnansweredPlainPromptIsANo(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the line typed after the expired prompt never reached the REPL — the dead prompt took it")
+	}
+}
+
+// silentApprover is a prompt that ran out: a no that nobody gave.
+type silentApprover struct{}
+
+func (silentApprover) Approve(ctx context.Context, _, _ string) bool {
+	tool.NoAnswer(ctx)
+	return false
+}
+
+// The model is told a prompt ran out, not that the user said no — through the
+// TUI and the plain prompt alike — and a real no is still reported as one.
+func TestTheModelIsToldNobodyAnswered(t *testing.T) {
+	m := &tuiModel{bridge: newBridge(), input: textarea.New(), state: stRunning, spin: spinner.New()}
+	ask := func() <-chan string {
+		got := make(chan string, 1)
+		go func() { _, gone := tool.Ask(context.Background(), m.bridge, "run", "make deploy"); got <- gone }()
+		m.Update(approvalMsg(<-m.bridge.approvals))
+		return got
+	}
+	got := ask()
+	m.approveBy = time.Now().Add(-time.Second)
+	m.Update(spinner.TickMsg{})
+	if gone := <-got; !strings.Contains(gone, "nobody answered") {
+		t.Errorf("TUI timeout told the model %q, want that nobody answered", gone)
+	}
+	got = ask()
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if gone := <-got; gone != "" {
+		t.Errorf("an explicit no came back as %q, want the plain refusal", gone)
+	}
+
+	defer func(d time.Duration) { approvalTimeout = d }(approvalTimeout)
+	approvalTimeout = 50 * time.Millisecond
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	s := &stdinApprover{stdin: newStdinOwner(bufio.NewReader(pr))}
+	if _, gone := tool.Ask(context.Background(), s, "run", "make deploy"); !strings.Contains(gone, "nobody answered") {
+		t.Errorf("plain timeout told the model %q, want that nobody answered", gone)
+	}
+}
+
+// The calls asked about outside the tools say it too: the risk check's own stop,
+// a sub-agent spawn and an external agent.
+func TestEveryAskerSaysNobodyAnswered(t *testing.T) {
+	a, pol, _ := gateApp(t, "run.default=allow")
+	a.approver = silentApprover{}
+	ctx := scored(t, a, pol, flaggedCommand)
+	mustFlag(t, ctx)
+	if msg := a.riskGate(pol)(ctx, "run", "shell", map[string]any{"command": flaggedCommand}); !strings.Contains(msg, "nobody answered") {
+		t.Errorf("risk check: %q", msg)
+	}
+
+	b := &app{cfg: config.Default(), workspace: t.TempDir(), approver: silentApprover{}}
+	plan := spawnPlan{profile: "p", llmCfg: config.LLM{Model: "m"}, subWorkspace: b.workspace, spawnDefault: "ask"}
+	if _, err := b.runSpawnPlan(context.Background(), plan, "a task", nil); err == nil || !strings.Contains(err.Error(), "nobody answered") {
+		t.Errorf("spawn: %v", err)
+	}
+	p := config.AgentProfile{Kind: "external", Command: "codex", Args: []string{"exec", "{task}"}}
+	if _, err := b.spawnExternalAgent(context.Background(), "codex", p, "a task", b.workspace, nil, nil); err == nil || !strings.Contains(err.Error(), "nobody answered") {
+		t.Errorf("external agent: %v", err)
 	}
 }

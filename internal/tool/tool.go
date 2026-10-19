@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 )
 
 // Result is a tool's outcome as the model sees it. Content is always model-
@@ -56,6 +57,45 @@ func (e *ToolError) Unwrap() error { return e.Err }
 // job's own cancellation (not just a process-wide abort) can free it.
 type Approver interface {
 	Approve(ctx context.Context, kind, detail string) bool
+}
+
+type noAnswerKey struct{}
+
+// NoAnswer is how an Approver marks the no it is about to return as nobody's:
+// the prompt ran out unanswered. A no under an Ask is otherwise reported as
+// the user's.
+func NoAnswer(ctx context.Context) {
+	if gone, ok := ctx.Value(noAnswerKey{}).(*atomic.Bool); ok {
+		gone.Store(true)
+	}
+}
+
+// Ask is ap.Approve, plus — when the no was nobody's answer — what the call
+// reports instead of "denied by user", or "" when someone did answer.
+func Ask(ctx context.Context, ap Approver, kind, detail string) (ok bool, unanswered string) {
+	return AskWith(ctx, kind, detail, ap.Approve)
+}
+
+// AskWith is Ask for an approval asked some other way.
+//
+// A refusal and a prompt that ran out read alike to the model as "denied by
+// user", so it took the user to be against the call — dropping it, or working
+// around a no nobody gave. What it needs instead is that the user is away: go on
+// without it, and leave it for them.
+func AskWith(ctx context.Context, kind, detail string, approve func(ctx context.Context, kind, detail string) bool) (ok bool, unanswered string) {
+	var gone atomic.Bool
+	if approve(context.WithValue(ctx, noAnswerKey{}, &gone), kind, detail) {
+		return true, ""
+	}
+	if !gone.Load() {
+		return false, ""
+	}
+	what, _, _ := strings.Cut(detail, "\n")
+	if !strings.HasPrefix(what, kind+" ") { // git's detail already opens "git …"
+		what = kind + " " + what
+	}
+	return false, what + " was not run: nobody answered the approval prompt in time — the user may be away. " +
+		"Don't ask for it again now; carry on with whatever doesn't need it, and when you finish, say it is still waiting on the user."
 }
 
 // Tool is one fat domain tool.

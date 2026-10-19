@@ -13,6 +13,7 @@ import (
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
 	"github.com/ipsupport-llc/ipsupport-code/internal/procgroup"
 	"github.com/ipsupport-llc/ipsupport-code/internal/textutil"
+	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 	"github.com/ipsupport-llc/ipsupport-code/internal/trace"
 )
 
@@ -97,7 +98,10 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 	// with its own safety into one without (found by review: the prompt showed
 	// "codex" and the task, never "exec --yolo").
 	launch := strings.TrimSpace(command + " " + strings.Join(p.Args, " "))
-	approved := a.approveGated(a.withLaunchScore(ctx, root, launch), "external agent", head+"\n  launch: "+launch+"\n  task: "+task)
+	approved, gone := tool.AskWith(a.withLaunchScore(ctx, root, launch), "external agent", head+"\n  launch: "+launch+"\n  task: "+task, a.approveGated)
+	if gone != "" {
+		return "", errors.New(gone)
+	}
 	if !approved {
 		return "", fmt.Errorf("external agent denied by user")
 	}

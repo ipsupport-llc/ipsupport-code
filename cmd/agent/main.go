@@ -1068,7 +1068,10 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 		if plan.outsideJail {
 			kind, where = "agent outside workspace", where+"  (outside the workspace)"
 		}
-		approved := a.approveGated(ctx, kind, fmt.Sprintf("%s · %s · %s\n  task: %s", plan.profile, plan.llmCfg.Model, where, task))
+		approved, gone := tool.AskWith(ctx, kind, fmt.Sprintf("%s · %s · %s\n  task: %s", plan.profile, plan.llmCfg.Model, where, task), a.approveGated)
+		if gone != "" {
+			return "", errors.New(gone)
+		}
 		if !approved {
 			return "", fmt.Errorf("spawn denied by user")
 		}
@@ -2757,7 +2760,10 @@ func (a *app) mcpClient(ctx context.Context, servers map[string]mcp.Server, name
 	// TestMCPClientLockNotHeldDuringApproval. attemptCtx (rather than ctx)
 	// carries the wait so closeMCP can cut it short on shutdown instead of
 	// leaving the eventual connection an orphan with nothing left to close it.
-	approved := a.approveGated(a.withLaunchScore(attemptCtx, "", launch), "mcp launch", detail)
+	approved, gone := tool.AskWith(a.withLaunchScore(attemptCtx, "", launch), "mcp launch", detail, a.approveGated)
+	if gone != "" {
+		return nil, errors.New(gone)
+	}
 	if !approved {
 		return nil, fmt.Errorf("mcp server %q launch denied by user", name)
 	}
@@ -2921,18 +2927,21 @@ func mcpCallDetail(server, tool string, args map[string]any) string {
 
 // mcpCall runs an MCP tool, asking approval first (it's external code that can do
 // anything).
-func (a *app) mcpCall(ctx context.Context, server, tool string, args map[string]any) (string, error) {
+func (a *app) mcpCall(ctx context.Context, server, name string, args map[string]any) (string, error) {
 	c, err := a.mcpClient(ctx, a.cfg.McpServers, server)
 	if err != nil {
 		return "", err
 	}
-	approved := a.approveGated(ctx, "mcp call", mcpCallDetail(server, tool, args))
+	approved, gone := tool.AskWith(ctx, "mcp call", mcpCallDetail(server, name, args), a.approveGated)
+	if gone != "" {
+		return "", errors.New(gone)
+	}
 	if !approved {
 		return "", fmt.Errorf("mcp call denied by user")
 	}
 	cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	return c.Call(cctx, tool, args)
+	return c.Call(cctx, name, args)
 }
 
 // maybeDetectWindowSync detects the window inline for the REPL/one-shot paths;
@@ -6407,12 +6416,19 @@ func (s *stdinApprover) ApproveAnswered(ctx context.Context, kind, detail string
 	select {
 	case res = <-result:
 	case <-wait.Done():
-		if ctx.Err() == nil {
-			fmt.Fprintf(os.Stderr, "\n  no answer in %s — denied; the task goes on without it\n", approvalWait())
-		}
-		return false, false
+		res.err = wait.Err()
 	}
+	// No line: the deadline passed — the read gives up with it, so this is
+	// reached by either branch — or stdin is closed and nobody can answer at
+	// all. A cancelled task is neither, and is told nothing; nor is a last
+	// line typed without its newline ("n" then EOF), which is someone's answer.
 	if res.err != nil {
+		if ctx.Err() == nil && strings.TrimSpace(res.line) == "" {
+			if wait.Err() != nil {
+				fmt.Fprintf(os.Stderr, "\n  no answer in %s — denied; the task goes on without it\n", approvalWait())
+			}
+			tool.NoAnswer(ctx)
+		}
 		return false, false
 	}
 	switch strings.TrimSpace(strings.ToLower(res.line)) {

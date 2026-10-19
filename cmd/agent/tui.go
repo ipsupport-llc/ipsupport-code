@@ -1218,8 +1218,8 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// next task's approvals are still read. Deny it outright: one asked
 				// before this task began holds an earlier abort signal, which
 				// Abort never closes.
-				if m.pending.expire != nil {
-					close(m.pending.expire)
+				if m.pending.dismiss != nil {
+					close(m.pending.dismiss)
 				}
 				m.pending = nil
 				return m, m.waitApproval()

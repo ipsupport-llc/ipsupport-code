@@ -470,6 +470,12 @@ pending either way, and answering it always lands you back where you were. A
 non-overridable deny floor (`rm -rf`, `sudo`, secrets, `.git`, `.env`, …) is
 always enforced.
 
+**No answer is a no.** A prompt waits two minutes, with the countdown in the
+status line. Then the call is denied and the task goes on without it, instead
+of sitting on the prompt until you come back. Only an explicit yes runs
+anything. The risk model learns nothing from a prompt that ran out, because
+nobody judged that call.
+
 **Grant it for the session.** Press **`a`** on any prompt to stop asking about
 that whole *kind* of action (file changes, shell, git, sub-agent spawns, MCP) for
 the rest of the session — in memory only, never written to config, cleared by
@@ -528,7 +534,7 @@ it learns from:
 ```
   ⚙ run shell cat ~/.ssh/id_rsa   ⚠ possible credential access (0.98)
   ⚠ approve run: cat ~/.ssh/id_rsa   ⚠ possible credential access (0.98)
-    y approve · n deny · a allow all shell commands this session, flagged ones too
+    y approve · n deny · a allow all shell commands this session, flagged ones too · ↑ Yes/No · or keep typing · no answer in 2m is a no
 ```
 
 Nothing is shown for a call it had nothing to say about — a number on every

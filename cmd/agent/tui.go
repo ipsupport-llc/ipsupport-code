@@ -93,6 +93,7 @@ type tuiModel struct {
 	pending       *approvalReq
 	preApprove    uiState         // state being interrupted when stApprove was entered — stRunning normally, or stIdle when a background job's approval is answered via ↑ while idle; restored when the approval is resolved
 	approveChoice bool            // selected Yes(true)/No(false) while answering an approval
+	approveBy     time.Time       // when the pending approval is denied for want of an answer (see approvalTimeout)
 	cfgCursor     int             // selected row in the /config panel (stConfig)
 	cfgPending    []stagedEdit    // /config changes made while a task ran; saved when it ends (staging.go)
 	cfgPhase      int             // stConfig sub-flow: cfgPhaseList, or an add-provider form field
@@ -607,6 +608,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
+		// The spinner ticks for the life of the program, so this is where an
+		// unanswered approval runs out — and where its countdown redraws.
+		if m.pending != nil && !m.approveBy.IsZero() && !time.Now().Before(m.approveBy) {
+			model, next := m.expireApproval()
+			return model, tea.Batch(cmd, next)
+		}
 		return m, cmd
 
 	case eventMsg:
@@ -651,7 +658,15 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case approvalMsg:
 		req := approvalReq(msg)
+		if req.aborted != nil {
+			select {
+			case <-req.aborted: // asked after esc: the tool already has its no
+				return m, m.waitApproval()
+			default:
+			}
+		}
 		m.pending = &req
+		m.approveBy = time.Now().Add(approvalTimeout)
 		// Do NOT fetch the next approval yet — that would overwrite m.pending and
 		// orphan this one's reply channel (a hang when the model batches calls).
 		// Multi-line: the head on the ⚠ line, extra detail lines (e.g. the FULL
@@ -664,7 +679,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.push(head)
 		m.pushLines(lines[1:])
-		m.push(cDim.Render("    y approve · n deny · a allow all " + categoryLabel(approvalCategory(req.kind)) + " this session" + flaggedToo(req.risk) + " · ↑ Yes/No · or keep typing"))
+		m.push(cDim.Render("    y approve · n deny · a allow all " + categoryLabel(approvalCategory(req.kind)) + " this session" + flaggedToo(req.risk) + " · ↑ Yes/No · or keep typing · no answer in " + approvalWait() + " is a no"))
 		// Go modal by default: a bare y/n/a/enter answers it, and nothing else
 		// leaks half-typed into the chat input while it's waiting. esc drops back
 		// to typing if you want to steer/queue something instead (the approval
@@ -1200,7 +1215,12 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.push(cDim.Render("  …cancelling  (esc again to force-detach if it's stuck)"))
 			if m.pending != nil {
 				// The shown approval consumed the single reader; re-arm one so the
-				// next task's approvals are still read.
+				// next task's approvals are still read. Deny it outright: one asked
+				// before this task began holds an earlier abort signal, which
+				// Abort never closes.
+				if m.pending.expire != nil {
+					close(m.pending.expire)
+				}
 				m.pending = nil
 				return m, m.waitApproval()
 			}
@@ -1358,6 +1378,38 @@ func (m *tuiModel) resolveApproval(ok bool) (tea.Model, tea.Cmd) {
 		return model, cmd
 	}
 	return m, nil
+}
+
+// expireApproval denies the pending approval nobody answered in time. Unlike an
+// answer it leaves a panel open over the prompt where it is, and teaches the
+// risk model nothing: nobody judged the call.
+func (m *tuiModel) expireApproval() (tea.Model, tea.Cmd) {
+	if m.state == stApprove {
+		m.state = m.preApprove
+	}
+	if m.pending.expire != nil {
+		close(m.pending.expire)
+	}
+	m.pending = nil
+	m.push(cDim.Render("  → ") + cErr.Render("denied") + cDim.Render(" · no answer in "+approvalWait()+" — the task goes on without it"))
+	// A task that finished behind the prompt is finalized now — also when esc
+	// had dropped back to typing, or nothing ever would — but one that finished
+	// behind a panel waits for the panel to close, as it would have.
+	if m.state == stRunning || m.state == stIdle {
+		if model, cmd, drained := m.finalizeTaskDoneAway(); drained {
+			return model, tea.Batch(cmd, m.waitApproval())
+		}
+	}
+	return m, m.waitApproval()
+}
+
+// approvalLeft is the pending approval's countdown, for the status line.
+func (m *tuiModel) approvalLeft() string {
+	if m.pending == nil || m.approveBy.IsZero() {
+		return ""
+	}
+	left := max(time.Until(m.approveBy), 0).Round(time.Second)
+	return cDim.Render(fmt.Sprintf(" · no in %d:%02d", int(left.Minutes()), int(left.Seconds())%60))
 }
 
 // approveSession approves the pending request AND stops asking about its whole
@@ -2178,7 +2230,7 @@ func (m *tuiModel) View() string {
 	case m.state == stConfig:
 		switch { // /config is the one panel that can sit over a live task
 		case m.pending != nil:
-			status = m.attention("⚠ APPROVAL WAITING") + cDim.Render(" behind this panel — esc, then answer it")
+			status = m.attention("⚠ APPROVAL WAITING") + cDim.Render(" behind this panel — esc, then answer it") + m.approvalLeft()
 		case m.cancel != nil:
 			status = cDim.Render("settings — a task is running: tuning applies now, other changes when it ends · esc back to it")
 		default:
@@ -2202,7 +2254,7 @@ func (m *tuiModel) View() string {
 		// Waiting for a keypress (though you can keep typing) — same unmissable
 		// badge as RESUME GOAL / PLAN READY, not a dim line indistinguishable from
 		// the routine "⚙ run shell" / "⚙ file write" tool-call chatter above it.
-		status = m.attention("⚠ APPROVAL NEEDED") + cDim.Render(" — y approve · n deny · a allow-session · ↑ Yes/No · or keep typing")
+		status = m.attention("⚠ APPROVAL NEEDED") + cDim.Render(" — y approve · n deny · a allow-session · ↑ Yes/No · or keep typing") + m.approvalLeft()
 	case m.state == stRunning:
 		if m.retry != nil {
 			remain := time.Until(m.retry.until).Truncate(100 * time.Millisecond)
@@ -2326,7 +2378,7 @@ func (m *tuiModel) approvePrompt() string {
 	} else {
 		no = cErr.Bold(true).Render("  ▸No  ")
 	}
-	return m.attention("⚠ APPROVE") + " " + detail + "  " + yes + no + cDim.Render("  (a = allow all this session)")
+	return m.attention("⚠ APPROVE") + " " + detail + "  " + yes + no + cDim.Render("  (a = allow all this session)") + m.approvalLeft()
 }
 
 // modeLine is the bottom indicator: auto (executes) or plan (proposes only),

@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
 )
@@ -34,6 +36,29 @@ type approvalReq struct {
 	// sees is a score nobody can judge.
 	risk  string
 	reply chan bool
+	// expire is closed by the UI when nobody answered within approvalTimeout:
+	// the call is denied, and — like esc — that is nobody's judgement of it.
+	expire chan struct{}
+	// aborted is the task's abort signal as of the ask. Once it is closed the
+	// tool has already been told no, so the UI does not show the prompt: an
+	// answer to it would change nothing, and its countdown would run for a
+	// call that is gone.
+	aborted <-chan struct{}
+}
+
+// approvalTimeout is how long a prompt waits for a person. A run left alone
+// used to sit on its first prompt until someone came back; now an unanswered
+// prompt is a "no" and the task goes on without that call. Only an explicit
+// yes runs anything. A var so tests can shorten it.
+var approvalTimeout = 2 * time.Minute
+
+// approvalWait is approvalTimeout as a prompt says it: "2m", not "2m0s".
+func approvalWait() string {
+	s := approvalTimeout.String()
+	if strings.HasSuffix(s, "m0s") {
+		s = s[:len(s)-2]
+	}
+	return s
 }
 
 func newBridge() *uiBridge {
@@ -70,9 +95,9 @@ func (b *uiBridge) ApproveAnswered(ctx context.Context, kind, detail string) (ok
 	abort := b.abort
 	b.mu.Unlock()
 
-	reply := make(chan bool, 1)
+	reply, expire := make(chan bool, 1), make(chan struct{})
 	select {
-	case b.approvals <- approvalReq{kind: kind, detail: detail, risk: riskNote(ctx), reply: reply}:
+	case b.approvals <- approvalReq{kind: kind, detail: detail, risk: riskNote(ctx), reply: reply, expire: expire, aborted: abort}:
 	case <-abort:
 		return false, false
 	case <-ctx.Done():
@@ -81,6 +106,8 @@ func (b *uiBridge) ApproveAnswered(ctx context.Context, kind, detail string) (ok
 	select {
 	case ok := <-reply:
 		return ok, true
+	case <-expire:
+		return false, false
 	case <-abort:
 		return false, false
 	case <-ctx.Done():

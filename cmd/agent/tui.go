@@ -658,6 +658,13 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case approvalMsg:
 		req := approvalReq(msg)
+		if req.aborted != nil {
+			select {
+			case <-req.aborted: // asked after esc: the tool already has its no
+				return m, m.waitApproval()
+			default:
+			}
+		}
 		m.pending = &req
 		m.approveBy = time.Now().Add(approvalTimeout)
 		// Do NOT fetch the next approval yet — that would overwrite m.pending and
@@ -1372,7 +1379,8 @@ func (m *tuiModel) resolveApproval(ok bool) (tea.Model, tea.Cmd) {
 // answer it leaves a panel open over the prompt where it is, and teaches the
 // risk model nothing: nobody judged the call.
 func (m *tuiModel) expireApproval() (tea.Model, tea.Cmd) {
-	if m.state == stApprove {
+	modal := m.state == stApprove
+	if modal {
 		m.state = m.preApprove
 	}
 	if m.pending.expire != nil {
@@ -1380,8 +1388,12 @@ func (m *tuiModel) expireApproval() (tea.Model, tea.Cmd) {
 	}
 	m.pending = nil
 	m.push(cDim.Render("  → ") + cErr.Render("denied") + cDim.Render(" · no answer in "+approvalWait()+" — the task goes on without it"))
-	if model, cmd, drained := m.finalizeTaskDoneAway(); drained {
-		return model, tea.Batch(cmd, m.waitApproval())
+	// A task that finished behind the prompt is finalized now — but one that
+	// finished behind a panel waits for the panel to close, as it would have.
+	if modal {
+		if model, cmd, drained := m.finalizeTaskDoneAway(); drained {
+			return model, tea.Batch(cmd, m.waitApproval())
+		}
 	}
 	return m, m.waitApproval()
 }

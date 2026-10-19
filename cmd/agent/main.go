@@ -6551,9 +6551,20 @@ func (o *stdinOwner) readApproveLineCtx(ctx context.Context) (string, error) {
 func (o *stdinOwner) readVia(req chan lineReq, done <-chan struct{}) (string, error) {
 	o.start()
 	reply := make(chan lineResult, 1)
-	req <- lineReq{reply: reply, done: done}
-	res := <-reply
-	return res.line, res.err
+	// A reader that gives up returns: pickRecipient skips its request, so
+	// waiting on for a reply would hold this goroutine for the life of the
+	// process — one more for every approval that ran out.
+	select {
+	case req <- lineReq{reply: reply, done: done}:
+	case <-done:
+		return "", context.Canceled
+	}
+	select {
+	case res := <-reply:
+		return res.line, res.err
+	case <-done:
+		return "", context.Canceled
+	}
 }
 
 // logLevel is the log threshold: warnings and up by default (so retries/errors

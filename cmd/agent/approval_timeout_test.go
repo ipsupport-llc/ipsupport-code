@@ -81,17 +81,64 @@ func TestAnUnansweredApprovalIsANoAndTheTaskGoesOn(t *testing.T) {
 }
 
 // Running out is not an answer typed into a panel: a panel open over the prompt
-// stays open.
+// stays open — even when the task finished behind it, which is finalized when
+// the panel closes, not when the prompt runs out.
 func TestAnExpiredApprovalLeavesAPanelOpen(t *testing.T) {
-	m := &tuiModel{bridge: newBridge(), input: textarea.New(), state: stRewind, spin: spinner.New()}
+	m := &tuiModel{bridge: newBridge(), input: textarea.New(), state: stRewind, spin: spinner.New(), taskDoneAway: true}
 	got := askThroughTheUI(t, m)
 	m.approveBy = time.Now().Add(-time.Second)
 	m.Update(spinner.TickMsg{})
 	if r := <-got; r[0] {
 		t.Fatal("an expired approval ran the call")
 	}
-	if m.state != stRewind {
-		t.Errorf("state = %v, want the rewind panel still open", m.state)
+	if m.state != stRewind || !m.taskDoneAway {
+		t.Errorf("state = %v, taskDoneAway = %v; want the rewind panel still open and the finished task still waiting on it", m.state, m.taskDoneAway)
+	}
+}
+
+// A prompt asked after esc was denied tool-side the moment it was asked: it is
+// not shown, and the reader moves on to the next one.
+func TestAPromptAskedAfterEscIsNotShown(t *testing.T) {
+	m := &tuiModel{bridge: newBridge(), input: textarea.New(), state: stRunning, spin: spinner.New()}
+	aborted := make(chan struct{})
+	close(aborted)
+	_, cmd := m.Update(approvalMsg(approvalReq{kind: "run", detail: "make deploy", reply: make(chan bool, 1), aborted: aborted}))
+	if m.pending != nil || m.state != stRunning {
+		t.Errorf("pending = %v, state = %v; want the dead prompt not shown", m.pending, m.state)
+	}
+	if cmd == nil {
+		t.Error("skipping a dead prompt must keep reading the next one")
+	}
+
+	// The same through the bridge: asked, then esc, then read by the UI.
+	got := make(chan bool, 1)
+	go func() { ok, _ := m.bridge.ApproveAnswered(context.Background(), "run", "make deploy"); got <- ok }()
+	req := <-m.bridge.approvals
+	m.bridge.Abort()
+	if <-got {
+		t.Fatal("an aborted approval ran the call")
+	}
+	m.Update(approvalMsg(req))
+	if m.pending != nil {
+		t.Error("the bridge's prompt was shown after esc had already denied it")
+	}
+}
+
+// A read that gave up returns, rather than waiting for a reply its abandoned
+// request will never get.
+func TestAReadThatGaveUpReturns(t *testing.T) {
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { pr.Close(); pw.Close() })
+	o := newStdinOwner(bufio.NewReader(pr))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _, _ = o.readApproveLineCtx(ctx); close(done) }()
+	time.Sleep(20 * time.Millisecond) // queued, waiting for a line
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the read is still waiting after its reader gave up — a goroutine leaked for good")
 	}
 }
 

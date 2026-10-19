@@ -1215,7 +1215,12 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.push(cDim.Render("  …cancelling  (esc again to force-detach if it's stuck)"))
 			if m.pending != nil {
 				// The shown approval consumed the single reader; re-arm one so the
-				// next task's approvals are still read.
+				// next task's approvals are still read. Deny it outright: one asked
+				// before this task began holds an earlier abort signal, which
+				// Abort never closes.
+				if m.pending.expire != nil {
+					close(m.pending.expire)
+				}
 				m.pending = nil
 				return m, m.waitApproval()
 			}
@@ -1379,8 +1384,7 @@ func (m *tuiModel) resolveApproval(ok bool) (tea.Model, tea.Cmd) {
 // answer it leaves a panel open over the prompt where it is, and teaches the
 // risk model nothing: nobody judged the call.
 func (m *tuiModel) expireApproval() (tea.Model, tea.Cmd) {
-	modal := m.state == stApprove
-	if modal {
+	if m.state == stApprove {
 		m.state = m.preApprove
 	}
 	if m.pending.expire != nil {
@@ -1388,9 +1392,10 @@ func (m *tuiModel) expireApproval() (tea.Model, tea.Cmd) {
 	}
 	m.pending = nil
 	m.push(cDim.Render("  → ") + cErr.Render("denied") + cDim.Render(" · no answer in "+approvalWait()+" — the task goes on without it"))
-	// A task that finished behind the prompt is finalized now — but one that
-	// finished behind a panel waits for the panel to close, as it would have.
-	if modal {
+	// A task that finished behind the prompt is finalized now — also when esc
+	// had dropped back to typing, or nothing ever would — but one that finished
+	// behind a panel waits for the panel to close, as it would have.
+	if m.state == stRunning || m.state == stIdle {
 		if model, cmd, drained := m.finalizeTaskDoneAway(); drained {
 			return model, tea.Batch(cmd, m.waitApproval())
 		}
@@ -2225,7 +2230,7 @@ func (m *tuiModel) View() string {
 	case m.state == stConfig:
 		switch { // /config is the one panel that can sit over a live task
 		case m.pending != nil:
-			status = m.attention("⚠ APPROVAL WAITING") + cDim.Render(" behind this panel — esc, then answer it")
+			status = m.attention("⚠ APPROVAL WAITING") + cDim.Render(" behind this panel — esc, then answer it") + m.approvalLeft()
 		case m.cancel != nil:
 			status = cDim.Render("settings — a task is running: tuning applies now, other changes when it ends · esc back to it")
 		default:

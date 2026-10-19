@@ -96,6 +96,39 @@ func TestAnExpiredApprovalLeavesAPanelOpen(t *testing.T) {
 	}
 }
 
+// A task that finished behind the prompt is finalized when the prompt runs out,
+// even after esc dropped back to typing: nothing else would, and the view sat
+// on "running" with no task behind it.
+func TestAnExpiredApprovalFinalizesTheTaskBehindIt(t *testing.T) {
+	m := &tuiModel{bridge: newBridge(), input: textarea.New(), state: stRunning, spin: spinner.New(), taskDoneAway: true}
+	got := askThroughTheUI(t, m)
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc}) // back to typing; still pending
+	m.approveBy = time.Now().Add(-time.Second)
+	m.Update(spinner.TickMsg{})
+	<-got
+	if m.state != stIdle || m.taskDoneAway {
+		t.Errorf("state = %v, taskDoneAway = %v; want the finished task finalized to idle", m.state, m.taskDoneAway)
+	}
+}
+
+// esc denies the prompt it drops, whichever task asked it. One asked before the
+// current task began holds an abort signal esc never closes.
+func TestEscDeniesAPromptFromBeforeTheTask(t *testing.T) {
+	m := &tuiModel{bridge: newBridge(), input: textarea.New(), state: stIdle, spin: spinner.New()}
+	got := askThroughTheUI(t, m) // a background job asks while idle
+	m.bridge.arm()               // the next task starts
+	m.state, m.cancel = stRunning, func() {}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	select {
+	case r := <-got:
+		if r[0] {
+			t.Fatal("esc approved the call")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("esc dropped the prompt, but its tool is still waiting for an answer")
+	}
+}
+
 // A prompt asked after esc was denied tool-side the moment it was asked: it is
 // not shown, and the reader moves on to the next one.
 func TestAPromptAskedAfterEscIsNotShown(t *testing.T) {

@@ -464,10 +464,16 @@ for the session only.
 When a plan-mode task finishes with a plan, you get a one-key **handshake**:
 **enter** to accept — switches to auto and immediately executes the plan —
 **m** to execute it in manual instead, asking before each change, or **esc** to
-keep planning (stay in plan mode; type to refine). If you switched to manual
-with shift+tab while the plan was being written, **enter** runs it in manual. Toggling the mode
-**mid-task** applies at the next turn, never mid-run (the running agent reads the
-mode live).
+keep planning (stay in plan mode; type to refine). A switch to manual that the
+model took while still writing the plan simply carries on in manual. If the
+switch came too late for that, the handshake shows and **enter** runs the plan
+in manual. Switching the mode
+**mid-task** takes effect at the start of the model's next turn, never in the
+middle of one. The log says from which step (`⇄ manual mode on — from step 3`),
+and a switch into or out of plan mode is said to the model too. If the task
+ends before the model takes another turn, the switch applies to the next task.
+A sub-agent already running keeps the plan or auto mode it started with, while
+manual applies to it at once.
 
 ## Permissions
 

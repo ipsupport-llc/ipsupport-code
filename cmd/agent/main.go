@@ -617,8 +617,10 @@ type app struct {
 	instrSrc        string                     // project instructions file in effect, "" if none
 	promptSrc       string                     // "built-in" or the system.md override path
 	facts           []string                   // durable project facts learned over time (per workspace)
-	planMode        bool                       // plan (propose) vs auto (execute); survives re-wire
+	planMode        atomic.Bool                // plan (propose) vs auto (execute); survives re-wire; the agent's goroutine sets it too (takeMode)
 	manual          atomic.Bool                // manual mode: every change asks (see manualStops); read by tool goroutines
+	modeMu          sync.Mutex                 // guards queuedMode
+	queuedMode      *mode                      // a mode chosen mid-task, for the agent's next turn (see takeMode)
 	readOnly        bool                       // -read-only: answer one task, change nothing, keep no session
 	goal            goalState                  // standing goal pursued by the judge loop (per workspace)
 	windowDetected  bool                       // got the real loaded context window (vs a default/guess)
@@ -741,7 +743,8 @@ func build(workspace, sessionName string, overrides []string, readOnly bool, rea
 		usageStore, _ = usage.Open("")
 	}
 
-	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader, readOnly: readOnly, planMode: readOnly}
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader, readOnly: readOnly}
+	a.planMode.Store(readOnly)
 	a.stdin = newStdinOwner(reader)                     // sole reader of `reader`'s actual bytes from here on (see stdinOwner)
 	a.approver = &stdinApprover{stdin: a.stdin, app: a} // set after: it references the app for session-allow
 	// Cancel background jobs (killing external-agent subprocesses too), shut down
@@ -938,7 +941,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 		// no read-only mode to hand them the way SetPlanMode gives an LLM sub-agent
 		// (see runSpawnPlan), so plan mode can only keep its "stays read-only"
 		// guarantee (see the subagents skill) by refusing the launch outright.
-		if a.planMode {
+		if a.planMode.Load() {
 			return spawnPlan{}, true, p, fmt.Errorf("plan mode is ON — external agent %q was NOT launched (it runs outside the sandbox with no read-only mode); list it as a step in your plan, then finish", profile)
 		}
 		// Resolve dir HERE, synchronously, same as the LLM branch below —
@@ -1037,7 +1040,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	}
 	return spawnPlan{
 		profile: profile, provider: provider, llmCfg: llmCfg, rolePrompt: p.Prompt,
-		subReg: subReg, subPol: planPol, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default, outsideJail: outsideJail,
+		subReg: subReg, subPol: planPol, subWorkspace: subWorkspace, planMode: a.planMode.Load(), spawnDefault: a.cfg.Spawn.Default, outsideJail: outsideJail,
 		tracer: tracer, priceOverrides: priceOverrides, goalMaxSteps: a.cfg.GoalMaxSteps,
 		shell: tool.Shell(a.cfg.Run.Shell),
 	}, false, p, nil
@@ -3262,15 +3265,17 @@ func (a *app) wire() error {
 	a.ag.SetHistory(prior)
 	a.ag.SeedHistoryGen(priorGen)
 	a.ag.SeedFrontTrim(priorTrim)
-	a.ag.SetPlanMode(a.planMode) // carry the mode into the rebuilt agent
+	a.ag.SetPlanMode(a.planMode.Load()) // carry the mode into the rebuilt agent
 	if a.readOnly {
 		run, _ := a.readOnlyRun()
 		a.ag.SetReadOnly(run)
 	}
 	a.ag.SetBeforeTurn(a.beforeTurn) // finished background jobs fold in between steps of a running task
 	a.ag.SetSteers(a.drainSteers)    // so do /steer notes, and before a final answer is accepted
-	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
-	if !a.readOnly {                 // a throwaway session leaves nothing behind
+	ag := a.ag
+	ag.SetModeSwitch(func() (bool, string, bool) { return a.takeMode(ag.Detached) }) // and a mode chosen with shift+tab mid-task
+	a.ag.SetAsides(a.drainAsides)                                                    // /btw side questions answered between steps, one no-tools turn each
+	if !a.readOnly {                                                                 // a throwaway session leaves nothing behind
 		a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
 	}
 	a.ensureShadow()                                           // once per process, here on the wiring goroutine
@@ -3332,7 +3337,7 @@ func (m mode) String() string {
 
 func (a *app) mode() mode {
 	switch {
-	case a.planMode:
+	case a.planMode.Load():
 		return modePlan
 	case a.manual.Load():
 		return modeManual
@@ -3340,12 +3345,59 @@ func (a *app) mode() mode {
 	return modeAuto
 }
 
-// setMode switches the mode and returns a one-line confirmation.
+// queueMode holds a mode chosen while a task runs, for the agent to take at the
+// start of the model's next turn (takeMode). A later choice replaces it.
+func (a *app) queueMode(m mode) {
+	a.modeMu.Lock()
+	a.queuedMode = &m
+	a.modeMu.Unlock()
+}
+
+// popQueuedMode takes a queued mode the agent has not: the task ended, or was
+// detached, first.
+func (a *app) popQueuedMode() *mode {
+	a.modeMu.Lock()
+	defer a.modeMu.Unlock()
+	q := a.queuedMode
+	a.queuedMode = nil
+	return q
+}
+
+// takeMode is the agent's mode switch (SetModeSwitch), called on its own
+// goroutine at the start of a turn. The app's mode changes right here, both
+// halves at once: manual for the call gate, and plan for a sub-agent the turn
+// may spawn — which used to read the old mode until the UI caught up. The
+// agent applies plan mode to itself; the "mode" event only tells the UI.
+//
+// The take and the stores are one step under modeMu, and detached is asked
+// inside it: a detached run's take either lands before force-detach pops the
+// queue — and the fresh agent is built from the mode it set — or finds itself
+// detached and takes nothing, not even a choice made since for the next run.
+func (a *app) takeMode(detached func() bool) (plan bool, name string, ok bool) {
+	a.modeMu.Lock()
+	defer a.modeMu.Unlock()
+	if detached() {
+		return false, "", false
+	}
+	q := a.queuedMode
+	a.queuedMode = nil
+	if q == nil {
+		return false, "", false
+	}
+	a.planMode.Store(*q == modePlan)
+	a.manual.Store(*q == modeManual)
+	return *q == modePlan, q.String(), true
+}
+
+// setMode switches the mode and returns a one-line confirmation. A mode set
+// outright replaces one still queued: /plan typed after a shift+tab during
+// /compact must not be undone by the next task's first turn.
 func (a *app) setMode(m mode) string {
-	a.planMode = m == modePlan
+	a.popQueuedMode()
+	a.planMode.Store(m == modePlan)
 	a.manual.Store(m == modeManual)
 	if a.ag != nil {
-		a.ag.SetPlanMode(a.planMode)
+		a.ag.SetPlanMode(m == modePlan)
 	}
 	switch m {
 	case modePlan:

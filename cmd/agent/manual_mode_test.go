@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"strings"
 	"testing"
@@ -8,7 +9,9 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 )
 
@@ -84,8 +87,8 @@ func TestModesCycle(t *testing.T) {
 	want := []mode{modePlan, modeManual, modeAuto}
 	for _, w := range want {
 		a.setMode(a.mode().next())
-		if a.mode() != w || a.planMode != (w == modePlan) || a.manual.Load() != (w == modeManual) {
-			t.Fatalf("mode = %v (plan %v, manual %v), want %v", a.mode(), a.planMode, a.manual.Load(), w)
+		if a.mode() != w || a.planMode.Load() != (w == modePlan) || a.manual.Load() != (w == modeManual) {
+			t.Fatalf("mode = %v (plan %v, manual %v), want %v", a.mode(), a.planMode.Load(), a.manual.Load(), w)
 		}
 		if line := m.modeLine(); !strings.Contains(line, w.String()+" mode on") {
 			t.Errorf("indicator %q, want %s", line, w)
@@ -143,5 +146,134 @@ func TestManualModeJudgesARecoveredCall(t *testing.T) {
 	before := ap.calls
 	if msg := a.riskGate(pol)(context.Background(), "file", "write", map[string]any{"path": 123}); ap.calls != before+1 || !strings.Contains(msg, "write 123") {
 		t.Errorf("numeric path: asked %d time(s), result %q; want a prompt", ap.calls-before, msg)
+	}
+}
+
+// shift+tab mid-task queues the mode for the agent's next turn; the agent takes
+// it once, and the app's mode changes right then — manual for the gate, plan
+// for a sub-agent the turn spawns. The "mode" event only tells the UI: read
+// late, it must not set back a newer switch. A task that ends first drops the
+// queue and applies the choice itself.
+func TestAModeChosenMidTaskIsTakenAtTheNextTurn(t *testing.T) {
+	a := &app{cfg: config.Default()}
+	m := &tuiModel{state: stRunning, input: textarea.New(), app: a}
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) // plan
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) // manual — the later choice wins
+	if a.mode() != modeAuto {
+		t.Fatal("the mode flipped mid-turn")
+	}
+	if log := strings.Join(m.history, "\n"); !strings.Contains(log, "from the model's next turn") || strings.Contains(log, "next task") {
+		t.Errorf("hint does not say when it applies:\n%s", log)
+	}
+	plan, name, ok := a.takeMode(func() bool { return false })
+	if !ok || plan || name != "manual" || a.mode() != modeManual {
+		t.Fatalf("takeMode = (%v, %q, %v), mode %v; want manual, taken, and in effect", plan, name, ok, a.mode())
+	}
+	if _, _, ok := a.takeMode(func() bool { return false }); ok {
+		t.Error("a queued mode was taken twice")
+	}
+	m.Update(eventMsg(uiEvent{kind: "mode", fields: map[string]any{"mode": "manual", "step": 2}}))
+	if log := strings.Join(m.history, "\n"); !strings.Contains(log, "manual mode on — from step 2") {
+		t.Errorf("the log does not say when the switch took effect:\n%s", log)
+	}
+
+	// A newer switch taken before an older event is read stands.
+	a.queueMode(modePlan)
+	a.takeMode(func() bool { return false })
+	m.Update(eventMsg(uiEvent{kind: "mode", fields: map[string]any{"mode": "manual", "step": 3}}))
+	if a.mode() != modePlan {
+		t.Errorf("a late event set the mode back to %v", a.mode())
+	}
+
+	// shift+tab works while an approval waits — the task is running.
+	m.state = stApprove
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if m.pendingMode == nil {
+		t.Error("shift+tab did nothing while an approval was waiting")
+	}
+
+	// The task ends before the agent took the choice: it applies, and the queue
+	// is emptied so the next task does not take it again.
+	m.state = stRunning
+	want := *m.pendingMode
+	m.applyPendingMode()
+	if a.mode() != want {
+		t.Errorf("mode = %v after the task ended, want the choice (%v) applied", a.mode(), want)
+	}
+	if _, _, ok := a.takeMode(func() bool { return false }); ok {
+		t.Error("the queue outlived the task that never took it")
+	}
+
+	// A mode set outright — an idle shift+tab, /plan — replaces one still
+	// queued, say from a shift+tab during /compact.
+	for _, set := range []func(){
+		func() { m.state = stIdle; m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) },
+		func() { a.setMode(modePlan) },
+	} {
+		a.queueMode(modeAuto)
+		set()
+		if _, _, ok := a.takeMode(func() bool { return false }); ok {
+			t.Error("a mode set outright left an older queued one for the next task to take")
+		}
+	}
+
+	// A choice the agent already took is not applied again at the task's end.
+	a.setMode(modeAuto)
+	m.state = stRunning
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) // plan
+	a.takeMode(func() bool { return false })
+	a.setMode(modeManual) // anything after, e.g. the user's own /manual once idle — stand-in
+	m.pendingMode = &[]mode{modePlan}[0]
+	m.applyPendingMode()
+	if a.mode() != modeManual {
+		t.Errorf("mode = %v: a choice the agent had taken was applied again at the end", a.mode())
+	}
+}
+
+// A task switched into plan mid-run ends with PLAN READY, however the events
+// are ordered: the handshake is decided by the mode the run ended in.
+func TestAPlanSwitchedToMidTaskGetsItsHandshake(t *testing.T) {
+	m := &tuiModel{state: stRunning, input: textarea.New(), bridge: newBridge(), ctx: context.Background(), app: &app{cfg: config.Default()}}
+	m.app.windowDetected = true
+	m.app.client = llm.NewOpenAIClient(config.LLM{})
+	m.app.ag = agent.New(m.app.client, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
+	m.planTask = false // started in auto
+	m.app.queueMode(modePlan)
+	m.app.takeMode(func() bool { return false }) // taken mid-run; its event not read yet
+	m.Update(taskDoneMsg{})
+	if m.state != stPlanReview {
+		t.Errorf("state = %v, want PLAN READY for a run that ended in plan mode", m.state)
+	}
+}
+
+// A mode chosen for a run that is then force-detached applies at once, and the
+// fresh agent does not take it later — over a mode chosen since, and possibly
+// from manual back to auto.
+func TestAForceDetachedRunsModeIsNotLeftQueued(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	a := &app{cfg: cfg, workspace: cfg.Workspace, reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	m := &tuiModel{app: a, state: stRunning, taskCancelled: true, cancel: func() {}, input: textarea.New()}
+	m.epoch = a.taskEpoch.Add(1)
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) // plan, for the wedged run
+	m.forceDetach()
+	if a.mode() != modePlan || m.pendingMode != nil {
+		t.Errorf("after force-detach: mode %v, pending %v; want the choice applied", a.mode(), m.pendingMode)
+	}
+	if _, _, ok := a.takeMode(func() bool { return false }); ok {
+		t.Error("the fresh agent would take the abandoned run's mode on its first turn")
+	}
+	// A detached run that reaches its take late takes nothing — not even a
+	// choice made since for the next run.
+	a.queueMode(modeManual)
+	if _, _, ok := a.takeMode(func() bool { return true }); ok || a.mode() == modeManual {
+		t.Error("a detached run took the next run's mode")
+	}
+	if q := a.popQueuedMode(); q == nil || *q != modeManual {
+		t.Error("the next run's mode was lost to a detached run")
 	}
 }

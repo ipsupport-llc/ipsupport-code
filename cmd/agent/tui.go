@@ -83,7 +83,7 @@ type tuiModel struct {
 	steer         []string // /btw asides for the current run — pinned above the input, not in scrollback; cleared when the task ends
 	histIdx       int      // recall cursor into app.promptHist; == len means "not browsing"
 	histDraft     string   // in-progress input saved when history browsing begins
-	pendingMode   *mode    // a mode requested via shift+tab mid-task; applied on task done
+	pendingMode   *mode    // the last mode chosen via shift+tab mid-task — the base the next press cycles from; what applies is app.queuedMode
 	taskDoneAway  bool     // a task finished while a modal panel was open over it; finalize on panel close
 	planTask      bool     // the running task started in plan mode → offer accept-plan when it finishes
 	taskCancelled bool     // the running task was cancelled by esc → don't offer accept-plan
@@ -702,7 +702,8 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cancel = nil
 		m.retry = nil
 		m.restoreSteers()                                  // steering notes belonged to the run that just ended
-		m.applyPendingMode()                               // a shift+tab during the task takes effect now, before the next one
+		m.planTask = m.app.mode() == modePlan              // the mode the run ended in: a switch it took mid-task counts, whatever order the events arrive in
+		m.applyPendingMode()                               // a shift+tab the run never took applies now, before the next task
 		detect := m.detectWindowCmd()                      // model is loaded now — confirm the real window
 		detect = tea.Batch(detect, m.applyPendingConfig()) // settings staged in /config while this task was running
 		if held := m.heldLessons; held != nil {
@@ -1001,18 +1002,20 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		switch m.state {
 		case stIdle:
-			m.app.setMode(m.app.mode().next()) // cycle auto → plan → manual; the bottom indicator updates
+			m.app.setMode(m.app.mode().next()) // cycle auto → plan → manual (and drop a queued one); the bottom indicator updates
 			m.pendingMode = nil
-		case stRunning:
-			// Can't flip live — the running agent reads the mode (flipping races +
-			// splits the run). Remember it and apply when this task finishes.
+		case stRunning, stApprove: // an approval waiting is a task running — and a likely moment to want manual
+			// Not flipped here, mid-turn — a turn's calls would be judged under two
+			// modes. Queued for the agent, which takes it at the start of the
+			// model's next turn and says so (the "mode" event).
 			cur := m.app.mode()
 			if m.pendingMode != nil {
 				cur = *m.pendingMode
 			}
 			next := cur.next()
 			m.pendingMode = &next
-			m.push(cDim.Render("  ⇄ " + modeName(next) + " — applies on the next task"))
+			m.app.queueMode(next)
+			m.push(cDim.Render("  ⇄ " + modeName(next) + " — from the model's next turn"))
 		}
 		// In a modal panel (config/sessions/agents/rewind) shift+tab is inert.
 		return m, nil
@@ -1360,16 +1363,17 @@ func (m *tuiModel) planReviewKeys() string {
 // modeName labels a mode for the mid-task mode-switch hint.
 func modeName(m mode) string { return m.String() + " mode" }
 
-// applyPendingMode applies a plan/auto switch requested (via shift+tab) while a
-// task was running — deferred so it never flips the mode mid-run. No-op if none
-// pending or it already matches the current mode.
+// applyPendingMode applies a mode chosen via shift+tab that the task ended
+// before taking — the model's last turn was already under way. What is still
+// in the queue is what was not taken, so a choice the agent did take is never
+// applied twice, and no event order can confuse the two.
 func (m *tuiModel) applyPendingMode() {
-	if m.pendingMode == nil {
+	m.pendingMode = nil
+	q := m.app.popQueuedMode()
+	if q == nil {
 		return
 	}
-	want := *m.pendingMode
-	m.pendingMode = nil
-	if want != m.app.mode() {
+	if want := *q; want != m.app.mode() {
 		m.push(cDim.Render("  " + m.app.setMode(want)))
 	}
 }
@@ -2105,8 +2109,8 @@ func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
 	m.startTok = c // count completion (generated) tokens for this task
 	m.suggestion = ""
 	m.input.Placeholder = defaultPlaceholder
-	m.bridge.arm()              // fresh abort signal so a previous cancel doesn't deny this task's approvals
-	m.planTask = m.app.planMode // remember so we can offer accept-plan when it finishes
+	m.bridge.arm()                     // fresh abort signal so a previous cancel doesn't deny this task's approvals
+	m.planTask = m.app.planMode.Load() // remember so we can offer accept-plan when it finishes
 	m.taskCancelled = false
 	m.epoch = m.app.taskEpoch.Add(1) // this run's identity — a force-detach bumps it to orphan the run
 	tctx, cancel := context.WithCancel(m.ctx)
@@ -2122,7 +2126,10 @@ func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
 // no-ops too. Nothing blocks; the queue drains onto the fresh agent.
 func (m *tuiModel) forceDetach() (tea.Model, tea.Cmd) {
 	old := m.app.ag
-	old.Detach()           // silence the wedged run (emit/remember → no-ops)
+	old.Detach() // silence the wedged run (emit/remember → no-ops)
+	// Before the fresh agent is built: a mode the run took is in the app's
+	// mode by now, and one it did not is ours to apply (takeMode's lock).
+	queued := m.app.popQueuedMode()
 	m.app.taskEpoch.Add(1) // orphan its run: its taskDoneMsg + side effects are stale now
 	m.epoch = m.app.taskEpoch.Load()
 	if err := m.app.wire(); err != nil {
@@ -2133,6 +2140,10 @@ func (m *tuiModel) forceDetach() (tea.Model, tea.Cmd) {
 	m.cancel = nil
 	m.retry = nil
 	m.restoreSteers() // the abandoned run will never take them
+	m.pendingMode = nil
+	if queued != nil { // nor a mode chosen for it: it applies now, not on the fresh agent's first turn
+		m.push(cDim.Render("  " + m.app.setMode(*queued)))
+	}
 	m.busyMsg = ""
 	m.taskCancelled = false
 	staged := m.applyPendingConfig() // a detached run emits no taskDoneMsg — don't strand staged settings
@@ -3338,6 +3349,9 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		}
 		return []string{cOk.Render(fmt.Sprintf("  ✓ job #%d (%v) finished", id, e.fields["profile"])) +
 			cDim.Render("  — result lands next turn · /jobs result "+strconv.Itoa(id)+" to read now")}
+	case "mode":
+		name, _ := e.fields["mode"].(string)
+		return []string{cDim.Render(fmt.Sprintf("  ⇄ %s mode on — from step %d", name, toInt(e.fields["step"])))}
 	case "steer":
 		// The moment a /steer note reached the model — the pinned note said only
 		// that it would, and nothing in the log said when, or that it ever did.

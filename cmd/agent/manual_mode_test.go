@@ -145,3 +145,53 @@ func TestManualModeJudgesARecoveredCall(t *testing.T) {
 		t.Errorf("numeric path: asked %d time(s), result %q; want a prompt", ap.calls-before, msg)
 	}
 }
+
+// shift+tab mid-task queues the mode for the agent's next turn; the agent takes
+// it once, manual taking effect for the gate right then; the "mode" event
+// brings the UI along — and a task that ends first drops the queue and applies
+// the choice itself.
+func TestAModeChosenMidTaskIsTakenAtTheNextTurn(t *testing.T) {
+	a := &app{cfg: config.Default()}
+	m := &tuiModel{state: stRunning, input: textarea.New(), app: a}
+
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) // plan
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) // manual — the later choice wins
+	if a.mode() != modeAuto {
+		t.Fatal("the mode flipped mid-turn")
+	}
+	if log := strings.Join(m.history, "\n"); !strings.Contains(log, "from the model's next turn") || strings.Contains(log, "next task") {
+		t.Errorf("hint does not say when it applies:\n%s", log)
+	}
+	plan, name, ok := a.takeMode()
+	if !ok || plan || name != "manual" || !a.manual.Load() {
+		t.Fatalf("takeMode = (%v, %q, %v), manual on = %v; want manual, taken, and on for the gate", plan, name, ok, a.manual.Load())
+	}
+	if _, _, ok := a.takeMode(); ok {
+		t.Error("a queued mode was taken twice")
+	}
+
+	m.Update(eventMsg(uiEvent{kind: "mode", fields: map[string]any{"mode": "manual", "step": 2}}))
+	if a.mode() != modeManual || m.pendingMode != nil {
+		t.Errorf("after the mode event: mode %v, pending %v; want manual and nothing pending", a.mode(), m.pendingMode)
+	}
+	if log := strings.Join(m.history, "\n"); !strings.Contains(log, "manual mode on — from step 2") {
+		t.Errorf("the log does not say when the switch took effect:\n%s", log)
+	}
+
+	// A switch into plan mid-task offers the plan handshake at the end.
+	m.Update(eventMsg(uiEvent{kind: "mode", fields: map[string]any{"mode": "plan", "step": 3}}))
+	if !m.planTask {
+		t.Error("a plan switched to mid-task will not get its PLAN READY handshake")
+	}
+
+	// The task ends before the agent took the choice: it applies, and the queue
+	// is dropped so the next task does not take it again.
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m.applyPendingMode()
+	if a.mode() != modeManual {
+		t.Errorf("mode = %v after the task ended, want the choice applied", a.mode())
+	}
+	if _, _, ok := a.takeMode(); ok {
+		t.Error("the queue outlived the task that never took it")
+	}
+}

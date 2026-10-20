@@ -3853,7 +3853,8 @@ func TestGoalCheckIsSaidUpFront(t *testing.T) {
 		{"no goal", 0, false, false},
 		{"plan mode", 3, true, false},
 	} {
-		a := &Agent{maxReturns: c.returns, planMode: c.plan}
+		a := &Agent{maxReturns: c.returns}
+		a.SetPlanMode(c.plan)
 		if said := strings.Contains(a.turnNote(nil), goalCheckNote); said != c.say {
 			t.Errorf("%s: goal check said = %v, want %v", c.name, said, c.say)
 		}
@@ -4672,5 +4673,75 @@ func TestARecoveredCallIsJudgedAsItRuns(t *testing.T) {
 	a.Run(context.Background(), "make x")
 	if ran != "" {
 		t.Errorf("plan mode let a recovered mutating call run: %q", ran)
+	}
+}
+
+// A mode chosen mid-task takes effect at the start of the model's next turn,
+// not when the task ends: switched to plan after the first turn, the write the
+// model tries on its second is refused, the model is told plan mode is on, and
+// the UI hears which step it started on.
+func TestAModeChosenMidTaskTakesEffectOnTheNextTurn(t *testing.T) {
+	wrote := 0
+	reg := tool.NewRegistry(tool.NewDomain(tool.DomainSpec{
+		Name: "file", Summary: "files",
+		Actions: []tool.Action{
+			{Name: "read", Run: func(context.Context, tool.Args) tool.Result { return tool.Ok("x") }},
+			{Name: "write", Mutates: true, Run: func(context.Context, tool.Args) tool.Result { wrote++; return tool.Ok("wrote") }},
+		},
+	}))
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "file", `{"action":"write","params":{"path":"a"}}`),
+		toolCallReply("c2", "file", `{"action":"write","params":{"path":"b"}}`),
+		{Role: "assistant", Content: "plan: 1. write b"},
+	}}
+	rt := &recTracer{}
+	a := New(fake, reg, nil, rt, "", 10)
+	asked := 0
+	a.SetModeSwitch(func() (bool, string, bool) {
+		asked++
+		if asked == 2 { // chosen during the first turn: taken before the second
+			return true, "plan", true
+		}
+		return false, "", false
+	})
+	a.Run(context.Background(), "write a and b")
+	if wrote != 1 {
+		t.Errorf("writes = %d, want 1 — the first turn's ran in auto, the second's was refused in plan", wrote)
+	}
+	if !a.PlanMode() {
+		t.Error("the agent is not in plan mode after taking the switch")
+	}
+	if !strings.Contains(fmt.Sprint(fake.lastMsgs), planDirective) {
+		t.Error("the model was never told plan mode is on")
+	}
+	if !slices.Contains(rt.kinds, "mode") {
+		t.Error("no mode event — the UI cannot say when the switch took effect")
+	}
+
+	// Back out of plan the same way: the OFF note, and the write runs.
+	fake = &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "file", `{"action":"read","params":{"path":"a"}}`),
+		toolCallReply("c2", "file", `{"action":"write","params":{"path":"b"}}`),
+		{Role: "assistant", Content: "done"},
+	}}
+	a = New(fake, reg, nil, nil, "", 10)
+	a.SetPlanMode(true)
+	asked, wrote = 0, 0
+	a.SetModeSwitch(func() (bool, string, bool) {
+		asked++
+		return false, "auto", asked == 2
+	})
+	a.Run(context.Background(), "write b")
+	if wrote != 1 || !strings.Contains(fmt.Sprint(fake.lastMsgs), planOffNote) {
+		t.Errorf("writes = %d, off note sent = %v; want the write to run once plan mode is off", wrote, strings.Contains(fmt.Sprint(fake.lastMsgs), planOffNote))
+	}
+
+	// Read-only mode is not the user's to switch.
+	a = New(&scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "ok"}}}, reg, nil, nil, "", 10)
+	a.SetReadOnly(false)
+	a.SetModeSwitch(func() (bool, string, bool) { return false, "auto", true })
+	a.Run(context.Background(), "look")
+	if !a.PlanMode() {
+		t.Error("a mode switch turned read-only mode off")
 	}
 }

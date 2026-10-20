@@ -88,7 +88,7 @@ type Agent struct {
 	historyMu  sync.Mutex
 	history    []llm.Message
 	maxHistory int
-	planMode   bool
+	planMode   atomic.Bool // set between turns only: by the caller while idle, or by switchMode
 	// readOnly is plan mode that answers the task instead of proposing a plan;
 	// readOnlyRun lets the run tool through, its commands confined to a sandbox
 	// where nothing they could change is writable.
@@ -118,7 +118,8 @@ type Agent struct {
 	// the seam for finished background jobs that must reach the model between
 	// turns WITHOUT interrupting the run. Must be safe to call concurrently.
 	beforeTurn func() []llm.Message
-	steers     func() []string // /steer notes typed mid-run — see SetSteers
+	steers     func() []string                          // /steer notes typed mid-run — see SetSteers
+	modeSwitch func() (plan bool, mode string, ok bool) // a mode chosen mid-run — see SetModeSwitch
 
 	// Goal pursuit: when the model finalizes but a judge (judgeGoal) decides the
 	// goal isn't met, it's re-fed the goal and continues, up to maxReturns (a TTL).
@@ -312,7 +313,7 @@ func (a *Agent) turnNote(hist []llm.Message) string {
 		} else {
 			parts = append(parts, readOnlyDirective+readOnlyNoRunNote)
 		}
-	case a.planMode:
+	case a.planMode.Load():
 		// Every task while it is on, not once: the directive must survive the
 		// history trimming its first mention away.
 		parts = append(parts, planDirective)
@@ -322,7 +323,7 @@ func (a *Agent) turnNote(hist []llm.Message) string {
 		// already in its history and no memory of having sent it.
 		parts = append(parts, planOffNote)
 	}
-	if a.maxReturns > 0 && !a.planMode { // the judge decides, as in Run
+	if a.maxReturns > 0 && !a.planMode.Load() { // the judge decides, as in Run
 		parts = append(parts, goalCheckNote)
 	}
 	if len(parts) == 0 {
@@ -440,6 +441,29 @@ func (a *Agent) deliverSteers(msgs *[]llm.Message, step int) bool {
 	return true
 }
 
+// switchMode applies a mode chosen while the task runs, at the start of the
+// model's next turn — it used to wait for the whole task to end. A switch into
+// or out of plan mode is said in the conversation too, so the model hears of
+// it on the turn it takes effect. Read-only mode is not the user's to switch,
+// and a detached run takes nothing.
+func (a *Agent) switchMode(msgs *[]llm.Message, step int) {
+	if a.modeSwitch == nil || a.readOnly || a.detached.Load() {
+		return
+	}
+	plan, mode, ok := a.modeSwitch()
+	if !ok {
+		return
+	}
+	if was := a.planMode.Swap(plan); was != plan {
+		note := planOffNote
+		if plan {
+			note = planDirective
+		}
+		*msgs = append(*msgs, llm.User(Note(note)))
+	}
+	a.emit("mode", map[string]any{"mode": mode, "step": step + 1})
+}
+
 // SetJudgeLLM points the goal judge at its own connection instead of the main
 // one. nil (the default) means the judge shares a.llm.
 //
@@ -488,6 +512,12 @@ func (a *Agent) SetBeforeTurn(fn func() []llm.Message) { a.beforeTurn = fn }
 // next one. Every delivery is announced with a "steer" event. The hook must be
 // concurrency-safe, like SetBeforeTurn's.
 func (a *Agent) SetSteers(fn func() []string) { a.steers = fn }
+
+// SetModeSwitch registers where a mode chosen while a task runs (shift+tab)
+// comes from: fn reports a switch waiting, if any — whether it is plan mode,
+// and its name for the "mode" event — and takes it. It is asked at the start
+// of each of the model's turns, which is when the switch takes effect.
+func (a *Agent) SetModeSwitch(fn func() (plan bool, mode string, ok bool)) { a.modeSwitch = fn }
 
 // SetAsides registers the /btw side-channel: fn is drained between steps of a
 // running task, and each question gets a one-turn, no-tools answer (emitted as an
@@ -562,21 +592,22 @@ func (a *Agent) HasRiskObserver() bool { return a.riskObserver != nil }
 // SetPlanMode toggles plan mode. In plan mode the agent investigates with
 // read-only tools and proposes a plan; mutating tool calls are refused, so it
 // can't change anything until switched back to auto.
-func (a *Agent) SetPlanMode(on bool) { a.planMode = on }
+func (a *Agent) SetPlanMode(on bool) { a.planMode.Store(on) }
 
 // SetReadOnly turns read-only mode on: plan mode's refusal of every call that
 // changes state, but the task is answered rather than planned. With run, the
 // run tool is let through: the caller has confined its commands to an OS
 // sandbox where the workspace is read-only.
 func (a *Agent) SetReadOnly(run bool) {
-	a.planMode, a.readOnly, a.readOnlyRun = true, true, run
+	a.planMode.Store(true)
+	a.readOnly, a.readOnlyRun = true, run
 }
 
 // ReadOnly reports whether read-only mode is on, and whether it lets run through.
 func (a *Agent) ReadOnly() (on, run bool) { return a.readOnly, a.readOnlyRun }
 
 // PlanMode reports whether plan mode is on.
-func (a *Agent) PlanMode() bool { return a.planMode }
+func (a *Agent) PlanMode() bool { return a.planMode.Load() }
 
 // SessionLen reports how many remembered messages are in the current session.
 func (a *Agent) SessionLen() int {
@@ -1182,7 +1213,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	sent := a.turnNote(hist) + goal
 	msgs = append(msgs, llm.User(sent))
 	tools := a.reg.OpenAITools()
-	slog.Debug("run start", a.debugArgs("goal", clip(goal, 120), "tools", toolNames(tools), "plan_mode", a.planMode)...)
+	slog.Debug("run start", a.debugArgs("goal", clip(goal, 120), "tools", toolNames(tools), "plan_mode", a.planMode.Load())...)
 	// Reported live: no single log line said how/why a run ended — reading it
 	// off "model turn"/"stuck check" lines meant inferring it indirectly (e.g.
 	// a tool_calls=[] turn with no following "stuck check" line MIGHT be a
@@ -1234,6 +1265,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		// /steer notes the user typed mid-run, then finished background jobs:
 		// folded into the working set before this turn's model call, so they land
 		// between iterations instead of interrupting the stream.
+		a.switchMode(&msgs, step)
 		a.deliverSteers(&msgs, step)
 		if a.beforeTurn != nil {
 			if extra := a.beforeTurn(); len(extra) > 0 {
@@ -1398,7 +1430,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// retry (the judge's own empty-reply retry, the refusal nudge right
 			// below) — this is the same class of problem and deserves the same
 			// treatment before being accepted as a real (if silent) answer.
-			if !a.planMode && !emptyNudged && !acted && strings.TrimSpace(clean) == "" {
+			if !a.planMode.Load() && !emptyNudged && !acted && strings.TrimSpace(clean) == "" {
 				msgs = append(msgs, llm.User(emptyReplyNudge))
 				a.emit("nudge", map[string]any{"told": emptyReplyNudge})
 				emptyNudged = true
@@ -1407,7 +1439,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// Refusal guard: a chat model answering an action task by pasting file
 			// contents or claiming it "can't access your files" — and doing nothing
 			// via tools this run. Push back once, hard, before accepting it.
-			if !a.planMode && !refusalNudged && !acted && looksLikeRefusal(clean) {
+			if !a.planMode.Load() && !refusalNudged && !acted && looksLikeRefusal(clean) {
 				msgs = append(msgs, llm.User(refusalNudge))
 				a.emit("nudge", map[string]any{"told": refusalNudge})
 				refusalNudged = true
@@ -1446,7 +1478,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// attempt and then refusing to grade it is the one combination that
 			// makes no sense.
 			chatReply := !acted && strings.TrimSpace(clean) != ""
-			if !a.planMode && a.maxReturns > 0 && !chatReply {
+			if !a.planMode.Load() && a.maxReturns > 0 && !chatReply {
 				// The goal was re-fed and the model finished WITHOUT doing any work
 				// since. Push it once first: a nudge is cheaper than a judge call and
 				// spends no return.
@@ -2139,7 +2171,7 @@ func (a *Agent) judgeOnGiveUp(ctx context.Context, goal string, returns int, had
 	// here, on the two endings where the run produced the least on its own. With
 	// the default TTL of 6, a run that takes its sixth re-feed and then burns its
 	// step budget got no assessment at all.
-	if a.planMode || a.maxReturns == 0 || !(hadProductiveTurn || a.priorGoalProgress) {
+	if a.planMode.Load() || a.maxReturns == 0 || !(hadProductiveTurn || a.priorGoalProgress) {
 		return false, ""
 	}
 	verdict, missing := a.judgeGoal(ctx, reason, goal, result, convo)
@@ -2616,7 +2648,7 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool)
 
 	// Plan mode backstop: refuse mutating calls even if the model ignores the
 	// directive, so a weak model can't change anything while planning.
-	if a.planMode && a.reg.Mutates(c.Name, action) && !(a.readOnlyRun && c.Name == "run") {
+	if a.planMode.Load() && a.reg.Mutates(c.Name, action) && !(a.readOnlyRun && c.Name == "run") {
 		msg := fmt.Sprintf("plan mode is ON — %s.%s was NOT run. Don't retry it; list it as a step in your plan, then finish.", c.Name, action)
 		if a.readOnly {
 			msg = fmt.Sprintf("read-only mode — %s.%s was NOT run: nothing may be changed. Don't retry it; say in your answer what you would change.", c.Name, action)

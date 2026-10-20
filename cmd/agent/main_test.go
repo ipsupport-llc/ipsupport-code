@@ -1808,8 +1808,8 @@ func TestIsCommandLine(t *testing.T) {
 	}
 }
 
-// shift+tab during a task doesn't flip the mode live (that races the running
-// agent) — it queues the switch and applies it when the task finishes.
+// shift+tab during a task doesn't flip the mode mid-turn — it queues the
+// switch, for the agent's next turn or, failing that, the task's end.
 func TestDeferredModeSwitchWhileRunning(t *testing.T) {
 	m := &tuiModel{state: stRunning, input: textarea.New(), app: &app{cfg: config.Default()}}
 	m.app.planMode = false // start in auto

@@ -83,7 +83,7 @@ type tuiModel struct {
 	steer         []string // /btw asides for the current run — pinned above the input, not in scrollback; cleared when the task ends
 	histIdx       int      // recall cursor into app.promptHist; == len means "not browsing"
 	histDraft     string   // in-progress input saved when history browsing begins
-	pendingMode   *mode    // a mode requested via shift+tab mid-task; applied on task done
+	pendingMode   *mode    // a mode chosen via shift+tab mid-task: the agent takes it on its next turn ("mode" event), or the task's end applies it
 	taskDoneAway  bool     // a task finished while a modal panel was open over it; finalize on panel close
 	planTask      bool     // the running task started in plan mode → offer accept-plan when it finishes
 	taskCancelled bool     // the running task was cancelled by esc → don't offer accept-plan
@@ -646,6 +646,9 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if e.kind == "steer" {
 				m.steerDelivered(e)
 			}
+			if e.kind == "mode" {
+				m.modeTaken(e)
+			}
 			m.push(m.renderEvent(e)...)
 			if e.kind == "final" {
 				m.subs = nil // a stray sub-agent line can't outlive the task
@@ -1004,15 +1007,17 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.app.setMode(m.app.mode().next()) // cycle auto → plan → manual; the bottom indicator updates
 			m.pendingMode = nil
 		case stRunning:
-			// Can't flip live — the running agent reads the mode (flipping races +
-			// splits the run). Remember it and apply when this task finishes.
+			// Not flipped here, mid-turn — a turn's calls would be judged under two
+			// modes. Queued for the agent, which takes it at the start of the
+			// model's next turn and says so (the "mode" event).
 			cur := m.app.mode()
 			if m.pendingMode != nil {
 				cur = *m.pendingMode
 			}
 			next := cur.next()
 			m.pendingMode = &next
-			m.push(cDim.Render("  ⇄ " + modeName(next) + " — applies on the next task"))
+			m.app.queueMode(next)
+			m.push(cDim.Render("  ⇄ " + modeName(next) + " — from the model's next turn"))
 		}
 		// In a modal panel (config/sessions/agents/rewind) shift+tab is inert.
 		return m, nil
@@ -1360,10 +1365,24 @@ func (m *tuiModel) planReviewKeys() string {
 // modeName labels a mode for the mid-task mode-switch hint.
 func modeName(m mode) string { return m.String() + " mode" }
 
-// applyPendingMode applies a plan/auto switch requested (via shift+tab) while a
-// task was running — deferred so it never flips the mode mid-run. No-op if none
-// pending or it already matches the current mode.
+// modeTaken brings the app along when the agent took a queued mode at the
+// start of a turn: the indicator, the plan handshake at the end, and a pending
+// choice that it was.
+func (m *tuiModel) modeTaken(e uiEvent) {
+	name, _ := e.fields["mode"].(string)
+	md := modeNamed(name)
+	m.app.setMode(md)
+	m.planTask = md == modePlan
+	if m.pendingMode != nil && *m.pendingMode == md {
+		m.pendingMode = nil
+	}
+}
+
+// applyPendingMode applies a mode chosen via shift+tab that the task ended
+// before taking — the model's last turn was already under way. No-op if none
+// is pending or it already matches the current mode.
 func (m *tuiModel) applyPendingMode() {
+	m.app.dropQueuedMode()
 	if m.pendingMode == nil {
 		return
 	}
@@ -3338,6 +3357,9 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		}
 		return []string{cOk.Render(fmt.Sprintf("  ✓ job #%d (%v) finished", id, e.fields["profile"])) +
 			cDim.Render("  — result lands next turn · /jobs result "+strconv.Itoa(id)+" to read now")}
+	case "mode":
+		name, _ := e.fields["mode"].(string)
+		return []string{cDim.Render(fmt.Sprintf("  ⇄ %s mode on — from step %d", name, toInt(e.fields["step"])))}
 	case "steer":
 		// The moment a /steer note reached the model — the pinned note said only
 		// that it would, and nothing in the log said when, or that it ever did.

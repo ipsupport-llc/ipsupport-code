@@ -619,6 +619,8 @@ type app struct {
 	facts           []string                   // durable project facts learned over time (per workspace)
 	planMode        bool                       // plan (propose) vs auto (execute); survives re-wire
 	manual          atomic.Bool                // manual mode: every change asks (see manualStops); read by tool goroutines
+	modeMu          sync.Mutex                 // guards queuedMode
+	queuedMode      *mode                      // a mode chosen mid-task, for the agent's next turn (see takeMode)
 	readOnly        bool                       // -read-only: answer one task, change nothing, keep no session
 	goal            goalState                  // standing goal pursued by the judge loop (per workspace)
 	windowDetected  bool                       // got the real loaded context window (vs a default/guess)
@@ -3269,6 +3271,7 @@ func (a *app) wire() error {
 	}
 	a.ag.SetBeforeTurn(a.beforeTurn) // finished background jobs fold in between steps of a running task
 	a.ag.SetSteers(a.drainSteers)    // so do /steer notes, and before a final answer is accepted
+	a.ag.SetModeSwitch(a.takeMode)   // and a mode chosen with shift+tab mid-task
 	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
 	if !a.readOnly {                 // a throwaway session leaves nothing behind
 		a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
@@ -3320,6 +3323,17 @@ const (
 // first, so a single press still does what it always did.
 func (m mode) next() mode { return (m + 1) % 3 }
 
+// modeNamed is the mode a String names; auto for anything else.
+func modeNamed(s string) mode {
+	switch s {
+	case "plan":
+		return modePlan
+	case "manual":
+		return modeManual
+	}
+	return modeAuto
+}
+
 func (m mode) String() string {
 	switch m {
 	case modePlan:
@@ -3338,6 +3352,37 @@ func (a *app) mode() mode {
 		return modeManual
 	}
 	return modeAuto
+}
+
+// queueMode holds a mode chosen while a task runs, for the agent to take at the
+// start of the model's next turn (takeMode). A later choice replaces it.
+func (a *app) queueMode(m mode) {
+	a.modeMu.Lock()
+	a.queuedMode = &m
+	a.modeMu.Unlock()
+}
+
+// dropQueuedMode forgets a queued mode the task ended before taking.
+func (a *app) dropQueuedMode() {
+	a.modeMu.Lock()
+	a.queuedMode = nil
+	a.modeMu.Unlock()
+}
+
+// takeMode is the agent's mode switch (SetModeSwitch), called on its own
+// goroutine at the start of a turn: manual takes effect for the call gate
+// right here; plan mode the agent applies itself. The UI hears of it from the
+// "mode" event and brings the rest of the app's state along.
+func (a *app) takeMode() (plan bool, name string, ok bool) {
+	a.modeMu.Lock()
+	q := a.queuedMode
+	a.queuedMode = nil
+	a.modeMu.Unlock()
+	if q == nil {
+		return false, "", false
+	}
+	a.manual.Store(*q == modeManual)
+	return *q == modePlan, q.String(), true
 }
 
 // setMode switches the mode and returns a one-line confirmation.

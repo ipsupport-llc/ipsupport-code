@@ -83,7 +83,7 @@ type tuiModel struct {
 	steer         []string // /btw asides for the current run — pinned above the input, not in scrollback; cleared when the task ends
 	histIdx       int      // recall cursor into app.promptHist; == len means "not browsing"
 	histDraft     string   // in-progress input saved when history browsing begins
-	pendingMode   *mode    // a mode chosen via shift+tab mid-task: the agent takes it on its next turn ("mode" event), or the task's end applies it
+	pendingMode   *mode    // the last mode chosen via shift+tab mid-task — the base the next press cycles from; what applies is app.queuedMode
 	taskDoneAway  bool     // a task finished while a modal panel was open over it; finalize on panel close
 	planTask      bool     // the running task started in plan mode → offer accept-plan when it finishes
 	taskCancelled bool     // the running task was cancelled by esc → don't offer accept-plan
@@ -646,9 +646,6 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if e.kind == "steer" {
 				m.steerDelivered(e)
 			}
-			if e.kind == "mode" {
-				m.modeTaken(e)
-			}
 			m.push(m.renderEvent(e)...)
 			if e.kind == "final" {
 				m.subs = nil // a stray sub-agent line can't outlive the task
@@ -1005,9 +1002,8 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		switch m.state {
 		case stIdle:
-			m.app.setMode(m.app.mode().next()) // cycle auto → plan → manual; the bottom indicator updates
+			m.app.setMode(m.app.mode().next()) // cycle auto → plan → manual (and drop a queued one); the bottom indicator updates
 			m.pendingMode = nil
-			m.app.dropQueuedMode()
 		case stRunning, stApprove: // an approval waiting is a task running — and a likely moment to want manual
 			// Not flipped here, mid-turn — a turn's calls would be judged under two
 			// modes. Queued for the agent, which takes it at the start of the
@@ -1367,27 +1363,17 @@ func (m *tuiModel) planReviewKeys() string {
 // modeName labels a mode for the mid-task mode-switch hint.
 func modeName(m mode) string { return m.String() + " mode" }
 
-// modeTaken clears the pending choice the agent just took. It changes no mode:
-// takeMode already did, and an event read late must not set back a newer
-// switch the agent took since.
-func (m *tuiModel) modeTaken(e uiEvent) {
-	name, _ := e.fields["mode"].(string)
-	if m.pendingMode != nil && *m.pendingMode == modeNamed(name) {
-		m.pendingMode = nil
-	}
-}
-
 // applyPendingMode applies a mode chosen via shift+tab that the task ended
-// before taking — the model's last turn was already under way. No-op if none
-// is pending or it already matches the current mode.
+// before taking — the model's last turn was already under way. What is still
+// in the queue is what was not taken, so a choice the agent did take is never
+// applied twice, and no event order can confuse the two.
 func (m *tuiModel) applyPendingMode() {
-	m.app.dropQueuedMode()
-	if m.pendingMode == nil {
+	m.pendingMode = nil
+	q := m.app.popQueuedMode()
+	if q == nil {
 		return
 	}
-	want := *m.pendingMode
-	m.pendingMode = nil
-	if want != m.app.mode() {
+	if want := *q; want != m.app.mode() {
 		m.push(cDim.Render("  " + m.app.setMode(want)))
 	}
 }
@@ -2140,7 +2126,10 @@ func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
 // no-ops too. Nothing blocks; the queue drains onto the fresh agent.
 func (m *tuiModel) forceDetach() (tea.Model, tea.Cmd) {
 	old := m.app.ag
-	old.Detach()           // silence the wedged run (emit/remember → no-ops)
+	old.Detach() // silence the wedged run (emit/remember → no-ops)
+	// Before the fresh agent is built: a mode the run took is in the app's
+	// mode by now, and one it did not is ours to apply (takeMode's lock).
+	queued := m.app.popQueuedMode()
 	m.app.taskEpoch.Add(1) // orphan its run: its taskDoneMsg + side effects are stale now
 	m.epoch = m.app.taskEpoch.Load()
 	if err := m.app.wire(); err != nil {
@@ -2150,8 +2139,11 @@ func (m *tuiModel) forceDetach() (tea.Model, tea.Cmd) {
 	m.state = stIdle
 	m.cancel = nil
 	m.retry = nil
-	m.restoreSteers()    // the abandoned run will never take them
-	m.applyPendingMode() // nor a mode chosen for it: it applies now, and the fresh agent must not take it later
+	m.restoreSteers() // the abandoned run will never take them
+	m.pendingMode = nil
+	if queued != nil { // nor a mode chosen for it: it applies now, not on the fresh agent's first turn
+		m.push(cDim.Render("  " + m.app.setMode(*queued)))
+	}
 	m.busyMsg = ""
 	m.taskCancelled = false
 	staged := m.applyPendingConfig() // a detached run emits no taskDoneMsg — don't strand staged settings

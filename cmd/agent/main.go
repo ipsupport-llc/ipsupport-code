@@ -3324,17 +3324,6 @@ const (
 // first, so a single press still does what it always did.
 func (m mode) next() mode { return (m + 1) % 3 }
 
-// modeNamed is the mode a String names; auto for anything else.
-func modeNamed(s string) mode {
-	switch s {
-	case "plan":
-		return modePlan
-	case "manual":
-		return modeManual
-	}
-	return modeAuto
-}
-
 func (m mode) String() string {
 	switch m {
 	case modePlan:
@@ -3363,11 +3352,14 @@ func (a *app) queueMode(m mode) {
 	a.modeMu.Unlock()
 }
 
-// dropQueuedMode forgets a queued mode the task ended before taking.
-func (a *app) dropQueuedMode() {
+// popQueuedMode takes a queued mode the agent has not: the task ended, or was
+// detached, first.
+func (a *app) popQueuedMode() *mode {
 	a.modeMu.Lock()
+	defer a.modeMu.Unlock()
+	q := a.queuedMode
 	a.queuedMode = nil
-	a.modeMu.Unlock()
+	return q
 }
 
 // takeMode is the agent's mode switch (SetModeSwitch), called on its own
@@ -3375,11 +3367,15 @@ func (a *app) dropQueuedMode() {
 // halves at once: manual for the call gate, and plan for a sub-agent the turn
 // may spawn — which used to read the old mode until the UI caught up. The
 // agent applies plan mode to itself; the "mode" event only tells the UI.
+//
+// The take and the stores are one step under modeMu: a detached run's take
+// either lands before force-detach pops the queue — and the fresh agent is
+// built from the mode it set — or finds the queue empty.
 func (a *app) takeMode() (plan bool, name string, ok bool) {
 	a.modeMu.Lock()
+	defer a.modeMu.Unlock()
 	q := a.queuedMode
 	a.queuedMode = nil
-	a.modeMu.Unlock()
 	if q == nil {
 		return false, "", false
 	}
@@ -3388,8 +3384,11 @@ func (a *app) takeMode() (plan bool, name string, ok bool) {
 	return *q == modePlan, q.String(), true
 }
 
-// setMode switches the mode and returns a one-line confirmation.
+// setMode switches the mode and returns a one-line confirmation. A mode set
+// outright replaces one still queued: /plan typed after a shift+tab during
+// /compact must not be undone by the next task's first turn.
 func (a *app) setMode(m mode) string {
+	a.popQueuedMode()
 	a.planMode.Store(m == modePlan)
 	a.manual.Store(m == modeManual)
 	if a.ag != nil {

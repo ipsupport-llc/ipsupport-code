@@ -174,9 +174,6 @@ func TestAModeChosenMidTaskIsTakenAtTheNextTurn(t *testing.T) {
 		t.Error("a queued mode was taken twice")
 	}
 	m.Update(eventMsg(uiEvent{kind: "mode", fields: map[string]any{"mode": "manual", "step": 2}}))
-	if m.pendingMode != nil {
-		t.Error("the choice the agent took is still pending")
-	}
 	if log := strings.Join(m.history, "\n"); !strings.Contains(log, "manual mode on — from step 2") {
 		t.Errorf("the log does not say when the switch took effect:\n%s", log)
 	}
@@ -197,7 +194,7 @@ func TestAModeChosenMidTaskIsTakenAtTheNextTurn(t *testing.T) {
 	}
 
 	// The task ends before the agent took the choice: it applies, and the queue
-	// is dropped so the next task does not take it again.
+	// is emptied so the next task does not take it again.
 	m.state = stRunning
 	want := *m.pendingMode
 	m.applyPendingMode()
@@ -208,12 +205,29 @@ func TestAModeChosenMidTaskIsTakenAtTheNextTurn(t *testing.T) {
 		t.Error("the queue outlived the task that never took it")
 	}
 
-	// An idle switch drops a queue left behind.
-	a.queueMode(modeAuto)
-	m.state = stIdle
-	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab})
-	if _, _, ok := a.takeMode(); ok {
-		t.Error("an idle switch left an older queued mode for the next task to take")
+	// A mode set outright — an idle shift+tab, /plan — replaces one still
+	// queued, say from a shift+tab during /compact.
+	for _, set := range []func(){
+		func() { m.state = stIdle; m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) },
+		func() { a.setMode(modePlan) },
+	} {
+		a.queueMode(modeAuto)
+		set()
+		if _, _, ok := a.takeMode(); ok {
+			t.Error("a mode set outright left an older queued one for the next task to take")
+		}
+	}
+
+	// A choice the agent already took is not applied again at the task's end.
+	a.setMode(modeAuto)
+	m.state = stRunning
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) // plan
+	a.takeMode()
+	a.setMode(modeManual) // anything after, e.g. the user's own /manual once idle — stand-in
+	m.pendingMode = &[]mode{modePlan}[0]
+	m.applyPendingMode()
+	if a.mode() != modeManual {
+		t.Errorf("mode = %v: a choice the agent had taken was applied again at the end", a.mode())
 	}
 }
 

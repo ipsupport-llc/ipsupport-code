@@ -1830,8 +1830,7 @@ func TestDeferredModeSwitchWhileRunning(t *testing.T) {
 		t.Errorf("third shift+tab should come back to auto, got %v", *m.pendingMode)
 	}
 
-	plan := modePlan
-	m.pendingMode = &plan
+	m.app.queueMode(modePlan) // what the task ended without taking
 	m.applyPendingMode()
 	if !m.app.planMode.Load() {
 		t.Error("applyPendingMode should have switched to plan")

@@ -70,8 +70,10 @@ func TestNoAnswerMarksOnlyANo(t *testing.T) {
 // its hint at where the path meant — instead of calling it outside the workspace.
 func TestGitPassesOnTheUnexpandedPathHint(t *testing.T) {
 	tl := gitToolFor(t, initRepo(t), yes())
-	r := tl.Call(context.Background(), "clone", map[string]any{"url": "$HOME/repo"})
-	if !r.IsError || !strings.Contains(r.Content, "not shell-expanded") {
-		t.Errorf("clone $HOME/repo = %+v, want the not-shell-expanded refusal", r)
+	for _, url := range []string{"$HOME/repo", "$env:HOME/repo"} { // the second reads as host:path
+		r := tl.Call(context.Background(), "clone", map[string]any{"url": url})
+		if !r.IsError || !strings.Contains(r.Content, "not shell-expanded") {
+			t.Errorf("clone %s = %+v, want the not-shell-expanded refusal", url, r)
+		}
 	}
 }

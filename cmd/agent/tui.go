@@ -1140,8 +1140,8 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case stPlanReview:
 		switch k.String() {
-		case "enter", "y", "a", "m": // accept: execute the proposed plan, in auto — or manual (see planTarget)
-			m.app.setMode(m.planTarget(k.String() == "m"))
+		case "enter", "y", "a", "m", "M": // accept: execute the proposed plan, in auto — or manual (see planTarget)
+			m.app.setMode(m.planTarget(k.String() == "m" || k.String() == "M"))
 			m.push(cYou.Render("❯ ") + "execute the plan")
 			return m, m.runTask("Execute the plan you just proposed above, step by step. If a detail is unclear, make a reasonable call and proceed.")
 		case "esc", "n", "q": // keep planning — stay in plan mode; type to refine or shift+tab to auto

@@ -119,10 +119,10 @@ func (a *app) riskGate(pol *policy.Engine) func(ctx context.Context, tool, actio
 		kind, detail := name, ""
 		switch name {
 		case "run":
-			detail, _ = params["command"].(string)
+			detail = tool.Str(params, "command") // read as the tool reads it: a number is a path too
 		case "file":
 			kind = action
-			detail, _ = params["path"].(string)
+			detail = tool.Str(params, "path")
 		default:
 			return ""
 		}
@@ -274,19 +274,19 @@ func (a *app) persistRiskLearning(c risk.Correction) {
 // the shadow log records as "no comparison available" instead of inventing a
 // verdict for the disagreement column to be wrong about. A disagreement count
 // built on a guess is worse than a smaller one built on facts.
-func policyVerdict(pol *policy.Engine, tool, action string, params map[string]any) risk.PolicyVerdict {
+func policyVerdict(pol *policy.Engine, name, action string, params map[string]any) risk.PolicyVerdict {
 	if pol == nil {
 		return risk.VerdictUnknown
 	}
-	switch tool {
+	switch name {
 	case "run":
-		cmd, _ := params["command"].(string)
+		cmd := tool.Str(params, "command")
 		if cmd == "" {
 			return risk.VerdictUnknown
 		}
 		return fromDecision(pol.Run(cmd))
 	case "file":
-		path, _ := params["path"].(string)
+		path := tool.Str(params, "path")
 		if path == "" {
 			switch action {
 			case "list", "find", "search": // the tool reads these from "." then

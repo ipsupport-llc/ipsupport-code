@@ -2590,6 +2590,9 @@ func (a *Agent) anyMutating(calls []llm.ToolCall) bool {
 
 func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool) {
 	action, params, argWarn := parseArgs(c.Arguments)
+	// Judged as it will run: a missing or garbled action is recovered here, not
+	// only inside Dispatch after every check below has passed it by.
+	action, params = a.reg.Normalize(c.Name, action, params)
 
 	// Risk scoring, if anything is listening. Called with the parsed call and
 	// nothing else: the observer decides what to score and what to compare it

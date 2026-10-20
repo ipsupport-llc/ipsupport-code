@@ -5,7 +5,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textarea"
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/tool"
 )
 
 // Manual mode asks before every change the policy would have let through
@@ -93,5 +97,51 @@ func TestModesCycle(t *testing.T) {
 	}
 	if got := m.shadowLabel("mode", m.liveShadow()); !strings.Contains(got, "manual") {
 		t.Errorf("/config preview shows %q for manual", got)
+	}
+}
+
+// Accepting a plan runs it in manual when manual was chosen while it was being
+// written, or when accepted with m — it used to switch to auto regardless, and
+// every change then ran without the yes the user had asked to give.
+func TestAnAcceptedPlanKeepsManual(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		from mode
+		key  tea.KeyMsg
+		want mode
+	}{
+		{"enter from plan", modePlan, tea.KeyMsg{Type: tea.KeyEnter}, modeAuto},
+		{"m from plan", modePlan, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}}, modeManual},
+		{"enter after shift+tab to manual", modeManual, tea.KeyMsg{Type: tea.KeyEnter}, modeManual},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			m := &tuiModel{app: &app{cfg: config.Default()}, input: textarea.New(), state: stPlanReview}
+			m.app.setMode(c.from)
+			if c.from == modeManual && !strings.Contains(m.planReviewKeys(), "in manual") {
+				t.Errorf("keys %q do not say the plan runs in manual", m.planReviewKeys())
+			}
+			mode := m.planTarget(c.key.String() == "m")
+			if mode != c.want {
+				t.Errorf("accepting with %q from %v runs in %v, want %v", c.key.String(), c.from, mode, c.want)
+			}
+		})
+	}
+}
+
+// A run call whose command arrived in the action field is judged as the
+// command it runs as: manual mode asks about it. It used to pass the gate as
+// nothing, then run once Dispatch recovered the command.
+func TestManualModeJudgesARecoveredCall(t *testing.T) {
+	a, pol, ap := gateApp(t, "run.default=allow", "file.default=allow")
+	a.setMode(modeManual)
+	reg := tool.NewRegistry(tool.NewRun(pol, ap, 0, 0, tool.Shell("")))
+	action, params := reg.Normalize("run", "touch example.txt", map[string]any{})
+	if msg := a.riskGate(pol)(context.Background(), "run", action, params); ap.calls != 1 || !strings.Contains(msg, "touch example.txt") {
+		t.Errorf("recovered call: asked %d time(s), result %q; want it asked about as the command it runs", ap.calls, msg)
+	}
+	// A number is a path to the tool, so it is one to the gate.
+	before := ap.calls
+	if msg := a.riskGate(pol)(context.Background(), "file", "write", map[string]any{"path": 123}); ap.calls != before+1 || !strings.Contains(msg, "write 123") {
+		t.Errorf("numeric path: asked %d time(s), result %q; want a prompt", ap.calls-before, msg)
 	}
 }

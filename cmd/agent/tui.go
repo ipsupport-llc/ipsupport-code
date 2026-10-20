@@ -722,7 +722,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// A plan-mode task just proposed a plan — offer the accept→execute handshake.
 			m.planTask = false
 			m.state = stPlanReview
-			m.push("  " + m.attention("▸ PLAN READY") + "  enter: do it (switch to auto & execute) · esc: keep planning (type to refine)")
+			m.push("  " + m.attention("▸ PLAN READY") + "  " + m.planReviewKeys() + " (type to refine)")
 			return m, detect
 		}
 		m.planTask = false
@@ -1140,8 +1140,8 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case stPlanReview:
 		switch k.String() {
-		case "enter", "y", "a": // accept: switch to auto and execute the proposed plan
-			m.app.setMode(modeAuto)
+		case "enter", "y", "a", "m": // accept: execute the proposed plan, in auto — or manual (see planTarget)
+			m.app.setMode(m.planTarget(k.String() == "m"))
 			m.push(cYou.Render("❯ ") + "execute the plan")
 			return m, m.runTask("Execute the plan you just proposed above, step by step. If a detail is unclear, make a reasonable call and proceed.")
 		case "esc", "n", "q": // keep planning — stay in plan mode; type to refine or shift+tab to auto
@@ -1335,6 +1335,26 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.input, cmd = m.input.Update(k)
 		return m, cmd
 	}
+}
+
+// planTarget is the mode an accepted plan runs in: manual when asked for with
+// m, or when manual was already chosen with shift+tab while the plan was being
+// written — accepting used to switch to auto regardless, and every change
+// then ran without the yes the user had asked to give. Auto otherwise.
+func (m *tuiModel) planTarget(manual bool) mode {
+	if manual || m.app.mode() == modeManual {
+		return modeManual
+	}
+	return modeAuto
+}
+
+// planReviewKeys is the PLAN READY handshake's key line, naming the mode the
+// plan will run in.
+func (m *tuiModel) planReviewKeys() string {
+	if m.app.mode() == modeManual {
+		return "enter: do it in manual (asks before each change) · esc: not now"
+	}
+	return "enter: do it (switch to auto & execute) · m: do it in manual (asks before each change) · esc: keep planning"
 }
 
 // modeName labels a mode for the mid-task mode-switch hint.
@@ -2235,7 +2255,7 @@ func (m *tuiModel) View() string {
 		}
 	case m.state == stPlanReview:
 		// Waiting for a keypress — animated spinner + inverse badge, NOT a dim footnote.
-		status = m.spin.View() + " " + m.attention("▸ PLAN READY") + "  enter: do it (switch to auto & execute) · esc: keep planning"
+		status = m.spin.View() + " " + m.attention("▸ PLAN READY") + "  " + m.planReviewKeys()
 	case m.state == stGoalResume:
 		status = m.spin.View() + " " + m.attention("◎ RESUME GOAL") + "  enter: resume · esc: not now"
 	case m.state == stHistSearch:

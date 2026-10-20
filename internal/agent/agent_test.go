@@ -4630,3 +4630,47 @@ func TestDegenerateNudgeIsAHarnessMessage(t *testing.T) {
 		t.Error("degenerateNudge is not recognised as a harness message")
 	}
 }
+
+// A call whose value landed in the action field is judged as the call it runs
+// as: the observer, plan mode and the gate all see the recovered action and
+// params. It used to be judged as nothing, then recovered inside Dispatch and
+// run.
+func TestARecoveredCallIsJudgedAsItRuns(t *testing.T) {
+	ran := ""
+	reg := tool.NewRegistry(tool.NewDomain(tool.DomainSpec{
+		Name: "run", Summary: "shell",
+		Actions: []tool.Action{{Name: "shell", Mutates: true, Params: []tool.Param{tool.Req("command", "str")},
+			Run: func(_ context.Context, a tool.Args) tool.Result { ran = a.Str("command"); return tool.Ok("ok") }}},
+	}))
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "run", `{"action":"touch x","params":{}}`),
+		{Role: "assistant", Content: "done"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	var scored, gated string
+	a.SetRiskObserver(func(ctx context.Context, _, action string, p map[string]any) (context.Context, string) {
+		scored = action + " " + tool.Str(p, "command")
+		return ctx, ""
+	})
+	a.SetCallGate(func(_ context.Context, _, action string, p map[string]any) string {
+		gated = action + " " + tool.Str(p, "command")
+		return "denied"
+	})
+	a.Run(context.Background(), "make x")
+	if scored != "shell touch x" || gated != "shell touch x" {
+		t.Errorf("scored %q, gated %q; want both to see shell touch x", scored, gated)
+	}
+	if ran != "" {
+		t.Errorf("the gate said no, but %q ran", ran)
+	}
+
+	a = New(&scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "run", `{"action":"touch x","params":{}}`),
+		{Role: "assistant", Content: "plan"},
+	}}, reg, nil, nil, "", 5)
+	a.SetPlanMode(true)
+	a.Run(context.Background(), "make x")
+	if ran != "" {
+		t.Errorf("plan mode let a recovered mutating call run: %q", ran)
+	}
+}

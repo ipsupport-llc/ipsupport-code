@@ -462,8 +462,10 @@ for the session only.
   holds in every mode.
 
 When a plan-mode task finishes with a plan, you get a one-key **handshake**:
-**enter** to accept — switches to auto and immediately executes the plan — or
-**esc** to keep planning (stay in plan mode; type to refine). Toggling the mode
+**enter** to accept — switches to auto and immediately executes the plan —
+**m** to execute it in manual instead, asking before each change, or **esc** to
+keep planning (stay in plan mode; type to refine). If you switched to manual
+with shift+tab while the plan was being written, **enter** runs it in manual. Toggling the mode
 **mid-task** applies at the next turn, never mid-run (the running agent reads the
 mode live).
 

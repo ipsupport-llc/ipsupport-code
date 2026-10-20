@@ -183,6 +183,18 @@ func (c *deadlineConn) Read(b []byte) (int, error) {
 // transport DOES bound the connect/handshake/response-header phases so a dead
 // connection (e.g. after the laptop sleeps) can't wedge a request forever —
 // short of that, a stuck socket read ignores context cancellation.
+// UserAgent names this program on every request to the model server, so a
+// proxy in front of it (LLMTray, a gateway) can tell it from any other Go
+// client — they all said "Go-http-client/1.1". Set once at startup; empty
+// leaves Go's default.
+var UserAgent string
+
+func setUserAgent(req *http.Request) {
+	if UserAgent != "" {
+		req.Header.Set("User-Agent", UserAgent)
+	}
+}
+
 func NewOpenAIClient(c config.LLM) *OpenAIClient {
 	idle := 90 * time.Second
 	if c.IdleTimeoutSeconds > 0 {
@@ -567,6 +579,7 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
+	setUserAgent(req)
 	if strings.Contains(c.baseURL, "openrouter.ai") {
 		// OpenRouter uses these to attribute traffic to the app (rankings, some
 		// free-tier access). Harmless elsewhere, so only set for OpenRouter.

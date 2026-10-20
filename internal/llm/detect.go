@@ -25,6 +25,7 @@ func ListModels(ctx context.Context, baseURL, apiKey string, hc *http.Client) ([
 	if err != nil {
 		return nil, err
 	}
+	setUserAgent(req)
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
@@ -70,6 +71,7 @@ func DetectModelContext(ctx context.Context, baseURL, apiKey, model string, hc *
 	if err != nil {
 		return 0
 	}
+	setUserAgent(req)
 	if apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
@@ -123,6 +125,7 @@ func ListLMStudioModels(ctx context.Context, baseURL string, hc *http.Client) ([
 	if err != nil {
 		return nil, err
 	}
+	setUserAgent(req)
 	resp, err := hc.Do(req)
 	if err != nil {
 		return nil, err
@@ -154,6 +157,7 @@ func DetectContextWindow(ctx context.Context, baseURL, model string, hc *http.Cl
 	if err != nil {
 		return 0
 	}
+	setUserAgent(req)
 	resp, err := hc.Do(req)
 	if err != nil {
 		return 0

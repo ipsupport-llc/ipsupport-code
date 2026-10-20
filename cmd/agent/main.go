@@ -72,6 +72,7 @@ func main() {
 	// sandbox, it re-runs THIS binary, which self-restricts and execs the real
 	// command. Must run first; a normal launch falls straight through.
 	sandbox.MaybeExecConfined()
+	llm.UserAgent = userAgent()
 	var (
 		workspace       string
 		doInit          bool

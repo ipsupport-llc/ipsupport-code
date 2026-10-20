@@ -166,11 +166,11 @@ func TestAModeChosenMidTaskIsTakenAtTheNextTurn(t *testing.T) {
 	if log := strings.Join(m.history, "\n"); !strings.Contains(log, "from the model's next turn") || strings.Contains(log, "next task") {
 		t.Errorf("hint does not say when it applies:\n%s", log)
 	}
-	plan, name, ok := a.takeMode()
+	plan, name, ok := a.takeMode(func() bool { return false })
 	if !ok || plan || name != "manual" || a.mode() != modeManual {
 		t.Fatalf("takeMode = (%v, %q, %v), mode %v; want manual, taken, and in effect", plan, name, ok, a.mode())
 	}
-	if _, _, ok := a.takeMode(); ok {
+	if _, _, ok := a.takeMode(func() bool { return false }); ok {
 		t.Error("a queued mode was taken twice")
 	}
 	m.Update(eventMsg(uiEvent{kind: "mode", fields: map[string]any{"mode": "manual", "step": 2}}))
@@ -180,7 +180,7 @@ func TestAModeChosenMidTaskIsTakenAtTheNextTurn(t *testing.T) {
 
 	// A newer switch taken before an older event is read stands.
 	a.queueMode(modePlan)
-	a.takeMode()
+	a.takeMode(func() bool { return false })
 	m.Update(eventMsg(uiEvent{kind: "mode", fields: map[string]any{"mode": "manual", "step": 3}}))
 	if a.mode() != modePlan {
 		t.Errorf("a late event set the mode back to %v", a.mode())
@@ -201,7 +201,7 @@ func TestAModeChosenMidTaskIsTakenAtTheNextTurn(t *testing.T) {
 	if a.mode() != want {
 		t.Errorf("mode = %v after the task ended, want the choice (%v) applied", a.mode(), want)
 	}
-	if _, _, ok := a.takeMode(); ok {
+	if _, _, ok := a.takeMode(func() bool { return false }); ok {
 		t.Error("the queue outlived the task that never took it")
 	}
 
@@ -213,7 +213,7 @@ func TestAModeChosenMidTaskIsTakenAtTheNextTurn(t *testing.T) {
 	} {
 		a.queueMode(modeAuto)
 		set()
-		if _, _, ok := a.takeMode(); ok {
+		if _, _, ok := a.takeMode(func() bool { return false }); ok {
 			t.Error("a mode set outright left an older queued one for the next task to take")
 		}
 	}
@@ -222,7 +222,7 @@ func TestAModeChosenMidTaskIsTakenAtTheNextTurn(t *testing.T) {
 	a.setMode(modeAuto)
 	m.state = stRunning
 	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) // plan
-	a.takeMode()
+	a.takeMode(func() bool { return false })
 	a.setMode(modeManual) // anything after, e.g. the user's own /manual once idle — stand-in
 	m.pendingMode = &[]mode{modePlan}[0]
 	m.applyPendingMode()
@@ -240,7 +240,7 @@ func TestAPlanSwitchedToMidTaskGetsItsHandshake(t *testing.T) {
 	m.app.ag = agent.New(m.app.client, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
 	m.planTask = false // started in auto
 	m.app.queueMode(modePlan)
-	m.app.takeMode() // taken mid-run; its event not read yet
+	m.app.takeMode(func() bool { return false }) // taken mid-run; its event not read yet
 	m.Update(taskDoneMsg{})
 	if m.state != stPlanReview {
 		t.Errorf("state = %v, want PLAN READY for a run that ended in plan mode", m.state)
@@ -264,7 +264,16 @@ func TestAForceDetachedRunsModeIsNotLeftQueued(t *testing.T) {
 	if a.mode() != modePlan || m.pendingMode != nil {
 		t.Errorf("after force-detach: mode %v, pending %v; want the choice applied", a.mode(), m.pendingMode)
 	}
-	if _, _, ok := a.takeMode(); ok {
+	if _, _, ok := a.takeMode(func() bool { return false }); ok {
 		t.Error("the fresh agent would take the abandoned run's mode on its first turn")
+	}
+	// A detached run that reaches its take late takes nothing — not even a
+	// choice made since for the next run.
+	a.queueMode(modeManual)
+	if _, _, ok := a.takeMode(func() bool { return true }); ok || a.mode() == modeManual {
+		t.Error("a detached run took the next run's mode")
+	}
+	if q := a.popQueuedMode(); q == nil || *q != modeManual {
+		t.Error("the next run's mode was lost to a detached run")
 	}
 }

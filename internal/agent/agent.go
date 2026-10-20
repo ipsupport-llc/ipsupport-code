@@ -1007,6 +1007,9 @@ func (a *Agent) Detach() { a.detached.Store(true) }
 // Reattach undoes Detach (used only if the agent swap it was part of failed).
 func (a *Agent) Reattach() { a.detached.Store(false) }
 
+// Detached reports whether Detach silenced this agent.
+func (a *Agent) Detached() bool { return a.detached.Load() }
+
 // remember appends the goal and its final answer to the session, trimming to
 // the most recent maxHistory messages. msgs is the full turn just finished
 // (all tool calls/results) — actionsDigest pulls a short, deterministic list of

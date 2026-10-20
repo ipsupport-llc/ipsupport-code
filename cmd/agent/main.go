@@ -3272,9 +3272,10 @@ func (a *app) wire() error {
 	}
 	a.ag.SetBeforeTurn(a.beforeTurn) // finished background jobs fold in between steps of a running task
 	a.ag.SetSteers(a.drainSteers)    // so do /steer notes, and before a final answer is accepted
-	a.ag.SetModeSwitch(a.takeMode)   // and a mode chosen with shift+tab mid-task
-	a.ag.SetAsides(a.drainAsides)    // /btw side questions answered between steps, one no-tools turn each
-	if !a.readOnly {                 // a throwaway session leaves nothing behind
+	ag := a.ag
+	ag.SetModeSwitch(func() (bool, string, bool) { return a.takeMode(ag.Detached) }) // and a mode chosen with shift+tab mid-task
+	a.ag.SetAsides(a.drainAsides)                                                    // /btw side questions answered between steps, one no-tools turn each
+	if !a.readOnly {                                                                 // a throwaway session leaves nothing behind
 		a.ag.SetArchiver(&sessionArchiver{path: a.archivePath()})
 	}
 	a.ensureShadow()                                           // once per process, here on the wiring goroutine
@@ -3368,12 +3369,16 @@ func (a *app) popQueuedMode() *mode {
 // may spawn — which used to read the old mode until the UI caught up. The
 // agent applies plan mode to itself; the "mode" event only tells the UI.
 //
-// The take and the stores are one step under modeMu: a detached run's take
-// either lands before force-detach pops the queue — and the fresh agent is
-// built from the mode it set — or finds the queue empty.
-func (a *app) takeMode() (plan bool, name string, ok bool) {
+// The take and the stores are one step under modeMu, and detached is asked
+// inside it: a detached run's take either lands before force-detach pops the
+// queue — and the fresh agent is built from the mode it set — or finds itself
+// detached and takes nothing, not even a choice made since for the next run.
+func (a *app) takeMode(detached func() bool) (plan bool, name string, ok bool) {
 	a.modeMu.Lock()
 	defer a.modeMu.Unlock()
+	if detached() {
+		return false, "", false
+	}
 	q := a.queuedMode
 	a.queuedMode = nil
 	if q == nil {

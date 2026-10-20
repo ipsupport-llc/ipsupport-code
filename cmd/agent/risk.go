@@ -119,25 +119,52 @@ func (a *app) riskGate(pol *policy.Engine) func(ctx context.Context, tool, actio
 		kind, detail := name, ""
 		switch name {
 		case "run":
-			detail, _ = params["command"].(string)
+			detail = tool.Str(params, "command") // read as the tool reads it: a number is a path too
 		case "file":
 			kind = action
-			detail, _ = params["path"].(string)
+			detail = tool.Str(params, "path")
 		default:
 			return ""
 		}
-		if !a.riskStops(ctx, kind) || policyVerdict(pol, name, action, params) != risk.VerdictAllow {
+		flagged := a.riskStops(ctx, kind)
+		if !flagged && !a.manualStops(name, action) || policyVerdict(pol, name, action, params) != risk.VerdictAllow {
 			return ""
 		}
 		ok, gone := tool.AskWith(ctx, kind, detail, a.approveGated)
 		if ok {
 			return ""
 		}
+		if !flagged { // asked because of manual mode alone
+			if gone != "" {
+				return gone
+			}
+			return fmt.Sprintf("%s %s denied by user", kind, detail)
+		}
 		if gone != "" {
 			return gone + " (The risk check had flagged it: " + riskNote(ctx) + ".)"
 		}
 		return fmt.Sprintf("%s %s denied by user — the risk check flagged it: %s", kind, detail, riskNote(ctx))
 	}
+}
+
+// manualStops reports whether manual mode stops a call the policy would run
+// without asking: in manual every change asks — any shell command, since any
+// can change something, and every file write, append, edit and mkdir. Reads
+// stay free, and an 'a' at a prompt still covers its kind for the session.
+func (a *app) manualStops(name, action string) bool {
+	if !a.manual.Load() {
+		return false
+	}
+	switch name {
+	case "run":
+		return true
+	case "file":
+		switch action {
+		case "write", "append", "edit", "mkdir":
+			return true
+		}
+	}
+	return false
 }
 
 // withLaunchScore scores a command line a call is about to start: an external
@@ -247,19 +274,19 @@ func (a *app) persistRiskLearning(c risk.Correction) {
 // the shadow log records as "no comparison available" instead of inventing a
 // verdict for the disagreement column to be wrong about. A disagreement count
 // built on a guess is worse than a smaller one built on facts.
-func policyVerdict(pol *policy.Engine, tool, action string, params map[string]any) risk.PolicyVerdict {
+func policyVerdict(pol *policy.Engine, name, action string, params map[string]any) risk.PolicyVerdict {
 	if pol == nil {
 		return risk.VerdictUnknown
 	}
-	switch tool {
+	switch name {
 	case "run":
-		cmd, _ := params["command"].(string)
+		cmd := tool.Str(params, "command")
 		if cmd == "" {
 			return risk.VerdictUnknown
 		}
 		return fromDecision(pol.Run(cmd))
 	case "file":
-		path, _ := params["path"].(string)
+		path := tool.Str(params, "path")
 		if path == "" {
 			switch action {
 			case "list", "find", "search": // the tool reads these from "." then

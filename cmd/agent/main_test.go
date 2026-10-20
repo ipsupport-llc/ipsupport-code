@@ -1815,18 +1815,22 @@ func TestDeferredModeSwitchWhileRunning(t *testing.T) {
 	m.app.planMode = false // start in auto
 
 	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab})
-	if m.pendingMode == nil || !*m.pendingMode {
+	if m.pendingMode == nil || *m.pendingMode != modePlan {
 		t.Fatalf("shift+tab while running should queue plan mode, pending=%v", m.pendingMode)
 	}
 	if m.app.planMode {
 		t.Error("mode must NOT flip live while a task runs")
 	}
-	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) // toggles the queued target back
-	if *m.pendingMode {
-		t.Error("second shift+tab should flip the queued target back to auto")
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) // moves the queued target on
+	if *m.pendingMode != modeManual {
+		t.Errorf("second shift+tab should queue manual, got %v", *m.pendingMode)
+	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab})
+	if *m.pendingMode != modeAuto {
+		t.Errorf("third shift+tab should come back to auto, got %v", *m.pendingMode)
 	}
 
-	plan := true
+	plan := modePlan
 	m.pendingMode = &plan
 	m.applyPendingMode()
 	if !m.app.planMode {

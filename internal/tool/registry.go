@@ -135,6 +135,42 @@ func inferAction(t Tool, acts []string, params map[string]any) string {
 	return ""
 }
 
+// Normalize is the action and params Dispatch will actually run a call with,
+// by the same recovery of a missing or garbled action. Anything that judges a
+// call before it runs — the risk score, plan mode, the call gate — must see it
+// this way, or a call recovered here runs unjudged: "touch x" dumped into
+// run's action field was scored and gated as nothing, then run as a command
+// (found by review). A call nothing recovers comes back as given, for
+// Dispatch to refuse.
+func (r *Registry) Normalize(name, action string, params map[string]any) (string, map[string]any) {
+	t, ok := r.tools[name]
+	if !ok {
+		return action, params
+	}
+	acts := t.Actions()
+	switch {
+	case contains(acts, action):
+		return action, params
+	case action == "":
+		if a := inferAction(t, acts, params); a != "" {
+			return a, params
+		}
+		if d, isDomain := t.(*Domain); isDomain {
+			if a, p, ok := d.soleRequiredParam(); ok && !isEmpty(params[p]) {
+				return a, params
+			}
+		}
+	case len(otherOwners(r.actionToTool[action], name)) == 0:
+		if a := inferAction(t, acts, params); a != "" {
+			return a, params
+		}
+		if a, p, ok := garbledActionAsParam(t, action, params); ok {
+			return a, p
+		}
+	}
+	return action, params
+}
+
 // garbledActionAsParam recovers a call where the model dumped its intended
 // value directly into "action" instead of params (see Domain.
 // soleRequiredParam's doc). Safe specifically because it only fires for a

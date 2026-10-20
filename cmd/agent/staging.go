@@ -255,12 +255,12 @@ func (m *tuiModel) reasoningWhileBusy(rest string) bool {
 // row would land can be worked out without touching a.cfg.
 type shadow struct {
 	cfg       config.Config
-	plan      bool
+	mode      mode
 	accentIdx int
 }
 
 func (m *tuiModel) liveShadow() shadow {
-	return shadow{cfg: m.app.cfg, plan: m.app.planMode, accentIdx: m.accentIdx}
+	return shadow{cfg: m.app.cfg, mode: m.app.mode(), accentIdx: m.accentIdx}
 }
 
 // cycleRow is a row that steps through its values on enter: get reads where
@@ -273,7 +273,7 @@ type cycleRow struct {
 func flip(b *bool) { *b = !*b }
 
 var cycleRows = map[string]cycleRow{
-	"mode":       {func(s *shadow) string { return strconv.FormatBool(s.plan) }, func(s *shadow) { flip(&s.plan) }},
+	"mode":       {func(s *shadow) string { return s.mode.String() }, func(s *shadow) { s.mode = s.mode.next() }},
 	"perm_files": {func(s *shadow) string { return s.cfg.File.Default }, func(s *shadow) { s.cfg.File.Default = nextStr(s.cfg.File.Default, permCycle) }},
 	"perm_run":   {func(s *shadow) string { return s.cfg.Run.Default }, func(s *shadow) { s.cfg.Run.Default = nextStr(s.cfg.Run.Default, permCycle) }},
 	"timeout": {func(s *shadow) string { return strconv.Itoa(s.cfg.Run.TimeoutSeconds) },
@@ -327,8 +327,9 @@ var cycleRows = map[string]cycleRow{
 
 // shadowLabel is how a row shows the shadow's value — the row's own wording.
 func (m *tuiModel) shadowLabel(key string, s shadow) string {
-	v := &tuiModel{app: &app{cfg: s.cfg, planMode: s.plan, workspace: m.app.workspace},
+	v := &tuiModel{app: &app{cfg: s.cfg, workspace: m.app.workspace},
 		accent: lipgloss.Color(colorCycle[s.accentIdx]), accentIdx: s.accentIdx}
+	v.app.setMode(s.mode)
 	_, value, _ := v.configRowView(key)
 	return value
 }

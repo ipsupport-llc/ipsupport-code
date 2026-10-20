@@ -65,3 +65,15 @@ func TestNoAnswerMarksOnlyANo(t *testing.T) {
 	}
 	NoAnswer(context.Background()) // outside an Ask: nothing to mark, and no panic
 }
+
+// git passes on the refusal of a path opening with an env reference — with
+// its hint at where the path meant — instead of calling it outside the workspace.
+func TestGitPassesOnTheUnexpandedPathHint(t *testing.T) {
+	tl := gitToolFor(t, initRepo(t), yes())
+	for _, url := range []string{"$HOME/repo", "$env:HOME/repo"} { // the second reads as host:path
+		r := tl.Call(context.Background(), "clone", map[string]any{"url": url})
+		if !r.IsError || !strings.Contains(r.Content, "not shell-expanded") {
+			t.Errorf("clone %s = %+v, want the not-shell-expanded refusal", url, r)
+		}
+	}
+}

@@ -131,11 +131,21 @@ func localGitPath(v string) bool {
 // fetching from one outside reads files the jail exists to keep out, and
 // pushing to one writes there (found by review).
 func (g *gitTool) checkLocalGitPath(v string) error {
+	if strings.HasPrefix(v, "$") || strings.HasPrefix(v, "%") {
+		// "$env:HOME/repo" reads as host:path to localGitPath, and git then
+		// failed on ssh to a host named "$env"; no server is named like that.
+		if _, err := g.pol.Resolve(v); errors.Is(err, policy.ErrNotShellExpanded) {
+			return err
+		}
+	}
 	if !localGitPath(v) {
 		return nil
 	}
 	p := strings.TrimPrefix(strings.TrimPrefix(v, "file://"), "file:")
 	if _, err := g.pol.Resolve(p); err != nil {
+		if errors.Is(err, policy.ErrNotShellExpanded) {
+			return err // its own hint says where the path meant
+		}
 		return errors.New("a local repository outside the workspace isn't reachable from here: " + v)
 	}
 	return nil

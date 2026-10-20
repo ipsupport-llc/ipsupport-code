@@ -136,6 +136,9 @@ func (g *gitTool) checkLocalGitPath(v string) error {
 	}
 	p := strings.TrimPrefix(strings.TrimPrefix(v, "file://"), "file:")
 	if _, err := g.pol.Resolve(p); err != nil {
+		if errors.Is(err, policy.ErrNotShellExpanded) {
+			return err // its own hint says where the path meant
+		}
 		return errors.New("a local repository outside the workspace isn't reachable from here: " + v)
 	}
 	return nil

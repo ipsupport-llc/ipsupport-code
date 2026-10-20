@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -62,15 +63,19 @@ func TestResolveRefusesALeadingEnvReference(t *testing.T) {
 	for _, p := range []string{
 		"$env:HOME/note.json", "$ENV:HOME" + sep + "note.json", "${env:HOME}/note.json",
 		"${HOME}/note.json", "$HOME/note.json", "%HOME%/note.json", "$HOME",
+		`$env:HOME\note.json`, // Windows spelling on any system
 	} {
 		_, err := e.Resolve(p)
 		if err == nil || !strings.Contains(err.Error(), "not shell-expanded") || !strings.Contains(err.Error(), home) {
 			t.Errorf("Resolve(%q) error = %v; want it refused, naming where HOME is", p, err)
 		}
 	}
-	for _, p := range []string{"$IPCO_TEST_SECRET", "$env:IPCO_TEST_SECRET/x", "%IPCO_TEST_SECRET%/x"} {
+	if runtime.GOOS != "windows" { // "home" is its own variable on Unix, not HOME
+		t.Setenv("home", "/elsewhere/private")
+	}
+	for _, p := range []string{"$IPCO_TEST_SECRET", "$env:IPCO_TEST_SECRET/x", "%IPCO_TEST_SECRET%/x", "$home/x", "${env:ProgramFiles(x86)}/x"} {
 		_, err := e.Resolve(p)
-		if err == nil || strings.Contains(err.Error(), "sk-do-not-leak") {
+		if err == nil || strings.Contains(err.Error(), "sk-do-not-leak") || strings.Contains(err.Error(), "/elsewhere/private") {
 			t.Errorf("Resolve(%q) error = %v; want it refused without the value", p, err)
 		}
 	}

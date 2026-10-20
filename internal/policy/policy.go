@@ -6,6 +6,7 @@
 package policy
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -522,7 +523,11 @@ func expandTilde(p string) string {
 // shell's own spelling: PowerShell's $env:NAME and ${env:NAME} (its "env:" in
 // any case), POSIX ${NAME} and $NAME, and cmd's %NAME% (whose names may hold
 // parentheses: %ProgramFiles(x86)%).
-var envRef = regexp.MustCompile(`^(?:\$(?i:env):([A-Za-z_][A-Za-z0-9_]*)|\$\{(?:(?i:env):)?([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_()]*)%)`)
+var envRef = regexp.MustCompile(`^(?:\$(?i:env):([A-Za-z_][A-Za-z0-9_]*)|\$\{(?:(?i:env):)?([A-Za-z_][A-Za-z0-9_()]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_()]*)%)`)
+
+// ErrNotShellExpanded is the refusal of a path opening with an environment
+// reference (see unexpandedRef), for a caller to pass on as it is.
+var ErrNotShellExpanded = errors.New("file paths are not shell-expanded")
 
 // dirVars are the variables an unexpanded path is told the value of: places,
 // not secrets. Any other variable's value never appears — a model reading
@@ -542,21 +547,27 @@ var dirVars = map[string]bool{
 // risk check and git all see the path as written, and a call must open what
 // they saw — and the value of an arbitrary variable, echoed back in an error,
 // is a way to read a secret. A reference counts only when a separator or the
-// end follows it: "$Recycle.Bin" and "Foo$Bar.class" are file names.
+// end follows it: "$Recycle.Bin" and "Foo$Bar.class" are file names. A
+// backslash counts as a separator everywhere: models write Windows paths on
+// any system, and "$env:USERPROFILE\.gitconfig" is the same mistake on macOS.
 func unexpandedRef(p string) error {
 	m := envRef.FindStringSubmatch(p)
 	if m == nil {
 		return nil
 	}
-	if rest := p[len(m[0]):]; rest != "" && rest[0] != '/' && rest[0] != filepath.Separator {
+	if rest := p[len(m[0]):]; rest != "" && rest[0] != '/' && rest[0] != '\\' {
 		return nil
 	}
 	name := m[1] + m[2] + m[3] + m[4] // exactly one group matched
+	key := name                       // "home" is not "HOME" on Unix: only Windows folds case
+	if runtime.GOOS == "windows" {
+		key = strings.ToUpper(name)
+	}
 	hint := ""
-	if v := os.Getenv(name); v != "" && dirVars[strings.ToUpper(name)] && filepath.IsAbs(v) {
+	if v := os.Getenv(name); v != "" && dirVars[key] && filepath.IsAbs(v) {
 		hint = fmt.Sprintf(" (%s is %s)", m[0], v)
 	}
-	return fmt.Errorf("path %q starts with %s, but file paths are not shell-expanded — pass the full path%s", p, m[0], hint)
+	return fmt.Errorf("path %q starts with %s, but %w — pass the full path%s", p, m[0], ErrNotShellExpanded, hint)
 }
 
 // maxSymlinkChase bounds resolveSymlinks' own-target chase (see below) against

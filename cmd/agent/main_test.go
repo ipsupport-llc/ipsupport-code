@@ -1812,13 +1812,13 @@ func TestIsCommandLine(t *testing.T) {
 // switch, for the agent's next turn or, failing that, the task's end.
 func TestDeferredModeSwitchWhileRunning(t *testing.T) {
 	m := &tuiModel{state: stRunning, input: textarea.New(), app: &app{cfg: config.Default()}}
-	m.app.planMode = false // start in auto
+	m.app.planMode.Store(false) // start in auto
 
 	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab})
 	if m.pendingMode == nil || *m.pendingMode != modePlan {
 		t.Fatalf("shift+tab while running should queue plan mode, pending=%v", m.pendingMode)
 	}
-	if m.app.planMode {
+	if m.app.planMode.Load() {
 		t.Error("mode must NOT flip live while a task runs")
 	}
 	m.handleKey(tea.KeyMsg{Type: tea.KeyShiftTab}) // moves the queued target on
@@ -1833,7 +1833,7 @@ func TestDeferredModeSwitchWhileRunning(t *testing.T) {
 	plan := modePlan
 	m.pendingMode = &plan
 	m.applyPendingMode()
-	if !m.app.planMode {
+	if !m.app.planMode.Load() {
 		t.Error("applyPendingMode should have switched to plan")
 	}
 	if m.pendingMode != nil {
@@ -2327,7 +2327,7 @@ func TestPlanReviewHandshake(t *testing.T) {
 		m.app.windowDetected = true // detectWindowCmd → nil (no probe)
 		m.app.client = llm.NewOpenAIClient(config.LLM{})
 		m.app.ag = agent.New(m.app.client, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 5)
-		m.app.planMode = true
+		m.app.planMode.Store(true)
 		m.planTask = true
 		return m
 	}
@@ -2340,16 +2340,16 @@ func TestPlanReviewHandshake(t *testing.T) {
 	}
 	// enter = accept → switch to auto, a run starts (the cmd's goroutine isn't executed here)
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
-	if m.app.planMode || m.state != stRunning {
-		t.Errorf("accept → planMode=%v state=%v; want auto + running", m.app.planMode, m.state)
+	if m.app.planMode.Load() || m.state != stRunning {
+		t.Errorf("accept → planMode=%v state=%v; want auto + running", m.app.planMode.Load(), m.state)
 	}
 
 	// esc = keep planning → idle, plan mode preserved
 	m = newM()
 	m.Update(taskDoneMsg{})
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
-	if m.state != stIdle || !m.app.planMode {
-		t.Errorf("keep planning → state=%v planMode=%v; want stIdle + plan kept", m.state, m.app.planMode)
+	if m.state != stIdle || !m.app.planMode.Load() {
+		t.Errorf("keep planning → state=%v planMode=%v; want stIdle + plan kept", m.state, m.app.planMode.Load())
 	}
 
 	// a cancelled plan run must NOT pop the handshake
@@ -3826,7 +3826,8 @@ func TestSpawnExternalAgentBlockedInPlanMode(t *testing.T) {
 	cfg.Agents = map[string]config.AgentProfile{
 		"touch": {Kind: "external", Command: "touch", Args: []string{"{task}"}},
 	}
-	a := &app{cfg: cfg, workspace: ws, approver: fixedApprover(true), planMode: true}
+	a := &app{cfg: cfg, workspace: ws, approver: fixedApprover(true)}
+	a.planMode.Store(true)
 
 	_, err := a.spawnAgent(context.Background(), "touch", marker, "")
 	if err == nil || !strings.Contains(err.Error(), "plan mode") {
@@ -6250,7 +6251,7 @@ func TestModeLine(t *testing.T) {
 	if !strings.Contains(m.modeLine(), "auto mode on") {
 		t.Errorf("auto: %q", m.modeLine())
 	}
-	m.app.planMode = true
+	m.app.planMode.Store(true)
 	if !strings.Contains(m.modeLine(), "plan mode on") {
 		t.Errorf("plan: %q", m.modeLine())
 	}

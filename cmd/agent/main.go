@@ -617,7 +617,7 @@ type app struct {
 	instrSrc        string                     // project instructions file in effect, "" if none
 	promptSrc       string                     // "built-in" or the system.md override path
 	facts           []string                   // durable project facts learned over time (per workspace)
-	planMode        bool                       // plan (propose) vs auto (execute); survives re-wire
+	planMode        atomic.Bool                // plan (propose) vs auto (execute); survives re-wire; the agent's goroutine sets it too (takeMode)
 	manual          atomic.Bool                // manual mode: every change asks (see manualStops); read by tool goroutines
 	modeMu          sync.Mutex                 // guards queuedMode
 	queuedMode      *mode                      // a mode chosen mid-task, for the agent's next turn (see takeMode)
@@ -743,7 +743,8 @@ func build(workspace, sessionName string, overrides []string, readOnly bool, rea
 		usageStore, _ = usage.Open("")
 	}
 
-	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader, readOnly: readOnly, planMode: readOnly}
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, usage: usageStore, skills: skills, reader: reader, readOnly: readOnly}
+	a.planMode.Store(readOnly)
 	a.stdin = newStdinOwner(reader)                     // sole reader of `reader`'s actual bytes from here on (see stdinOwner)
 	a.approver = &stdinApprover{stdin: a.stdin, app: a} // set after: it references the app for session-allow
 	// Cancel background jobs (killing external-agent subprocesses too), shut down
@@ -940,7 +941,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 		// no read-only mode to hand them the way SetPlanMode gives an LLM sub-agent
 		// (see runSpawnPlan), so plan mode can only keep its "stays read-only"
 		// guarantee (see the subagents skill) by refusing the launch outright.
-		if a.planMode {
+		if a.planMode.Load() {
 			return spawnPlan{}, true, p, fmt.Errorf("plan mode is ON — external agent %q was NOT launched (it runs outside the sandbox with no read-only mode); list it as a step in your plan, then finish", profile)
 		}
 		// Resolve dir HERE, synchronously, same as the LLM branch below —
@@ -1039,7 +1040,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 	}
 	return spawnPlan{
 		profile: profile, provider: provider, llmCfg: llmCfg, rolePrompt: p.Prompt,
-		subReg: subReg, subPol: planPol, subWorkspace: subWorkspace, planMode: a.planMode, spawnDefault: a.cfg.Spawn.Default, outsideJail: outsideJail,
+		subReg: subReg, subPol: planPol, subWorkspace: subWorkspace, planMode: a.planMode.Load(), spawnDefault: a.cfg.Spawn.Default, outsideJail: outsideJail,
 		tracer: tracer, priceOverrides: priceOverrides, goalMaxSteps: a.cfg.GoalMaxSteps,
 		shell: tool.Shell(a.cfg.Run.Shell),
 	}, false, p, nil
@@ -3264,7 +3265,7 @@ func (a *app) wire() error {
 	a.ag.SetHistory(prior)
 	a.ag.SeedHistoryGen(priorGen)
 	a.ag.SeedFrontTrim(priorTrim)
-	a.ag.SetPlanMode(a.planMode) // carry the mode into the rebuilt agent
+	a.ag.SetPlanMode(a.planMode.Load()) // carry the mode into the rebuilt agent
 	if a.readOnly {
 		run, _ := a.readOnlyRun()
 		a.ag.SetReadOnly(run)
@@ -3346,7 +3347,7 @@ func (m mode) String() string {
 
 func (a *app) mode() mode {
 	switch {
-	case a.planMode:
+	case a.planMode.Load():
 		return modePlan
 	case a.manual.Load():
 		return modeManual
@@ -3370,9 +3371,10 @@ func (a *app) dropQueuedMode() {
 }
 
 // takeMode is the agent's mode switch (SetModeSwitch), called on its own
-// goroutine at the start of a turn: manual takes effect for the call gate
-// right here; plan mode the agent applies itself. The UI hears of it from the
-// "mode" event and brings the rest of the app's state along.
+// goroutine at the start of a turn. The app's mode changes right here, both
+// halves at once: manual for the call gate, and plan for a sub-agent the turn
+// may spawn — which used to read the old mode until the UI caught up. The
+// agent applies plan mode to itself; the "mode" event only tells the UI.
 func (a *app) takeMode() (plan bool, name string, ok bool) {
 	a.modeMu.Lock()
 	q := a.queuedMode
@@ -3381,16 +3383,17 @@ func (a *app) takeMode() (plan bool, name string, ok bool) {
 	if q == nil {
 		return false, "", false
 	}
+	a.planMode.Store(*q == modePlan)
 	a.manual.Store(*q == modeManual)
 	return *q == modePlan, q.String(), true
 }
 
 // setMode switches the mode and returns a one-line confirmation.
 func (a *app) setMode(m mode) string {
-	a.planMode = m == modePlan
+	a.planMode.Store(m == modePlan)
 	a.manual.Store(m == modeManual)
 	if a.ag != nil {
-		a.ag.SetPlanMode(a.planMode)
+		a.ag.SetPlanMode(m == modePlan)
 	}
 	switch m {
 	case modePlan:

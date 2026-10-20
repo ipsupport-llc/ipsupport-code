@@ -45,47 +45,41 @@ func TestResolveJailEscapeErrorExplainsItsAHardBoundary(t *testing.T) {
 	}
 }
 
-// A path opening with an environment reference lands where the variable points,
-// in each shell's spelling — not in a literal "$env:USERPROFILE" directory under
-// the workspace — and still inside the jail's rules.
-func TestResolveExpandsALeadingEnvReference(t *testing.T) {
+// A path opening with an environment reference is refused, not joined onto the
+// workspace as a literal "$env:USERPROFILE" directory — and not expanded
+// either: the prompt and the risk check saw the path as written. A place's
+// value is offered so the model can retry with the full path; any other
+// variable's value never appears.
+func TestResolveRefusesALeadingEnvReference(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("IPCO_TEST_HOME", home)
+	t.Setenv("HOME", home)
+	t.Setenv("IPCO_TEST_SECRET", "sk-do-not-leak")
 	c := config.Default()
 	c.Workspace = home
 	c.File = config.FilePolicy{Default: "allow", Jail: "."}
 	e := eng(t, c)
-	want := filepath.Join(home, "note.json")
+	sep := string(filepath.Separator)
 	for _, p := range []string{
-		"$env:IPCO_TEST_HOME/note.json",
-		"${IPCO_TEST_HOME}/note.json",
-		"$IPCO_TEST_HOME/note.json",
-		"%IPCO_TEST_HOME%/note.json",
-		"$env:IPCO_TEST_HOME" + string(filepath.Separator) + "note.json",
+		"$env:HOME/note.json", "$ENV:HOME" + sep + "note.json", "${env:HOME}/note.json",
+		"${HOME}/note.json", "$HOME/note.json", "%HOME%/note.json", "$HOME",
 	} {
-		got, err := e.Resolve(p)
-		if err != nil || got != want {
-			t.Errorf("Resolve(%q) = %q, %v; want %q", p, got, err, want)
+		_, err := e.Resolve(p)
+		if err == nil || !strings.Contains(err.Error(), "not shell-expanded") || !strings.Contains(err.Error(), home) {
+			t.Errorf("Resolve(%q) error = %v; want it refused, naming where HOME is", p, err)
 		}
 	}
-	// Not references: a file name with a $ in it, a name followed by more name,
-	// and a variable that is not set — all stay as written, in the workspace.
-	for _, p := range []string{"Foo$Bar.class", "$IPCO_TEST_HOME.bak", "$IPCO_NOT_SET_ANYWHERE/note.json", "$Recycle.Bin"} {
+	for _, p := range []string{"$IPCO_TEST_SECRET", "$env:IPCO_TEST_SECRET/x", "%IPCO_TEST_SECRET%/x"} {
+		_, err := e.Resolve(p)
+		if err == nil || strings.Contains(err.Error(), "sk-do-not-leak") {
+			t.Errorf("Resolve(%q) error = %v; want it refused without the value", p, err)
+		}
+	}
+	// Not references: a file name with a $ in it, and a name followed by more name.
+	for _, p := range []string{"Foo$Bar.class", "$HOME.bak", "$Recycle.Bin"} {
 		got, err := e.Resolve(p)
 		if err != nil || got != filepath.Join(home, p) {
 			t.Errorf("Resolve(%q) = %q, %v; want it left as a name in the workspace", p, got, err)
 		}
-	}
-	// The jail still holds: a reference to somewhere outside it is outside it.
-	sub := filepath.Join(home, "sub")
-	if err := os.Mkdir(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	c2 := config.Default()
-	c2.Workspace = sub
-	c2.File = config.FilePolicy{Default: "allow", Jail: "."}
-	if _, err := eng(t, c2).Resolve("$IPCO_TEST_HOME/escape.json"); err == nil {
-		t.Error("an env reference must not escape a sub-directory jail")
 	}
 }
 

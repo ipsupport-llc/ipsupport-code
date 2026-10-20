@@ -467,7 +467,10 @@ func (e *Engine) IsSecret(abs string) bool { return fileMatchFold(secretReadFloo
 // under the workspace, silently creating a literal "~" directory. The jail check
 // still runs after expansion, so ~ can't be used to escape it.
 func (e *Engine) Resolve(path string) (string, error) {
-	abs := expandEnvRef(expandTilde(path))
+	if err := unexpandedRef(path); err != nil {
+		return "", err
+	}
+	abs := expandTilde(path)
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(e.base(), abs)
 	}
@@ -516,31 +519,44 @@ func expandTilde(p string) string {
 }
 
 // envRef matches an environment reference at the start of a path, in each
-// shell's own spelling: PowerShell's $env:NAME, POSIX ${NAME} and $NAME, and
-// cmd's %NAME% (whose names may hold parentheses: %ProgramFiles(x86)%).
-var envRef = regexp.MustCompile(`^(?:\$env:([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_()]*)%)`)
+// shell's own spelling: PowerShell's $env:NAME and ${env:NAME} (its "env:" in
+// any case), POSIX ${NAME} and $NAME, and cmd's %NAME% (whose names may hold
+// parentheses: %ProgramFiles(x86)%).
+var envRef = regexp.MustCompile(`^(?:\$(?i:env):([A-Za-z_][A-Za-z0-9_]*)|\$\{(?:(?i:env):)?([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_()]*)%)`)
 
-// expandEnvRef turns a leading environment reference into its value. Nothing on
-// the way to a file tool is a shell, so "$env:USERPROFILE\.gitconfig" was joined
-// onto the workspace as a literal "$env:USERPROFILE" directory: the read failed
-// with a path the model never wrote, and the risk check had scored the home
-// directory it meant. Only a variable that is set, and only when a separator or
-// the end follows it — "$Recycle.Bin" and "Foo$Bar.class" are file names, and a
-// reference to nothing is left for the path to fail on as written.
-func expandEnvRef(p string) string {
+// dirVars are the variables an unexpanded path is told the value of: places,
+// not secrets. Any other variable's value never appears — a model reading
+// "$OPENAI_API_KEY" must learn nothing from the error.
+var dirVars = map[string]bool{
+	"HOME": true, "USERPROFILE": true, "APPDATA": true, "LOCALAPPDATA": true,
+	"TEMP": true, "TMP": true, "TMPDIR": true, "PROGRAMDATA": true,
+	"PROGRAMFILES": true, "PROGRAMFILES(X86)": true, "SYSTEMROOT": true, "WINDIR": true,
+	"XDG_CONFIG_HOME": true, "XDG_DATA_HOME": true, "XDG_CACHE_HOME": true,
+}
+
+// unexpandedRef refuses a path that opens with an environment reference.
+// Nothing on the way to a file tool is a shell, so "$env:USERPROFILE\.gitconfig"
+// was joined onto the workspace as a literal "$env:USERPROFILE" directory: the
+// read failed on a path the model never wrote, after the risk check had scored
+// the home directory it meant. It is not expanded here either: the prompt, the
+// risk check and git all see the path as written, and a call must open what
+// they saw — and the value of an arbitrary variable, echoed back in an error,
+// is a way to read a secret. A reference counts only when a separator or the
+// end follows it: "$Recycle.Bin" and "Foo$Bar.class" are file names.
+func unexpandedRef(p string) error {
 	m := envRef.FindStringSubmatch(p)
 	if m == nil {
-		return p
+		return nil
 	}
-	rest := p[len(m[0]):]
-	if rest != "" && rest[0] != '/' && rest[0] != filepath.Separator {
-		return p
+	if rest := p[len(m[0]):]; rest != "" && rest[0] != '/' && rest[0] != filepath.Separator {
+		return nil
 	}
 	name := m[1] + m[2] + m[3] + m[4] // exactly one group matched
-	if v := os.Getenv(name); v != "" {
-		return v + rest
+	hint := ""
+	if v := os.Getenv(name); v != "" && dirVars[strings.ToUpper(name)] && filepath.IsAbs(v) {
+		hint = fmt.Sprintf(" (%s is %s)", m[0], v)
 	}
-	return p
+	return fmt.Errorf("path %q starts with %s, but file paths are not shell-expanded — pass the full path%s", p, m[0], hint)
 }
 
 // maxSymlinkChase bounds resolveSymlinks' own-target chase (see below) against

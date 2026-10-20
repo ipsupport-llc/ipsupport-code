@@ -428,11 +428,8 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 	case "idle_timeout":
 		return "idle timeout", idleTimeoutLabel(act.IdleTimeoutSeconds), "enter: type seconds (no response/stream data → retry)"
 	case "mode":
-		v := "⏵⏵ auto"
-		if m.app.planMode {
-			v = "⏸ plan"
-		}
-		return "mode", v, "enter: toggle · this session only (shift+tab does the same)"
+		v := map[mode]string{modeAuto: "⏵⏵ auto", modePlan: "⏸ plan", modeManual: "✋ manual"}[m.app.mode()]
+		return "mode", v, "enter: next mode · this session only (shift+tab does the same)"
 	case "perm_files":
 		return "file writes", m.app.cfg.File.Default, "enter: ask/allow/deny"
 	case "perm_run":
@@ -608,7 +605,7 @@ func (m *tuiModel) activateConfigRow(key string) (tea.Model, tea.Cmd) {
 	case "provider":
 		m.cfgPick = &cfgPicker{key: key, p: newPicker(m.app.providerPickItems(), m.app.providerName())}
 	case "mode":
-		m.app.setMode(!m.app.planMode)
+		m.app.setMode(m.app.mode().next())
 	case "perm_files":
 		m.cyclePerm(&m.app.cfg.File.Default)
 	case "perm_run":

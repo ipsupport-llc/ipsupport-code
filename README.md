@@ -194,7 +194,7 @@ the main model then merges the results into one answer.
 Safety: every spawn **asks for approval** (even local ones cost compute) until you
 relax it with `/permissions agents on`. Sub-agents read/write files and use git but
 **only run shell commands if you enable it** with `/agents exec on`. They inherit
-the current plan/auto mode, can't spawn their own sub-agents (depth 1), and their
+the current mode, can't spawn their own sub-agents (depth 1), and their
 tokens are recorded in `/usage` like any other.
 
 ### External CLI agents
@@ -443,15 +443,23 @@ In the TUI, `/sessions` lists/switches/deletes threads, `/new <name>` starts a
 fresh named thread (the old one stays in `/sessions`), and `/new` clears the
 active one.
 
-## Modes: auto vs plan
+## Modes: auto, plan, manual
 
-Toggle with **shift+tab** (or `/plan` / `/auto`); the current mode shows at the
-bottom of the screen.
+Cycle with **shift+tab** (auto → plan → manual), or use `/auto`, `/plan` and
+`/manual`. The current mode shows at the bottom of the screen. The mode lasts
+for the session only.
 
-- **auto** (default) — the agent executes the task with tools.
+- **auto** (default) — the agent executes the task with tools, under your
+  permission policy.
 - **plan** — read-only: it investigates and proposes a numbered plan, and every
   state-changing tool call is **blocked at the engine**, so it can't touch
   anything until you accept.
+- **manual** — the agent executes, but **asks before every change**: every
+  shell command, every file write, append, edit and mkdir, mutating git,
+  sub-agent spawns and MCP. It asks even where `/permissions` or an allow
+  rule would let the call through. Reads and searches stay free. An **`a`** at
+  a prompt still covers its kind for the rest of the session. The deny floor
+  holds in every mode.
 
 When a plan-mode task finishes with a plan, you get a one-key **handshake**:
 **enter** to accept — switches to auto and immediately executes the plan — or
@@ -827,7 +835,7 @@ Anything not starting with `/` is run as a task. Tab completes commands.
 
 | command | what |
 |---|---|
-| `/plan`, `/auto` | plan mode (propose only) vs auto mode (execute) — also shift+tab |
+| `/plan`, `/auto`, `/manual` | plan mode (propose only), auto mode (execute) or manual mode (execute, ask before every change) — also shift+tab |
 | `/goal <text>` | set & pursue a multi-turn goal (judge re-feeds until met); `go` · `clear` · `ttl <n>` · `off` |
 | `/skills` | list / toggle / install on-demand instruction packs |
 | `/permissions` | relax approval for non-destructive file/shell actions |

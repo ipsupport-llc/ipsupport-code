@@ -126,18 +126,45 @@ func (a *app) riskGate(pol *policy.Engine) func(ctx context.Context, tool, actio
 		default:
 			return ""
 		}
-		if !a.riskStops(ctx, kind) || policyVerdict(pol, name, action, params) != risk.VerdictAllow {
+		flagged := a.riskStops(ctx, kind)
+		if !flagged && !a.manualStops(name, action) || policyVerdict(pol, name, action, params) != risk.VerdictAllow {
 			return ""
 		}
 		ok, gone := tool.AskWith(ctx, kind, detail, a.approveGated)
 		if ok {
 			return ""
 		}
+		if !flagged { // asked because of manual mode alone
+			if gone != "" {
+				return gone
+			}
+			return fmt.Sprintf("%s %s denied by user", kind, detail)
+		}
 		if gone != "" {
 			return gone + " (The risk check had flagged it: " + riskNote(ctx) + ".)"
 		}
 		return fmt.Sprintf("%s %s denied by user — the risk check flagged it: %s", kind, detail, riskNote(ctx))
 	}
+}
+
+// manualStops reports whether manual mode stops a call the policy would run
+// without asking: in manual every change asks — any shell command, since any
+// can change something, and every file write, append, edit and mkdir. Reads
+// stay free, and an 'a' at a prompt still covers its kind for the session.
+func (a *app) manualStops(name, action string) bool {
+	if !a.manual.Load() {
+		return false
+	}
+	switch name {
+	case "run":
+		return true
+	case "file":
+		switch action {
+		case "write", "append", "edit", "mkdir":
+			return true
+		}
+	}
+	return false
 }
 
 // withLaunchScore scores a command line a call is about to start: an external

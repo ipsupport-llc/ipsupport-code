@@ -83,7 +83,7 @@ type tuiModel struct {
 	steer         []string // /btw asides for the current run — pinned above the input, not in scrollback; cleared when the task ends
 	histIdx       int      // recall cursor into app.promptHist; == len means "not browsing"
 	histDraft     string   // in-progress input saved when history browsing begins
-	pendingMode   *bool    // plan(true)/auto(false) requested via shift+tab mid-task; applied on task done
+	pendingMode   *mode    // a mode requested via shift+tab mid-task; applied on task done
 	taskDoneAway  bool     // a task finished while a modal panel was open over it; finalize on panel close
 	planTask      bool     // the running task started in plan mode → offer accept-plan when it finishes
 	taskCancelled bool     // the running task was cancelled by esc → don't offer accept-plan
@@ -442,7 +442,7 @@ func bannerLines(name, ver, provider, model, cwd string, window int, accent lipg
 		Padding(0, 2).
 		Render(body)
 	tip := cDim.Render(`type a task — e.g. "explain what main.go does" — or /help for commands`)
-	keys := cDim.Render("Tab complete · ctrl+r history · alt+enter newline · ctrl+u clear · ctrl+g redraw · ctrl+c quit · shift+tab plan⇄auto")
+	keys := cDim.Render("Tab complete · ctrl+r history · alt+enter newline · ctrl+u clear · ctrl+g redraw · ctrl+c quit · shift+tab auto/plan/manual")
 	return append(strings.Split(box, "\n"), "", tip, keys)
 }
 
@@ -1001,16 +1001,16 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "shift+tab":
 		switch m.state {
 		case stIdle:
-			m.app.setMode(!m.app.planMode) // cycle plan/auto; the bottom indicator updates
+			m.app.setMode(m.app.mode().next()) // cycle auto → plan → manual; the bottom indicator updates
 			m.pendingMode = nil
 		case stRunning:
 			// Can't flip live — the running agent reads the mode (flipping races +
 			// splits the run). Remember it and apply when this task finishes.
-			cur := m.app.planMode
+			cur := m.app.mode()
 			if m.pendingMode != nil {
 				cur = *m.pendingMode
 			}
-			next := !cur
+			next := cur.next()
 			m.pendingMode = &next
 			m.push(cDim.Render("  ⇄ " + modeName(next) + " — applies on the next task"))
 		}
@@ -1141,7 +1141,7 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case stPlanReview:
 		switch k.String() {
 		case "enter", "y", "a": // accept: switch to auto and execute the proposed plan
-			m.app.setMode(false)
+			m.app.setMode(modeAuto)
 			m.push(cYou.Render("❯ ") + "execute the plan")
 			return m, m.runTask("Execute the plan you just proposed above, step by step. If a detail is unclear, make a reasonable call and proceed.")
 		case "esc", "n", "q": // keep planning — stay in plan mode; type to refine or shift+tab to auto
@@ -1337,13 +1337,8 @@ func (m *tuiModel) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// modeName labels a plan/auto boolean for the mid-task mode-switch hint.
-func modeName(plan bool) string {
-	if plan {
-		return "plan mode"
-	}
-	return "auto mode"
-}
+// modeName labels a mode for the mid-task mode-switch hint.
+func modeName(m mode) string { return m.String() + " mode" }
 
 // applyPendingMode applies a plan/auto switch requested (via shift+tab) while a
 // task was running — deferred so it never flips the mode mid-run. No-op if none
@@ -1354,7 +1349,7 @@ func (m *tuiModel) applyPendingMode() {
 	}
 	want := *m.pendingMode
 	m.pendingMode = nil
-	if want != m.app.planMode {
+	if want != m.app.mode() {
 		m.push(cDim.Render("  " + m.app.setMode(want)))
 	}
 }
@@ -1680,9 +1675,11 @@ func (m *tuiModel) runCommand(line string) (tea.Model, tea.Cmd) {
 	case "/compact":
 		return m, m.startCompact(false, rest)
 	case "/plan":
-		m.push(cDim.Render(m.app.setMode(true)))
+		m.push(cDim.Render(m.app.setMode(modePlan)))
 	case "/auto":
-		m.push(cDim.Render(m.app.setMode(false)))
+		m.push(cDim.Render(m.app.setMode(modeAuto)))
+	case "/manual":
+		m.push(cDim.Render(m.app.setMode(modeManual)))
 	case "/license", "/licenses":
 		m.pushLines(append(strings.Split(legal.Summary(), "\n"), "", "Full texts: ipsupport-code --license"))
 	case "/update":
@@ -2381,11 +2378,15 @@ func (m *tuiModel) approvePrompt() string {
 	return m.attention("⚠ APPROVE") + " " + detail + "  " + yes + no + cDim.Render("  (a = allow all this session)") + m.approvalLeft()
 }
 
-// modeLine is the bottom indicator: auto (executes) or plan (proposes only),
-// cycled with shift+tab — the same affordance as Claude Code.
+// modeLine is the bottom indicator: auto (executes), plan (proposes only) or
+// manual (asks before every change), cycled with shift+tab — the same
+// affordance as Claude Code.
 func (m *tuiModel) modeLine() string {
-	if m.app.planMode {
+	switch m.app.mode() {
+	case modePlan:
 		return "  " + m.accentBold().Render("⏸ plan mode on") + cDim.Render("  (shift+tab to cycle · read-only, it proposes)")
+	case modeManual:
+		return "  " + m.accentBold().Render("✋ manual mode on") + cDim.Render("  (shift+tab to cycle · asks before every change)")
 	}
 	return "  " + cOk.Render("⏵⏵ auto mode on") + cDim.Render("  (shift+tab to cycle)")
 }
@@ -2709,6 +2710,7 @@ var commandList = []cmdInfo{
 	{"/compact", "[focus] — summarize the session so far to free up context"},
 	{"/plan", "plan mode — propose a plan, change nothing"},
 	{"/auto", "auto mode — execute the task (default)"},
+	{"/manual", "manual mode — execute, but ask before every change"},
 	{"/ai", "switch/add AI provider; key <name> <tok>; add <name> <url> [model] [key=<tok>] (custom, one step)"},
 	{"/model", "list the provider's models, or pick one"},
 	{"/config", "settings panel — interactive in the TUI (↑↓ · enter · esc); a static overview in the REPL"},

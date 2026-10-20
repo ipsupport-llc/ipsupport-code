@@ -618,6 +618,7 @@ type app struct {
 	promptSrc       string                     // "built-in" or the system.md override path
 	facts           []string                   // durable project facts learned over time (per workspace)
 	planMode        bool                       // plan (propose) vs auto (execute); survives re-wire
+	manual          atomic.Bool                // manual mode: every change asks (see manualStops); read by tool goroutines
 	readOnly        bool                       // -read-only: answer one task, change nothing, keep no session
 	goal            goalState                  // standing goal pursued by the judge loop (per workspace)
 	windowDetected  bool                       // got the real loaded context window (vs a default/guess)
@@ -1061,7 +1062,7 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 	// behind a shared lock — the approver (TUI bridge / stdin prompt) already
 	// serializes concurrent prompts on its own, and a mutex held here would
 	// block an unrelated job's own spawn/mcp approval behind this one's.
-	if plan.spawnDefault != "allow" || plan.outsideJail || a.riskStops(ctx, "spawn agent") {
+	if plan.spawnDefault != "allow" || plan.outsideJail || a.riskStops(ctx, "spawn agent") || a.manual.Load() {
 		// Outside the workspace is its own kind of approval, not a "spawn …"
 		// one: an allow-for-this-session given to ordinary spawns must not
 		// cover a sub-agent sent outside the jail.
@@ -3305,15 +3306,52 @@ func (a *app) wire() error {
 // runaway session, not something a normal session ever reaches.
 const rawMemoryMaxHistory = 500
 
-// setMode switches between plan (investigate + propose) and auto (execute) and
-// returns a one-line confirmation.
-func (a *app) setMode(plan bool) string {
-	a.planMode = plan
-	if a.ag != nil {
-		a.ag.SetPlanMode(plan)
+// mode is how the agent goes about a task: auto executes under the permission
+// policy, manual executes but asks before every change, plan only proposes.
+type mode int
+
+const (
+	modeAuto mode = iota
+	modePlan
+	modeManual
+)
+
+// next is the mode shift+tab moves to: auto → plan → manual → auto. Plan comes
+// first, so a single press still does what it always did.
+func (m mode) next() mode { return (m + 1) % 3 }
+
+func (m mode) String() string {
+	switch m {
+	case modePlan:
+		return "plan"
+	case modeManual:
+		return "manual"
 	}
-	if plan {
+	return "auto"
+}
+
+func (a *app) mode() mode {
+	switch {
+	case a.planMode:
+		return modePlan
+	case a.manual.Load():
+		return modeManual
+	}
+	return modeAuto
+}
+
+// setMode switches the mode and returns a one-line confirmation.
+func (a *app) setMode(m mode) string {
+	a.planMode = m == modePlan
+	a.manual.Store(m == modeManual)
+	if a.ag != nil {
+		a.ag.SetPlanMode(a.planMode)
+	}
+	switch m {
+	case modePlan:
 		return "plan mode on — investigates and proposes a plan; changes nothing"
+	case modeManual:
+		return "manual mode on — executes, but asks before every change: file writes, shell commands, git, sub-agents, MCP"
 	}
 	return "auto mode on — executes the task"
 }
@@ -4620,9 +4658,11 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 			fmt.Printf("compacted %d messages → summary.\n", n)
 		}
 	case "/plan":
-		fmt.Println(a.setMode(true))
+		fmt.Println(a.setMode(modePlan))
 	case "/auto":
-		fmt.Println(a.setMode(false))
+		fmt.Println(a.setMode(modeAuto))
+	case "/manual":
+		fmt.Println(a.setMode(modeManual))
 	case "/license", "/licenses":
 		fmt.Println(legal.Summary())
 		fmt.Println("\nFull texts: ipsupport-code --license")
@@ -5449,7 +5489,7 @@ func helpText() string {
   /new [name]      start a NEW session (the old one stays in /sessions)
   /clear           wipe this session's context (same session)
   /compact         summarize the session so far to free up context
-  /plan, /auto     plan mode (propose only) vs auto mode (execute)
+  /plan, /auto, /manual  plan (propose only) · auto (execute) · manual (execute, ask before every change)
   /ai [name]       switch AI provider; /ai key <name> <tok>; /ai add <name> <url> [model] (custom)
   /model [name]    list the provider's models, or pick one
   /config          control panel: all settings + how to change them
@@ -5477,7 +5517,7 @@ func helpText() string {
   /exit, /quit     leave
 
 keys: Enter send · alt+enter newline · Tab complete /commands + @file paths ·
-  ctrl+r history search · shift+tab plan/auto · ctrl+u clear input · esc cancel (twice = force-detach a stuck task)
+  ctrl+r history search · shift+tab auto/plan/manual · ctrl+u clear input · esc cancel (twice = force-detach a stuck task)
 
 sub-agents: define profiles in /config → Sub-agents (provider → model → name),
   then ask e.g. "review internal/tool across grok and claude, then merge". The

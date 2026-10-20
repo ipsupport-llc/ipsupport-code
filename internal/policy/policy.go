@@ -467,7 +467,7 @@ func (e *Engine) IsSecret(abs string) bool { return fileMatchFold(secretReadFloo
 // under the workspace, silently creating a literal "~" directory. The jail check
 // still runs after expansion, so ~ can't be used to escape it.
 func (e *Engine) Resolve(path string) (string, error) {
-	abs := expandTilde(path)
+	abs := expandEnvRef(expandTilde(path))
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(e.base(), abs)
 	}
@@ -507,10 +507,38 @@ func (e *Engine) Resolve(path string) (string, error) {
 // shell behavior so the model's "~/file" lands in $HOME instead of a literal "~"
 // directory under the workspace.
 func expandTilde(p string) string {
-	if p == "~" || strings.HasPrefix(p, "~/") {
+	if p == "~" || strings.HasPrefix(p, "~/") || strings.HasPrefix(p, "~"+string(filepath.Separator)) { // ~\ on Windows
 		if home, err := os.UserHomeDir(); err == nil {
 			return filepath.Join(home, strings.TrimPrefix(p, "~"))
 		}
+	}
+	return p
+}
+
+// envRef matches an environment reference at the start of a path, in each
+// shell's own spelling: PowerShell's $env:NAME, POSIX ${NAME} and $NAME, and
+// cmd's %NAME% (whose names may hold parentheses: %ProgramFiles(x86)%).
+var envRef = regexp.MustCompile(`^(?:\$env:([A-Za-z_][A-Za-z0-9_]*)|\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_()]*)%)`)
+
+// expandEnvRef turns a leading environment reference into its value. Nothing on
+// the way to a file tool is a shell, so "$env:USERPROFILE\.gitconfig" was joined
+// onto the workspace as a literal "$env:USERPROFILE" directory: the read failed
+// with a path the model never wrote, and the risk check had scored the home
+// directory it meant. Only a variable that is set, and only when a separator or
+// the end follows it — "$Recycle.Bin" and "Foo$Bar.class" are file names, and a
+// reference to nothing is left for the path to fail on as written.
+func expandEnvRef(p string) string {
+	m := envRef.FindStringSubmatch(p)
+	if m == nil {
+		return p
+	}
+	rest := p[len(m[0]):]
+	if rest != "" && rest[0] != '/' && rest[0] != filepath.Separator {
+		return p
+	}
+	name := m[1] + m[2] + m[3] + m[4] // exactly one group matched
+	if v := os.Getenv(name); v != "" {
+		return v + rest
 	}
 	return p
 }

@@ -45,6 +45,50 @@ func TestResolveJailEscapeErrorExplainsItsAHardBoundary(t *testing.T) {
 	}
 }
 
+// A path opening with an environment reference lands where the variable points,
+// in each shell's spelling — not in a literal "$env:USERPROFILE" directory under
+// the workspace — and still inside the jail's rules.
+func TestResolveExpandsALeadingEnvReference(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("IPCO_TEST_HOME", home)
+	c := config.Default()
+	c.Workspace = home
+	c.File = config.FilePolicy{Default: "allow", Jail: "."}
+	e := eng(t, c)
+	want := filepath.Join(home, "note.json")
+	for _, p := range []string{
+		"$env:IPCO_TEST_HOME/note.json",
+		"${IPCO_TEST_HOME}/note.json",
+		"$IPCO_TEST_HOME/note.json",
+		"%IPCO_TEST_HOME%/note.json",
+		"$env:IPCO_TEST_HOME" + string(filepath.Separator) + "note.json",
+	} {
+		got, err := e.Resolve(p)
+		if err != nil || got != want {
+			t.Errorf("Resolve(%q) = %q, %v; want %q", p, got, err, want)
+		}
+	}
+	// Not references: a file name with a $ in it, a name followed by more name,
+	// and a variable that is not set — all stay as written, in the workspace.
+	for _, p := range []string{"Foo$Bar.class", "$IPCO_TEST_HOME.bak", "$IPCO_NOT_SET_ANYWHERE/note.json", "$Recycle.Bin"} {
+		got, err := e.Resolve(p)
+		if err != nil || got != filepath.Join(home, p) {
+			t.Errorf("Resolve(%q) = %q, %v; want it left as a name in the workspace", p, got, err)
+		}
+	}
+	// The jail still holds: a reference to somewhere outside it is outside it.
+	sub := filepath.Join(home, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c2 := config.Default()
+	c2.Workspace = sub
+	c2.File = config.FilePolicy{Default: "allow", Jail: "."}
+	if _, err := eng(t, c2).Resolve("$IPCO_TEST_HOME/escape.json"); err == nil {
+		t.Error("an env reference must not escape a sub-directory jail")
+	}
+}
+
 func TestResolveExpandsTilde(t *testing.T) {
 	home := t.TempDir()
 	setHome(t, home)
@@ -59,6 +103,12 @@ func TestResolveExpandsTilde(t *testing.T) {
 	}
 	if strings.Contains(got, "~") || filepath.Base(got) != "note.json" {
 		t.Errorf("Resolve(~/note.json) = %q, want <home>/note.json", got)
+	}
+	// ~\ is Windows' spelling of the same; elsewhere a backslash is a name character.
+	if filepath.Separator == '\\' {
+		if got, err := e.Resolve(`~\note.json`); err != nil || strings.Contains(got, "~") {
+			t.Errorf(`Resolve(~\note.json) = %q, %v; want <home>\note.json`, got, err)
+		}
 	}
 
 	// ~ must still respect the jail: from a sub-directory jail, ~ (the parent) escapes

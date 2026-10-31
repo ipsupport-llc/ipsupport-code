@@ -1667,14 +1667,23 @@ type goalState struct {
 	Runs   int           `json:"runs,omitempty"`
 }
 
-// addGoalWork counts a finished run's working time toward the standing goal.
+// addGoalWork counts a finished run's working time toward the standing goal,
+// and saves it: a run that failed never reaches finishGoal's save, and its time
+// was lost to the next restart.
 func (a *app) addGoalWork(d time.Duration) {
 	a.statusMu.Lock()
-	if a.goal.Status != "" {
+	standing := a.goal.Status != ""
+	if standing {
 		a.goal.Worked += d
 		a.goal.Runs++
 	}
 	a.statusMu.Unlock()
+	if !standing {
+		return
+	}
+	if err := a.saveGoal(); err != nil {
+		slog.Warn("goal not persisted", "err", err)
+	}
 }
 
 // goalDoneLine says a met goal took how long: its runs' working time, not the

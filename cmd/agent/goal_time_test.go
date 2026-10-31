@@ -20,8 +20,7 @@ import (
 func TestAMetGoalSaysHowLongItTook(t *testing.T) {
 	a := &app{workspace: t.TempDir(), cfg: config.Default()}
 	a.setGoal("ship it")
-	a.addGoalWork(40 * time.Minute)
-	a.finishGoal(agent.Transcript{}) // not met yet
+	a.addGoalWork(40 * time.Minute) // a run that failed: finishGoal never ran
 
 	b := &app{workspace: a.workspace, cfg: config.Default()} // a restart
 	b.loadGoal()

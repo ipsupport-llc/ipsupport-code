@@ -3305,6 +3305,9 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		// "the model is done" and "the model gave up" read the same in dim grey.
 		why, _ := e.fields["why"].(string)
 		return []string{judgingLine(why)}
+	case "goal_done":
+		worked, _ := e.fields["worked"].(time.Duration)
+		return []string{cOk.Render("  ✓ " + goalDoneLine(worked, toInt(e.fields["runs"])))}
 	case "judge":
 		if done, _ := e.fields["done"].(bool); done {
 			return []string{cOk.Render("  ✓ judge: goal met")}

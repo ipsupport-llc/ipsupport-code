@@ -824,6 +824,11 @@ any work, it gets **one** push to act before the loop gives up (turn it off with
 confirming success, it says so plainly — *"goal not confirmed complete, `/goal go`
 to keep pushing"* — instead of implying it's done.
 
+When the judge confirms the goal, the agent says how long the work took:
+*"✓ goal met — worked 1h12m over 3 runs"*. That counts the working time of
+every run at the goal, across `/goal go` resumes and restarts, and leaves out
+time spent waiting on an approval prompt.
+
 ## Context & auto-compact
 
 The status bar shows `ctx 4.1k/8k` — the size of the last prompt vs. the model's

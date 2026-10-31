@@ -1659,6 +1659,45 @@ type goalState struct {
 	// amend it for the judge and every re-feed, across resumes. Cleared with
 	// the goal, or when it is replaced with different text.
 	Corrections []string `json:"corrections,omitempty"`
+	// Worked is the time runs spent on this goal, across every resume and
+	// restart, approval waits left out; Runs is how many there were. Both are
+	// said when the goal is met. Cleared with the goal, or when it is replaced
+	// with different text.
+	Worked time.Duration `json:"worked_ns,omitempty"`
+	Runs   int           `json:"runs,omitempty"`
+}
+
+// addGoalWork counts a finished run's working time toward the standing goal.
+func (a *app) addGoalWork(d time.Duration) {
+	a.statusMu.Lock()
+	if a.goal.Status != "" {
+		a.goal.Worked += d
+		a.goal.Runs++
+	}
+	a.statusMu.Unlock()
+}
+
+// goalDoneLine says a met goal took how long: its runs' working time, not the
+// days it may have stood between them.
+func goalDoneLine(worked time.Duration, runs int) string {
+	s := "goal met — worked " + workTime(worked)
+	if runs > 1 {
+		s += fmt.Sprintf(" over %d runs", runs)
+	}
+	return s
+}
+
+// workTime is a duration as a person reads it: 1h12m, 4m05s, 42s.
+func workTime(d time.Duration) string {
+	d = d.Round(time.Second)
+	h, m, s := int(d.Hours()), int(d.Minutes())%60, int(d.Seconds())%60
+	switch {
+	case h > 0:
+		return fmt.Sprintf("%dh%02dm", h, m)
+	case m > 0:
+		return fmt.Sprintf("%dm%02ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
 }
 
 // target is the goal as the judge accepts it: its text, amended by the user's
@@ -1849,11 +1888,14 @@ func (a *app) setGoal(text string) {
 // and every subsequent run counts toward it — until the judge confirms it met,
 // or the user explicitly turns it off (/goal off) or clears it (/goal clear).
 // No other condition (text match, /btw, a clarifying follow-up) knocks it out.
-func (a *app) finishGoal(tr agent.Transcript) {
+//
+// It reports whether the goal was met just now, and if so how long it took
+// (see addGoalWork).
+func (a *app) finishGoal(tr agent.Transcript) (met bool, worked time.Duration, runs int) {
 	a.statusMu.Lock()
 	if a.goal.Status == "" {
 		a.statusMu.Unlock()
-		return
+		return false, 0, 0
 	}
 	// With the judge loop off (/goal off · ttl 0) GoalMet is never set — the model
 	// decides when it's done, so a clean uninterrupted finish counts as done
@@ -1871,6 +1913,7 @@ func (a *app) finishGoal(tr agent.Transcript) {
 	done := !tr.Cancelled && tr.GoalMet
 	if done {
 		// Done: clear it entirely so it never resurfaces after a restart.
+		worked, runs = a.goal.Worked, a.goal.Runs
 		a.goal = goalState{}
 	} else {
 		// Still unfinished: re-arm one resume offer for the next restart (you
@@ -1895,11 +1938,12 @@ func (a *app) finishGoal(tr agent.Transcript) {
 	a.statusMu.Unlock()
 	if done {
 		os.Remove(a.goalPath())
-		return
+		return true, worked, runs
 	}
 	if err := a.saveGoal(); err != nil {
 		slog.Warn("goal status not persisted", "err", err)
 	}
+	return false, 0, 0
 }
 
 // markGoalOffered records that the standing goal has been surfaced once after a
@@ -4513,6 +4557,9 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	start := time.Now()
 	tr, err := a.ag.Run(ctx, goal)
 	dur := a.runDuration(start, waitSnapshot)
+	if !a.readOnly { // a read-only task isn't working on the standing goal
+		a.addGoalWork(dur)
+	}
 	if err != nil {
 		a.recordUsage(dur) // the failed attempt may have burned real tokens — don't drop them
 		slog.Error("run failed", "err", err)
@@ -4521,8 +4568,11 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	}
 	a.lastRealContext = tr.PromptTokens // snapshot the real fullness before reflectAndStore (below) can clobber the shared client's own Context()
 	a.recordRun(tr)
-	if !a.readOnly { // a read-only task isn't working on the standing goal
-		a.finishGoal(tr)
+	var met bool
+	var worked time.Duration
+	var runs int
+	if !a.readOnly {
+		met, worked, runs = a.finishGoal(tr)
 	}
 	a.recordUsage(dur)
 	a.saveSession() // the conversation is decided now — save it before the slower,
@@ -4532,6 +4582,9 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 		fmt.Println(tr.Final)
 	} else {
 		fmt.Println("(no final answer — step budget exhausted)")
+	}
+	if met {
+		fmt.Println("✓ " + goalDoneLine(worked, runs))
 	}
 	// Not gated on tr.Stopped any more: a run the harness stopped after repeated
 	// failures is the one that can teach an "avoid" lesson, and excluding it made
@@ -4595,6 +4648,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) (a
 	if a.taskEpoch.Load() != epoch {
 		return agent.Transcript{}, false // force-detached mid-run — its results belong to a run the UI abandoned
 	}
+	a.addGoalWork(dur)
 	if err != nil {
 		a.recordUsage(dur) // the failed attempt may have burned real tokens — don't drop them
 		a.emit("error", map[string]any{"text": err.Error()})
@@ -4602,7 +4656,9 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) (a
 	}
 	a.lastRealContext = tr.PromptTokens // the real fullness of the task's own client, before anything else touches it
 	a.recordRun(tr)
-	a.finishGoal(tr)
+	if met, worked, runs := a.finishGoal(tr); met {
+		a.emit("goal_done", map[string]any{"worked": worked, "runs": runs})
+	}
 	a.recordUsage(dur)
 	a.saveSession() // the conversation is decided now — save it before the slower,
 	// best-effort reflection the caller runs next. That matters because /exit quits

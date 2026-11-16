@@ -1021,7 +1021,7 @@ func (a *Agent) remember(goal, sent, final string, msgs []llm.Message) {
 	if a.detached.Load() {
 		return
 	}
-	entry := final + actionsDigest(msgs) + steersDigest(msgs)
+	entry := final + actionsDigest(msgs, a.reg) + steersDigest(msgs)
 	if a.archiver != nil {
 		a.archiver.Archive(goal, entry) // the archive is for the user to search: the goal as they typed it
 	}
@@ -1070,7 +1070,11 @@ func steersDigest(msgs []llm.Message) string {
 // model's OpenAI-compat endpoint often leaves tool_call ids empty or reuses
 // the same one across calls, which silently broke ID-based lookups on some
 // turns but not others.
-func actionsDigest(msgs []llm.Message) string {
+//
+// reg, when given, recovers a missing or garbled action the way execOne did
+// before running the call ({"action":"touch x"} on run ran as shell), so the
+// digest names what ran rather than what the model typed.
+func actionsDigest(msgs []llm.Message, reg *tool.Registry) string {
 	var files []string
 	seenFile := map[string]bool{}
 	// First-seen order (cmdOrder), latest-seen outcome (cmdEntry, overwritten on
@@ -1087,6 +1091,9 @@ func actionsDigest(msgs []llm.Message) string {
 		}
 		for j, tc := range m.ToolCalls {
 			action, params, _ := parseArgs(tc.Arguments)
+			if reg != nil {
+				action, params = reg.Normalize(tc.Name, action, params)
+			}
 			switch tc.Name {
 			case "file":
 				if action == "read" || action == "list" || action == "find" || action == "search" {
@@ -1321,7 +1328,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 				// spend another model call.
 				if !cancelled {
 					met, missing := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn,
-						"turn_failed", stopNote(msgs, false, err)+actionsDigest(msgs)+a.priorGapNote(returns), msgs)
+						"turn_failed", stopNote(msgs, false, err)+actionsDigest(msgs, a.reg)+a.priorGapNote(returns), msgs)
 					goalMet = met
 					if !met {
 						tr.Missing = firstNonEmpty(missing, lastMissing)
@@ -1513,7 +1520,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					if isDoneOnly(assistant.ToolCalls) {
 						why = "done"
 					}
-					verdict, missing := a.judgeGoal(ctx, why, a.target(goal, msgs), clean+actionsDigest(msgs)+a.priorGapNote(returns), msgs)
+					verdict, missing := a.judgeGoal(ctx, why, a.target(goal, msgs), clean+actionsDigest(msgs, a.reg)+a.priorGapNote(returns), msgs)
 					// Reported live: the judge's own decision (a separate LLM call)
 					// was entirely invisible in the debug log for its two NORMAL
 					// verdicts — only its failure ("goal judge failed") and
@@ -1670,7 +1677,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// files touched / commands run (and why they failed), the same record
 					// remember() below stores as cross-task memory.
 					met, missing := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn, "stuck_stop",
-						"(the agent got stuck repeating or failing tool calls before producing a coherent final answer.)"+actionsDigest(msgs)+a.priorGapNote(returns),
+						"(the agent got stuck repeating or failing tool calls before producing a coherent final answer.)"+actionsDigest(msgs, a.reg)+a.priorGapNote(returns),
 						msgs)
 					// Reported live: a single bad tool call, repeated until this stop,
 					// read as having killed the whole standing goal ("неправильный вызов
@@ -1725,7 +1732,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	// something real to go on (files touched / commands run) instead of just
 	// the model's own possibly-empty final text.
 	met, missing := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn, "step_exhaustion",
-		judgeResult+actionsDigest(msgs)+a.priorGapNote(returns), msgs)
+		judgeResult+actionsDigest(msgs, a.reg)+a.priorGapNote(returns), msgs)
 	tr.GoalMet = met
 	tr.Missing = missing
 	clean += goalNotConfirmedNote(a.maxReturns, met, missing)

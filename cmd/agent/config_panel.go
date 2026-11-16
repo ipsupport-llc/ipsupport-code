@@ -334,7 +334,10 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		return "model", act.Model, "enter: pick from the server's list (or type one it doesn't list)"
 	case "apikey":
 		v := "— none"
-		if act.APIKey != "" {
+		switch {
+		case len(act.APIKeyCmd) > 0:
+			v = "● from api_key_cmd"
+		case act.APIKey != "":
 			v = "● set"
 		}
 		return "api key", v, "enter: set or replace (masked) · ctrl+d in it removes"

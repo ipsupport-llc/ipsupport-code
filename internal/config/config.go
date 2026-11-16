@@ -50,6 +50,14 @@ type LLM struct {
 	// much room a much bigger (or smaller) window actually affords.
 	MaxSteps int    `json:"max_steps"`
 	APIKey   string `json:"api_key,omitempty"`
+	// APIKeyCmd is a command whose trimmed stdout is the API key, for
+	// endpoints that only issue short-lived keys. It runs on first use, again
+	// after APIKeyTTL seconds (0: only when needed), and again once when the
+	// server answers 401. The key it prints is never saved. When set it wins
+	// over APIKey and the provider's environment variable. Machine-level only,
+	// like the rest of the connection: a workspace config can't set it.
+	APIKeyCmd []string `json:"api_key_cmd,omitempty"`
+	APIKeyTTL int      `json:"api_key_ttl,omitempty"`
 	// Type selects extra capabilities: "lmstudio" uses LM Studio's native API
 	// (rich model list, context detection); anything else is plain OpenAI-compat.
 	Type string `json:"type,omitempty"`
@@ -93,6 +101,16 @@ type LLM struct {
 	// (see Config.Reasoning), whose shape varies by provider.
 	Extra map[string]any `json:"-"`
 }
+
+// clone copies l without sharing its slices.
+func (l LLM) clone() LLM {
+	l.APIKeyCmd = append([]string(nil), l.APIKeyCmd...)
+	return l
+}
+
+// HasKey reports whether the connection has a way to authenticate: a key, or a
+// command that prints one.
+func (l LLM) HasKey() bool { return l.APIKey != "" || len(l.APIKeyCmd) > 0 }
 
 // LMStudio reports whether this connection speaks LM Studio's native API.
 func (l LLM) LMStudio() bool { return l.Type == "lmstudio" }
@@ -1100,7 +1118,9 @@ func Load(workspace string) (Config, error) {
 	// reuses (mutates in place) an already-non-nil destination map rather
 	// than allocating a fresh one, so a bare `:=` copy would still alias the
 	// same map mergeFile is about to write "evil" into below.
-	trustedLLM := cfg.LLM
+	// The same goes for a slice in LLM (api_key_cmd): decoding into a non-nil
+	// slice writes over its backing array, which a plain copy still shares.
+	trustedLLM := cfg.LLM.clone()
 	// The VALUE, not the pointer: json.Unmarshal writes through a non-nil
 	// *bool, so a saved pointer would change along with the workspace's
 	// "telemetry": true and turn on what the user had turned off.
@@ -1111,7 +1131,7 @@ func Load(workspace string) (Config, error) {
 	}
 	trustedProviders := make(map[string]LLM, len(cfg.Providers))
 	for name, l := range cfg.Providers {
-		trustedProviders[name] = l
+		trustedProviders[name] = l.clone()
 	}
 	// The risk check is what stops a flagged command in a checkout whose own
 	// file allows everything, so that file may turn it on but never off.

@@ -540,7 +540,8 @@ func (m *tuiModel) detectWindowCmd() tea.Cmd {
 				msg.borrowed = msg.lm.Borrowed(act.Model)
 			}
 		} else {
-			msg.tokens = llm.DetectModelContext(ctx, act.BaseURL, act.APIKey, act.Model, http.DefaultClient)
+			key, _ := llm.APIKey(ctx, act)
+			msg.tokens = llm.DetectModelContext(ctx, act.BaseURL, key, act.Model, http.DefaultClient)
 		}
 		return msg
 	}

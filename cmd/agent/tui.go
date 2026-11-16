@@ -839,9 +839,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.epoch != m.app.modelEpoch.Load() {
 			return m, nil
 		}
-		for _, n := range m.app.unsaid(lmNotes(msg.lm, msg.model)) {
-			m.push(cErr.Render("  ⚠ " + n))
+		say := func(applied bool) {
+			for _, n := range m.app.unsaid(lmNotes(msg.lm, msg.model, applied)) {
+				m.push(cErr.Render("  ⚠ " + n))
+			}
 		}
+		say(false) // a missing id is worth saying even if this result is dropped below
 		// A task is running — possibly behind an approval prompt or the /config
 		// panel, states that are not stRunning but still have a task under them.
 		// Its goroutine reads a.cfg and a.ag, so neither may change now: not the
@@ -858,6 +861,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.tokens > 0 {
 			changed := m.app.applyWindow(msg.provider, msg.tokens)
 			if msg.provider == m.app.providerName() {
+				say(true) // the window is in use now, borrowed or not
 				m.app.windowDetected = !msg.borrowed
 				// Re-wire so the live agent/client immediately pick up the new
 				// window (step budget, history cap, mid-task trim threshold,

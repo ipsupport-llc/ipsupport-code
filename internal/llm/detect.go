@@ -201,14 +201,18 @@ func DetectContextWindow(ctx context.Context, baseURL, model string, hc *http.Cl
 	// say, 260k instead of the real 8k. When nothing is loaded Tokens is 0 so the
 	// caller keeps its default and re-detects once the model is up.
 	w := LMWindow{Known: out.Data != nil} // a reply without a list says nothing about ours
-	for _, m := range out.Data {
-		if !SameModel(model, m.ID) {
-			continue
-		}
-		w.Listed = true
-		if m.LoadedContextLength > 0 {
-			w.Tokens, w.From = m.LoadedContextLength, m.ID
-			return w
+	// The exact id first: SameModel would also accept a sibling (x for x@q8_0)
+	// whose window may differ.
+	for _, exact := range []bool{true, false} {
+		for _, m := range out.Data {
+			if exact && m.ID != model || !exact && !SameModel(model, m.ID) {
+				continue
+			}
+			w.Listed = true
+			if m.LoadedContextLength > 0 {
+				w.Tokens, w.From = m.LoadedContextLength, m.ID
+				return w
+			}
 		}
 	}
 	// Our model isn't loaded: fall back to whatever is, because that is often

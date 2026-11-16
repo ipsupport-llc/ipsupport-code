@@ -5,33 +5,40 @@ import (
 	"strings"
 )
 
-// snapshotSuffix is the dated-snapshot tail hosted providers append to an
-// alias when they report which model answered: gpt-4o → gpt-4o-2024-08-06,
-// grok-4 → grok-4-0709.
-var snapshotSuffix = regexp.MustCompile(`^-[0-9][0-9-]*$`)
+// aliasSuffix is the tail that tells an alias from the snapshot it points at:
+// a date (gpt-4o-2024-08-06, claude-3-5-sonnet-20241022, grok-4-0709) or
+// "-latest". Hosted providers often answer an alias with the snapshot's id.
+var aliasSuffix = regexp.MustCompile(`-(\d{4}-\d{2}-\d{2}|\d{8}|\d{4}|latest)$`)
 
 // SameModel reports whether served — the model a server says answered — is the
 // model that was asked for. It tolerates differences that don't change the
-// model: letter case, a publisher prefix (google/x vs x), a quantization tag
-// one side leaves off (x@q8_0 vs x), Ollama's :latest, and a dated snapshot of
-// an alias. An empty served (the server didn't say) counts as the same.
+// model: letter case, a publisher prefix only one side names (google/x vs x),
+// a quantization tag only one side names (x@q8_0 vs x), Ollama's :latest, and
+// an alias against its dated snapshot. An empty served (the server didn't say)
+// counts as the same.
 func SameModel(asked, served string) bool {
-	a, s := normModel(asked), normModel(served)
+	a, s := strings.ToLower(strings.TrimSpace(asked)), strings.ToLower(strings.TrimSpace(served))
 	if s == "" || a == s {
 		return true
 	}
-	if baseModel(a) == baseModel(s) && (!strings.Contains(a, "@") || !strings.Contains(s, "@")) {
+	if !strings.Contains(a, "/") || !strings.Contains(s, "/") {
+		a, s = dropPublisher(a), dropPublisher(s) // two named publishers must agree
+	}
+	a, s = strings.TrimSuffix(a, ":latest"), strings.TrimSuffix(s, ":latest")
+	if a == s {
+		return true
+	}
+	if ba, bs := baseModel(a), baseModel(s); ba == bs && (ba == a || bs == s) {
 		return true // one side names the quantization, the other doesn't
 	}
-	return strings.HasPrefix(s, a) && snapshotSuffix.MatchString(s[len(a):])
+	return aliasSuffix.ReplaceAllString(a, "") == aliasSuffix.ReplaceAllString(s, "")
 }
 
-func normModel(id string) string {
-	id = strings.ToLower(strings.TrimSpace(id))
+func dropPublisher(id string) string {
 	if i := strings.LastIndex(id, "/"); i >= 0 {
-		id = id[i+1:]
+		return id[i+1:]
 	}
-	return strings.TrimSuffix(id, ":latest")
+	return id
 }
 
 // baseModel drops an LM Studio quantization tag (x@q8_0 → x).

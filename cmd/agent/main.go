@@ -1087,7 +1087,7 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 	}
 
 	id := fmt.Sprintf("sub%d", a.spawnSeq.Add(1)) // groups this sub-agent's UI events
-	client := llm.NewOpenAIClient(plan.llmCfg)    // reasoning params already resolved in resolveSpawn
+	client := a.newClient(plan.llmCfg)            // reasoning params already resolved in resolveSpawn
 	sub := a.newSubAgent(plan, client, id)
 	if plan.tracer != nil {
 		plan.tracer.Emit("subagent", map[string]any{"agent": id, "profile": plan.profile, "provider": plan.provider, "model": plan.llmCfg.Model, "dir": plan.subWorkspace, "task": oneLine(task, 80)})
@@ -2489,7 +2489,7 @@ func (a *app) wireJudge() {
 	if budget > 0 {
 		cfg.MaxOutputTokens = budget
 	}
-	a.judgeClient = llm.NewOpenAIClient(cfg)
+	a.judgeClient = a.newClient(cfg)
 	a.lastJudgePrompt, a.lastJudgeCompl = 0, 0
 	a.ag.SetJudgeLLM(a.judgeClient)
 }
@@ -3038,17 +3038,27 @@ func (a *app) unsaid(notes []string) []string {
 
 // lmNotes is what LM Studio's model list says the user should know about the
 // configured model: it isn't in the list at all, so the server may answer with
-// whatever is loaded; or it isn't loaded, so the context window was taken from
-// the model that is.
-func lmNotes(lw llm.LMWindow, model string) []string {
+// whatever is loaded; or (applied: the window was used) it isn't loaded, so the
+// context window was taken from the model that is.
+func lmNotes(lw llm.LMWindow, model string, applied bool) []string {
 	var notes []string
 	if lw.Known && !lw.Listed {
 		notes = append(notes, fmt.Sprintf("model %q isn't in LM Studio's model list — it may answer with whatever model is loaded instead; check the id with /model", model))
 	}
-	if lw.Borrowed(model) {
+	if applied && lw.Borrowed(model) {
 		notes = append(notes, fmt.Sprintf("model %q isn't loaded — context window %d taken from the loaded model %q", model, lw.Tokens, lw.From))
 	}
 	return notes
+}
+
+// newClient builds a model client that reports a reply from the wrong model.
+// Every client goes through here — the main one, sub-agents, the judge and
+// reflection — since a sub-agent profile can name a model the server doesn't
+// have just as well as the main connection can.
+func (a *app) newClient(c config.LLM) *llm.OpenAIClient {
+	cl := llm.NewOpenAIClient(c)
+	cl.OnModelMismatch = a.modelMismatch
+	return cl
 }
 
 // modelMismatch is the client's OnModelMismatch: a reply came from another
@@ -3117,7 +3127,7 @@ func (a *app) detectContextWindow() []string {
 			slog.Info("detected context window", "tokens", w, "model", model, "from", lw.From)
 			a.rewireAfterWindowChange(changed)
 		}
-		return lmNotes(lw, model)
+		return lmNotes(lw, model, true)
 	}
 	act := a.activeLLM()
 	if w := llm.DetectModelContext(ctx, act.BaseURL, act.APIKey, act.Model, http.DefaultClient); w > 0 {
@@ -3353,13 +3363,12 @@ func (a *app) wire() error {
 	if a.client != nil {
 		seedP, seedC = a.client.Usage()
 	}
-	a.client = llm.NewOpenAIClient(a.withReasoning(a.activeLLM(), a.providerName(), ""))
+	a.client = a.newClient(a.withReasoning(a.activeLLM(), a.providerName(), ""))
 	a.client.SeedUsage(seedP, seedC)
 	a.client.OnRetry = func(attempt int, wait time.Duration, reason string) {
 		slog.Warn("llm retry", "attempt", attempt, "wait", wait, "reason", reason)
 		a.emit("retry", map[string]any{"attempt": attempt, "wait_ms": wait.Milliseconds(), "reason": reason})
 	}
-	a.client.OnModelMismatch = a.modelMismatch
 	// Carry the live session into the new agent. wire() is called again to install
 	// the TUI bridge and on /login to reload config; without this hand-off the
 	// restored conversation would be dropped and every launch would start blank.
@@ -4459,7 +4468,7 @@ func (a *app) reflectTarget() (client *llm.OpenAIClient, lite bool, provider, mo
 	// reasoningParams falls back to the task model's own keys, so an unscoped
 	// reflection keeps exactly the reasoning it had while it shared the client.
 	cfg.Extra = a.reasoningParams(prov, model, "reflect")
-	return llm.NewOpenAIClient(cfg), lite, prov, model
+	return a.newClient(cfg), lite, prov, model
 }
 
 // reflectJob is a reflection pass resolved on the goroutine that owns a.cfg and

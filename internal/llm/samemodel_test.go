@@ -12,16 +12,18 @@ import (
 
 func TestSameModelToleratesOnlyHarmlessDifferences(t *testing.T) {
 	same := [][2]string{
-		{"gemma-4-e2b", "google/gemma-4-e2b"},        // publisher prefix
-		{"google/gemma-4-e2b", "gemma-4-e2b"},        // either side
-		{"Gemma-4-E2B", "gemma-4-e2b"},               // case
-		{"gemma-4-e2b@q8_0", "gemma-4-e2b"},          // server leaves the quant off
-		{"gemma-4-e2b", "gemma-4-e2b@q4_k_m"},        // or adds it
-		{"llama3", "llama3:latest"},                  // Ollama's default tag
-		{"gpt-4o", "gpt-4o-2024-08-06"},              // dated snapshot of an alias
-		{"grok-4", "grok-4-0709"},                    // ditto
-		{"anything", ""},                             // the server didn't say
-		{"openai/gpt-4o-mini", "openai/gpt-4o-mini"}, // identical
+		{"gemma-4-e2b", "google/gemma-4-e2b"},                      // publisher prefix
+		{"google/gemma-4-e2b", "gemma-4-e2b"},                      // either side
+		{"Gemma-4-E2B", "gemma-4-e2b"},                             // case
+		{"gemma-4-e2b@q8_0", "gemma-4-e2b"},                        // server leaves the quant off
+		{"gemma-4-e2b", "gemma-4-e2b@q4_k_m"},                      // or adds it
+		{"llama3", "llama3:latest"},                                // Ollama's default tag
+		{"gpt-4o", "gpt-4o-2024-08-06"},                            // dated snapshot of an alias
+		{"grok-4", "grok-4-0709"},                                  // ditto
+		{"claude-3-5-sonnet-latest", "claude-3-5-sonnet-20241022"}, // -latest answered with the snapshot
+		{"gpt-4o-2024-08-06", "gpt-4o"},                            // a snapshot answered with its alias
+		{"anything", ""},                                           // the server didn't say
+		{"openai/gpt-4o-mini", "openai/gpt-4o-mini"},               // identical
 	}
 	for _, c := range same {
 		if !SameModel(c[0], c[1]) {
@@ -34,6 +36,8 @@ func TestSameModelToleratesOnlyHarmlessDifferences(t *testing.T) {
 		{"gemma-4-e2b@q8_0", "gemma-4-e2b@q4_k_m"},                     // two different quantizations
 		{"qwen3:8b", "qwen3:14b"},                                      // Ollama tags other than :latest matter
 		{"gpt-4o", "gpt-4o-mini"},
+		{"claude-sonnet-4", "claude-sonnet-4-5"},      // a version, not a date
+		{"google/gemma-4-e2b", "unsloth/gemma-4-e2b"}, // two publishers named, and different
 	}
 	for _, c := range differ {
 		if SameModel(c[0], c[1]) {
@@ -104,6 +108,15 @@ func TestDetectContextWindowSaysWhereTheWindowCameFrom(t *testing.T) {
 	defer other.Close()
 	if w := DetectContextWindow(context.Background(), other.URL+"/v1", "m", other.Client()); w.Known {
 		t.Errorf("a 200 without a model list: %+v — not a list that lacks our model", w)
+	}
+
+	// The exact id wins over a sibling SameModel would also accept.
+	sib := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"data":[{"id":"x","state":"loaded","loaded_context_length":32768},{"id":"x@q8_0","state":"loaded","loaded_context_length":4096}]}`)
+	}))
+	defer sib.Close()
+	if w := DetectContextWindow(context.Background(), sib.URL+"/v1", "x@q8_0", sib.Client()); w.Tokens != 4096 || w.From != "x@q8_0" {
+		t.Errorf("exact id loaded beside a sibling: %+v, want its own 4096", w)
 	}
 
 	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNotFound) }))

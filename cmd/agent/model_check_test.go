@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -33,6 +34,7 @@ func stderrOf(t *testing.T, f func()) string {
 
 func wiredApp(t *testing.T) *app {
 	t.Helper()
+	setHome(t, t.TempDir())
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
 	cfg.LLM.ContextWindow = 4096
@@ -179,10 +181,61 @@ func TestAMismatchedReplyReachesTheUser(t *testing.T) {
 
 // Nothing is said when LM Studio gave no list, or listed and loaded the model.
 func TestNoNotesWithoutReason(t *testing.T) {
-	if n := lmNotes(llm.LMWindow{}, "m"); len(n) != 0 {
+	if n := lmNotes(llm.LMWindow{}, "m", true); len(n) != 0 {
 		t.Errorf("no list: %q", n)
 	}
-	if n := lmNotes(llm.LMWindow{Known: true, Listed: true, Tokens: 8192, From: "pub/m"}, "m"); len(n) != 0 {
+	if n := lmNotes(llm.LMWindow{Known: true, Listed: true, Tokens: 8192, From: "pub/m"}, "m", true); len(n) != 0 {
 		t.Errorf("our model, loaded: %q", n)
+	}
+}
+
+// A probe result dropped because a task started meanwhile says nothing about
+// the window it didn't apply — and says it when a later one is applied.
+func TestABorrowedWindowIsSaidOnlyWhenUsed(t *testing.T) {
+	a := wiredApp(t)
+	m := &tuiModel{app: a, state: stRunning, cancel: func() {}}
+	msg := windowMsg{provider: "local", tokens: 8192, epoch: a.modelEpoch.Load(), model: a.cfg.LLM.Model, borrowed: true,
+		lm: llm.LMWindow{Tokens: 8192, From: "other-model", Known: true, Listed: true}}
+	m.Update(msg)
+	if a.cfg.LLM.ContextWindow == 8192 || len(m.history) != 0 {
+		t.Fatalf("dropped result: window %d, log %q — want neither applied nor said", a.cfg.LLM.ContextWindow, m.history)
+	}
+	m.state, m.cancel = stIdle, nil
+	m.Update(msg)
+	if len(m.history) != 1 || !strings.Contains(m.history[0], "taken from the loaded model") {
+		t.Errorf("applied later: log %q, want the note once", m.history)
+	}
+}
+
+// Sub-agents, the judge and reflection get their own clients; each reports a
+// reply from the wrong model too.
+func TestEveryClientReportsMismatches(t *testing.T) {
+	a := wiredApp(t)
+	if a.client.OnModelMismatch == nil {
+		t.Error("main client")
+	}
+	a.cfg.JudgeMaxOutputTokens = 100 // gives the judge its own client
+	a.wireJudge()
+	if a.judgeClient == nil || a.judgeClient.OnModelMismatch == nil {
+		t.Error("judge client")
+	}
+	if c, _, _, _ := a.reflectTarget(); c == nil || c.OnModelMismatch == nil {
+		t.Error("reflection client")
+	}
+	// The sub-agent's is built mid-spawn; hold the line structurally: the only
+	// place in the app that makes a client is newClient.
+	files, _ := filepath.Glob("*.go")
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, _ := os.ReadFile(f)
+		n := strings.Count(string(b), "llm.NewOpenAIClient(")
+		if f == "main.go" {
+			n-- // newClient itself
+		}
+		if n != 0 {
+			t.Errorf("%s builds %d client(s) without newClient — their replies go unchecked", f, n)
+		}
 	}
 }

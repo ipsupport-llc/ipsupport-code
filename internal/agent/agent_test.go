@@ -4791,3 +4791,60 @@ func TestRememberedTurnRecordsARecoveredCall(t *testing.T) {
 		t.Errorf("remembered turn %+v lacks the command that ran", h)
 	}
 }
+
+// A call refused before it ran — plan mode here — is recorded as not run, not
+// as a command that ran (found by review: normalizing made a garbled refused
+// call look executed).
+func TestTheDigestSaysARefusedCommandDidNotRun(t *testing.T) {
+	ran := false
+	reg := tool.NewRegistry(tool.NewDomain(tool.DomainSpec{
+		Name: "run", Summary: "test-only shell",
+		Actions: []tool.Action{{Name: "shell", Mutates: true, Params: []tool.Param{tool.Req("command", "str")},
+			Run: func(context.Context, tool.Args) tool.Result { ran = true; return tool.Ok("exit 0\n") }}},
+	}))
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("c1", "run", `{"action":"touch x"}`),
+		toolCallReply("c2", "run", `{"action":"shell","params":{"command":"make y"}}`),
+		{Role: "assistant", Content: "plan: touch x, make y"},
+	}}
+	a := New(fake, reg, nil, nil, "", 5)
+	a.SetPlanMode(true)
+	if _, err := a.Run(context.Background(), "plan it"); err != nil {
+		t.Fatal(err)
+	}
+	if ran {
+		t.Fatal("sanity: plan mode ran a command")
+	}
+	h := a.History()
+	got := h[len(h)-1].Content
+	for _, want := range []string{"touch x — NOT run: plan mode is ON", "make y — NOT run: plan mode is ON"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("remembered %q lacks %q", got, want)
+		}
+	}
+
+	ok := []llm.Message{
+		toolCallReply("c1", "run", `{"action":"shell","params":{"command":"go test"}}`),
+		{Role: "tool", Content: "exit 1\nFAIL x"},
+		toolCallReply("c2", "run", `{"action":"shell","params":{"command":"sleep 99"}}`),
+		{Role: "tool", Content: "command timed out after 1s and was killed: sleep 99"},
+		toolCallReply("c3", "run", `{"action":"shell","params":{"command":"rm -rf /"}}`),
+		{Role: "tool", Content: "command denied by user: rm -rf /"},
+	}
+	d := actionsDigest(ok, reg)
+	for _, want := range []string{"go test — FAILED: FAIL x", "rm -rf / — NOT run: command denied by user"} {
+		if !strings.Contains(d, want) {
+			t.Errorf("digest %q lacks %q", d, want)
+		}
+	}
+	files := actionsDigest([]llm.Message{
+		toolCallReply("c1", "file", `{"action":"write","params":{"path":"a.go","content":"x"}}`),
+		{Role: "tool", Content: "plan mode is ON — file.write was NOT run. Don't retry it; list it as a step in your plan, then finish."},
+	}, reg)
+	if strings.Contains(files, "a.go") {
+		t.Errorf("a write refused in plan mode is listed as touched: %q", files)
+	}
+	if strings.Contains(d, "sleep 99 — NOT run") {
+		t.Errorf("a command killed at its timeout did run: %q", d)
+	}
+}

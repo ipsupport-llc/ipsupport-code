@@ -1099,6 +1099,9 @@ func actionsDigest(msgs []llm.Message, reg *tool.Registry) string {
 				if action == "read" || action == "list" || action == "find" || action == "search" {
 					continue // read-only — not something the next task needs to be told "already happened"
 				}
+				if k := i + 1 + j; k < len(msgs) && msgs[k].Role == "tool" && strings.Contains(firstLine(msgs[k].Content), "was NOT run") {
+					continue // refused by plan or read-only mode: nothing was touched
+				}
 				if p, _ := params["path"].(string); p != "" && !seenFile[p] {
 					seenFile[p] = true
 					files = append(files, p)
@@ -1107,7 +1110,9 @@ func actionsDigest(msgs []llm.Message, reg *tool.Registry) string {
 				if c, _ := params["command"].(string); c != "" {
 					entry := clip(c, 100) // long enough that a compound "mkdir && cd && go mod init X" isn't cut before the part that actually identifies it
 					if k := i + 1 + j; k < len(msgs) && msgs[k].Role == "tool" {
-						if reason := runFailureReason(msgs[k].Content); reason != "" {
+						if why := notRunReason(msgs[k].Content); why != "" {
+							entry += " — NOT run: " + why
+						} else if reason := runFailureReason(msgs[k].Content); reason != "" {
 							entry += " — FAILED: " + reason
 						}
 					}
@@ -1144,6 +1149,22 @@ func actionsDigest(msgs []llm.Message, reg *tool.Registry) string {
 // actual error message. Returns "" for a successful call ("exit 0"), an
 // untracked call (no matching result, or a shape this can't parse), so the
 // digest entry stays exactly as it was before this function existed.
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(s, "\n")
+	return line
+}
+
+// notRunReason says why a run call never ran — refused by plan or read-only
+// mode, the policy, or the user — or "" if it did. A command that ran always
+// answers "exit N" first; one killed at its timeout did run, and its message
+// says so.
+func notRunReason(content string) string {
+	if content == "" || strings.HasPrefix(content, "exit ") || strings.HasPrefix(content, "command timed out") {
+		return ""
+	}
+	return clip(strings.TrimSpace(firstLine(content)), 80)
+}
+
 func runFailureReason(content string) string {
 	if content == "" || strings.HasPrefix(content, "exit 0") {
 		return ""

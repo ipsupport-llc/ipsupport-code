@@ -3,6 +3,7 @@ package tool
 import (
 	"context"
 	"errors"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -141,14 +142,32 @@ func (g *gitTool) checkLocalGitPath(v string) error {
 	if !localGitPath(v) {
 		return nil
 	}
-	p := strings.TrimPrefix(strings.TrimPrefix(v, "file://"), "file:")
-	if _, err := g.pol.Resolve(p); err != nil {
-		if errors.Is(err, policy.ErrNotShellExpanded) {
-			return err // its own hint says where the path meant
+	_, err := g.resolveLocalGit(v)
+	return err
+}
+
+// resolveLocalGit is the absolute path git will open for a local repository
+// argument, or the jail's error. A file:// URL is read the way git reads it:
+// file://localhost/x is /x, and %2e%2e is "..".
+func (g *gitTool) resolveLocalGit(v string) (string, error) {
+	p := strings.TrimPrefix(v, "file:")
+	if rest, ok := strings.CutPrefix(v, "file://"); ok {
+		if !strings.HasPrefix(rest, "/") { // a host part: git only takes this machine's
+			rest = rest[strings.IndexByte(rest+"/", '/'):]
 		}
-		return errors.New("a local repository outside the workspace isn't reachable from here: " + v)
+		if dec, err := url.PathUnescape(rest); err == nil {
+			rest = dec
+		}
+		p = rest
 	}
-	return nil
+	abs, err := g.pol.Resolve(p)
+	if err != nil {
+		if errors.Is(err, policy.ErrNotShellExpanded) {
+			return "", err // its own hint says where the path meant
+		}
+		return "", errors.New("a local repository outside the workspace isn't reachable from here: " + v)
+	}
+	return abs, nil
 }
 
 func (g *gitTool) clone(ctx context.Context, a Args) Result {
@@ -272,9 +291,19 @@ func (g *gitTool) remote(ctx context.Context, a Args) Result {
 		return Err(err.Error())
 	}
 	// A later fetch or push names only the remote, so the path has to be
-	// checked here, where it is set.
+	// checked here, where it is set. Here even a bare word is a path (git
+	// takes "mirror" as ./mirror), and the path stored is the absolute one
+	// checked: git reads a relative one from the repository root, which need
+	// not be where it was checked from.
 	if err := g.checkLocalGitPath(url); err != nil {
 		return Err(err.Error())
+	}
+	if localGitPath(url) || !strings.Contains(url, ":") {
+		abs, err := g.resolveLocalGit(url)
+		if err != nil {
+			return Err(err.Error())
+		}
+		url = abs
 	}
 	// Probe first (read-only, no approval) so the one approved call is the right
 	// one: "remote add" fails on an existing name, "set-url" on a missing one.

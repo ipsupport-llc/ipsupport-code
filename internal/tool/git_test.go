@@ -878,10 +878,21 @@ func TestGitLocalPathsStayInTheJail(t *testing.T) {
 		"clone": {"url": outside, "dir": "copy"},
 		"fetch": {"remote": outside},
 		"push":  {"remote": "file://" + outside},
+		// fetch and push then name only the remote, so its path is checked
+		// when it is set (#393).
+		"remote": {"name": "x", "url": outside},
 	} {
 		if r := tl.Call(ctx, action, args); !r.IsError || !strings.Contains(r.Content, "outside the workspace") {
 			t.Errorf("%s from a local path outside the jail: %+v", action, r)
 		}
+	}
+	if out, _ := exec.Command("git", "-C", ws, "remote").Output(); strings.TrimSpace(string(out)) != "" {
+		t.Errorf("a remote outside the jail was added anyway: %q", out)
+	}
+	inside := filepath.Join(ws, "mirror")
+	exec.Command("git", "clone", "-q", outside, inside).Run()
+	if r := tl.Call(ctx, "remote", map[string]any{"name": "mirror", "url": "./mirror"}); r.IsError {
+		t.Errorf("a remote inside the jail: %+v", r)
 	}
 	for v, local := range map[string]bool{
 		"origin": false, "https://github.com/o/r.git": false, "git@github.com:o/r.git": false,
@@ -944,5 +955,54 @@ func TestGitRunsThroughItsWrapper(t *testing.T) {
 	}
 	if len(got) == 0 || got[0] != "git" || !strings.Contains(strings.Join(got, " "), "status") {
 		t.Errorf("the wrapper saw %q, want git … status", got)
+	}
+}
+
+// A remote's path is read the way git reads it, and a bare word is a path too
+// (found by review).
+func TestRemotePathsAreCheckedAsGitReadsThem(t *testing.T) {
+	outside := initRepo(t)
+	ws := initRepo(t)
+	tl := gitToolFor(t, ws, yes())
+	ctx := context.Background()
+	slashed := filepath.ToSlash(outside)
+	if !strings.HasPrefix(slashed, "/") {
+		slashed = "/" + slashed // file:///C:/x on Windows
+	}
+	link := filepath.Join(ws, "mirror")
+	hasLink := os.Symlink(outside, link) == nil
+	for name, u := range map[string]string{
+		"host":    "file://localhost" + slashed,                                           // git: file://localhost/x is /x
+		"escaped": "file://" + filepath.ToSlash(ws) + "/%2e%2e/" + filepath.Base(outside), // git decodes %2e%2e to ..
+	} {
+		if r := tl.Call(ctx, "remote", map[string]any{"name": name, "url": u}); !r.IsError || !strings.Contains(r.Content, "outside the workspace") {
+			t.Errorf("%s: remote %q accepted: %+v", name, u, r)
+		}
+		if r := tl.Call(ctx, "clone", map[string]any{"url": u, "dir": "c-" + name}); !r.IsError || !strings.Contains(r.Content, "outside the workspace") {
+			t.Errorf("%s: clone %q accepted: %+v", name, u, r)
+		}
+	}
+	if hasLink {
+		if r := tl.Call(ctx, "remote", map[string]any{"name": "m", "url": "mirror"}); !r.IsError {
+			t.Errorf("a bare-word remote through a symlink out of the jail: %+v", r)
+		}
+		os.Remove(link)
+	}
+
+	// Inside the jail it works, and is stored absolute: git reads a relative
+	// remote from the repository root, not from where it was checked.
+	inside := filepath.Join(ws, "sub", "repo")
+	os.MkdirAll(filepath.Dir(inside), 0o755)
+	exec.Command("git", "clone", "-q", outside, inside).Run()
+	if r := tl.Call(ctx, "remote", map[string]any{"name": "in", "url": "sub/repo"}); r.IsError {
+		t.Fatalf("a remote inside the jail: %+v", r)
+	}
+	got, _ := exec.Command("git", "-C", ws, "remote", "get-url", "in").Output()
+	want, _ := filepath.EvalSymlinks(inside)
+	if g, _ := filepath.EvalSymlinks(strings.TrimSpace(string(got))); g != want {
+		t.Errorf("stored url %q, want the absolute %q", got, want)
+	}
+	if r := tl.Call(ctx, "remote", map[string]any{"name": "gh", "url": "git@github.com:o/r.git"}); r.IsError {
+		t.Errorf("an scp-style server url: %+v", r)
 	}
 }

@@ -1021,7 +1021,7 @@ func (a *Agent) remember(goal, sent, final string, msgs []llm.Message) {
 	if a.detached.Load() {
 		return
 	}
-	entry := final + actionsDigest(msgs) + steersDigest(msgs)
+	entry := final + actionsDigest(msgs, a.reg) + steersDigest(msgs)
 	if a.archiver != nil {
 		a.archiver.Archive(goal, entry) // the archive is for the user to search: the goal as they typed it
 	}
@@ -1070,7 +1070,11 @@ func steersDigest(msgs []llm.Message) string {
 // model's OpenAI-compat endpoint often leaves tool_call ids empty or reuses
 // the same one across calls, which silently broke ID-based lookups on some
 // turns but not others.
-func actionsDigest(msgs []llm.Message) string {
+//
+// reg, when given, recovers a missing or garbled action the way execOne did
+// before running the call ({"action":"touch x"} on run ran as shell), so the
+// digest names what ran rather than what the model typed.
+func actionsDigest(msgs []llm.Message, reg *tool.Registry) string {
 	var files []string
 	seenFile := map[string]bool{}
 	// First-seen order (cmdOrder), latest-seen outcome (cmdEntry, overwritten on
@@ -1087,10 +1091,16 @@ func actionsDigest(msgs []llm.Message) string {
 		}
 		for j, tc := range m.ToolCalls {
 			action, params, _ := parseArgs(tc.Arguments)
+			if reg != nil {
+				action, params = reg.Normalize(tc.Name, action, params)
+			}
 			switch tc.Name {
 			case "file":
 				if action == "read" || action == "list" || action == "find" || action == "search" {
 					continue // read-only — not something the next task needs to be told "already happened"
+				}
+				if k := i + 1 + j; k < len(msgs) && msgs[k].Role == "tool" && strings.Contains(firstLine(msgs[k].Content), "was NOT run") {
+					continue // refused by plan or read-only mode: nothing was touched
 				}
 				if p, _ := params["path"].(string); p != "" && !seenFile[p] {
 					seenFile[p] = true
@@ -1100,7 +1110,9 @@ func actionsDigest(msgs []llm.Message) string {
 				if c, _ := params["command"].(string); c != "" {
 					entry := clip(c, 100) // long enough that a compound "mkdir && cd && go mod init X" isn't cut before the part that actually identifies it
 					if k := i + 1 + j; k < len(msgs) && msgs[k].Role == "tool" {
-						if reason := runFailureReason(msgs[k].Content); reason != "" {
+						if why := notRunReason(msgs[k].Content); why != "" {
+							entry += " — NOT run: " + why
+						} else if reason := runFailureReason(msgs[k].Content); reason != "" {
 							entry += " — FAILED: " + reason
 						}
 					}
@@ -1137,6 +1149,22 @@ func actionsDigest(msgs []llm.Message) string {
 // actual error message. Returns "" for a successful call ("exit 0"), an
 // untracked call (no matching result, or a shape this can't parse), so the
 // digest entry stays exactly as it was before this function existed.
+func firstLine(s string) string {
+	line, _, _ := strings.Cut(s, "\n")
+	return line
+}
+
+// notRunReason says why a run call never ran — refused by plan or read-only
+// mode, the policy, or the user — or "" if it did. A command that ran always
+// answers "exit N" first; one killed at its timeout did run, and its message
+// says so.
+func notRunReason(content string) string {
+	if content == "" || strings.HasPrefix(content, "exit ") || strings.HasPrefix(content, "command timed out") {
+		return ""
+	}
+	return clip(strings.TrimSpace(firstLine(content)), 80)
+}
+
 func runFailureReason(content string) string {
 	if content == "" || strings.HasPrefix(content, "exit 0") {
 		return ""
@@ -1321,7 +1349,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 				// spend another model call.
 				if !cancelled {
 					met, missing := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn,
-						"turn_failed", stopNote(msgs, false, err)+actionsDigest(msgs)+a.priorGapNote(returns), msgs)
+						"turn_failed", stopNote(msgs, false, err)+actionsDigest(msgs, a.reg)+a.priorGapNote(returns), msgs)
 					goalMet = met
 					if !met {
 						tr.Missing = firstNonEmpty(missing, lastMissing)
@@ -1513,7 +1541,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					if isDoneOnly(assistant.ToolCalls) {
 						why = "done"
 					}
-					verdict, missing := a.judgeGoal(ctx, why, a.target(goal, msgs), clean+actionsDigest(msgs)+a.priorGapNote(returns), msgs)
+					verdict, missing := a.judgeGoal(ctx, why, a.target(goal, msgs), clean+actionsDigest(msgs, a.reg)+a.priorGapNote(returns), msgs)
 					// Reported live: the judge's own decision (a separate LLM call)
 					// was entirely invisible in the debug log for its two NORMAL
 					// verdicts — only its failure ("goal judge failed") and
@@ -1670,7 +1698,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// files touched / commands run (and why they failed), the same record
 					// remember() below stores as cross-task memory.
 					met, missing := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn, "stuck_stop",
-						"(the agent got stuck repeating or failing tool calls before producing a coherent final answer.)"+actionsDigest(msgs)+a.priorGapNote(returns),
+						"(the agent got stuck repeating or failing tool calls before producing a coherent final answer.)"+actionsDigest(msgs, a.reg)+a.priorGapNote(returns),
 						msgs)
 					// Reported live: a single bad tool call, repeated until this stop,
 					// read as having killed the whole standing goal ("неправильный вызов
@@ -1725,7 +1753,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	// something real to go on (files touched / commands run) instead of just
 	// the model's own possibly-empty final text.
 	met, missing := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn, "step_exhaustion",
-		judgeResult+actionsDigest(msgs)+a.priorGapNote(returns), msgs)
+		judgeResult+actionsDigest(msgs, a.reg)+a.priorGapNote(returns), msgs)
 	tr.GoalMet = met
 	tr.Missing = missing
 	clean += goalNotConfirmedNote(a.maxReturns, met, missing)

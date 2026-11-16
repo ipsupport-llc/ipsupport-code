@@ -92,6 +92,13 @@ type OpenAIClient struct {
 	// model) rather than just "thinking".
 	OnRetry func(attempt int, wait time.Duration, reason string)
 
+	// OnModelMismatch, if set, is called when a reply says it came from a
+	// different model than the one asked for (see SameModel). Some servers —
+	// LM Studio among them — answer an id they can't resolve with whatever model
+	// is loaded and still return 200, so this is the only sign of it. Called on
+	// every such reply; the caller decides how often to tell the user.
+	OnModelMismatch func(asked, served string)
+
 	// idle bounds how long we wait with NO response or stream data before giving
 	// up on a request and retrying. It's an idle (not total) deadline, so a slow-
 	// but-progressing generation isn't killed, while a server that went silent
@@ -671,6 +678,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 	// content can say the model quietly matched "stop" vs. got cut off.
 	chunks, dropped := 0, 0
 	var finishReason string
+	var served string // the model the server says answered (first chunk that names one)
 	// reasoning accumulates this call's own reasoning/thinking text — still
 	// never sent back to the model (toWire only maps the fields it explicitly
 	// lists), but surfaced on the returned Message so a debug log can show
@@ -752,6 +760,9 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 			slog.Debug("stream chunk unparsed", "err", err, "payload", textutil.OneLine(payload, 240))
 			dropped++
 			continue
+		}
+		if served == "" {
+			served = ch.Model
 		}
 		if ch.Error != nil {
 			// The server said the generation failed. What streamed before this
@@ -913,6 +924,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 		c.Arguments = validArgs(c.Arguments)
 		msg.ToolCalls = append(msg.ToolCalls, c)
 	}
+	c.checkServed(served)
 	return msg, nil
 }
 
@@ -922,6 +934,7 @@ func (c *OpenAIClient) parseJSON(r io.Reader, promptEstimate int) (Message, erro
 		return Message{}, err
 	}
 	var out struct {
+		Model   string `json:"model"`
 		Choices []struct {
 			Message      wireMessage `json:"message"`
 			FinishReason string      `json:"finish_reason"`
@@ -955,7 +968,16 @@ func (c *OpenAIClient) parseJSON(r io.Reader, promptEstimate int) (Message, erro
 	msg := fromWire(out.Choices[0].Message)
 	msg.Content = stripChannelTokens(msg.Content)
 	msg.FinishReason = out.Choices[0].FinishReason
+	c.checkServed(out.Model)
 	return msg, nil
+}
+
+// checkServed reports a reply that came from a model other than the one asked
+// for. See OnModelMismatch.
+func (c *OpenAIClient) checkServed(served string) {
+	if c.OnModelMismatch != nil && !SameModel(c.model, served) {
+		c.OnModelMismatch(c.model, served)
+	}
 }
 
 func (c *OpenAIClient) bumpToken() {
@@ -996,6 +1018,8 @@ func stripChannelTokens(s string) string {
 }
 
 type streamChunk struct {
+	// Model is the model the server says produced this chunk.
+	Model string `json:"model"`
 	// Error is a server-side failure reported inside the stream, as a data
 	// chunk of its own (some servers do this and still end with [DONE]).
 	Error *struct {

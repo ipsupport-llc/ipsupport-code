@@ -834,6 +834,11 @@ time spent waiting on an approval prompt.
 The status bar shows `ctx 4.1k/8k` — the size of the last prompt vs. the model's
 context window. The window is **auto-detected** from LM Studio's
 `/api/v0/models`; set `llm.context_window` to override (0 disables auto-compact).
+If the configured model isn't loaded, the window of the model that is loaded is
+used until it is, and the agent says so. It also warns once when the model id
+isn't in LM Studio's list, and when a reply comes from a different model than
+the one configured — some servers answer an id they can't resolve with
+whatever model is loaded, without an error.
 When the prompt passes ~75% of the window the session is **auto-compacted** into
 a short summary to free room (run it any time with `/compact`; the threshold and
 whether it summarizes at all are configurable — see `memory`/`compact_threshold`

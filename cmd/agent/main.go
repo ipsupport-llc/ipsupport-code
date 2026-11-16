@@ -584,6 +584,10 @@ type app struct {
 	// newly active model's context-window state.
 	modelEpoch atomic.Int64
 
+	// warned holds the model warnings already shown this session (see
+	// warnOnce), so a fallback the server repeats on every reply is said once.
+	warned sync.Map
+
 	// approvalWaitNS accumulates nanoseconds spent BLOCKED in an approval
 	// prompt (approveGated), across every tool call and every concurrent
 	// sub-agent — never decremented. A caller measuring one run's own
@@ -1083,7 +1087,7 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 	}
 
 	id := fmt.Sprintf("sub%d", a.spawnSeq.Add(1)) // groups this sub-agent's UI events
-	client := llm.NewOpenAIClient(plan.llmCfg)    // reasoning params already resolved in resolveSpawn
+	client := a.newClient(plan.llmCfg)            // reasoning params already resolved in resolveSpawn
 	sub := a.newSubAgent(plan, client, id)
 	if plan.tracer != nil {
 		plan.tracer.Emit("subagent", map[string]any{"agent": id, "profile": plan.profile, "provider": plan.provider, "model": plan.llmCfg.Model, "dir": plan.subWorkspace, "task": oneLine(task, 80)})
@@ -2485,7 +2489,7 @@ func (a *app) wireJudge() {
 	if budget > 0 {
 		cfg.MaxOutputTokens = budget
 	}
-	a.judgeClient = llm.NewOpenAIClient(cfg)
+	a.judgeClient = a.newClient(cfg)
 	a.lastJudgePrompt, a.lastJudgeCompl = 0, 0
 	a.ag.SetJudgeLLM(a.judgeClient)
 }
@@ -3007,7 +3011,66 @@ func (a *app) mcpCall(ctx context.Context, server, name string, args map[string]
 // provider can't freeze the screen.
 func (a *app) maybeDetectWindowSync() {
 	if !a.tui {
-		a.detectContextWindow()
+		a.printNotes(a.detectContextWindow())
+	}
+}
+
+// printNotes shows model warnings on the plain (non-TUI) paths.
+func (a *app) printNotes(notes []string) {
+	for _, n := range a.unsaid(notes) {
+		fmt.Fprintln(os.Stderr, "⚠ "+n)
+	}
+}
+
+// unsaid keeps the warnings not yet shown this session and marks them shown,
+// so a condition that holds on every probe or every reply is said once.
+// Called only where the result is shown.
+func (a *app) unsaid(notes []string) []string {
+	var out []string
+	for _, n := range notes {
+		if _, seen := a.warned.LoadOrStore(n, true); !seen {
+			slog.Info("model warning", "text", n) // Info: on plain runs stderr already carries the ⚠ line
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// lmNotes is what LM Studio's model list says the user should know about the
+// configured model: it isn't in the list at all, so the server may answer with
+// whatever is loaded; or (applied: the window was used) it isn't loaded, so the
+// context window was taken from the model that is.
+func lmNotes(lw llm.LMWindow, model string, applied bool) []string {
+	var notes []string
+	if lw.Known && !lw.Listed {
+		notes = append(notes, fmt.Sprintf("model %q isn't in LM Studio's model list — it may answer with whatever model is loaded instead; check the id with /model", model))
+	}
+	if applied && lw.Borrowed(model) {
+		notes = append(notes, fmt.Sprintf("model %q isn't loaded — context window %d taken from the loaded model %q", model, lw.Tokens, lw.From))
+	}
+	return notes
+}
+
+// newClient builds a model client that reports a reply from the wrong model.
+// Every client goes through here — the main one, sub-agents, the judge and
+// reflection — since a sub-agent profile can name a model the server doesn't
+// have just as well as the main connection can.
+func (a *app) newClient(c config.LLM) *llm.OpenAIClient {
+	cl := llm.NewOpenAIClient(c)
+	cl.OnModelMismatch = a.modelMismatch
+	return cl
+}
+
+// modelMismatch is the client's OnModelMismatch: a reply came from another
+// model than the one configured. Said once per session for each pair.
+func (a *app) modelMismatch(asked, served string) {
+	n := fmt.Sprintf("asked for model %q but %q answered — the server may have fallen back to whatever is loaded; check the model id", asked, served)
+	if a.uiTracer == nil {
+		a.printNotes([]string{n})
+		return
+	}
+	for _, n := range a.unsaid([]string{n}) {
+		a.emit("warning", map[string]any{"text": n})
 	}
 }
 
@@ -3040,24 +3103,31 @@ func (a *app) applyWindow(provider string, tokens int) bool {
 // model's window via its native API; external providers that list a
 // context_length (OpenRouter) report it via /models. Reset on every model/
 // provider switch (windowDetected=false) so it re-detects. Best-effort.
-func (a *app) detectContextWindow() {
+//
+// It returns what the user should hear about the configured model (see
+// lmNotes); the caller decides whether to print it.
+func (a *app) detectContextWindow() []string {
 	if a.windowDetected {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if a.isLocal() {
 		if !a.cfg.LLM.LMStudio() {
-			return
+			return nil
 		}
-		if w := llm.DetectContextWindow(ctx, a.cfg.LLM.BaseURL, a.cfg.LLM.Model, http.DefaultClient); w > 0 {
+		model := a.cfg.LLM.Model
+		lw := llm.DetectContextWindow(ctx, a.cfg.LLM.BaseURL, model, http.DefaultClient)
+		if w := lw.Tokens; w > 0 {
 			changed := a.cfg.LLM.ContextWindow != w
 			a.cfg.LLM.ContextWindow = w
-			a.windowDetected = true
-			slog.Info("detected context window", "tokens", w, "model", a.cfg.LLM.Model)
+			// A window borrowed from another loaded model is a stand-in: keep
+			// probing, so it is replaced once our own model is loaded.
+			a.windowDetected = !lw.Borrowed(model)
+			slog.Info("detected context window", "tokens", w, "model", model, "from", lw.From)
 			a.rewireAfterWindowChange(changed)
 		}
-		return
+		return lmNotes(lw, model, true)
 	}
 	act := a.activeLLM()
 	if w := llm.DetectModelContext(ctx, act.BaseURL, act.APIKey, act.Model, http.DefaultClient); w > 0 {
@@ -3072,6 +3142,7 @@ func (a *app) detectContextWindow() {
 		slog.Info("detected context window", "tokens", w, "model", act.Model, "provider", a.providerName())
 		a.rewireAfterWindowChange(changed)
 	}
+	return nil
 }
 
 // rewireAfterWindowChange re-wires the live agent/client after detection
@@ -3292,7 +3363,7 @@ func (a *app) wire() error {
 	if a.client != nil {
 		seedP, seedC = a.client.Usage()
 	}
-	a.client = llm.NewOpenAIClient(a.withReasoning(a.activeLLM(), a.providerName(), ""))
+	a.client = a.newClient(a.withReasoning(a.activeLLM(), a.providerName(), ""))
 	a.client.SeedUsage(seedP, seedC)
 	a.client.OnRetry = func(attempt int, wait time.Duration, reason string) {
 		slog.Warn("llm retry", "attempt", attempt, "wait", wait, "reason", reason)
@@ -4397,7 +4468,7 @@ func (a *app) reflectTarget() (client *llm.OpenAIClient, lite bool, provider, mo
 	// reasoningParams falls back to the task model's own keys, so an unscoped
 	// reflection keeps exactly the reasoning it had while it shared the client.
 	cfg.Extra = a.reasoningParams(prov, model, "reflect")
-	return llm.NewOpenAIClient(cfg), lite, prov, model
+	return a.newClient(cfg), lite, prov, model
 }
 
 // reflectJob is a reflection pass resolved on the goroutine that owns a.cfg and
@@ -4613,7 +4684,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 			fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
 		}
 	}
-	a.detectContextWindow() // the model is loaded now — confirm the real window
+	a.printNotes(a.detectContextWindow()) // the model is loaded now — confirm the real window
 	if a.shouldAutoCompact() {
 		compactStart := time.Now()
 		n, err := a.ag.Compact(ctx, a.compactFocus(""))

@@ -584,6 +584,10 @@ type app struct {
 	// newly active model's context-window state.
 	modelEpoch atomic.Int64
 
+	// warned holds the model warnings already shown this session (see
+	// warnOnce), so a fallback the server repeats on every reply is said once.
+	warned sync.Map
+
 	// approvalWaitNS accumulates nanoseconds spent BLOCKED in an approval
 	// prompt (approveGated), across every tool call and every concurrent
 	// sub-agent — never decremented. A caller measuring one run's own
@@ -3007,7 +3011,56 @@ func (a *app) mcpCall(ctx context.Context, server, name string, args map[string]
 // provider can't freeze the screen.
 func (a *app) maybeDetectWindowSync() {
 	if !a.tui {
-		a.detectContextWindow()
+		a.printNotes(a.detectContextWindow())
+	}
+}
+
+// printNotes shows model warnings on the plain (non-TUI) paths.
+func (a *app) printNotes(notes []string) {
+	for _, n := range a.unsaid(notes) {
+		fmt.Fprintln(os.Stderr, "⚠ "+n)
+	}
+}
+
+// unsaid keeps the warnings not yet shown this session and marks them shown,
+// so a condition that holds on every probe or every reply is said once.
+// Called only where the result is shown.
+func (a *app) unsaid(notes []string) []string {
+	var out []string
+	for _, n := range notes {
+		if _, seen := a.warned.LoadOrStore(n, true); !seen {
+			slog.Info("model warning", "text", n) // Info: on plain runs stderr already carries the ⚠ line
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// lmNotes is what LM Studio's model list says the user should know about the
+// configured model: it isn't in the list at all, so the server may answer with
+// whatever is loaded; or it isn't loaded, so the context window was taken from
+// the model that is.
+func lmNotes(lw llm.LMWindow, model string) []string {
+	var notes []string
+	if lw.Known && !lw.Listed {
+		notes = append(notes, fmt.Sprintf("model %q isn't in LM Studio's model list — it may answer with whatever model is loaded instead; check the id with /model", model))
+	}
+	if lw.Borrowed(model) {
+		notes = append(notes, fmt.Sprintf("model %q isn't loaded — context window %d taken from the loaded model %q", model, lw.Tokens, lw.From))
+	}
+	return notes
+}
+
+// modelMismatch is the client's OnModelMismatch: a reply came from another
+// model than the one configured. Said once per session for each pair.
+func (a *app) modelMismatch(asked, served string) {
+	n := fmt.Sprintf("asked for model %q but %q answered — the server may have fallen back to whatever is loaded; check the model id", asked, served)
+	if a.uiTracer == nil {
+		a.printNotes([]string{n})
+		return
+	}
+	for _, n := range a.unsaid([]string{n}) {
+		a.emit("warning", map[string]any{"text": n})
 	}
 }
 
@@ -3040,24 +3093,31 @@ func (a *app) applyWindow(provider string, tokens int) bool {
 // model's window via its native API; external providers that list a
 // context_length (OpenRouter) report it via /models. Reset on every model/
 // provider switch (windowDetected=false) so it re-detects. Best-effort.
-func (a *app) detectContextWindow() {
+//
+// It returns what the user should hear about the configured model (see
+// lmNotes); the caller decides whether to print it.
+func (a *app) detectContextWindow() []string {
 	if a.windowDetected {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if a.isLocal() {
 		if !a.cfg.LLM.LMStudio() {
-			return
+			return nil
 		}
-		if w := llm.DetectContextWindow(ctx, a.cfg.LLM.BaseURL, a.cfg.LLM.Model, http.DefaultClient); w > 0 {
+		model := a.cfg.LLM.Model
+		lw := llm.DetectContextWindow(ctx, a.cfg.LLM.BaseURL, model, http.DefaultClient)
+		if w := lw.Tokens; w > 0 {
 			changed := a.cfg.LLM.ContextWindow != w
 			a.cfg.LLM.ContextWindow = w
-			a.windowDetected = true
-			slog.Info("detected context window", "tokens", w, "model", a.cfg.LLM.Model)
+			// A window borrowed from another loaded model is a stand-in: keep
+			// probing, so it is replaced once our own model is loaded.
+			a.windowDetected = !lw.Borrowed(model)
+			slog.Info("detected context window", "tokens", w, "model", model, "from", lw.From)
 			a.rewireAfterWindowChange(changed)
 		}
-		return
+		return lmNotes(lw, model)
 	}
 	act := a.activeLLM()
 	if w := llm.DetectModelContext(ctx, act.BaseURL, act.APIKey, act.Model, http.DefaultClient); w > 0 {
@@ -3072,6 +3132,7 @@ func (a *app) detectContextWindow() {
 		slog.Info("detected context window", "tokens", w, "model", act.Model, "provider", a.providerName())
 		a.rewireAfterWindowChange(changed)
 	}
+	return nil
 }
 
 // rewireAfterWindowChange re-wires the live agent/client after detection
@@ -3298,6 +3359,7 @@ func (a *app) wire() error {
 		slog.Warn("llm retry", "attempt", attempt, "wait", wait, "reason", reason)
 		a.emit("retry", map[string]any{"attempt": attempt, "wait_ms": wait.Milliseconds(), "reason": reason})
 	}
+	a.client.OnModelMismatch = a.modelMismatch
 	// Carry the live session into the new agent. wire() is called again to install
 	// the TUI bridge and on /login to reload config; without this hand-off the
 	// restored conversation would be dropped and every launch would start blank.
@@ -4613,7 +4675,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 			fmt.Fprintf(os.Stderr, "(learned %d new lesson(s))\n", learned)
 		}
 	}
-	a.detectContextWindow() // the model is loaded now — confirm the real window
+	a.printNotes(a.detectContextWindow()) // the model is loaded now — confirm the real window
 	if a.shouldAutoCompact() {
 		compactStart := time.Now()
 		n, err := a.ag.Compact(ctx, a.compactFocus(""))

@@ -36,11 +36,11 @@ func TestDetectContextWindow(t *testing.T) {
 	defer srv.Close()
 
 	// Prefer the loaded window of our model.
-	if got := DetectContextWindow(context.Background(), srv.URL+"/v1", "m", srv.Client()); got != 16384 {
+	if got := DetectContextWindow(context.Background(), srv.URL+"/v1", "m", srv.Client()).Tokens; got != 16384 {
 		t.Errorf("got %d, want 16384 (loaded window of model m)", got)
 	}
 	// Unknown model → first loaded entry.
-	if got := DetectContextWindow(context.Background(), srv.URL+"/v1", "nope", srv.Client()); got != 16384 {
+	if got := DetectContextWindow(context.Background(), srv.URL+"/v1", "nope", srv.Client()).Tokens; got != 16384 {
 		t.Errorf("got %d, want 16384 (first loaded)", got)
 	}
 }
@@ -77,7 +77,7 @@ func TestDetectContextWindowUnloadedReturnsZero(t *testing.T) {
 		io.WriteString(w, body)
 	}))
 	defer srv.Close()
-	if got := DetectContextWindow(context.Background(), srv.URL+"/v1", "m", srv.Client()); got != 0 {
+	if got := DetectContextWindow(context.Background(), srv.URL+"/v1", "m", srv.Client()).Tokens; got != 0 {
 		t.Errorf("got %d, want 0 (don't trust max for an unloaded model)", got)
 	}
 }
@@ -113,7 +113,7 @@ func TestDetectContextWindowUnavailable(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound) // not LM Studio's native API
 	}))
 	defer srv.Close()
-	if got := DetectContextWindow(context.Background(), srv.URL+"/v1", "m", srv.Client()); got != 0 {
+	if got := DetectContextWindow(context.Background(), srv.URL+"/v1", "m", srv.Client()).Tokens; got != 0 {
 		t.Errorf("got %d, want 0 (so the caller keeps its default)", got)
 	}
 }

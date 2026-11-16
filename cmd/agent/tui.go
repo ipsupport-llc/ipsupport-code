@@ -196,7 +196,10 @@ type diffMsg struct{ lines []string }     // output of /diff
 type windowMsg struct {                   // re-detected context window for a provider
 	provider string
 	tokens   int
-	epoch    int64 // model active at dispatch time — a later model switch's is stale
+	epoch    int64        // model active at dispatch time — a later model switch's is stale
+	lm       llm.LMWindow // LM Studio's word on the model, for the warnings (lmNotes)
+	model    string       // the model probed
+	borrowed bool         // tokens came from another loaded model: keep probing
 }
 type modelsMsg struct { // /model result: lines to show, or setTo to switch model
 	lines []string
@@ -529,15 +532,17 @@ func (m *tuiModel) detectWindowCmd() tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		tok := 0
+		msg := windowMsg{provider: provider, epoch: ep, model: act.Model}
 		if local {
 			if act.LMStudio() {
-				tok = llm.DetectContextWindow(ctx, act.BaseURL, act.Model, http.DefaultClient)
+				msg.lm = llm.DetectContextWindow(ctx, act.BaseURL, act.Model, http.DefaultClient)
+				msg.tokens = msg.lm.Tokens
+				msg.borrowed = msg.lm.Borrowed(act.Model)
 			}
 		} else {
-			tok = llm.DetectModelContext(ctx, act.BaseURL, act.APIKey, act.Model, http.DefaultClient)
+			msg.tokens = llm.DetectModelContext(ctx, act.BaseURL, act.APIKey, act.Model, http.DefaultClient)
 		}
-		return windowMsg{provider: provider, tokens: tok, epoch: ep}
+		return msg
 	}
 }
 
@@ -834,6 +839,9 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.epoch != m.app.modelEpoch.Load() {
 			return m, nil
 		}
+		for _, n := range m.app.unsaid(lmNotes(msg.lm, msg.model)) {
+			m.push(cErr.Render("  ⚠ " + n))
+		}
 		// A task is running — possibly behind an approval prompt or the /config
 		// panel, states that are not stRunning but still have a task under them.
 		// Its goroutine reads a.cfg and a.ag, so neither may change now: not the
@@ -850,7 +858,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.tokens > 0 {
 			changed := m.app.applyWindow(msg.provider, msg.tokens)
 			if msg.provider == m.app.providerName() {
-				m.app.windowDetected = true
+				m.app.windowDetected = !msg.borrowed
 				// Re-wire so the live agent/client immediately pick up the new
 				// window (step budget, history cap, mid-task trim threshold,
 				// per-turn generation cap) instead of waiting on some unrelated
@@ -3412,6 +3420,9 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 	case "error":
 		c, _ := e.fields["text"].(string)
 		return []string{cErr.Render("error: " + c)}
+	case "warning":
+		c, _ := e.fields["text"].(string)
+		return []string{cErr.Render("  ⚠ " + c)}
 	}
 	return nil
 }

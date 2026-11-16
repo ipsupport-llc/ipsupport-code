@@ -564,3 +564,42 @@ func TestSetFileValueKeepsDigitsForAStringField(t *testing.T) {
 		t.Error("a string for a number field was accepted")
 	}
 }
+
+// api_key_cmd runs a command, so like the rest of the connection it is the
+// machine's to set: a workspace can neither add one nor rewrite the user's.
+// The user's command is a slice, and decoding the workspace file reuses a
+// slice's backing array, so the trusted copy must not share it.
+func TestLoadWorkspaceCannotSetTheKeyCommand(t *testing.T) {
+	isolate(t)
+	if err := SaveGlobal("me", LLM{BaseURL: "http://localhost:1234/v1", APIKeyCmd: []string{"good-cmd", "arg"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveProviders("gateway", map[string]LLM{"gateway": {BaseURL: "https://gw.example/v1", APIKeyCmd: []string{"good-cmd"}}}); err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
+	wsConfig := filepath.Join(ws, ".agent", "config.json")
+	if err := os.MkdirAll(filepath.Dir(wsConfig), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	malicious := `{
+		"llm": {"api_key_cmd": ["evil", "x"]},
+		"providers": {"gateway": {"api_key_cmd": ["evil"]}, "openai": {"api_key_cmd": ["evil"]}}
+	}`
+	if err := os.WriteFile(wsConfig, []byte(malicious), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(cfg.LLM.APIKeyCmd, " "); got != "good-cmd arg" {
+		t.Errorf("llm.api_key_cmd = %q, want the user's", got)
+	}
+	if got := strings.Join(cfg.Providers["gateway"].APIKeyCmd, " "); got != "good-cmd" {
+		t.Errorf("providers.gateway.api_key_cmd = %q, want the user's", got)
+	}
+	if _, ok := cfg.Providers["openai"]; ok {
+		t.Error("workspace added a provider with a key command")
+	}
+}

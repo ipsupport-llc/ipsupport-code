@@ -251,7 +251,7 @@ func modelPickItems(ctx context.Context, act config.LLM) ([]pickItem, error) {
 		}
 		return markCurrent(out, act.Model), nil
 	}
-	ids, err := llm.ListModels(ctx, act.BaseURL, act.APIKey, http.DefaultClient)
+	ids, err := llm.ListModelsFor(ctx, act, http.DefaultClient)
 	if err != nil {
 		return nil, err
 	}

@@ -81,6 +81,8 @@ type OpenAIClient struct {
 	baseURL string
 	model   string
 	apiKey  string
+	keys    *keyCmd // api_key_cmd: the key comes from here instead of apiKey
+	keyTTL  time.Duration
 	// tuning is what each request is sent with that may change while a task
 	// runs (SetTuning): swapped whole, read once per request, so a change
 	// applies from the model's next turn without rebuilding the client.
@@ -211,6 +213,8 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 		baseURL: strings.TrimRight(c.BaseURL, "/"),
 		model:   c.Model,
 		apiKey:  c.APIKey,
+		keys:    keyCommand(c),
+		keyTTL:  keyTTL(c),
 		hc: &http.Client{
 			Transport: &http.Transport{
 				Proxy: http.ProxyFromEnvironment,
@@ -399,6 +403,13 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 		// call's legitimate progress made while this attempt was in flight).
 		var reqCompl int
 		msg, err, retriable := c.send(ctx, buf, &reqCompl)
+		var ae *authError
+		if c.keys != nil && errors.As(err, &ae) {
+			// The key from api_key_cmd was refused — most likely it expired.
+			// Get a fresh one and try once more; a second 401 is reported.
+			c.keys.expire(ae.key)
+			msg, err, retriable = c.send(ctx, buf, &reqCompl)
+		}
 		if err == nil {
 			return msg, nil
 		}
@@ -566,6 +577,16 @@ func isSingleRune(s string) bool {
 
 // send makes one attempt; the bool reports whether the failure is worth a retry.
 func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Message, error, bool) {
+	// Before the idle watchdog starts: an api_key_cmd may wait minutes on a
+	// sign-in, and that is not the server going quiet.
+	key := c.apiKey
+	if c.keys != nil {
+		k, err := c.keys.Key(ctx, c.keyTTL)
+		if err != nil {
+			return Message{}, err, false
+		}
+		key = k
+	}
 	c.mu.Lock()
 	c.live.Reset() // this attempt's own live output, not a dropped attempt's leftovers
 	c.liveReasoning.Reset()
@@ -593,8 +614,8 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 		req.Header.Set("HTTP-Referer", "https://github.com/ipsupport-llc/ipsupport-code")
 		req.Header.Set("X-Title", "ipsupport-code")
 	}
-	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
 	}
 
 	resp, err := c.hc.Do(req)
@@ -617,7 +638,11 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 		return Message{}, fmt.Errorf("llm rate-limited (http %d)", resp.StatusCode), true
 	case resp.StatusCode >= 400:
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return Message{}, fmt.Errorf("llm http %d: %s", resp.StatusCode, oneLine(string(data))), false
+		err := fmt.Errorf("llm http %d: %s", resp.StatusCode, oneLine(redactKey(string(data), key)))
+		if resp.StatusCode == http.StatusUnauthorized {
+			err = &authError{err: err, key: key}
+		}
+		return Message{}, err, false
 	}
 	// Estimate of the prompt we just sent (~4 bytes/token, this codebase's usual
 	// rough conversion — see e.g. the tool catalog budget) — the fallback below
@@ -651,6 +676,15 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 	m, err := c.parseJSON(resp.Body, promptEstimate) // server ignored stream (e.g. a test fake)
 	return m, err, false
 }
+
+// authError is a 401: the server refused the key sent with the request.
+type authError struct {
+	err error
+	key string
+}
+
+func (e *authError) Error() string { return e.err.Error() }
+func (e *authError) Unwrap() error { return e.err }
 
 // oneLine collapses a (possibly HTML) error body to a short single line.
 func oneLine(s string) string { return textutil.OneLine(s, 150) }

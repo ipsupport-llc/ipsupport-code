@@ -827,7 +827,7 @@ func checkActiveProvider(cfg config.Config) error {
 		}
 		return nil
 	}
-	if l.APIKey == "" { // built-in cloud template
+	if !l.HasKey() { // built-in cloud template
 		return fmt.Errorf("provider %q needs an API key — run: ipsupport-code config set providers.%s.api_key <token> (or set its env var)", name, name)
 	}
 	return nil
@@ -983,7 +983,7 @@ func (a *app) resolveSpawn(profile, dir string) (spawnPlan, bool, config.AgentPr
 			if rp.BaseURL == "" { // a custom provider must at least name where to connect
 				return spawnPlan{}, false, p, fmt.Errorf("profile %q: %s has no base_url — set providers.%s.base_url in config", profile, provider, provider)
 			}
-		} else if rp.APIKey == "" { // built-in cloud templates need a key
+		} else if !rp.HasKey() { // built-in cloud templates need a key
 			return spawnPlan{}, false, p, fmt.Errorf("profile %q: %s has no API key — add one with /ai key %s <token>", profile, provider, provider)
 		}
 		llmCfg = rp
@@ -1488,7 +1488,7 @@ func (a *app) providerConn(provider string) (config.LLM, string) {
 		}
 		return rp, "" // keyless is fine (local Ollama/vLLM/etc.)
 	}
-	if rp.APIKey == "" { // built-in cloud templates need a key
+	if !rp.HasKey() { // built-in cloud templates need a key
 		return config.LLM{}, fmt.Sprintf("%s has no API key — add one with /ai key %s <token> first", provider, provider)
 	}
 	return rp, ""
@@ -1503,7 +1503,7 @@ func (a *app) configuredProviderNames() []string {
 		if seen[n] {
 			return
 		}
-		if l, ok := config.ResolveProvider(a.cfg, n); ok && (l.APIKey != "" || config.IsCustomProvider(a.cfg, n)) {
+		if l, ok := config.ResolveProvider(a.cfg, n); ok && (l.HasKey() || config.IsCustomProvider(a.cfg, n)) {
 			out = append(out, n)
 			seen[n] = true
 		}
@@ -3130,7 +3130,11 @@ func (a *app) detectContextWindow() []string {
 		return lmNotes(lw, model, true)
 	}
 	act := a.activeLLM()
-	if w := llm.DetectModelContext(ctx, act.BaseURL, act.APIKey, act.Model, http.DefaultClient); w > 0 {
+	key, ok := llm.KnownKey(act)
+	if !ok {
+		return nil // api_key_cmd hasn't run yet; detected after the first request
+	}
+	if w := llm.DetectModelContext(ctx, act.BaseURL, key, act.Model, http.DefaultClient); w > 0 {
 		if a.cfg.Providers == nil {
 			a.cfg.Providers = map[string]config.LLM{}
 		}
@@ -3365,6 +3369,7 @@ func (a *app) wire() error {
 	}
 	a.client = a.newClient(a.withReasoning(a.activeLLM(), a.providerName(), ""))
 	a.client.SeedUsage(seedP, seedC)
+	llm.SetKeyCmdOutput(a.keyCmdLine)
 	a.client.OnRetry = func(attempt int, wait time.Duration, reason string) {
 		slog.Warn("llm retry", "attempt", attempt, "wait", wait, "reason", reason)
 		a.emit("retry", map[string]any{"attempt": attempt, "wait_ms": wait.Milliseconds(), "reason": reason})
@@ -4287,6 +4292,16 @@ func (a *app) systemPrompt() string {
 	return out
 }
 
+// keyCmdLine shows a line an api_key_cmd wrote to stderr while it runs — a
+// sign-in URL or code the user has to act on.
+func (a *app) keyCmdLine(line string) {
+	if a.uiTracer != nil {
+		a.emit("keycmd", map[string]any{"text": line})
+		return
+	}
+	fmt.Fprintln(os.Stderr, "api_key_cmd: "+line)
+}
+
 func (a *app) emit(kind string, fields map[string]any) {
 	if a.tracer != nil {
 		a.tracer.Emit(kind, fields)
@@ -4442,7 +4457,7 @@ func (a *app) reflectTarget() (client *llm.OpenAIClient, lite bool, provider, mo
 			}
 			c, usable := a.cfg.LLM, true
 			if pp != "local" {
-				if rp, rok := config.ResolveProvider(a.cfg, pp); rok && (rp.APIKey != "" || (config.IsCustomProvider(a.cfg, pp) && rp.BaseURL != "")) {
+				if rp, rok := config.ResolveProvider(a.cfg, pp); rok && (rp.HasKey() || (config.IsCustomProvider(a.cfg, pp) && rp.BaseURL != "")) {
 					c = rp
 				} else {
 					usable = false
@@ -5068,7 +5083,7 @@ func (a *app) providerList() []string {
 	for _, n := range names {
 		l, _ := config.ResolveProvider(a.cfg, n)
 		note := "no key"
-		if l.APIKey != "" {
+		if l.HasKey() {
 			note = "key set"
 		}
 		if _, tmpl := config.ProviderTemplates[n]; !tmpl {
@@ -5089,7 +5104,7 @@ func (a *app) setProvider(name string) []string {
 			if l.BaseURL == "" {
 				return []string{fmt.Sprintf("%s has no base_url — set providers.%s.base_url in config", name, name)}
 			}
-		} else if l.APIKey == "" { // built-in cloud template
+		} else if !l.HasKey() { // built-in cloud template
 			return []string{fmt.Sprintf("%s needs an API key — run: /ai key %s <token>  (or set the env var)", name, name)}
 		}
 	}
@@ -5180,7 +5195,7 @@ func listModelIDs(ctx context.Context, act config.LLM) []string {
 		}
 		return ids
 	}
-	ids, _ := llm.ListModels(ctx, act.BaseURL, act.APIKey, http.DefaultClient)
+	ids, _ := llm.ListModelsFor(ctx, act, http.DefaultClient)
 	return ids
 }
 
@@ -5249,7 +5264,7 @@ func modelLines(ctx context.Context, act config.LLM, provider string) []string {
 		}
 		return out
 	}
-	ids, err := llm.ListModels(ctx, act.BaseURL, act.APIKey, http.DefaultClient)
+	ids, err := llm.ListModelsFor(ctx, act, http.DefaultClient)
 	if err != nil {
 		return []string{"couldn't list models: " + err.Error()}
 	}
@@ -5360,7 +5375,7 @@ func (a *app) setContextWindow(v int) error {
 func (a *app) configOverview() []string {
 	act := a.activeLLM()
 	key := "—"
-	if act.APIKey != "" {
+	if act.HasKey() {
 		key = "set"
 	}
 	return []string{

@@ -271,6 +271,11 @@ func (g *gitTool) remote(ctx context.Context, a Args) Result {
 	if err := checkRemoteURL(url); err != nil {
 		return Err(err.Error())
 	}
+	// A later fetch or push names only the remote, so the path has to be
+	// checked here, where it is set.
+	if err := g.checkLocalGitPath(url); err != nil {
+		return Err(err.Error())
+	}
 	// Probe first (read-only, no approval) so the one approved call is the right
 	// one: "remote add" fails on an existing name, "set-url" on a missing one.
 	verb := "add"

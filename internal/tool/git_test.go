@@ -878,10 +878,21 @@ func TestGitLocalPathsStayInTheJail(t *testing.T) {
 		"clone": {"url": outside, "dir": "copy"},
 		"fetch": {"remote": outside},
 		"push":  {"remote": "file://" + outside},
+		// fetch and push then name only the remote, so its path is checked
+		// when it is set (#393).
+		"remote": {"name": "x", "url": outside},
 	} {
 		if r := tl.Call(ctx, action, args); !r.IsError || !strings.Contains(r.Content, "outside the workspace") {
 			t.Errorf("%s from a local path outside the jail: %+v", action, r)
 		}
+	}
+	if out, _ := exec.Command("git", "-C", ws, "remote").Output(); strings.TrimSpace(string(out)) != "" {
+		t.Errorf("a remote outside the jail was added anyway: %q", out)
+	}
+	inside := filepath.Join(ws, "mirror")
+	exec.Command("git", "clone", "-q", outside, inside).Run()
+	if r := tl.Call(ctx, "remote", map[string]any{"name": "mirror", "url": "./mirror"}); r.IsError {
+		t.Errorf("a remote inside the jail: %+v", r)
 	}
 	for v, local := range map[string]bool{
 		"origin": false, "https://github.com/o/r.git": false, "git@github.com:o/r.git": false,

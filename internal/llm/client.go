@@ -82,6 +82,7 @@ type OpenAIClient struct {
 	model   string
 	apiKey  string
 	keys    *keyCmd // api_key_cmd: the key comes from here instead of apiKey
+	keyTTL  time.Duration
 	// tuning is what each request is sent with that may change while a task
 	// runs (SetTuning): swapped whole, read once per request, so a change
 	// applies from the model's next turn without rebuilding the client.
@@ -213,6 +214,7 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 		model:   c.Model,
 		apiKey:  c.APIKey,
 		keys:    keyCommand(c),
+		keyTTL:  keyTTL(c),
 		hc: &http.Client{
 			Transport: &http.Transport{
 				Proxy: http.ProxyFromEnvironment,
@@ -579,7 +581,7 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 	// sign-in, and that is not the server going quiet.
 	key := c.apiKey
 	if c.keys != nil {
-		k, err := c.keys.Key(ctx)
+		k, err := c.keys.Key(ctx, c.keyTTL)
 		if err != nil {
 			return Message{}, err, false
 		}
@@ -636,7 +638,7 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 		return Message{}, fmt.Errorf("llm rate-limited (http %d)", resp.StatusCode), true
 	case resp.StatusCode >= 400:
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		err := fmt.Errorf("llm http %d: %s", resp.StatusCode, oneLine(string(data)))
+		err := fmt.Errorf("llm http %d: %s", resp.StatusCode, oneLine(redactKey(string(data), key)))
 		if resp.StatusCode == http.StatusUnauthorized {
 			err = &authError{err: err, key: key}
 		}

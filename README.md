@@ -154,10 +154,14 @@ that prints one instead of a key:
 The command runs on first use, and its trimmed stdout is the key. The key is
 kept in memory and never saved. It runs again once `api_key_ttl` seconds have
 passed (0 or unset means no timed refresh), and once when the server answers
-401, after which the request is retried one time. A command that fails shows
-its stderr. It gets up to 5 minutes, so it can open a browser for a sign-in.
-When it is set it wins over `api_key` and the env var. Like the rest of the
-connection it is machine-level: a workspace's `.agent/config.json` can't set it.
+401, after which the request is retried one time. It gets up to 5 minutes, so
+it can open a browser for a sign-in. What it writes to stderr is shown as it
+writes it (a URL or code to act on), and a failure shows that output. It has no
+terminal input. It runs without a shell, so a PowerShell helper is
+`["powershell", "-NoProfile", "-File", "get-key.ps1"]`. Background checks (the
+context-window probe) never start it. When it is set it wins over `api_key` and
+the env var. Like the rest of the connection it is machine-level: a
+workspace's `.agent/config.json` can't set it.
 `/config` opens an interactive settings panel: **↑↓** to move, **Enter** to
 change the selected row, **esc** to close — changes apply and save as you make
 them, no hand-editing JSON.

@@ -540,8 +540,9 @@ func (m *tuiModel) detectWindowCmd() tea.Cmd {
 				msg.borrowed = msg.lm.Borrowed(act.Model)
 			}
 		} else {
-			key, _ := llm.APIKey(ctx, act)
-			msg.tokens = llm.DetectModelContext(ctx, act.BaseURL, key, act.Model, http.DefaultClient)
+			if key, ok := llm.KnownKey(act); ok { // api_key_cmd not run yet: detected after the first request
+				msg.tokens = llm.DetectModelContext(ctx, act.BaseURL, key, act.Model, http.DefaultClient)
+			}
 		}
 		return msg
 	}
@@ -3428,6 +3429,9 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 	case "warning":
 		c, _ := e.fields["text"].(string)
 		return []string{cErr.Render("  ⚠ " + c)}
+	case "keycmd":
+		c, _ := e.fields["text"].(string)
+		return []string{cDim.Render("  api_key_cmd: " + c)}
 	}
 	return nil
 }

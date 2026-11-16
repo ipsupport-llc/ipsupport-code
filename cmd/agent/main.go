@@ -3130,7 +3130,10 @@ func (a *app) detectContextWindow() []string {
 		return lmNotes(lw, model, true)
 	}
 	act := a.activeLLM()
-	key, _ := llm.APIKey(ctx, act)
+	key, ok := llm.KnownKey(act)
+	if !ok {
+		return nil // api_key_cmd hasn't run yet; detected after the first request
+	}
 	if w := llm.DetectModelContext(ctx, act.BaseURL, key, act.Model, http.DefaultClient); w > 0 {
 		if a.cfg.Providers == nil {
 			a.cfg.Providers = map[string]config.LLM{}
@@ -3366,6 +3369,7 @@ func (a *app) wire() error {
 	}
 	a.client = a.newClient(a.withReasoning(a.activeLLM(), a.providerName(), ""))
 	a.client.SeedUsage(seedP, seedC)
+	llm.SetKeyCmdOutput(a.keyCmdLine)
 	a.client.OnRetry = func(attempt int, wait time.Duration, reason string) {
 		slog.Warn("llm retry", "attempt", attempt, "wait", wait, "reason", reason)
 		a.emit("retry", map[string]any{"attempt": attempt, "wait_ms": wait.Milliseconds(), "reason": reason})
@@ -4288,6 +4292,16 @@ func (a *app) systemPrompt() string {
 	return out
 }
 
+// keyCmdLine shows a line an api_key_cmd wrote to stderr while it runs — a
+// sign-in URL or code the user has to act on.
+func (a *app) keyCmdLine(line string) {
+	if a.uiTracer != nil {
+		a.emit("keycmd", map[string]any{"text": line})
+		return
+	}
+	fmt.Fprintln(os.Stderr, "api_key_cmd: "+line)
+}
+
 func (a *app) emit(kind string, fields map[string]any) {
 	if a.tracer != nil {
 		a.tracer.Emit(kind, fields)
@@ -5181,8 +5195,7 @@ func listModelIDs(ctx context.Context, act config.LLM) []string {
 		}
 		return ids
 	}
-	key, _ := llm.APIKey(ctx, act)
-	ids, _ := llm.ListModels(ctx, act.BaseURL, key, http.DefaultClient)
+	ids, _ := llm.ListModelsFor(ctx, act, http.DefaultClient)
 	return ids
 }
 
@@ -5251,11 +5264,7 @@ func modelLines(ctx context.Context, act config.LLM, provider string) []string {
 		}
 		return out
 	}
-	key, err := llm.APIKey(ctx, act)
-	if err != nil {
-		return []string{"couldn't list models: " + err.Error()}
-	}
-	ids, err := llm.ListModels(ctx, act.BaseURL, key, http.DefaultClient)
+	ids, err := llm.ListModelsFor(ctx, act, http.DefaultClient)
 	if err != nil {
 		return []string{"couldn't list models: " + err.Error()}
 	}

@@ -36,10 +36,14 @@ func ListModels(ctx context.Context, baseURL, apiKey string, hc *http.Client) ([
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		if msg := strings.TrimSpace(string(body)); msg != "" {
-			return nil, fmt.Errorf("list models: http %d: %s", resp.StatusCode, oneLineList(msg))
+		err := fmt.Errorf("list models: http %d", resp.StatusCode)
+		if msg := strings.TrimSpace(redactKey(string(body), apiKey)); msg != "" {
+			err = fmt.Errorf("list models: http %d: %s", resp.StatusCode, oneLineList(msg))
 		}
-		return nil, fmt.Errorf("list models: http %d", resp.StatusCode)
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, &authError{err: err, key: apiKey}
+		}
+		return nil, err
 	}
 	var out struct {
 		Data []struct {

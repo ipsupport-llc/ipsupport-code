@@ -34,3 +34,59 @@ jobs:
             dist/*.tar.gz dist/*.zip dist/checksums.txt \
             --title "${{ github.ref_name }}" \
             --generate-notes
+
+  # The Scoop bucket (ipsupport-llc/scoop-bucket, shared with LLMTray) follows
+  # the release: version, URLs and the zips' SHA-256 from checksums.txt,
+  # pushed with that repo's deploy key (write access to the bucket only). The
+  # key is a secret of the `scoop-bucket` environment, which only `v*` tags
+  # may use. A job of its own, so a failed bump can be re-run without
+  # publishing again; one at a time across tags.
+  scoop:
+    needs: release
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    environment: scoop-bucket
+    concurrency:
+      group: scoop-bucket
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: ipsupport-llc/scoop-bucket
+          ssh-key: ${{ secrets.SCOOP_BUCKET_DEPLOY_KEY }}
+          path: bucket
+      - name: Point the Scoop bucket at this release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=${TAG#v}
+          gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p checksums.txt -O checksums.txt
+          hash() { awk -v f="ipsupport-code_${TAG}_windows-$1.zip" '$2 == f { print $1 }' checksums.txt; }
+          amd64=$(hash amd64) arm64=$(hash arm64)
+          [ -n "$amd64" ] && [ -n "$arm64" ] || { echo "::error::windows zips missing from checksums.txt"; exit 1; }
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/ipsupport-code_${TAG}_windows"
+          cd bucket
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Someone else's change landing in between: start again from it.
+          for attempt in 1 2 3; do
+            git fetch --quiet origin main
+            git reset --quiet --hard origin/main
+            jq --indent 4 --arg v "$version" --arg base "$base" --arg a "$amd64" --arg r "$arm64" '
+              .version = $v
+              | .architecture["64bit"] = {url: ($base + "-amd64.zip"), hash: $a}
+              | .architecture.arm64 = {url: ($base + "-arm64.zip"), hash: $r}
+            ' bucket/ipsupport-code.json > m.json
+            mv m.json bucket/ipsupport-code.json
+            git add bucket/ipsupport-code.json
+            if git diff --cached --quiet; then echo 'nothing to change'; exit 0; fi
+            git commit --quiet -m "ipsupport-code $version"
+            if git push origin HEAD:main; then exit 0; fi
+            sleep $((5 * attempt))
+          done
+          echo '::error::the bucket push failed three times'
+          exit 1

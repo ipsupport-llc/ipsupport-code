@@ -13,7 +13,7 @@ github.com/atotto/clipboard v0.1.4                     BSD-3-Clause
 github.com/aymanbagabas/go-osc52/v2 v2.0.1             MIT
 github.com/aymanbagabas/go-udiff v0.4.1                BSD-3-Clause AND MIT
 github.com/aymerick/douceur v0.2.0                     MIT
-github.com/bmatcuk/doublestar/v4 v4.10.2               MIT
+github.com/bmatcuk/doublestar/v4 v4.10.4               MIT
 github.com/charmbracelet/bubbles v1.0.0                MIT
 github.com/charmbracelet/bubbletea v1.3.10             MIT
 github.com/charmbracelet/colorprofile v0.4.1           MIT
@@ -33,7 +33,7 @@ github.com/go-shiori/go-readability v0.0.0-20251205110129-5db1dc9836f0 MIT
 github.com/gogs/chardet v0.0.0-20211120154057-b7413eaefb8f MIT
 github.com/gorilla/css v1.0.1                          BSD-3-Clause
 github.com/JohannesKaufmann/html-to-markdown v1.6.0    MIT
-github.com/landlock-lsm/go-landlock v0.10.1            MIT
+github.com/landlock-lsm/go-landlock v0.11.2            MIT
 github.com/lucasb-eyer/go-colorful v1.3.0              MIT
 github.com/mattn/go-isatty v0.0.20                     MIT
 github.com/mattn/go-localereader v0.0.1                MIT
@@ -49,10 +49,10 @@ github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e MIT
 github.com/yuin/goldmark v1.8.6                        MIT
 github.com/yuin/goldmark-emoji v1.0.6                  MIT
 golang.org/x/net v0.58.0                               BSD-3-Clause
-golang.org/x/sys v0.49.0                               BSD-3-Clause
-golang.org/x/term v0.46.0                              BSD-3-Clause
+golang.org/x/sys v0.50.0                               BSD-3-Clause
+golang.org/x/term v0.48.0                              BSD-3-Clause
 golang.org/x/text v0.41.0                              BSD-3-Clause
-kernel.org/pub/linux/libs/security/libcap/psx v1.2.77  BSD-3-Clause (dual BSD-3-Clause / GPL-2.0; used under BSD-3-Clause)
+kernel.org/pub/linux/libs/security/libcap/psx v1.2.78  BSD-3-Clause (dual BSD-3-Clause / GPL-2.0; used under BSD-3-Clause)
 
 Data the risk model (internal/risk/model.bin) was trained from:
   gitleaks rule vocabulary            MIT, Copyright (c) 2019 Zachary Rice
@@ -416,7 +416,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----- github.com/bmatcuk/doublestar/v4 v4.10.2 (MIT) ----
+---- github.com/bmatcuk/doublestar/v4 v4.10.4 (MIT) ----
 
 The MIT License (MIT)
 
@@ -903,7 +903,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----- github.com/landlock-lsm/go-landlock v0.10.1 (MIT) ----
+---- github.com/landlock-lsm/go-landlock v0.11.2 (MIT) ----
 
 MIT License
 
@@ -1265,7 +1265,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
----- golang.org/x/sys v0.49.0 (BSD-3-Clause) ----
+---- golang.org/x/sys v0.50.0 (BSD-3-Clause) ----
 
 Copyright 2009 The Go Authors.
 
@@ -1295,7 +1295,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
----- golang.org/x/term v0.46.0 (BSD-3-Clause) ----
+---- golang.org/x/term v0.48.0 (BSD-3-Clause) ----
 
 Copyright 2009 The Go Authors.
 
@@ -1355,7 +1355,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
----- kernel.org/pub/linux/libs/security/libcap/psx v1.2.77 (BSD-3-Clause (dual BSD-3-Clause / GPL-2.0; used under BSD-3-Clause)) ----
+---- kernel.org/pub/linux/libs/security/libcap/psx v1.2.78 (BSD-3-Clause (dual BSD-3-Clause / GPL-2.0; used under BSD-3-Clause)) ----
 
 /* SPDX-License-Identifier: BSD-3-Clause OR GPL-2.0-only */
 

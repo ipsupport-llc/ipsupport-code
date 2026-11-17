@@ -7,10 +7,14 @@ name: dependabot-notices
 #
 # The push uses a deploy key (Dependabot secret NOTICES_DEPLOY_KEY), not
 # GITHUB_TOKEN: a push made with GITHUB_TOKEN does not trigger workflows, so
-# CI would never run on the new head. The key is only handed to the last step,
-# after generation. The generator imports only the standard library and calls
-# `go list`, which doesn't execute dependency code. Branch rules keep the key
-# off main.
+# CI would never run on the new head. Dependabot secrets exist only in runs
+# Dependabot itself triggered, so the job runs only for those, on the exact
+# commit of the event, with git hooks off; the key is handed to the last step
+# only. The generator imports only the standard library and calls `go list`,
+# which doesn't execute dependency code. Branch rules keep the key off main.
+#
+# "[dependabot skip]" in the commit message lets Dependabot keep rebasing the
+# PR (it drops the commit; this workflow then regenerates on the new head).
 
 on:
   pull_request:
@@ -25,12 +29,15 @@ concurrency:
 
 jobs:
   notices:
-    if: github.event.pull_request.user.login == 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.actor == 'dependabot[bot]' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
       - uses: actions/setup-go@v7
         with:
@@ -58,6 +65,6 @@ jobs:
           echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$hosts"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Regenerate internal/legal/NOTICES.txt" -- internal/legal/NOTICES.txt
+          git -c core.hooksPath=/dev/null commit -m "Regenerate internal/legal/NOTICES.txt [dependabot skip]" -- internal/legal/NOTICES.txt
           GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$hosts -o StrictHostKeyChecking=yes" \
-            git push "git@github.com:${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$BRANCH"
+            git -c core.hooksPath=/dev/null push "git@github.com:${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$BRANCH"

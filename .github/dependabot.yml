@@ -5,6 +5,11 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # One PR per week for all Go modules; .github/workflows/dependabot-notices.yml
+    # regenerates internal/legal/NOTICES.txt on it.
+    groups:
+      go:
+        patterns: ["*"]
   - package-ecosystem: github-actions
     directory: "/"
     schedule:

@@ -1,0 +1,70 @@
+name: dependabot-notices
+
+# A Dependabot bump of a Go module changes the version that
+# internal/legal/NOTICES.txt must list, and Dependabot can't run
+# ./internal/legal/gen, so its PRs fail TestNoticesCoverEveryLinkedModule.
+# This regenerates the file and pushes it onto the PR branch.
+#
+# The push uses a deploy key (Dependabot secret NOTICES_DEPLOY_KEY), not
+# GITHUB_TOKEN: a push made with GITHUB_TOKEN does not trigger workflows, so
+# CI would never run on the new head. Dependabot secrets exist only in runs
+# Dependabot itself triggered, so the job runs only for those, on the exact
+# commit of the event, with git hooks off; the key is handed to the last step
+# only. The generator imports only the standard library and calls `go list`,
+# which doesn't execute dependency code. Branch rules keep the key off main.
+#
+# "[dependabot skip]" in the commit message lets Dependabot keep rebasing the
+# PR (it drops the commit; this workflow then regenerates on the new head).
+
+on:
+  pull_request:
+    paths: [go.mod, go.sum]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependabot-notices-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  notices:
+    if: >-
+      github.actor == 'dependabot[bot]' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: regenerate notices
+        run: go run ./internal/legal/gen
+      - name: push if changed
+        env:
+          DEPLOY_KEY: ${{ secrets.NOTICES_DEPLOY_KEY }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if git diff --quiet -- internal/legal/NOTICES.txt; then
+            echo "notices already up to date"
+            exit 0
+          fi
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::NOTICES.txt is stale and the Dependabot secret NOTICES_DEPLOY_KEY is not set"
+            exit 1
+          fi
+          key=$(mktemp) hosts=$(mktemp)
+          trap 'rm -f "$key" "$hosts"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$key"
+          # github.com's published host key (api.github.com/meta).
+          echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$hosts"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -c core.hooksPath=/dev/null commit -m "Regenerate internal/legal/NOTICES.txt [dependabot skip]" -- internal/legal/NOTICES.txt
+          GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o UserKnownHostsFile=$hosts -o StrictHostKeyChecking=yes" \
+            git -c core.hooksPath=/dev/null push "git@github.com:${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/$BRANCH"

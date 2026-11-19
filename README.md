@@ -86,6 +86,15 @@ brew install ipsupport-llc/tap/ipco
 Homebrew then owns the install: `update` points you at `brew upgrade ipsupport-code`
 instead of replacing the binary.
 
+**Scoop** (Windows) — the latest stable release, with `ipco` beside it:
+
+```powershell
+scoop bucket add ipsupport https://github.com/ipsupport-llc/scoop-bucket
+scoop install ipsupport/ipsupport-code
+```
+
+Likewise, `update` then points you at `scoop update ipsupport-code`.
+
 **Or download the archive** for your platform from the
 [latest release](https://github.com/ipsupport-llc/ipsupport-code/releases/latest)
 (or the rolling [`nightly`](https://github.com/ipsupport-llc/ipsupport-code/releases/tag/nightly)):

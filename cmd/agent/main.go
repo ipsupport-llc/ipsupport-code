@@ -426,8 +426,8 @@ func misplacedFlags(args []string, lookup func(string) *flag.Flag) []string {
 // runUpdate downloads and installs a newer binary from GitHub Releases for the
 // configured channel (an optional "stable"/"nightly" arg switches and saves it).
 func runUpdate(args []string, client *http.Client) {
-	if cmd := selfupdate.BrewUpgrade(); cmd != "" {
-		fmt.Println("installed with Homebrew — update it with: " + cmd)
+	if by, cmd := selfupdate.PackageManager(); cmd != "" {
+		fmt.Printf("installed with %s — update it with: %s\n", by, cmd)
 		return
 	}
 	cfg, _ := config.Load(".")
@@ -523,9 +523,9 @@ func (a *app) freshnessNotice(ctx context.Context) string {
 		channel = selfupdate.Stable
 	}
 	how := "run `update`"
-	if cmd := selfupdate.BrewUpgrade(); cmd != "" {
-		// The formula follows stable releases: a saved nightly channel would
-		// nag about builds brew never installs.
+	if _, cmd := selfupdate.PackageManager(); cmd != "" {
+		// The formula and the Scoop manifest follow stable releases: a saved
+		// nightly channel would nag about builds they never install.
 		how, channel = "run `"+cmd+"`", selfupdate.Stable
 	}
 	rel, err := selfupdate.Latest(ctx, selfupdate.Repo, channel, http.DefaultClient)

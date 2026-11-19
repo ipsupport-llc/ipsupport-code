@@ -100,8 +100,8 @@ func Latest(ctx context.Context, repo, channel string, hc *http.Client) (Release
 // Apply downloads the release asset, verifies its checksum, and replaces the
 // running executable. It returns the path of the replaced binary.
 func Apply(ctx context.Context, rel Release, hc *http.Client) (string, error) {
-	if cmd := BrewUpgrade(); cmd != "" {
-		return "", fmt.Errorf("installed with Homebrew — update it with: %s", cmd)
+	if by, cmd := PackageManager(); cmd != "" {
+		return "", fmt.Errorf("installed with %s — update it with: %s", by, cmd)
 	}
 	if hc == nil {
 		hc = http.DefaultClient
@@ -267,16 +267,74 @@ func extractZip(data []byte, name string) ([]byte, error) {
 	return nil, fmt.Errorf("%q not found in the archive", name)
 }
 
-// BrewUpgrade is the command that updates this binary when Homebrew installed
-// it, or "" when Homebrew didn't. Homebrew owns that install: replacing the
-// file in its Cellar behind its back leaves brew believing in a version that
-// is no longer there.
-func BrewUpgrade() string {
-	exe, err := os.Executable()
+// PackageManager names the package manager that installed this binary and the
+// command that updates it, or "", "" when none did. That manager owns the
+// install: replacing the file behind its back leaves it believing in a version
+// that is no longer there.
+func PackageManager() (by, update string) {
+	exe, err := osExecutable()
 	if err != nil {
+		return "", ""
+	}
+	return packageManagerFor(exe)
+}
+
+var osExecutable = os.Executable // tests stand in another install
+
+func packageManagerFor(exe string) (by, update string) {
+	if cmd := brewUpgradeFor(exe); cmd != "" {
+		return "Homebrew", cmd
+	}
+	if cmd := scoopUpdateFor(exe, scoopGlobalRoot(os.Getenv)); cmd != "" {
+		return "Scoop", cmd
+	}
+	return "", ""
+}
+
+// scoopUpdateFor recognises Scoop's layout, <root>\apps\ipsupport-code\<version
+// or current>\ipsupport-code.exe, whatever the root. Its shims (ipsupport-code,
+// ipco) start that exe, so os.Executable is there. An install under the global
+// root (scoop install -g) is only found by `scoop update -g`.
+func scoopUpdateFor(exe, globalRoot string) string {
+	norm := func(p string) string {
+		return strings.TrimSuffix(strings.ToLower(strings.ReplaceAll(p, `\`, "/")), "/")
+	}
+	dir := path.Dir(norm(exe))
+	apps := path.Dir(path.Dir(dir))
+	if path.Base(path.Dir(dir)) != "ipsupport-code" || path.Base(apps) != "apps" {
 		return ""
 	}
-	return brewUpgradeFor(exe)
+	if globalRoot != "" && path.Dir(apps) == norm(globalRoot) {
+		return "scoop update -g ipsupport-code"
+	}
+	return "scoop update ipsupport-code"
+}
+
+// scoopGlobalRoot is where `scoop install -g` puts apps, found as Scoop finds
+// it (lib/core.ps1): $SCOOP_GLOBAL, then global_path in its config
+// ($XDG_CONFIG_HOME or %USERPROFILE%\.config, scoop\config.json), then
+// %ProgramData%\scoop.
+func scoopGlobalRoot(getenv func(string) string) string {
+	if g := getenv("SCOOP_GLOBAL"); g != "" {
+		return g
+	}
+	home := getenv("XDG_CONFIG_HOME")
+	if home == "" && getenv("USERPROFILE") != "" {
+		home = filepath.Join(getenv("USERPROFILE"), ".config")
+	}
+	if home != "" {
+		var cfg struct {
+			GlobalPath string `json:"global_path"`
+		}
+		if b, err := os.ReadFile(filepath.Join(home, "scoop", "config.json")); err == nil &&
+			json.Unmarshal(b, &cfg) == nil && cfg.GlobalPath != "" {
+			return cfg.GlobalPath
+		}
+	}
+	if pd := getenv("ProgramData"); pd != "" {
+		return filepath.Join(pd, "scoop")
+	}
+	return `C:\ProgramData\scoop`
 }
 
 // brewUpgradeFor resolves exe's links (brew's bin/ and opt/ links, ipco)

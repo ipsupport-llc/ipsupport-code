@@ -285,7 +285,7 @@ func packageManagerFor(exe string) (by, update string) {
 	if cmd := brewUpgradeFor(exe); cmd != "" {
 		return "Homebrew", cmd
 	}
-	if cmd := scoopUpdateFor(exe, os.Getenv("SCOOP_GLOBAL")); cmd != "" {
+	if cmd := scoopUpdateFor(exe, scoopGlobalRoot(os.Getenv)); cmd != "" {
 		return "Scoop", cmd
 	}
 	return "", ""
@@ -293,9 +293,8 @@ func packageManagerFor(exe string) (by, update string) {
 
 // scoopUpdateFor recognises Scoop's layout, <root>\apps\ipsupport-code\<version
 // or current>\ipsupport-code.exe, whatever the root. Its shims (ipsupport-code,
-// ipco) start that exe, so os.Executable is there. A global install
-// (scoop install -g: $SCOOP_GLOBAL, by default C:\ProgramData\scoop) is only
-// found by `scoop update -g`.
+// ipco) start that exe, so os.Executable is there. An install under the global
+// root (scoop install -g) is only found by `scoop update -g`.
 func scoopUpdateFor(exe, globalRoot string) string {
 	norm := func(p string) string {
 		return strings.TrimSuffix(strings.ToLower(strings.ReplaceAll(p, `\`, "/")), "/")
@@ -305,11 +304,37 @@ func scoopUpdateFor(exe, globalRoot string) string {
 	if path.Base(path.Dir(dir)) != "ipsupport-code" || path.Base(apps) != "apps" {
 		return ""
 	}
-	root := path.Dir(apps)
-	if (globalRoot != "" && root == norm(globalRoot)) || strings.HasSuffix(root, "/programdata/scoop") {
+	if globalRoot != "" && path.Dir(apps) == norm(globalRoot) {
 		return "scoop update -g ipsupport-code"
 	}
 	return "scoop update ipsupport-code"
+}
+
+// scoopGlobalRoot is where `scoop install -g` puts apps, found as Scoop finds
+// it (lib/core.ps1): $SCOOP_GLOBAL, then global_path in its config
+// ($XDG_CONFIG_HOME or %USERPROFILE%\.config, scoop\config.json), then
+// %ProgramData%\scoop.
+func scoopGlobalRoot(getenv func(string) string) string {
+	if g := getenv("SCOOP_GLOBAL"); g != "" {
+		return g
+	}
+	home := getenv("XDG_CONFIG_HOME")
+	if home == "" && getenv("USERPROFILE") != "" {
+		home = filepath.Join(getenv("USERPROFILE"), ".config")
+	}
+	if home != "" {
+		var cfg struct {
+			GlobalPath string `json:"global_path"`
+		}
+		if b, err := os.ReadFile(filepath.Join(home, "scoop", "config.json")); err == nil &&
+			json.Unmarshal(b, &cfg) == nil && cfg.GlobalPath != "" {
+			return cfg.GlobalPath
+		}
+	}
+	if pd := getenv("ProgramData"); pd != "" {
+		return filepath.Join(pd, "scoop")
+	}
+	return `C:\ProgramData\scoop`
 }
 
 // brewUpgradeFor resolves exe's links (brew's bin/ and opt/ links, ipco)

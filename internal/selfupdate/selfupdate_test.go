@@ -318,3 +318,52 @@ func TestAPlainFileUnderBrewsPrefixIsNotBrews(t *testing.T) {
 		t.Fatalf("brewUpgradeFor(%q) = %q, want \"\"", bin, got)
 	}
 }
+
+// A binary Scoop installed is updated by Scoop: user, global and custom roots,
+// the version dir or the current junction, any case.
+func TestScoopInstallIsUpdatedByScoop(t *testing.T) {
+	for _, c := range []struct{ exe, global, want string }{
+		{`C:\Users\me\scoop\apps\ipsupport-code\current\ipsupport-code.exe`, "", "scoop update ipsupport-code"},
+		{`C:\Users\me\scoop\apps\ipsupport-code\0.69.2\ipsupport-code.exe`, "", "scoop update ipsupport-code"},
+		{`D:\Tools\Scoop\Apps\IPSUPPORT-CODE\Current\ipsupport-code.exe`, "", "scoop update ipsupport-code"},
+		{`C:\ProgramData\scoop\apps\ipsupport-code\current\ipsupport-code.exe`, "", "scoop update -g ipsupport-code"},
+		{`E:\GlobalScoop\apps\ipsupport-code\current\ipsupport-code.exe`, `E:\GlobalScoop\`, "scoop update -g ipsupport-code"},
+		{`C:\Users\me\AppData\Local\Programs\ipsupport-code\ipsupport-code.exe`, "", ""}, // install.ps1
+		{`C:\apps\ipsupport-code\ipsupport-code.exe`, "", ""},                            // no version dir
+		{`C:\Users\me\scoop\apps\other\current\ipsupport-code.exe`, "", ""},
+		{`C:\Users\me\scoop\shims\ipsupport-code.exe`, "", ""},
+		{`C:\Tools\ipsupport-code\current\ipsupport-code.exe`, "", ""}, // not under apps\
+		{"/home/me/.local/bin/ipsupport-code", "", ""},
+	} {
+		if got := scoopUpdateFor(c.exe, c.global); got != c.want {
+			t.Errorf("scoopUpdateFor(%q, %q) = %q, want %q", c.exe, c.global, got, c.want)
+		}
+	}
+}
+
+// Whichever manager installed it is named with its own command.
+func TestPackageManagerNamesTheInstaller(t *testing.T) {
+	for _, c := range []struct{ exe, by, cmd string }{
+		{"/opt/homebrew/Cellar/ipsupport-code/0.69.2/bin/ipsupport-code", "Homebrew", "brew upgrade ipsupport-code"},
+		{`C:\Users\me\scoop\apps\ipsupport-code\current\ipsupport-code.exe`, "Scoop", "scoop update ipsupport-code"},
+		{"/home/me/.local/bin/ipsupport-code", "", ""},
+	} {
+		if by, cmd := packageManagerFor(c.exe); by != c.by || cmd != c.cmd {
+			t.Errorf("packageManagerFor(%q) = %q, %q, want %q, %q", c.exe, by, cmd, c.by, c.cmd)
+		}
+	}
+}
+
+// Apply itself refuses a managed install before touching the network, so no
+// caller can replace a binary Scoop or Homebrew owns.
+func TestApplyRefusesAManagedInstall(t *testing.T) {
+	defer func(f func() (string, error)) { osExecutable = f }(osExecutable)
+	osExecutable = func() (string, error) {
+		return `C:\Users\me\scoop\apps\ipsupport-code\current\ipsupport-code.exe`, nil
+	}
+	rel := Release{Version: "v9", AssetName: "a.zip", AssetURL: "http://127.0.0.1:1/never", SumsURL: "http://127.0.0.1:1/never"}
+	_, err := Apply(context.Background(), rel, nil)
+	if err == nil || !strings.Contains(err.Error(), "installed with Scoop — update it with: scoop update ipsupport-code") {
+		t.Fatalf("Apply err = %v, want the Scoop refusal", err)
+	}
+}

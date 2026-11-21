@@ -10315,3 +10315,34 @@ func TestReadOnlyRefusesStoresInTheWorkspace(t *testing.T) {
 		cleanup()
 	}
 }
+
+// A log line is drawn as text, then padded with spaces to the terminal's width.
+// A carriage return left in it sends the cursor back to the first column, so the
+// padding is written over the text instead of after it. Windows programs end
+// their lines with \r\n and a tool's output is split on \n alone — reported live:
+// every line of a command's output under "→ exit 0" came out blank on Windows,
+// with leftovers of the previous screen at the right edge.
+func TestLogLinesCarryNoCarriageReturn(t *testing.T) {
+	out := "exit 0\r\ntest_count ... ok\r\n{\"words\": 3}\r\n"
+	check := func(where, content string) {
+		t.Helper()
+		if strings.Contains(content, "\r") {
+			t.Errorf("%s: a raw \\r reached the viewport: %q", where, content)
+		}
+		for _, want := range []string{"test_count ... ok", `{"words": 3}`} {
+			if !strings.Contains(content, want) {
+				t.Errorf("%s: %q missing from %q", where, want, content)
+			}
+		}
+	}
+
+	m := &tuiModel{ready: true, width: 80, height: 40, vp: viewport.New(80, 34)}
+	m.push(outputLines(out, "→", cOk)...)
+	check("push", m.renderContent())
+
+	// A resize rebuilds the log from history; a restored session's recap goes
+	// in that way, without push.
+	m.width = 60
+	m.rewrapLog()
+	check("rewrap", m.renderContent())
+}

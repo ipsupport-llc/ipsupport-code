@@ -2682,7 +2682,12 @@ func (m *tuiModel) push(lines ...string) {
 // wrapLine soft-wraps a single log line if it's wider than the viewport, so a
 // long single-line input/answer doesn't run off the edge. A line that already
 // fits (including the width-padded diff rows) passes through untouched.
+//
+// A carriage return is dropped first: the line is padded to the terminal's
+// width, and a \r sends the cursor back so the padding blanks the text instead
+// of following it. Every line a Windows program prints ends in one.
 func (m *tuiModel) wrapLine(ln string) string {
+	ln = strings.ReplaceAll(ln, "\r", "")
 	if m.width < 1 || lipgloss.Width(ln) <= m.width {
 		return ln
 	}

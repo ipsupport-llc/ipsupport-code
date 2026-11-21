@@ -7,11 +7,11 @@ Component                                              License
 ipsupport-code                                         MIT
 Go standard library and runtime                        BSD-3-Clause
 github.com/alecthomas/chroma/v2 v2.27.0                MIT
-github.com/andybalholm/cascadia v1.3.4                 BSD-2-Clause
+github.com/andybalholm/cascadia v1.3.5                 BSD-2-Clause
 github.com/araddon/dateparse v0.0.0-20210429162001-6b43995a97de MIT
 github.com/atotto/clipboard v0.1.4                     BSD-3-Clause
 github.com/aymanbagabas/go-osc52/v2 v2.0.1             MIT
-github.com/aymanbagabas/go-udiff v0.4.1                BSD-3-Clause AND MIT
+github.com/aymanbagabas/go-udiff v0.4.2                BSD-3-Clause AND MIT
 github.com/aymerick/douceur v0.2.0                     MIT
 github.com/bmatcuk/doublestar/v4 v4.10.4               MIT
 github.com/charmbracelet/bubbles v1.0.0                MIT
@@ -42,15 +42,15 @@ github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 MIT
 github.com/muesli/cancelreader v0.2.2                  MIT
 github.com/muesli/reflow v0.3.0                        MIT
 github.com/muesli/termenv v0.16.0                      MIT
-github.com/PuerkitoBio/goquery v1.13.0                 BSD-3-Clause
+github.com/PuerkitoBio/goquery v1.14.0                 BSD-3-Clause
 github.com/rivo/uniseg v0.4.7                          MIT
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e MIT
 github.com/yuin/goldmark v1.8.6                        MIT
 github.com/yuin/goldmark-emoji v1.0.6                  MIT
-golang.org/x/net v0.58.0                               BSD-3-Clause
+golang.org/x/net v0.62.0                               BSD-3-Clause
 golang.org/x/sys v0.50.0                               BSD-3-Clause
 golang.org/x/term v0.48.0                              BSD-3-Clause
-golang.org/x/text v0.41.0                              BSD-3-Clause
+golang.org/x/text v0.43.0                              BSD-3-Clause
 kernel.org/pub/linux/libs/security/libcap/psx v1.2.78  BSD-3-Clause (dual BSD-3-Clause / GPL-2.0; used under BSD-3-Clause)
 
 Data the risk model (internal/risk/model.bin) was trained from:
@@ -234,7 +234,7 @@ DAMAGES, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 FROM, OUT OF THE USE OR INABILITY TO USE THE FONT SOFTWARE OR FROM
 OTHER DEALINGS IN THE FONT SOFTWARE.
 
----- github.com/andybalholm/cascadia v1.3.4 (BSD-2-Clause) ----
+---- github.com/andybalholm/cascadia v1.3.5 (BSD-2-Clause) ----
 
 Copyright (c) 2011 Andy Balholm. All rights reserved.
 
@@ -339,7 +339,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----- github.com/aymanbagabas/go-udiff v0.4.1 (BSD-3-Clause AND MIT) ----
+---- github.com/aymanbagabas/go-udiff v0.4.2 (BSD-3-Clause AND MIT) ----
 
 Copyright (c) 2009 The Go Authors. All rights reserved.
 
@@ -1099,7 +1099,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----- github.com/PuerkitoBio/goquery v1.13.0 (BSD-3-Clause) ----
+---- github.com/PuerkitoBio/goquery v1.14.0 (BSD-3-Clause) ----
 
 Copyright (c) 2012-2021, Martin Angers & Contributors
 All rights reserved.
@@ -1210,7 +1210,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
----- golang.org/x/net v0.58.0 (BSD-3-Clause) ----
+---- golang.org/x/net v0.62.0 (BSD-3-Clause) ----
 
 Copyright 2009 The Go Authors.
 
@@ -1300,7 +1300,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
----- golang.org/x/text v0.41.0 (BSD-3-Clause) ----
+---- golang.org/x/text v0.43.0 (BSD-3-Clause) ----
 
 Copyright 2009 The Go Authors.
 

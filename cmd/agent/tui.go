@@ -2400,7 +2400,11 @@ func (m *tuiModel) View() string {
 	parts = append(parts, m.steerView()...)    // /btw asides, pinned above the input
 	parts = append(parts, m.queuedView()...)   // pinned just above the input
 	parts = append(parts, m.topRule(frame), m.input.View(), frame.Render(strings.Repeat("─", m.width)), bottom)
-	return strings.Join(parts, "\n")
+	// No carriage return may reach the terminal. Lines are padded to the
+	// terminal's width, and a \r sends the cursor back so the padding blanks the
+	// text instead of following it. Every line a Windows program prints, and
+	// every line of a CRLF file's diff, ends in one.
+	return strings.ReplaceAll(strings.Join(parts, "\n"), "\r", "")
 }
 
 // approvePrompt renders the Yes/No selector shown while answering an approval.

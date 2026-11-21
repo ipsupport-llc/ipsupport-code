@@ -10315,3 +10315,45 @@ func TestReadOnlyRefusesStoresInTheWorkspace(t *testing.T) {
 		cleanup()
 	}
 }
+
+// Lines are drawn padded to the terminal's width. A carriage return left in one
+// sends the cursor back to the first column, so the padding is written over the
+// text instead of after it. Windows programs end their lines with \r\n and a
+// tool's output is split on \n alone — reported live: every line of a command's
+// output under "→ exit 0" came out blank on Windows, with leftovers of the
+// previous screen at the right edge. A CRLF file's diff in the rewind preview
+// reaches the screen without the log, and would blank the same way.
+func TestNoCarriageReturnReachesTheTerminal(t *testing.T) {
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb, reader: bufio.NewReader(strings.NewReader(""))}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	m := &tuiModel{app: a, ctx: context.Background(), bridge: newBridge(),
+		state: stIdle, input: textarea.New(), spin: spinner.New()}
+	model, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	m = model.(*tuiModel)
+
+	check := func(where string, want ...string) {
+		t.Helper()
+		v := m.View()
+		if strings.Contains(v, "\r") {
+			t.Errorf("%s: a carriage return reached the terminal:\n%q", where, v)
+		}
+		for _, w := range want {
+			if !strings.Contains(stripAnsi(v), w) {
+				t.Errorf("%s: %q missing from the frame:\n%s", where, w, stripAnsi(v))
+			}
+		}
+	}
+
+	m.push(outputLines("exit 0\r\ntest_count ... ok\r\n{\"words\": 3}\r\n", "→", cOk)...)
+	check("command output", "test_count ... ok", `{"words": 3}`)
+
+	m.state = stRewind
+	m.rewindRows = []rewindRow{{goal: "edit notes", files: 1}}
+	m.rewindPrev = m.renderDiff("notes.txt", "@@ -1,2 +1,2 @@\r\n kept line\r\n-old line\r\n+new line\r\n")
+	check("rewind preview", "kept line", "old line", "new line")
+}

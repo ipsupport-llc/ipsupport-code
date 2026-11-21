@@ -2400,7 +2400,11 @@ func (m *tuiModel) View() string {
 	parts = append(parts, m.steerView()...)    // /btw asides, pinned above the input
 	parts = append(parts, m.queuedView()...)   // pinned just above the input
 	parts = append(parts, m.topRule(frame), m.input.View(), frame.Render(strings.Repeat("─", m.width)), bottom)
-	return strings.Join(parts, "\n")
+	// No carriage return may reach the terminal. Lines are padded to the
+	// terminal's width, and a \r sends the cursor back so the padding blanks the
+	// text instead of following it. Every line a Windows program prints, and
+	// every line of a CRLF file's diff, ends in one.
+	return strings.ReplaceAll(strings.Join(parts, "\n"), "\r", "")
 }
 
 // approvePrompt renders the Yes/No selector shown while answering an approval.
@@ -2682,12 +2686,7 @@ func (m *tuiModel) push(lines ...string) {
 // wrapLine soft-wraps a single log line if it's wider than the viewport, so a
 // long single-line input/answer doesn't run off the edge. A line that already
 // fits (including the width-padded diff rows) passes through untouched.
-//
-// A carriage return is dropped first: the line is padded to the terminal's
-// width, and a \r sends the cursor back so the padding blanks the text instead
-// of following it. Every line a Windows program prints ends in one.
 func (m *tuiModel) wrapLine(ln string) string {
-	ln = strings.ReplaceAll(ln, "\r", "")
 	if m.width < 1 || lipgloss.Width(ln) <= m.width {
 		return ln
 	}

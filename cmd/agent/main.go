@@ -1103,6 +1103,13 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 		a.addSessionCost(plan.llmCfg.Model, pt, ct, plan.priceOverrides) // sub-agent spend counts toward /budget too
 		_ = a.usage.Save()
 	}
+	if err == nil && tr.Stopped {
+		// The delegate gave up (step budget, stuck, a failed turn) or was cancelled
+		// with work done. Run hands that back as a clean return with a note in
+		// Final; passed on as-is, the parent read the note as the delegate's
+		// findings and /jobs showed a ✓.
+		err = fmt.Errorf("sub-agent stopped before finishing:\n%s", tr.Final)
+	}
 	done := map[string]any{"agent": id, "profile": plan.profile, "ok": err == nil}
 	if err != nil {
 		done["error"] = oneLine(err.Error(), 60)
@@ -2021,7 +2028,7 @@ func (a *app) goalTTL(verb string, fields []string) []string {
 	}
 	a.cfg.GoalMaxReturns = n // applied per goal run via goalLoopBudget
 	if n == 0 {
-		return []string{"goal loop → off (one run; the model decides when it's done)"}
+		return []string{"goal loop → off (one run, no judge; the goal stays open until /goal clear)"}
 	}
 	return []string{fmt.Sprintf("goal loop → up to %d re-feed(s) before giving up", n)}
 }

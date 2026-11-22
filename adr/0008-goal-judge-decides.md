@@ -21,9 +21,12 @@ Guards against the loop itself: an unparseable judge reply is asked once more,
 then counts as **not met** and the goal is re-fed — a judge that cannot answer
 has confirmed nothing; a re-fed run that finishes without doing any work gets one
 nudge, and if it idles again it goes to the judge like any other finish. A
-continuation judge (ADR-0015) that answers with a tool call has not answered. A
+continuation judge (ADR-0015) that answers with a tool call has not answered, nor
+has a judge that calls done() while asking for a tool it doesn't have. A
 loop that stops without the judge confirming success says so plainly. Plain
-tasks run once with no judge.
+tasks run once with no judge. A prose reply with no tool call is judged when the
+run is the goal itself, and not when it answers a side question asked while the
+goal stands.
 
 *Corrected 2026-10-04:* this section first said an unparseable reply counts as
 done and a turn with no tool calls is never judged. Neither has been true since

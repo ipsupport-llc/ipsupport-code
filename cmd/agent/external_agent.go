@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
 
@@ -135,6 +136,7 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 	} else {
 		cmd.Stdout, cmd.Stderr = stdout, stderr
 	}
+	untrackedBefore := untrackedFiles(root)
 	runErr := cmd.Run()
 	if errors.Is(runErr, exec.ErrWaitDelay) {
 		runErr = nil // the CLI exited fine; a lingering child just held the pipe
@@ -143,7 +145,14 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 		runErr = fmt.Errorf("timed out after %s — use the CLI's non-interactive mode (exec / -p / --message) so it can't sit waiting for input", timeout)
 	}
 
-	body := externalResult(command, stdout, stderr, strings.TrimSpace(mustGit(root, "diff", "--stat")), runErr)
+	var created []string
+	for f := range untrackedFiles(root) {
+		if !untrackedBefore[f] {
+			created = append(created, f)
+		}
+	}
+	sort.Strings(created)
+	body := externalResult(command, stdout, stderr, strings.TrimSpace(mustGit(root, "diff", "--stat")), created, runErr)
 	done := map[string]any{"agent": id, "profile": profile, "ok": runErr == nil}
 	if runErr != nil {
 		done["error"] = oneLine(runErr.Error(), 60)
@@ -177,12 +186,30 @@ func expandTaskArgs(args []string, task string) []string {
 	return out
 }
 
+// untrackedFiles is the set of untracked, not-ignored files under dir, relative
+// to it; empty outside a git checkout. git diff --stat never shows a new file,
+// so the files an external agent created are found by comparing this set from
+// before and after its run.
+func untrackedFiles(dir string) map[string]bool {
+	set := map[string]bool{}
+	for _, f := range strings.Split(mustGit(dir, "ls-files", "--others", "--exclude-standard"), "\n") {
+		if f = strings.TrimSpace(f); f != "" {
+			set[f] = true
+		}
+	}
+	return set
+}
+
+// maxCreatedListed caps the new-file list handed back to the parent model.
+const maxCreatedListed = 30
+
 // externalResult assembles what the parent model gets back: the TAIL of stdout (a
 // CLI agent's final answer is at the end; the start is progress noise), a stderr
-// tail on failure, and a git diff --stat summary — never the full patch, which can
-// be thousands of tokens (the user reviews it with /diff). stdout/stderr are
-// already tail-bounded by BoundedTailWriter as they streamed in.
-func externalResult(command string, stdout, stderr *textutil.BoundedTailWriter, diffStat string, runErr error) string {
+// tail on failure, a git diff --stat summary — never the full patch, which can
+// be thousands of tokens (the user reviews it with /diff) — and the files the
+// agent created, which that summary leaves out. stdout/stderr are already
+// tail-bounded by BoundedTailWriter as they streamed in.
+func externalResult(command string, stdout, stderr *textutil.BoundedTailWriter, diffStat string, created []string, runErr error) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "external agent `%s` finished.\n", command)
 	if out := strings.TrimSpace(stdout.String()); out != "" {
@@ -201,6 +228,16 @@ func externalResult(command string, stdout, stderr *textutil.BoundedTailWriter, 
 	}
 	if diffStat != "" {
 		b.WriteString("\n--- changes (git diff --stat) ---\n" + diffStat + "\n(full patch: /diff)\n")
+	}
+	if len(created) > 0 {
+		b.WriteString("\n--- new files ---\n")
+		for i, f := range created {
+			if i == maxCreatedListed {
+				fmt.Fprintf(&b, "… and %d more\n", len(created)-i)
+				break
+			}
+			b.WriteString(f + "\n")
+		}
 	}
 	return strings.TrimSpace(b.String())
 }

@@ -100,15 +100,15 @@ func TestBeforeTurnDeliversFinishedJob(t *testing.T) {
 		t.Fatal("beforeTurn took the steer — it would reach the model unannounced")
 	}
 
-	// The job note is durable (folded into history).
-	h := a.ag.History()
-	if len(h) != before+1 || !strings.Contains(h[len(h)-1].Content, "codex report: patched") {
-		t.Fatalf("job note not persisted to history")
+	// History is the agent's to write once the run ends (see Run): written here,
+	// mid-task, the note landed ahead of the task it arrived during.
+	if a.ag.SessionLen() != before {
+		t.Fatalf("beforeTurn wrote the job note into history mid-task")
 	}
 
 	// The task-boundary path must not re-deliver an already-delivered job.
 	a.injectJobResults()
-	if a.ag.SessionLen() != before+1 {
+	if a.ag.SessionLen() != before {
 		t.Error("injectJobResults re-delivered a job already drained by beforeTurn")
 	}
 	if got := a.drainJobResults(); got != nil {
@@ -2303,7 +2303,7 @@ func TestClosePanelStates(t *testing.T) {
 	}
 
 	// Task finished while the panel was open → idle, and the queued command drains.
-	m = &tuiModel{state: stConfig, input: textarea.New(), app: &app{cfg: config.Default()}}
+	m = &tuiModel{state: stConfig, input: textarea.New(), app: wiredApp(t)}
 	m.taskDoneAway = true
 	m.queued = []string{"/help"}
 	if _, _ = m.closePanel(); m.state != stIdle {
@@ -2357,6 +2357,18 @@ func TestPlanReviewHandshake(t *testing.T) {
 	m.Update(taskDoneMsg{})
 	if m.state == stPlanReview {
 		t.Error("a cancelled plan task should skip plan-review")
+	}
+
+	// a plan task that finished behind /config gets the handshake when it closes
+	m = newM()
+	m.state = stConfig
+	m.Update(taskDoneMsg{})
+	if m.state != stConfig || !m.taskDoneAway {
+		t.Fatalf("finished behind /config → state=%v taskDoneAway=%v; want the panel kept open", m.state, m.taskDoneAway)
+	}
+	m.closePanel()
+	if m.state != stPlanReview {
+		t.Errorf("closing /config after a plan task → state %v, want stPlanReview", m.state)
 	}
 }
 
@@ -2996,18 +3008,18 @@ func tailWriter(max int, s string) *textutil.BoundedTailWriter {
 // externalResult keeps the parent's context lean: stdout tail always, stderr only
 // on failure, diff summary with the /diff pointer.
 func TestExternalResult(t *testing.T) {
-	ok := externalResult("codex", tailWriter(maxExternalStdout, "did the thing"), tailWriter(maxExternalStderr, "warn noise"), "1 file changed", nil)
+	ok := externalResult("codex", tailWriter(maxExternalStdout, "did the thing"), tailWriter(maxExternalStderr, "warn noise"), "1 file changed", nil, nil)
 	if !strings.Contains(ok, "did the thing") || strings.Contains(ok, "warn noise") {
 		t.Errorf("success must include stdout, not stderr:\n%s", ok)
 	}
 	if !strings.Contains(ok, "1 file changed") || !strings.Contains(ok, "/diff") {
 		t.Errorf("diff summary + /diff pointer missing:\n%s", ok)
 	}
-	bad := externalResult("codex", tailWriter(maxExternalStdout, "partial"), tailWriter(maxExternalStderr, "boom"), "", fmt.Errorf("exit 1"))
+	bad := externalResult("codex", tailWriter(maxExternalStdout, "partial"), tailWriter(maxExternalStderr, "boom"), "", nil, fmt.Errorf("exit 1"))
 	if !strings.Contains(bad, "boom") {
 		t.Errorf("failure must include the stderr tail:\n%s", bad)
 	}
-	long := externalResult("codex", tailWriter(maxExternalStdout, strings.Repeat("x", maxExternalStdout+500)), tailWriter(maxExternalStderr, ""), "", nil)
+	long := externalResult("codex", tailWriter(maxExternalStdout, strings.Repeat("x", maxExternalStdout+500)), tailWriter(maxExternalStderr, ""), "", nil, nil)
 	if !strings.Contains(long, "…") {
 		t.Error("oversized stdout should be tail-clipped with a marker")
 	}
@@ -3451,9 +3463,13 @@ func TestBackgroundJobLifecycle(t *testing.T) {
 		t.Errorf("/jobs result = %q", full)
 	}
 
-	// next turn boundary: the result lands in the conversation exactly once
-	before := a.ag.SessionLen()
+	// next turn boundary: the result lands in the conversation exactly once,
+	// as an ordinary append that leaves earlier /rewind checkpoints valid
+	before, gen := a.ag.SessionLen(), a.ag.HistoryGen()
 	a.injectJobResults()
+	if a.ag.HistoryGen() != gen {
+		t.Error("injecting a job note reshaped history — every earlier /rewind checkpoint is invalidated")
+	}
 	h := a.ag.History()
 	if len(h) != before+1 || !strings.Contains(h[len(h)-1].Content, "ok: ping the thing") {
 		t.Fatalf("result not injected into history")
@@ -3809,6 +3825,35 @@ func TestSpawnExternalAgent(t *testing.T) {
 	}
 	if time.Since(start) > 4*time.Second {
 		t.Error("timeout did not kill the process promptly")
+	}
+}
+
+// git diff --stat never lists a new file, so an external agent whose whole job
+// was creating files reported no changes at all, and the parent could redo the
+// work. Files that were already untracked before it ran are not its doing.
+func TestExternalAgentReportsTheFilesItCreated(t *testing.T) {
+	ws := t.TempDir()
+	for _, args := range [][]string{{"init", "-q"}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"}} {
+		if out, err := exec.Command("git", append([]string{"-C", ws}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(ws, "before.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.Agents = map[string]config.AgentProfile{"mk": {Kind: "external", Command: "touch"}}
+	a := &app{cfg: cfg, workspace: ws, approver: fixedApprover(true)}
+	out, err := a.spawnAgent(context.Background(), "mk", "made.txt", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "--- new files ---\nmade.txt") {
+		t.Errorf("result does not list the created file:\n%s", out)
+	}
+	if strings.Contains(out, "before.txt") {
+		t.Errorf("result lists a file that was there before the agent ran:\n%s", out)
 	}
 }
 
@@ -4775,6 +4820,35 @@ func TestSpawnAgentLocalRuns(t *testing.T) {
 	}
 	if !strings.Contains(out, "looks good") {
 		t.Errorf("sub-agent answer = %q", out)
+	}
+}
+
+// A delegate that runs out of steps hands back a note, not findings. Returned as
+// a plain answer, the parent read "(no final answer — step budget exhausted…)"
+// as the delegate's report and /jobs marked it ✓.
+func TestSpawnAgentThatStoppedIsAFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"file","arguments":"{\"action\":\"list\",\"params\":{\"path\":\".\"}}"}}]}}]}`)
+	}))
+	defer srv.Close()
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = ""
+	cfg.GoalMaxSteps = 2 // never answers: the budget runs out
+	cfg.Agents = map[string]config.AgentProfile{"loc": {Provider: "local"}}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.spawnAgent(context.Background(), "loc", "list the files", "")
+	if err == nil {
+		t.Fatalf("a delegate that ran out of steps came back as a success: %q", out)
+	}
+	if !strings.Contains(err.Error(), "stopped before finishing") {
+		t.Errorf("err = %v, want it to say the delegate stopped", err)
 	}
 }
 

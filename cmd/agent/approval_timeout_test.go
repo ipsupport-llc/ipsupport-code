@@ -103,7 +103,7 @@ func TestAnExpiredApprovalLeavesAPanelOpen(t *testing.T) {
 // even after esc dropped back to typing: nothing else would, and the view sat
 // on "running" with no task behind it.
 func TestAnExpiredApprovalFinalizesTheTaskBehindIt(t *testing.T) {
-	m := &tuiModel{bridge: newBridge(), input: textarea.New(), state: stRunning, spin: spinner.New(), taskDoneAway: true}
+	m := &tuiModel{app: wiredApp(t), bridge: newBridge(), input: textarea.New(), state: stRunning, spin: spinner.New(), taskDoneAway: true}
 	got := askThroughTheUI(t, m)
 	m.handleKey(tea.KeyMsg{Type: tea.KeyEsc}) // back to typing; still pending
 	m.approveBy = time.Now().Add(-time.Second)

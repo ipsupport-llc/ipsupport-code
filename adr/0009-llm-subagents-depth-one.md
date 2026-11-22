@@ -28,7 +28,9 @@ The `agent` tool spawns a sub-agent on any configured profile (`/agents add`):
 ## Consequences
 
 - Parallel sub-agents share nothing mutable through the app struct; anything
-  per-call is carried on the context.
+  per-call is carried on the context. They do share the disk, so a fan-out of
+  spawns runs in parallel only in plan mode or when each names its own directory,
+  none inside another; spawns that share a checkout run one after another.
 - A sub-agent is jailed to its own working directory. One pointed outside the
   parent's workspace is a decision the user makes every time; relaxed spawn
   approvals do not cover it. *(Corrected 2026-10-04: this said a sub-agent

@@ -146,9 +146,7 @@ func (a *app) takeFinishedJobs() []llm.Message {
 // before the agent runs (same goroutine — safe). The between-steps path is
 // drainJobResults, via the beforeTurn hook.
 func (a *app) injectJobResults() {
-	if notes := a.takeFinishedJobs(); len(notes) > 0 {
-		a.ag.SetHistory(append(a.ag.History(), notes...))
-	}
+	a.ag.AppendHistory(a.takeFinishedJobs()...)
 }
 
 // beforeTurn is the agent's between-steps hook (SetBeforeTurn): it folds any
@@ -162,14 +160,10 @@ func (a *app) beforeTurn() []llm.Message {
 
 // drainJobResults is the between-steps counterpart of injectJobResults: it
 // delivers a job that finished while a task is running onto the model's next
-// step, and folds the same notes into durable history so the report survives the
-// run (matching the task-boundary path). Returns nil when nothing is pending.
+// step. The agent keeps the same notes in session memory once the run ends (see
+// Run), so the report outlives it. Returns nil when nothing is pending.
 func (a *app) drainJobResults() []llm.Message {
-	notes := a.takeFinishedJobs()
-	if len(notes) > 0 {
-		a.ag.SetHistory(append(a.ag.History(), notes...))
-	}
-	return notes
+	return a.takeFinishedJobs()
 }
 
 // --- /steer ------------------------------------------------------------------

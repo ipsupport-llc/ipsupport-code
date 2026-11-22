@@ -2148,7 +2148,8 @@ func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
 // no-ops too. Nothing blocks; the queue drains onto the fresh agent.
 func (m *tuiModel) forceDetach() (tea.Model, tea.Cmd) {
 	old := m.app.ag
-	old.Detach() // silence the wedged run (emit/remember → no-ops)
+	old.Detach()              // silence the wedged run (emit/remember → no-ops)
+	m.app.requeueMidRunJobs() // job results it took never reach history — the fresh agent gets them
 	// Before the fresh agent is built: a mode the run took is in the app's
 	// mode by now, and one it did not is ours to apply (takeMode's lock).
 	queued := m.app.popQueuedMode()

@@ -116,6 +116,24 @@ func TestBeforeTurnDeliversFinishedJob(t *testing.T) {
 	}
 }
 
+// A job result handed to a run that is then force-detached never reaches
+// history: the wedged run never ends, so it never keeps the note. The fresh
+// agent has to get it, or the report is lost for good.
+func TestForceDetachRequeuesJobResultsTheRunTook(t *testing.T) {
+	a := wiredApp(t)
+	a.jobs = append(a.jobs, &job{id: 1, profile: "codex", task: "fix the repo", done: true, ok: true, result: "codex report: patched"})
+	if got := a.drainJobResults(); len(got) != 1 {
+		t.Fatalf("drain = %v, want the job note", got)
+	}
+	m := &tuiModel{app: a, ctx: context.Background(), bridge: newBridge(), input: textarea.New(), spin: spinner.New(), state: stRunning}
+	m.cancel = func() {}
+	m.forceDetach()
+	a.injectJobResults() // the fresh agent's next task
+	if h := a.ag.History(); len(h) == 0 || !strings.Contains(h[len(h)-1].Content, "codex report: patched") {
+		t.Errorf("after force-detach the job report never reached the fresh agent: %v", h)
+	}
+}
+
 func TestLineTap(t *testing.T) {
 	var got []string
 	tap := &lineTap{onLine: func(s string) { got = append(got, s) }}
@@ -3852,8 +3870,31 @@ func TestExternalAgentReportsTheFilesItCreated(t *testing.T) {
 	if !strings.Contains(out, "--- new files ---\nmade.txt") {
 		t.Errorf("result does not list the created file:\n%s", out)
 	}
+	// A name outside ASCII comes back as written, not git-quoted.
+	if out, err = a.spawnAgent(context.Background(), "mk", "заметки.txt", ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "\nзаметки.txt") {
+		t.Errorf("result does not list the non-ASCII file as written:\n%s", out)
+	}
 	if strings.Contains(out, "before.txt") {
 		t.Errorf("result lists a file that was there before the agent ran:\n%s", out)
+	}
+
+	// An agent that commits what it made: nothing is untracked and the working
+	// tree matches the index, yet the work has to show.
+	script := filepath.Join(t.TempDir(), "commit.sh")
+	body := "#!/bin/sh\necho hi > committed.txt && git add committed.txt && git -c user.name=t -c user.email=t@t commit -q -m add\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a.cfg.Agents["ci"] = config.AgentProfile{Kind: "external", Command: script}
+	out, err = a.spawnAgent(context.Background(), "ci", "commit it", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "committed.txt") {
+		t.Errorf("result does not show the file the agent committed:\n%s", out)
 	}
 }
 
@@ -4820,6 +4861,46 @@ func TestSpawnAgentLocalRuns(t *testing.T) {
 	}
 	if !strings.Contains(out, "looks good") {
 		t.Errorf("sub-agent answer = %q", out)
+	}
+}
+
+// Spawns may run side by side only where they can't share files. Compared as
+// written, a symlink to a dir passed for a different dir, and two subdirs of one
+// git repository passed as separate though they share its index and HEAD.
+func TestSpawnWorkKeyFindsSharedTrees(t *testing.T) {
+	a := wiredApp(t)
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	for _, d := range []string{"svc/a", "svc/b"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	plain, other := filepath.Join(base, "plain"), filepath.Join(base, "other")
+	for _, d := range []string{plain, other} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(plain, alias); err != nil {
+		t.Fatal(err)
+	}
+	key := a.spawnWorkKey
+	if key(filepath.Join(repo, "svc/a")) != key(filepath.Join(repo, "svc/b")) {
+		t.Error("two subdirs of one repository got different keys")
+	}
+	if key(alias) != key(plain) {
+		t.Error("a symlink and its target got different keys")
+	}
+	if key(plain) == key(other) || key(plain) == "" {
+		t.Errorf("separate dirs: %q vs %q — want distinct, non-empty", key(plain), key(other))
+	}
+	if key(filepath.Join(base, "missing")) != "" {
+		t.Error("an unresolvable dir must come back empty, so the batch runs one at a time")
 	}
 }
 

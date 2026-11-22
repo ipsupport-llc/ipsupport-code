@@ -125,20 +125,33 @@ func jobNote(j *job) string {
 		j.id, status, j.profile, oneLine(j.task, 80), j.result)
 }
 
-// takeFinishedJobs marks every done-but-undelivered job delivered and returns
-// their notes as user-role messages. Shared by both delivery paths; the
-// `delivered` flag keeps them from double-delivering.
-func (a *app) takeFinishedJobs() []llm.Message {
-	a.jobMu.Lock()
-	defer a.jobMu.Unlock()
+// takeFinishedJobsLocked marks every done-but-undelivered job delivered and
+// returns their notes as user-role messages; each job taken is also appended to
+// *took when took is non-nil. Shared by both delivery paths; the `delivered`
+// flag keeps them from double-delivering. jobMu is held.
+func (a *app) takeFinishedJobsLocked(took *[]*job) []llm.Message {
 	var out []llm.Message
 	for _, j := range a.jobs {
 		if j.done && !j.delivered {
 			j.delivered = true
 			out = append(out, llm.User(jobNote(j)))
+			if took != nil {
+				*took = append(*took, j)
+			}
 		}
 	}
 	return out
+}
+
+// requeueMidRunJobs hands the jobs delivered to a force-detached run back for
+// delivery: that run never ends, so it never keeps their notes in history.
+func (a *app) requeueMidRunJobs() {
+	a.jobMu.Lock()
+	defer a.jobMu.Unlock()
+	for _, j := range a.midRunJobs {
+		j.delivered = false
+	}
+	a.midRunJobs = nil
 }
 
 // injectJobResults folds finished, undelivered background-job results into the
@@ -146,7 +159,11 @@ func (a *app) takeFinishedJobs() []llm.Message {
 // before the agent runs (same goroutine — safe). The between-steps path is
 // drainJobResults, via the beforeTurn hook.
 func (a *app) injectJobResults() {
-	a.ag.AppendHistory(a.takeFinishedJobs()...)
+	a.jobMu.Lock()
+	a.midRunJobs = nil // the previous run has ended: its notes are in history, or were requeued on detach
+	notes := a.takeFinishedJobsLocked(nil)
+	a.jobMu.Unlock()
+	a.ag.AppendHistory(notes...)
 }
 
 // beforeTurn is the agent's between-steps hook (SetBeforeTurn): it folds any
@@ -163,7 +180,9 @@ func (a *app) beforeTurn() []llm.Message {
 // step. The agent keeps the same notes in session memory once the run ends (see
 // Run), so the report outlives it. Returns nil when nothing is pending.
 func (a *app) drainJobResults() []llm.Message {
-	return a.takeFinishedJobs()
+	a.jobMu.Lock()
+	defer a.jobMu.Unlock()
+	return a.takeFinishedJobsLocked(&a.midRunJobs)
 }
 
 // --- /steer ------------------------------------------------------------------

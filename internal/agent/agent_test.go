@@ -320,6 +320,18 @@ func TestTrimIfNearWindowCutsAnOversizedNewestResult(t *testing.T) {
 	if strings.Contains(got, "re-run the call") {
 		t.Error("the newest result was replaced with a re-run placeholder — the model would fetch it again")
 	}
+
+	// When the rest of the request already fills the window, a small result is
+	// left alone: cutting it could only make it longer.
+	small := strings.Repeat("y", 520)
+	msgs = []llm.Message{
+		{Role: "system", Content: strings.Repeat("s", 40_000)},
+		{Role: "tool", Content: small},
+	}
+	trimIfNearWindow(msgs, contextWindow, 0, 0)
+	if len(msgs[1].Content) > len(small) {
+		t.Errorf("a %d-byte result grew to %d bytes", len(small), len(msgs[1].Content))
+	}
 }
 
 // Bug repro: trimIfNearWindow's placeholder must preserve enough of a FAILED
@@ -2936,6 +2948,31 @@ func TestAProseAnswerToTheGoalItselfIsJudged(t *testing.T) {
 	if tr, _ := a.Run(context.Background(), "what is 2+2"); tr.Returns != 0 || fake.i != 1 {
 		t.Errorf("errand: returns=%d calls=%d — want one call, no judge", tr.Returns, fake.i)
 	}
+
+	// A prose reply the judge does not accept may be a question back to the
+	// user: control comes back, the goal is not re-fed over it.
+	fake = &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "Which X do you mean?"},
+		{Role: "assistant", Content: "MORE: nothing explained yet"},
+	}}
+	a = New(fake, reg, nil, nil, "", 10)
+	a.SetGoalLoop(3, true)
+	a.SetGoalText("explain how X works")
+	if tr, _ := a.Run(context.Background(), "explain how X works"); tr.Returns != 0 || tr.GoalMet || tr.Final != "Which X do you mean?" {
+		t.Errorf("question back: returns=%d met=%v final=%q — want control back with the question", tr.Returns, tr.GoalMet, tr.Final)
+	}
+
+	// Nor is an errand that happens to be the goal's first paragraph.
+	fake = &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "here's A"},
+		{Role: "assistant", Content: "DONE"}, // what a judge asked here would say
+	}}
+	a = New(fake, reg, nil, nil, "", 10)
+	a.SetGoalLoop(3, true)
+	a.SetGoalText("explain A\n\nthen explain B")
+	if tr, _ := a.Run(context.Background(), "explain A"); tr.GoalMet || fake.i != 1 {
+		t.Errorf("first-paragraph errand: met=%v calls=%d — want one call, no judge", tr.GoalMet, fake.i)
+	}
 }
 
 // A tool-less reply still never reaches the judge. The goal loop is in force for
@@ -3384,6 +3421,13 @@ func TestJudgeStrayToolCallIsNotAVerdict(t *testing.T) {
 	}})
 	if v != judgeUnclear || source != "" {
 		t.Errorf("done() plus a stray tool call → %v (source %q), want unclear", v, source)
+	}
+	// The same unsettled answer with DONE written in the text.
+	v, _, source = parseJudgeReply(llm.Message{Role: "assistant", Content: "DONE", ToolCalls: []llm.ToolCall{
+		{ID: "2", Name: "file", Arguments: `{"action":"read","params":{"path":"main.go"}}`},
+	}})
+	if v != judgeUnclear || source != "" {
+		t.Errorf("DONE text plus a stray tool call → %v (source %q), want unclear", v, source)
 	}
 }
 
@@ -4107,6 +4151,31 @@ func TestParallelSpawnsOnlyInSeparateDirectories(t *testing.T) {
 				t.Errorf("ran in parallel = %v, want %v", got, tc.parallel)
 			}
 		})
+	}
+
+	// With the host's key, the comparison is on where each would really work:
+	// dirs that differ as written but share a tree run one at a time.
+	var mu sync.Mutex
+	active, peak := 0, 0
+	spawn := func(context.Context, string, string, string) (string, error) {
+		mu.Lock()
+		active++
+		peak = max(peak, active)
+		mu.Unlock()
+		time.Sleep(30 * time.Millisecond)
+		mu.Lock()
+		active--
+		mu.Unlock()
+		return "ok", nil
+	}
+	a := New(&scriptLLM{}, tool.NewRegistry(tool.NewAgent(spawn, nil)), nil, nil, "", 5)
+	a.SetSpawnDirKey(func(string) string { return "/repo" }) // both resolve into one checkout
+	a.runToolCalls(context.Background(), []llm.ToolCall{
+		{ID: "1", Name: "agent", Arguments: `{"action":"run","params":{"profile":"p","task":"t","dir":"svc/a"}}`},
+		{ID: "2", Name: "agent", Arguments: `{"action":"run","params":{"profile":"p","task":"t","dir":"svc/b"}}`},
+	})
+	if peak > 1 {
+		t.Error("two spawns the host resolved to one checkout ran in parallel")
 	}
 }
 

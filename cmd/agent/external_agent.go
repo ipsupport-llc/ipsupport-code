@@ -137,6 +137,7 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 		cmd.Stdout, cmd.Stderr = stdout, stderr
 	}
 	untrackedBefore := untrackedFiles(root)
+	headBefore := strings.TrimSpace(mustGit(root, "rev-parse", "--verify", "-q", "HEAD"))
 	runErr := cmd.Run()
 	if errors.Is(runErr, exec.ErrWaitDelay) {
 		runErr = nil // the CLI exited fine; a lingering child just held the pipe
@@ -152,7 +153,13 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 		}
 	}
 	sort.Strings(created)
-	body := externalResult(command, stdout, stderr, strings.TrimSpace(mustGit(root, "diff", "--stat")), created, runErr)
+	// Against the commit the agent started from, not the index: an agent that
+	// staged or committed its work showed no changes at all.
+	diffArgs := []string{"diff", "--stat"}
+	if headBefore != "" {
+		diffArgs = append(diffArgs, headBefore)
+	}
+	body := externalResult(command, stdout, stderr, strings.TrimSpace(mustGit(root, diffArgs...)), created, runErr)
 	done := map[string]any{"agent": id, "profile": profile, "ok": runErr == nil}
 	if runErr != nil {
 		done["error"] = oneLine(runErr.Error(), 60)
@@ -192,8 +199,9 @@ func expandTaskArgs(args []string, task string) []string {
 // before and after its run.
 func untrackedFiles(dir string) map[string]bool {
 	set := map[string]bool{}
-	for _, f := range strings.Split(mustGit(dir, "ls-files", "--others", "--exclude-standard"), "\n") {
-		if f = strings.TrimSpace(f); f != "" {
+	// -z: without it git quotes any name outside ASCII ("\320\277…").
+	for _, f := range strings.Split(mustGit(dir, "ls-files", "-z", "--others", "--exclude-standard"), "\x00") {
+		if f != "" {
 			set[f] = true
 		}
 	}

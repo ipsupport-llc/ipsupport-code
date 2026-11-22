@@ -3435,8 +3435,8 @@ func (a *app) wire() error {
 		run, _ := a.readOnlyRun()
 		a.ag.SetReadOnly(run)
 	}
-	a.ag.SetBeforeTurn(a.beforeTurn) // finished background jobs fold in between steps of a running task
-	a.ag.SetSteers(a.drainSteers)    // so do /steer notes, and before a final answer is accepted
+	a.ag.SetBeforeTurn(a.beforeTurn(a.ag)) // finished background jobs fold in between steps of a running task
+	a.ag.SetSteers(a.drainSteers)          // so do /steer notes, and before a final answer is accepted
 	ag := a.ag
 	ag.SetModeSwitch(func() (bool, string, bool) { return a.takeMode(ag.Detached) }) // and a mode chosen with shift+tab mid-task
 	a.ag.SetAsides(a.drainAsides)                                                    // /btw side questions answered between steps, one no-tools turn each

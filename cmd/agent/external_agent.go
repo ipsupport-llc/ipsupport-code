@@ -138,6 +138,11 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 	}
 	untrackedBefore := untrackedFiles(root)
 	headBefore := strings.TrimSpace(mustGit(root, "rev-parse", "--verify", "-q", "HEAD"))
+	if headBefore == "" && strings.TrimSpace(mustGit(root, "rev-parse", "--git-dir")) != "" {
+		// A repository with no commit yet: the starting point is the empty tree
+		// (hashed here, so it matches the repository's object format).
+		headBefore = strings.TrimSpace(mustGit(root, "hash-object", "-t", "tree", "--stdin"))
+	}
 	runErr := cmd.Run()
 	if errors.Is(runErr, exec.ErrWaitDelay) {
 		runErr = nil // the CLI exited fine; a lingering child just held the pipe

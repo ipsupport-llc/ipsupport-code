@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
 	"github.com/ipsupport-llc/ipsupport-code/internal/trace"
@@ -170,18 +171,24 @@ func (a *app) injectJobResults() {
 // just-finished background-job results into the model's working set, so a job
 // that completes MID-task lands on the next reason→act→observe step instead of
 // waiting for the next task boundary. /steer notes have their own hook,
-// drainSteers.
-func (a *app) beforeTurn() []llm.Message {
-	return a.drainJobResults()
+// drainSteers. It is bound to the agent it is installed on (see drainJobResults).
+func (a *app) beforeTurn(ag *agent.Agent) func() []llm.Message {
+	return func() []llm.Message { return a.drainJobResults(ag) }
 }
 
 // drainJobResults is the between-steps counterpart of injectJobResults: it
 // delivers a job that finished while a task is running onto the model's next
 // step. The agent keeps the same notes in session memory once the run ends (see
-// Run), so the report outlives it. Returns nil when nothing is pending.
-func (a *app) drainJobResults() []llm.Message {
+// Run), so the report outlives it. Returns nil when nothing is pending, and when
+// ag has been force-detached: forceDetach marks it detached before it requeues
+// under jobMu, so a wedged run that reaches this after the requeue takes nothing,
+// and one that got here first has its jobs requeued.
+func (a *app) drainJobResults(ag *agent.Agent) []llm.Message {
 	a.jobMu.Lock()
 	defer a.jobMu.Unlock()
+	if ag.Detached() {
+		return nil
+	}
 	return a.takeFinishedJobsLocked(&a.midRunJobs)
 }
 

@@ -92,7 +92,7 @@ func TestBeforeTurnDeliversFinishedJob(t *testing.T) {
 	a.addBtw("also check the tests") // a steer goes through its own hook, not this one
 
 	before := a.ag.SessionLen()
-	msgs := a.beforeTurn()
+	msgs := a.beforeTurn(a.ag)()
 	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "codex report: patched") {
 		t.Fatalf("beforeTurn = %v, want only the job note", msgs)
 	}
@@ -111,7 +111,7 @@ func TestBeforeTurnDeliversFinishedJob(t *testing.T) {
 	if a.ag.SessionLen() != before {
 		t.Error("injectJobResults re-delivered a job already drained by beforeTurn")
 	}
-	if got := a.drainJobResults(); got != nil {
+	if got := a.drainJobResults(a.ag); got != nil {
 		t.Errorf("drainJobResults re-delivered: %v", got)
 	}
 }
@@ -122,12 +122,18 @@ func TestBeforeTurnDeliversFinishedJob(t *testing.T) {
 func TestForceDetachRequeuesJobResultsTheRunTook(t *testing.T) {
 	a := wiredApp(t)
 	a.jobs = append(a.jobs, &job{id: 1, profile: "codex", task: "fix the repo", done: true, ok: true, result: "codex report: patched"})
-	if got := a.drainJobResults(); len(got) != 1 {
+	old := a.ag
+	if got := a.drainJobResults(old); len(got) != 1 {
 		t.Fatalf("drain = %v, want the job note", got)
 	}
 	m := &tuiModel{app: a, ctx: context.Background(), bridge: newBridge(), input: textarea.New(), spin: spinner.New(), state: stRunning}
 	m.cancel = func() {}
 	m.forceDetach()
+	// The wedged run reaching its next drain after the detach takes nothing:
+	// the requeued result belongs to the fresh agent.
+	if got := a.drainJobResults(old); got != nil {
+		t.Fatalf("the detached run took %v after the requeue", got)
+	}
 	a.injectJobResults() // the fresh agent's next task
 	if h := a.ag.History(); len(h) == 0 || !strings.Contains(h[len(h)-1].Content, "codex report: patched") {
 		t.Errorf("after force-detach the job report never reached the fresh agent: %v", h)
@@ -3896,6 +3902,21 @@ func TestExternalAgentReportsTheFilesItCreated(t *testing.T) {
 	if !strings.Contains(out, "committed.txt") {
 		t.Errorf("result does not show the file the agent committed:\n%s", out)
 	}
+
+	// The same in a repository with no commit yet: there is no HEAD to diff
+	// against, and the work must still show.
+	fresh := t.TempDir()
+	if out, err := exec.Command("git", "-C", fresh, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	a.cfg.Workspace, a.workspace = fresh, fresh
+	out, err = a.spawnAgent(context.Background(), "ci", "commit it", fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "committed.txt") {
+		t.Errorf("in a repository with no commit, the committed file does not show:\n%s", out)
+	}
 }
 
 // External CLI agents run outside our sandbox with no read-only mode, so plan
@@ -7408,7 +7429,7 @@ func TestSteerDrainsOnce(t *testing.T) {
 	if a.btwPending() != 0 {
 		t.Error("buffer not cleared after drain")
 	}
-	if got := a.beforeTurn(); len(got) != 0 {
+	if got := a.beforeTurn(a.ag)(); len(got) != 0 {
 		t.Errorf("beforeTurn delivered %v — steers have their own hook now", got)
 	}
 }

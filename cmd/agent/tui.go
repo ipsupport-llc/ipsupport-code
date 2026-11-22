@@ -726,28 +726,8 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.taskDoneAway = true
 			return m, detect
 		}
-		if m.planTask && !m.taskCancelled && len(m.queued) == 0 {
-			// A plan-mode task just proposed a plan — offer the accept→execute handshake.
-			m.planTask = false
-			m.state = stPlanReview
-			m.push("  " + m.attention("▸ PLAN READY") + "  " + m.planReviewKeys() + " (type to refine)")
-			return m, detect
-		}
-		m.planTask = false
-		m.state = stIdle
-		if m.app.shouldAutoCompact() { // context near the limit — fold it down before draining the queue
-			return m, tea.Batch(detect, m.startCompact(true, ""))
-		}
-		if len(m.queued) > 0 { // drain the next pending message(s): tasks + /commands
-			model, cmd := m.drainQueue()
-			return model, tea.Batch(detect, cmd)
-		}
-		if !m.taskCancelled {
-			if h := m.app.rateHint(); h != "" { // at most once per two weeks — see rateHint
-				m.push(cDim.Render("  " + h))
-			}
-		}
-		return m, tea.Batch(detect, m.input.Focus())
+		model, cmd := m.afterTask()
+		return model, tea.Batch(detect, cmd)
 
 	case reflectDoneMsg:
 		m.learning = false
@@ -1390,6 +1370,34 @@ func (m *tuiModel) applyPendingMode() {
 	if want := *q; want != m.app.mode() {
 		m.push(cDim.Render("  " + m.app.setMode(want)))
 	}
+}
+
+// afterTask hands control back once a finished task is off the screen: the plan
+// handshake for a plan-mode task, else idle — compacting first when the context
+// is near its limit — then anything queued. A task that finished behind a modal
+// gets the same through finalizeTaskDoneAway when the modal closes.
+func (m *tuiModel) afterTask() (tea.Model, tea.Cmd) {
+	if m.planTask && !m.taskCancelled && len(m.queued) == 0 {
+		// A plan-mode task just proposed a plan — offer the accept→execute handshake.
+		m.planTask = false
+		m.state = stPlanReview
+		m.push("  " + m.attention("▸ PLAN READY") + "  " + m.planReviewKeys() + " (type to refine)")
+		return m, nil
+	}
+	m.planTask = false
+	m.state = stIdle
+	if m.app.shouldAutoCompact() { // context near the limit — fold it down before draining the queue
+		return m, m.startCompact(true, "")
+	}
+	if len(m.queued) > 0 { // drain the next pending message(s): tasks + /commands
+		return m.drainQueue()
+	}
+	if !m.taskCancelled {
+		if h := m.app.rateHint(); h != "" { // at most once per two weeks — see rateHint
+			m.push(cDim.Render("  " + h))
+		}
+	}
+	return m, m.input.Focus()
 }
 
 // resolveApproval answers the pending approval and restores the state stApprove
@@ -2140,7 +2148,8 @@ func (m *tuiModel) startTask() (context.Context, context.CancelFunc) {
 // no-ops too. Nothing blocks; the queue drains onto the fresh agent.
 func (m *tuiModel) forceDetach() (tea.Model, tea.Cmd) {
 	old := m.app.ag
-	old.Detach() // silence the wedged run (emit/remember → no-ops)
+	old.Detach()              // silence the wedged run (emit/remember → no-ops)
+	m.app.requeueMidRunJobs() // job results it took never reach history — the fresh agent gets them
 	// Before the fresh agent is built: a mode the run took is in the app's
 	// mode by now, and one it did not is ours to apply (takeMode's lock).
 	queued := m.app.popQueuedMode()

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ipsupport-llc/ipsupport-code/internal/agent"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
 	"github.com/ipsupport-llc/ipsupport-code/internal/risk"
 	"github.com/ipsupport-llc/ipsupport-code/internal/trace"
@@ -125,20 +126,33 @@ func jobNote(j *job) string {
 		j.id, status, j.profile, oneLine(j.task, 80), j.result)
 }
 
-// takeFinishedJobs marks every done-but-undelivered job delivered and returns
-// their notes as user-role messages. Shared by both delivery paths; the
-// `delivered` flag keeps them from double-delivering.
-func (a *app) takeFinishedJobs() []llm.Message {
-	a.jobMu.Lock()
-	defer a.jobMu.Unlock()
+// takeFinishedJobsLocked marks every done-but-undelivered job delivered and
+// returns their notes as user-role messages; each job taken is also appended to
+// *took when took is non-nil. Shared by both delivery paths; the `delivered`
+// flag keeps them from double-delivering. jobMu is held.
+func (a *app) takeFinishedJobsLocked(took *[]*job) []llm.Message {
 	var out []llm.Message
 	for _, j := range a.jobs {
 		if j.done && !j.delivered {
 			j.delivered = true
 			out = append(out, llm.User(jobNote(j)))
+			if took != nil {
+				*took = append(*took, j)
+			}
 		}
 	}
 	return out
+}
+
+// requeueMidRunJobs hands the jobs delivered to a force-detached run back for
+// delivery: that run never ends, so it never keeps their notes in history.
+func (a *app) requeueMidRunJobs() {
+	a.jobMu.Lock()
+	defer a.jobMu.Unlock()
+	for _, j := range a.midRunJobs {
+		j.delivered = false
+	}
+	a.midRunJobs = nil
 }
 
 // injectJobResults folds finished, undelivered background-job results into the
@@ -146,30 +160,36 @@ func (a *app) takeFinishedJobs() []llm.Message {
 // before the agent runs (same goroutine — safe). The between-steps path is
 // drainJobResults, via the beforeTurn hook.
 func (a *app) injectJobResults() {
-	if notes := a.takeFinishedJobs(); len(notes) > 0 {
-		a.ag.SetHistory(append(a.ag.History(), notes...))
-	}
+	a.jobMu.Lock()
+	a.midRunJobs = nil // the previous run has ended: its notes are in history, or were requeued on detach
+	notes := a.takeFinishedJobsLocked(nil)
+	a.jobMu.Unlock()
+	a.ag.AppendHistory(notes...)
 }
 
 // beforeTurn is the agent's between-steps hook (SetBeforeTurn): it folds any
 // just-finished background-job results into the model's working set, so a job
 // that completes MID-task lands on the next reason→act→observe step instead of
 // waiting for the next task boundary. /steer notes have their own hook,
-// drainSteers.
-func (a *app) beforeTurn() []llm.Message {
-	return a.drainJobResults()
+// drainSteers. It is bound to the agent it is installed on (see drainJobResults).
+func (a *app) beforeTurn(ag *agent.Agent) func() []llm.Message {
+	return func() []llm.Message { return a.drainJobResults(ag) }
 }
 
 // drainJobResults is the between-steps counterpart of injectJobResults: it
 // delivers a job that finished while a task is running onto the model's next
-// step, and folds the same notes into durable history so the report survives the
-// run (matching the task-boundary path). Returns nil when nothing is pending.
-func (a *app) drainJobResults() []llm.Message {
-	notes := a.takeFinishedJobs()
-	if len(notes) > 0 {
-		a.ag.SetHistory(append(a.ag.History(), notes...))
+// step. The agent keeps the same notes in session memory once the run ends (see
+// Run), so the report outlives it. Returns nil when nothing is pending, and when
+// ag has been force-detached: forceDetach marks it detached before it requeues
+// under jobMu, so a wedged run that reaches this after the requeue takes nothing,
+// and one that got here first has its jobs requeued.
+func (a *app) drainJobResults(ag *agent.Agent) []llm.Message {
+	a.jobMu.Lock()
+	defer a.jobMu.Unlock()
+	if ag.Detached() {
+		return nil
 	}
-	return notes
+	return a.takeFinishedJobsLocked(&a.midRunJobs)
 }
 
 // --- /steer ------------------------------------------------------------------

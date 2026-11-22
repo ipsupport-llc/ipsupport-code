@@ -3,13 +3,16 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/knowledge"
 	"github.com/ipsupport-llc/ipsupport-code/internal/llm"
@@ -288,6 +291,46 @@ func TestTrimIfNearWindowOverflowFallback(t *testing.T) {
 	}
 	if limit := int(float64(contextWindow) * inTaskTrimRatio); estimateMsgTokens(msgs) >= limit {
 		t.Errorf("estimate still over limit after overflow fallback: %d >= %d", estimateMsgTokens(msgs), limit)
+	}
+}
+
+// One result bigger than the whole window, arriving as the newest message: both
+// passes spare the newest message, so nothing was freed and the request went out
+// over the window. It is cut from the middle instead — not replaced with a
+// "re-run the call" placeholder, which would send the model to fetch it again.
+func TestTrimIfNearWindowCutsAnOversizedNewestResult(t *testing.T) {
+	page := "HEAD-OF-PAGE " + strings.Repeat("x", 60_000) + " END-OF-PAGE"
+	msgs := []llm.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "read the page"},
+		{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "w", Name: "web", Arguments: `{"action":"fetch"}`}}},
+		{Role: "tool", Content: page},
+	}
+	contextWindow := 8192
+	if freed := trimIfNearWindow(msgs, contextWindow, 0, 0); freed <= 0 {
+		t.Fatal("nothing was freed — the request goes out over the window")
+	}
+	got := msgs[3].Content
+	if limit := int(float64(contextWindow) * inTaskTrimRatio); estimateMsgTokens(msgs) >= limit {
+		t.Errorf("estimate still over limit: %d >= %d", estimateMsgTokens(msgs), limit)
+	}
+	if !strings.HasPrefix(got, "HEAD-OF-PAGE") || !strings.HasSuffix(got, "END-OF-PAGE") {
+		t.Error("the cut lost the head or the tail of the result")
+	}
+	if strings.Contains(got, "re-run the call") {
+		t.Error("the newest result was replaced with a re-run placeholder — the model would fetch it again")
+	}
+
+	// When the rest of the request already fills the window, a small result is
+	// left alone: cutting it could only make it longer.
+	small := strings.Repeat("y", 520)
+	msgs = []llm.Message{
+		{Role: "system", Content: strings.Repeat("s", 40_000)},
+		{Role: "tool", Content: small},
+	}
+	trimIfNearWindow(msgs, contextWindow, 0, 0)
+	if len(msgs[1].Content) > len(small) {
+		t.Errorf("a %d-byte result grew to %d bytes", len(small), len(msgs[1].Content))
 	}
 }
 
@@ -2880,6 +2923,58 @@ func TestRunStillNudgesAnIdleModelBeforeSpendingAReturn(t *testing.T) {
 	}
 }
 
+// …but when the run IS the standing goal, a prose answer may be the whole job
+// ("explain X"). Skipping the judge there left the goal open for good.
+func TestAProseAnswerToTheGoalItselfIsJudged(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "X works like this: …"},
+		{Role: "assistant", Content: "DONE"}, // the judge
+	}}
+	a := New(fake, reg, nil, nil, "", 10)
+	a.SetGoalLoop(3, true)
+	a.SetGoalText("explain how X works" + CorrectionsBlock([]string{"keep it short"}))
+
+	tr, _ := a.Run(context.Background(), "explain how X works")
+	if !tr.GoalMet {
+		t.Errorf("goal met = false after %d call(s) — a prose answer to the goal itself was never judged", fake.i)
+	}
+
+	// An errand while that goal stands is still a plain answer, not judged.
+	fake = &scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "it's 4"}}}
+	a = New(fake, reg, nil, nil, "", 10)
+	a.SetGoalLoop(3, true)
+	a.SetGoalText("explain how X works")
+	if tr, _ := a.Run(context.Background(), "what is 2+2"); tr.Returns != 0 || fake.i != 1 {
+		t.Errorf("errand: returns=%d calls=%d — want one call, no judge", tr.Returns, fake.i)
+	}
+
+	// A prose reply the judge does not accept may be a question back to the
+	// user: control comes back, the goal is not re-fed over it.
+	fake = &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "Which X do you mean?"},
+		{Role: "assistant", Content: "MORE: nothing explained yet"},
+	}}
+	a = New(fake, reg, nil, nil, "", 10)
+	a.SetGoalLoop(3, true)
+	a.SetGoalText("explain how X works")
+	if tr, _ := a.Run(context.Background(), "explain how X works"); tr.Returns != 0 || tr.GoalMet || tr.Final != "Which X do you mean?" {
+		t.Errorf("question back: returns=%d met=%v final=%q — want control back with the question", tr.Returns, tr.GoalMet, tr.Final)
+	}
+
+	// Nor is an errand that happens to be the goal's first paragraph.
+	fake = &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "here's A"},
+		{Role: "assistant", Content: "DONE"}, // what a judge asked here would say
+	}}
+	a = New(fake, reg, nil, nil, "", 10)
+	a.SetGoalLoop(3, true)
+	a.SetGoalText("explain A\n\nthen explain B")
+	if tr, _ := a.Run(context.Background(), "explain A"); tr.GoalMet || fake.i != 1 {
+		t.Errorf("first-paragraph errand: met=%v calls=%d — want one call, no judge", tr.GoalMet, fake.i)
+	}
+}
+
 // A tool-less reply still never reaches the judge. The goal loop is in force for
 // EVERY prompt while a goal stands (see the host's goalLoopBudget), so judging a
 // plain conversational turn against the goal and re-feeding it would trap an
@@ -3317,6 +3412,22 @@ func TestJudgeStrayToolCallIsNotAVerdict(t *testing.T) {
 	}})
 	if v != judgeUnclear || source != "" {
 		t.Errorf("stray tool call → %v (source %q), want unclear", v, source)
+	}
+	// done() next to that same request for evidence: the judge declared the
+	// goal met while asking to see something it had not been shown.
+	v, _, source = parseJudgeReply(llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{
+		{ID: "1", Name: "done", Arguments: "{}"},
+		{ID: "2", Name: "file", Arguments: `{"action":"read","params":{"path":"main.go"}}`},
+	}})
+	if v != judgeUnclear || source != "" {
+		t.Errorf("done() plus a stray tool call → %v (source %q), want unclear", v, source)
+	}
+	// The same unsettled answer with DONE written in the text.
+	v, _, source = parseJudgeReply(llm.Message{Role: "assistant", Content: "DONE", ToolCalls: []llm.ToolCall{
+		{ID: "2", Name: "file", Arguments: `{"action":"read","params":{"path":"main.go"}}`},
+	}})
+	if v != judgeUnclear || source != "" {
+		t.Errorf("DONE text plus a stray tool call → %v (source %q), want unclear", v, source)
 	}
 }
 
@@ -3968,6 +4079,158 @@ func TestTwoCollapsedGenerationsStillStop(t *testing.T) {
 	tr, _ := a.Run(context.Background(), "do the thing")
 	if !tr.Stopped {
 		t.Error("a model collapsing twice must still stop the run")
+	}
+}
+
+// The rolling cap cuts by count. An odd cap left the previous task's answer at
+// the front with its question cut away, and a history that opens on an assistant
+// turn is rejected by chat templates that enforce user/assistant order.
+func TestHistoryCapNeverLeavesAnAnswerFirst(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(), {Role: "assistant", Content: "first answer"},
+		calcCall(), {Role: "assistant", Content: "second answer"},
+	}}
+	a := New(fake, reg, nil, nil, "", 10)
+	a.SetMaxHistory(3)
+	for _, g := range []string{"first task", "second task"} {
+		if _, err := a.Run(context.Background(), g); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := a.History()
+	if len(h) == 0 || h[0].Role != "user" {
+		t.Fatalf("history opens on %v, want a user message: %v", h[0].Role, h)
+	}
+	if !strings.HasSuffix(h[0].Content, "second task") || a.FrontTrimCount() != 2 {
+		t.Errorf("history = %v, front-trimmed %d — want only the second task, 2 trimmed", h, a.FrontTrimCount())
+	}
+}
+
+// A fan-out of spawns runs in parallel only when the sub-agents can't edit the
+// same files. Two spawns with no dir both work in the session's checkout, and
+// side by side they could overwrite each other's edits.
+func TestParallelSpawnsOnlyInSeparateDirectories(t *testing.T) {
+	cases := []struct {
+		name     string
+		dirs     []string
+		plan     bool
+		parallel bool
+	}{
+		{"both here", []string{"", ""}, false, false},
+		{"one here, one named the same", []string{"", "."}, false, false},
+		{"separate dirs", []string{"svc/a", "svc/b"}, false, true},
+		{"one inside the other", []string{"svc", "svc/b"}, false, false},
+		{"relative and absolute", []string{"svc/a", "/srv/b"}, false, false},
+		{"plan mode, both here", []string{"", ""}, true, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			active, peak := 0, 0
+			spawn := func(context.Context, string, string, string) (string, error) {
+				mu.Lock()
+				active++
+				peak = max(peak, active)
+				mu.Unlock()
+				time.Sleep(30 * time.Millisecond)
+				mu.Lock()
+				active--
+				mu.Unlock()
+				return "ok", nil
+			}
+			var calls []llm.ToolCall
+			for i, d := range tc.dirs {
+				args, _ := json.Marshal(map[string]any{"action": "run", "params": map[string]any{"profile": "p", "task": "t", "dir": d}})
+				calls = append(calls, llm.ToolCall{ID: fmt.Sprint(i), Name: "agent", Arguments: string(args)})
+			}
+			a := New(&scriptLLM{}, tool.NewRegistry(tool.NewAgent(spawn, nil)), nil, nil, "", 5)
+			a.SetPlanMode(tc.plan)
+			a.runToolCalls(context.Background(), calls)
+			if got := peak > 1; got != tc.parallel {
+				t.Errorf("ran in parallel = %v, want %v", got, tc.parallel)
+			}
+		})
+	}
+
+	// With the host's key, the comparison is on where each would really work:
+	// dirs that differ as written but share a tree run one at a time.
+	var mu sync.Mutex
+	active, peak := 0, 0
+	spawn := func(context.Context, string, string, string) (string, error) {
+		mu.Lock()
+		active++
+		peak = max(peak, active)
+		mu.Unlock()
+		time.Sleep(30 * time.Millisecond)
+		mu.Lock()
+		active--
+		mu.Unlock()
+		return "ok", nil
+	}
+	a := New(&scriptLLM{}, tool.NewRegistry(tool.NewAgent(spawn, nil)), nil, nil, "", 5)
+	a.SetSpawnDirKey(func(string) string { return "/repo" }) // both resolve into one checkout
+	a.runToolCalls(context.Background(), []llm.ToolCall{
+		{ID: "1", Name: "agent", Arguments: `{"action":"run","params":{"profile":"p","task":"t","dir":"svc/a"}}`},
+		{ID: "2", Name: "agent", Arguments: `{"action":"run","params":{"profile":"p","task":"t","dir":"svc/b"}}`},
+	})
+	if peak > 1 {
+		t.Error("two spawns the host resolved to one checkout ran in parallel")
+	}
+}
+
+// A background job that finishes mid-task reaches the model on the next step and
+// is kept in session memory AFTER the task — not spliced in ahead of it, where it
+// moved the goal message the next request must repeat byte for byte, and not as
+// a reshape of history that invalidates every /rewind checkpoint.
+func TestJobNoteDeliveredMidRunIsKeptAfterTheTask(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptLLM{replies: []llm.Message{calcCall(), {Role: "assistant", Content: "all done"}}}
+	a := New(fake, reg, nil, nil, "", 10)
+	a.SetHistory([]llm.Message{llm.User("earlier task"), {Role: "assistant", Content: "earlier answer"}})
+	gen := a.HistoryGen()
+	turns := 0
+	a.SetBeforeTurn(func() []llm.Message {
+		if turns++; turns == 2 {
+			return []llm.Message{llm.User("[background job #1 finished]")}
+		}
+		return nil
+	})
+	if _, err := a.Run(context.Background(), "compute it"); err != nil {
+		t.Fatal(err)
+	}
+	if a.HistoryGen() != gen {
+		t.Error("the mid-run job note reshaped history — earlier checkpoints are invalidated")
+	}
+	h := a.History()
+	if len(h) != 5 {
+		t.Fatalf("history has %d messages, want 5: %v", len(h), h)
+	}
+	if !strings.HasSuffix(h[2].Content, "compute it") || h[3].Role != "assistant" || h[4].Content != "[background job #1 finished]" {
+		t.Errorf("history order = %q, %q, %q — want the task, its answer, then the job note", h[2].Content, h[3].Content, h[4].Content)
+	}
+}
+
+// The push-back is once per collapse, not once per run: a model that recovered
+// and then worked for a while has earned a fresh nudge when it collapses again.
+func TestACollapseAfterARecoveryIsNudgedAgain(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	fake := &scriptedLLM{steps: []scriptStep{
+		call(calcCall()),
+		fails(llm.ErrDegenerateForTest),
+		call(calcCall()), // recovered
+		call(calcCall()),
+		fails(llm.ErrDegenerateForTest), // a second, separate collapse
+		reply("finished"),
+	}}
+	a := New(fake, reg, nil, nil, "", 20)
+
+	tr, err := a.Run(context.Background(), "do the thing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.Stopped || tr.Final != "finished" {
+		t.Errorf("stopped=%v final=%q — the second collapse ended the run instead of getting its own nudge", tr.Stopped, tr.Final)
 	}
 }
 

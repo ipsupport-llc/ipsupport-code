@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -112,11 +113,15 @@ type Agent struct {
 	// callGate is the optional last word before a tool runs (see SetCallGate).
 	callGate func(ctx context.Context, tool, action string, params map[string]any) string
 	label    string // non-empty for a sub-agent; tags its events so the UI can group them
+	// spawnDirKey, if set, says where a spawn into a dir would do its work — see
+	// SetSpawnDirKey.
+	spawnDirKey func(dir string) string
 
 	// beforeTurn, if set, is called at the top of every loop iteration and its
 	// messages are folded into the working set before the next model call. It's
 	// the seam for finished background jobs that must reach the model between
-	// turns WITHOUT interrupting the run. Must be safe to call concurrently.
+	// turns WITHOUT interrupting the run. Run appends them to session memory
+	// after the task once it ends. Must be safe to call concurrently.
 	beforeTurn func() []llm.Message
 	steers     func() []string                          // /steer notes typed mid-run — see SetSteers
 	modeSwitch func() (plan bool, mode string, ok bool) // a mode chosen mid-run — see SetModeSwitch
@@ -414,6 +419,15 @@ func (a *Agent) acceptanceTarget(runGoal string) string {
 	return runGoal
 }
 
+// runIsTheGoal reports whether this run was asked to do the standing goal itself
+// (/goal set, /goal go) rather than an errand while it stands. The goal text the
+// caller set may carry the user's corrections after it (CorrectionsBlock). With
+// no goal text set there is no standing goal to be.
+func (a *Agent) runIsTheGoal(runGoal string) bool {
+	g := strings.TrimSpace(runGoal)
+	return a.goalText != "" && g != "" && (a.goalText == g || strings.HasPrefix(a.goalText, g+correctionsHeader))
+}
+
 // target is acceptanceTarget with the corrections the user steered this run
 // with — what a re-feed restates and the judge accepts against.
 func (a *Agent) target(runGoal string, msgs []llm.Message) string {
@@ -571,6 +585,13 @@ func (a *Agent) AnswerAside(ctx context.Context, base []llm.Message, question st
 func (a *Agent) SetRiskObserver(f func(ctx context.Context, tool, action string, params map[string]any) (context.Context, string)) {
 	a.riskObserver = f
 }
+
+// SetSpawnDirKey sets how a spawn's dir argument maps to where it would work, for
+// deciding whether spawns may run side by side: the host resolves it to a real
+// path, widened to the git checkout it sits in (siblings share its index and
+// HEAD). "" means unresolvable, which runs the batch one at a time. Without it,
+// dirs are compared as written.
+func (a *Agent) SetSpawnDirKey(f func(dir string) string) { a.spawnDirKey = f }
 
 // SetCallGate installs a hook asked just before a tool call runs, after the
 // plan-mode backstop — so nothing is asked about a call that would be refused
@@ -887,7 +908,38 @@ func trimIfNearWindow(msgs []llm.Message, contextWindow, sentEst, realTokens int
 	if sizedInTokens(msgs, scale) >= limit {
 		freed += trimOldToolResults(msgs, limit, scale, len(msgs)-1)
 	}
+	if sizedInTokens(msgs, scale) >= limit {
+		freed += clipNewestResult(msgs, limit, scale)
+	}
 	return freed
+}
+
+// clipNewestResult is the last resort when the newest tool result alone is what
+// overflows the window (one big page in a small window): the passes above spare
+// it, and the request went out over the window. It is cut from the middle, head
+// and tail kept, rather than replaced like the older ones: the model has not read
+// it yet, and a placeholder saying "re-run the call" would send it fetching the
+// same oversized result again.
+func clipNewestResult(msgs []llm.Message, limit int, scale float64) int {
+	if len(msgs) == 0 {
+		return 0
+	}
+	m := &msgs[len(msgs)-1]
+	if m.Role != "tool" || len(m.Content) < trimMinResultSize {
+		return 0
+	}
+	over := sizedInTokens(msgs, scale) - limit + 1
+	const marker = 100 // the note that replaces the middle is under this
+	// Some of the result is always kept: when the rest of the request already
+	// fills the window, no cut here can make it fit, and the server says so.
+	const minKeep = 200
+	before := len(m.Content)
+	keep := max(before-int(float64(over)*4/scale)-marker, minKeep) // under before: before >= trimMinResultSize > minKeep+marker
+	head, _ := textutil.Clip(m.Content, keep*2/3)
+	tail := strings.TrimPrefix(textutil.Tail(m.Content, keep-len(head)), "…")
+	cut := before - len(head) - len(tail)
+	m.Content = head + fmt.Sprintf("\n[… %d bytes cut from the middle to fit the context window …]\n", cut) + tail
+	return before - len(m.Content)
 }
 
 // tokenScale calibrates estimateMsgTokens against what the server actually
@@ -1032,13 +1084,37 @@ func (a *Agent) remember(goal, sent, final string, msgs []llm.Message) {
 	a.notes, a.sentNotes = a.notes[a.sentNotes:], 0
 	a.notesMu.Unlock()
 	a.historyMu.Lock()
-	a.history = append(a.history, llm.User(sent), llm.Message{Role: "assistant", Content: entry})
+	a.appendHistoryLocked(llm.User(sent), llm.Message{Role: "assistant", Content: entry})
+	a.historyMu.Unlock()
+}
+
+// AppendHistory adds messages to the end of session memory. It is an ordinary
+// append, like remember's, so it leaves HistoryGen alone: a checkpoint taken
+// before it still indexes the same history.
+func (a *Agent) AppendHistory(m ...llm.Message) {
+	if len(m) == 0 {
+		return
+	}
+	a.historyMu.Lock()
+	a.appendHistoryLocked(m...)
+	a.historyMu.Unlock()
+}
+
+// appendHistoryLocked appends and applies the rolling cap. historyMu is held.
+// The cap cuts by count, so it can leave an answer at the front with its
+// question gone (an odd cap, or a job note that shifted the pairs); the answer
+// goes too. A history that opens on an assistant turn right after the system
+// prompt is rejected by chat templates that insist on user/assistant order.
+func (a *Agent) appendHistoryLocked(m ...llm.Message) {
+	a.history = append(a.history, m...)
 	if a.maxHistory > 0 && len(a.history) > a.maxHistory {
 		dropped := len(a.history) - a.maxHistory
-		a.history = append([]llm.Message(nil), a.history[len(a.history)-a.maxHistory:]...)
+		for dropped < len(a.history) && a.history[dropped].Role != "user" {
+			dropped++
+		}
+		a.history = append([]llm.Message(nil), a.history[dropped:]...)
 		a.frontTrim.Add(int64(dropped))
 	}
-	a.historyMu.Unlock()
 }
 
 // steersDigest records the corrections the user steered a finished task with,
@@ -1282,6 +1358,17 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	idleNudged := false       // already pushed a no-progress model once since the last re-feed?
 	promptTokens := 0         // last known real prompt size from a MAIN-turn Chat call — see Transcript.PromptTokens
 	extra := 0                // steps owed past the budget to a steer that arrived with the final answer
+	// What beforeTurn handed in mid-run (finished background jobs) is kept in
+	// session memory AFTER this task, once the run ends however it ends. Written
+	// into history the moment it arrived, it landed ahead of the task that was
+	// running — out of order, and ahead of the goal message the next request has
+	// to repeat byte for byte (ADR 0015).
+	var delivered []llm.Message
+	defer func() {
+		if !a.detached.Load() {
+			a.AppendHistory(delivered...)
+		}
+	}()
 	for step := 0; step < a.maxSteps+extra; step++ {
 		// Force-detached (see Detach): the UI has moved on to a fresh agent.
 		// Going on would run this step's hooks, which drain /steer notes and
@@ -1301,6 +1388,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		if a.beforeTurn != nil {
 			if extra := a.beforeTurn(); len(extra) > 0 {
 				msgs = append(msgs, extra...)
+				delivered = append(delivered, extra...)
 			}
 		}
 		// /btw side questions: answer each in one no-tools turn from the live
@@ -1384,6 +1472,9 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			tr.PromptTokens = promptTokens
 			return tr, fmt.Errorf("llm chat (step %d): %w", step+1, err)
 		}
+		// The turn after a collapse came back whole: the push-back worked, and a
+		// later collapse is a new one that earns its own.
+		degenerateNudged = false
 		// Snapshot the real conversation's fullness right after this MAIN-turn call
 		// succeeds — BEFORE judgeGoal (below, same iteration) gets a chance to run.
 		// judgeGoal shares this same a.llm when no dedicated judge/reflect model is
@@ -1508,7 +1599,18 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// reached the cap and the judge was skipped entirely. Funding an
 			// attempt and then refusing to grade it is the one combination that
 			// makes no sense.
-			chatReply := !acted && strings.TrimSpace(clean) != ""
+			//
+			// Only for an errand, though: when this run IS the goal (/goal set, /goal
+			// go), a prose answer may be exactly what the goal asked for ("explain
+			// X", "write up Y"), and skipping the judge left such a goal open for
+			// good.
+			//
+			// A prose reply to the goal that the judge does not accept is not
+			// re-fed either: it may be a question back to the user ("which file
+			// do you mean?"), and re-feeding would answer it with the goal again
+			// instead of handing control back.
+			proseOnly := !acted && strings.TrimSpace(clean) != ""
+			chatReply := proseOnly && !a.runIsTheGoal(goal)
 			if !a.planMode.Load() && a.maxReturns > 0 && !chatReply {
 				// The goal was re-fed and the model finished WITHOUT doing any work
 				// since. Push it once first: a nudge is cheaper than a judge call and
@@ -1567,7 +1669,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					if verdict == judgeDone {
 						goalMet = true // only an explicit DONE marks the goal verifiably met
 						a.emit("judge", map[string]any{"done": true})
-					} else if lastMissing = missing; returns < a.maxReturns {
+					} else if lastMissing = missing; returns < a.maxReturns && !proseOnly {
 						returns++
 						actedSinceReturn, idleNudged = false, false
 						told := goalReturn(a.target(goal, msgs), missing)
@@ -1993,8 +2095,12 @@ func CorrectionsBlock(notes []string) string {
 	if len(notes) > maxCorrections {
 		notes = notes[len(notes)-maxCorrections:]
 	}
-	return "\n\nThe user's corrections since (they override the above where they conflict):\n- " + strings.Join(notes, "\n- ")
+	return correctionsHeader + strings.Join(notes, "\n- ")
 }
+
+// correctionsHeader opens CorrectionsBlock; runIsTheGoal looks for it to tell a
+// goal with corrections from a goal with a second paragraph.
+const correctionsHeader = "\n\nThe user's corrections since (they override the above where they conflict):\n- "
 
 // goalReturnOpening is the fixed opening of every goal re-feed (see goalReturn).
 const goalReturnOpening = "The GOAL is NOT complete yet"
@@ -2388,7 +2494,7 @@ func parseJudgeReply(reply llm.Message) (verdict judgeVerdict, missing, source s
 	// attached — it is a judge that has not settled, and taking whichever came
 	// first meant the verdict flipped with the order of the array. MORE wins,
 	// the same way it does in text.
-	sawDone, sawMore, moreMissing := false, false, ""
+	sawDone, sawMore, sawOther, moreMissing := false, false, false, ""
 	for _, tc := range reply.ToolCalls {
 		switch tc.Name {
 		case "done":
@@ -2410,11 +2516,20 @@ func parseJudgeReply(reply llm.Message) (verdict judgeVerdict, missing, source s
 			// main.go after the edit" — it was asking for evidence it had not
 			// been given, and the call was dropped without even naming it.
 			slog.Debug("goal judge asked for a tool it doesn't have", "tool", tc.Name, "args", clip(tc.Arguments, 120))
+			sawOther = true
 		}
 	}
 	switch {
 	case sawMore:
 		return judgeMore, moreMissing, "tool"
+	case sawOther:
+		// A request for evidence next to a DONE — as done() or in the text: the
+		// judge declared the goal met while asking to look at something it had
+		// not seen. That is no verdict. A MORE in the text still stands.
+		if v, missing := parseVerdict(reply.Content); v == judgeMore {
+			return judgeMore, missing, "content"
+		}
+		return judgeUnclear, "", ""
 	case sawDone:
 		// A done() call alongside text that says otherwise is the same
 		// unsettled answer in a different shape.
@@ -2589,9 +2704,12 @@ func (a *Agent) runToolCalls(ctx context.Context, calls []llm.ToolCall) ([]llm.M
 	errs := make([]bool, len(calls))
 	// Concurrency: a single call, or a side-effecting batch, runs sequentially so
 	// calls can't race the filesystem/ledger — EXCEPT a pure fan-out of `agent`
-	// spawns, which are independent sub-agents (own dirs/clients/usage-locking), so
-	// we run those in parallel. A mixed batch (spawns + writes) stays sequential.
-	concurrent := len(calls) > 1 && (!a.anyMutating(calls) || a.allAgentCalls(calls))
+	// spawns that can't touch the same files: in plan mode (sub-agents inherit it
+	// and can't write), or each in its own directory. Spawns sharing a directory
+	// edit the same checkout, and run one after another. A mixed batch (spawns +
+	// writes) stays sequential.
+	concurrent := len(calls) > 1 && (!a.anyMutating(calls) ||
+		a.allAgentCalls(calls) && (a.planMode.Load() || a.separateSpawnDirs(calls)))
 	if !concurrent {
 		for i, c := range calls {
 			// A cancellation mid-batch (esc during a multi-call turn) must stop
@@ -2634,6 +2752,42 @@ func (a *Agent) allAgentCalls(calls []llm.ToolCall) bool {
 		}
 	}
 	return len(calls) > 0
+}
+
+// separateSpawnDirs reports whether every spawn in the batch works in its own
+// directory, none of them the same as or inside another's. No dir means the
+// session's own. With a spawnDirKey the comparison is on where each would really
+// work; without one, on the dirs as written, where a relative and an absolute
+// path can't be compared and so count as overlapping.
+func (a *Agent) separateSpawnDirs(calls []llm.ToolCall) bool {
+	dirs := make([]string, 0, len(calls))
+	for _, c := range calls {
+		_, params, _ := parseArgs(c.Arguments)
+		d, _ := params["dir"].(string)
+		d = strings.TrimSpace(d)
+		if a.spawnDirKey != nil {
+			if d = a.spawnDirKey(d); d == "" {
+				return false
+			}
+		} else if d == "" {
+			d = "."
+		}
+		dirs = append(dirs, filepath.Clean(d))
+	}
+	for i := range dirs {
+		for j := i + 1; j < len(dirs); j++ {
+			if filepath.IsAbs(dirs[i]) != filepath.IsAbs(dirs[j]) || nestedDir(dirs[i], dirs[j]) || nestedDir(dirs[j], dirs[i]) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// nestedDir reports whether dir is base or a directory under it.
+func nestedDir(base, dir string) bool {
+	rel, err := filepath.Rel(base, dir)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // anyMutating reports whether the batch has any side-effecting call — a mutating

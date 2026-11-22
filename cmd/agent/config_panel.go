@@ -269,8 +269,9 @@ func (m *tuiModel) renderAddProviderForm(accent lipgloss.Style) []string {
 	return append(lines, "", cDim.Render("  enter next/save · esc back · ←→ home end ctrl+u edit"))
 }
 
-// finalizeTaskDoneAway drains a task that finished while a modal (a /config-style
-// panel, or the approval prompt) was showing over it — idle, then anything queued.
+// finalizeTaskDoneAway finishes a task that ended while a modal (a /config-style
+// panel, or the approval prompt) was showing over it, the way taskDoneMsg would
+// have: plan handshake or idle, auto-compact, then anything queued (afterTask).
 // Reports whether it applied (m.taskDoneAway was set) so a caller with its own
 // restore-state (e.g. resolveApproval's m.preApprove) knows to keep that instead.
 func (m *tuiModel) finalizeTaskDoneAway() (tea.Model, tea.Cmd, bool) {
@@ -278,12 +279,8 @@ func (m *tuiModel) finalizeTaskDoneAway() (tea.Model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 	m.taskDoneAway = false
-	m.state = stIdle
-	if len(m.queued) > 0 {
-		model, cmd := m.drainQueue()
-		return model, cmd, true
-	}
-	return m, m.input.Focus(), true
+	model, cmd := m.afterTask()
+	return model, cmd, true
 }
 
 // closePanel leaves a modal panel: back to the still-running task if one is live,

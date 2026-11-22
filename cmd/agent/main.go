@@ -562,9 +562,13 @@ type app struct {
 	promptHist []string          // submitted inputs (tasks + /commands), oldest→newest, persisted per workspace for ↑ recall across restarts
 	snippets   map[string]string // named prompt templates (/snip save+recall), persisted globally
 
-	jobMu  sync.Mutex // guards jobs/jobSeq — background sub-agent runs (see jobs.go)
+	jobMu  sync.Mutex // guards jobs/jobSeq/midRunJobs — background sub-agent runs (see jobs.go)
 	jobs   []*job
 	jobSeq int
+	// midRunJobs were delivered to the running task between its steps; the agent
+	// keeps their notes in history when that run ends. A force-detached run never
+	// ends that way, so forceDetach hands them back for the fresh agent.
+	midRunJobs []*job
 
 	btwMu      sync.Mutex // guards pendingBtw — /steer notes folded into a running task
 	pendingBtw []string   // /steer notes awaiting the running task's next turn (see jobs.go drainSteers)
@@ -1103,6 +1107,13 @@ func (a *app) runSpawnPlan(ctx context.Context, plan spawnPlan, task string, onL
 		a.addSessionCost(plan.llmCfg.Model, pt, ct, plan.priceOverrides) // sub-agent spend counts toward /budget too
 		_ = a.usage.Save()
 	}
+	if err == nil && tr.Stopped {
+		// The delegate gave up (step budget, stuck, a failed turn) or was cancelled
+		// with work done. Run hands that back as a clean return with a note in
+		// Final; passed on as-is, the parent read the note as the delegate's
+		// findings and /jobs showed a ✓.
+		err = fmt.Errorf("sub-agent stopped before finishing:\n%s", tr.Final)
+	}
 	done := map[string]any{"agent": id, "profile": plan.profile, "ok": err == nil}
 	if err != nil {
 		done["error"] = oneLine(err.Error(), 60)
@@ -1188,6 +1199,31 @@ func (a *app) profilesOrHint() string {
 		return strings.Join(names, ", ")
 	}
 	return "none yet — add one in /config"
+}
+
+// spawnWorkKey is where a spawn into dir would do its work (see
+// Agent.SetSpawnDirKey): the real path, widened to the git checkout it is in —
+// sibling dirs of one repository share its index and HEAD, so one delegate's
+// commit would sweep up the other's staged edits. "" when it can't be resolved.
+func (a *app) spawnWorkKey(dir string) string {
+	root := a.pol.Workdir() // the default, as in resolveSpawn
+	if d := strings.TrimSpace(dir); d != "" {
+		r, err := a.resolveSpawnDir(d)
+		if err != nil {
+			return ""
+		}
+		root = r
+	}
+	real, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return ""
+	}
+	if top := strings.TrimSpace(mustGit(real, "rev-parse", "--show-toplevel")); top != "" {
+		if t, err := filepath.EvalSymlinks(top); err == nil {
+			return t
+		}
+	}
+	return real
 }
 
 // resolveSpawnDir turns a sub-agent's dir argument into an absolute path: ~ and
@@ -2021,7 +2057,7 @@ func (a *app) goalTTL(verb string, fields []string) []string {
 	}
 	a.cfg.GoalMaxReturns = n // applied per goal run via goalLoopBudget
 	if n == 0 {
-		return []string{"goal loop → off (one run; the model decides when it's done)"}
+		return []string{"goal loop → off (one run, no judge; the goal stays open until /goal clear)"}
 	}
 	return []string{fmt.Sprintf("goal loop → up to %d re-feed(s) before giving up", n)}
 }
@@ -3399,8 +3435,8 @@ func (a *app) wire() error {
 		run, _ := a.readOnlyRun()
 		a.ag.SetReadOnly(run)
 	}
-	a.ag.SetBeforeTurn(a.beforeTurn) // finished background jobs fold in between steps of a running task
-	a.ag.SetSteers(a.drainSteers)    // so do /steer notes, and before a final answer is accepted
+	a.ag.SetBeforeTurn(a.beforeTurn(a.ag)) // finished background jobs fold in between steps of a running task
+	a.ag.SetSteers(a.drainSteers)          // so do /steer notes, and before a final answer is accepted
 	ag := a.ag
 	ag.SetModeSwitch(func() (bool, string, bool) { return a.takeMode(ag.Detached) }) // and a mode chosen with shift+tab mid-task
 	a.ag.SetAsides(a.drainAsides)                                                    // /btw side questions answered between steps, one no-tools turn each
@@ -3409,6 +3445,7 @@ func (a *app) wire() error {
 	}
 	a.ensureShadow()                                           // once per process, here on the wiring goroutine
 	a.riskGateOn.Store(a.cfg.RiskCheck)                        // read by tool goroutines, never a.cfg there
+	a.ag.SetSpawnDirKey(a.spawnWorkKey)                        // parallel spawns only where they can't share files
 	a.ag.SetRiskObserver(a.riskObserver(pol, a.cfg.Run.Shell)) // risk scoring
 	a.ag.SetCallGate(a.riskGate(pol))                          // a flagged call stops for a person
 	a.ag.SetContextWindow(a.activeLLM().ContextWindow)         // so a single long task can watch its OWN growing trail mid-run

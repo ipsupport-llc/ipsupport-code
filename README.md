@@ -843,12 +843,13 @@ survives a restart — an unfinished one offers to resume **once** on the next
 start (not every time), and a completed goal clears itself. `/goal` shows the
 standing goal and its status; `/goal go`
 resumes it; `/goal clear` drops it; `/goal off` disables the loop (a goal then runs
-as a single pass). Plain tasks (anything you type that isn't a goal) run as one
+as a single pass, and only `/goal clear` closes it). Plain tasks (anything you type that isn't a goal) run as one
 pass with no judge overhead — only an explicit goal gets the loop.
 
-The judge defaults to done on any unparseable reply, so a confused model can't trap
-the agent in the loop. The whole thing is gated on real progress: a turn that calls
-no tools is never judged or re-fed. If a re-fed model then finishes without doing
+An unparseable judge reply is asked once more, then counts as not met and the goal
+is re-fed; the re-feed budget above is what keeps a confused judge from trapping the
+agent. A prose answer to a side question asked while a goal stands is not judged;
+a run of the goal itself always is. If a re-fed model then finishes without doing
 any work, it gets **one** push to act before the loop gives up (turn it off with
 `config set goal_nudge false`). And when the loop stops without the judge ever
 confirming success, it says so plainly — *"goal not confirmed complete, `/goal go`

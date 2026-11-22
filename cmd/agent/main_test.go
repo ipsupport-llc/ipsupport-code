@@ -92,7 +92,7 @@ func TestBeforeTurnDeliversFinishedJob(t *testing.T) {
 	a.addBtw("also check the tests") // a steer goes through its own hook, not this one
 
 	before := a.ag.SessionLen()
-	msgs := a.beforeTurn()
+	msgs := a.beforeTurn(a.ag)()
 	if len(msgs) != 1 || !strings.Contains(msgs[0].Content, "codex report: patched") {
 		t.Fatalf("beforeTurn = %v, want only the job note", msgs)
 	}
@@ -100,19 +100,43 @@ func TestBeforeTurnDeliversFinishedJob(t *testing.T) {
 		t.Fatal("beforeTurn took the steer — it would reach the model unannounced")
 	}
 
-	// The job note is durable (folded into history).
-	h := a.ag.History()
-	if len(h) != before+1 || !strings.Contains(h[len(h)-1].Content, "codex report: patched") {
-		t.Fatalf("job note not persisted to history")
+	// History is the agent's to write once the run ends (see Run): written here,
+	// mid-task, the note landed ahead of the task it arrived during.
+	if a.ag.SessionLen() != before {
+		t.Fatalf("beforeTurn wrote the job note into history mid-task")
 	}
 
 	// The task-boundary path must not re-deliver an already-delivered job.
 	a.injectJobResults()
-	if a.ag.SessionLen() != before+1 {
+	if a.ag.SessionLen() != before {
 		t.Error("injectJobResults re-delivered a job already drained by beforeTurn")
 	}
-	if got := a.drainJobResults(); got != nil {
+	if got := a.drainJobResults(a.ag); got != nil {
 		t.Errorf("drainJobResults re-delivered: %v", got)
+	}
+}
+
+// A job result handed to a run that is then force-detached never reaches
+// history: the wedged run never ends, so it never keeps the note. The fresh
+// agent has to get it, or the report is lost for good.
+func TestForceDetachRequeuesJobResultsTheRunTook(t *testing.T) {
+	a := wiredApp(t)
+	a.jobs = append(a.jobs, &job{id: 1, profile: "codex", task: "fix the repo", done: true, ok: true, result: "codex report: patched"})
+	old := a.ag
+	if got := a.drainJobResults(old); len(got) != 1 {
+		t.Fatalf("drain = %v, want the job note", got)
+	}
+	m := &tuiModel{app: a, ctx: context.Background(), bridge: newBridge(), input: textarea.New(), spin: spinner.New(), state: stRunning}
+	m.cancel = func() {}
+	m.forceDetach()
+	// The wedged run reaching its next drain after the detach takes nothing:
+	// the requeued result belongs to the fresh agent.
+	if got := a.drainJobResults(old); got != nil {
+		t.Fatalf("the detached run took %v after the requeue", got)
+	}
+	a.injectJobResults() // the fresh agent's next task
+	if h := a.ag.History(); len(h) == 0 || !strings.Contains(h[len(h)-1].Content, "codex report: patched") {
+		t.Errorf("after force-detach the job report never reached the fresh agent: %v", h)
 	}
 }
 
@@ -2303,7 +2327,7 @@ func TestClosePanelStates(t *testing.T) {
 	}
 
 	// Task finished while the panel was open → idle, and the queued command drains.
-	m = &tuiModel{state: stConfig, input: textarea.New(), app: &app{cfg: config.Default()}}
+	m = &tuiModel{state: stConfig, input: textarea.New(), app: wiredApp(t)}
 	m.taskDoneAway = true
 	m.queued = []string{"/help"}
 	if _, _ = m.closePanel(); m.state != stIdle {
@@ -2357,6 +2381,18 @@ func TestPlanReviewHandshake(t *testing.T) {
 	m.Update(taskDoneMsg{})
 	if m.state == stPlanReview {
 		t.Error("a cancelled plan task should skip plan-review")
+	}
+
+	// a plan task that finished behind /config gets the handshake when it closes
+	m = newM()
+	m.state = stConfig
+	m.Update(taskDoneMsg{})
+	if m.state != stConfig || !m.taskDoneAway {
+		t.Fatalf("finished behind /config → state=%v taskDoneAway=%v; want the panel kept open", m.state, m.taskDoneAway)
+	}
+	m.closePanel()
+	if m.state != stPlanReview {
+		t.Errorf("closing /config after a plan task → state %v, want stPlanReview", m.state)
 	}
 }
 
@@ -2996,18 +3032,18 @@ func tailWriter(max int, s string) *textutil.BoundedTailWriter {
 // externalResult keeps the parent's context lean: stdout tail always, stderr only
 // on failure, diff summary with the /diff pointer.
 func TestExternalResult(t *testing.T) {
-	ok := externalResult("codex", tailWriter(maxExternalStdout, "did the thing"), tailWriter(maxExternalStderr, "warn noise"), "1 file changed", nil)
+	ok := externalResult("codex", tailWriter(maxExternalStdout, "did the thing"), tailWriter(maxExternalStderr, "warn noise"), "1 file changed", nil, nil)
 	if !strings.Contains(ok, "did the thing") || strings.Contains(ok, "warn noise") {
 		t.Errorf("success must include stdout, not stderr:\n%s", ok)
 	}
 	if !strings.Contains(ok, "1 file changed") || !strings.Contains(ok, "/diff") {
 		t.Errorf("diff summary + /diff pointer missing:\n%s", ok)
 	}
-	bad := externalResult("codex", tailWriter(maxExternalStdout, "partial"), tailWriter(maxExternalStderr, "boom"), "", fmt.Errorf("exit 1"))
+	bad := externalResult("codex", tailWriter(maxExternalStdout, "partial"), tailWriter(maxExternalStderr, "boom"), "", nil, fmt.Errorf("exit 1"))
 	if !strings.Contains(bad, "boom") {
 		t.Errorf("failure must include the stderr tail:\n%s", bad)
 	}
-	long := externalResult("codex", tailWriter(maxExternalStdout, strings.Repeat("x", maxExternalStdout+500)), tailWriter(maxExternalStderr, ""), "", nil)
+	long := externalResult("codex", tailWriter(maxExternalStdout, strings.Repeat("x", maxExternalStdout+500)), tailWriter(maxExternalStderr, ""), "", nil, nil)
 	if !strings.Contains(long, "…") {
 		t.Error("oversized stdout should be tail-clipped with a marker")
 	}
@@ -3451,9 +3487,13 @@ func TestBackgroundJobLifecycle(t *testing.T) {
 		t.Errorf("/jobs result = %q", full)
 	}
 
-	// next turn boundary: the result lands in the conversation exactly once
-	before := a.ag.SessionLen()
+	// next turn boundary: the result lands in the conversation exactly once,
+	// as an ordinary append that leaves earlier /rewind checkpoints valid
+	before, gen := a.ag.SessionLen(), a.ag.HistoryGen()
 	a.injectJobResults()
+	if a.ag.HistoryGen() != gen {
+		t.Error("injecting a job note reshaped history — every earlier /rewind checkpoint is invalidated")
+	}
 	h := a.ag.History()
 	if len(h) != before+1 || !strings.Contains(h[len(h)-1].Content, "ok: ping the thing") {
 		t.Fatalf("result not injected into history")
@@ -3809,6 +3849,73 @@ func TestSpawnExternalAgent(t *testing.T) {
 	}
 	if time.Since(start) > 4*time.Second {
 		t.Error("timeout did not kill the process promptly")
+	}
+}
+
+// git diff --stat never lists a new file, so an external agent whose whole job
+// was creating files reported no changes at all, and the parent could redo the
+// work. Files that were already untracked before it ran are not its doing.
+func TestExternalAgentReportsTheFilesItCreated(t *testing.T) {
+	ws := t.TempDir()
+	for _, args := range [][]string{{"init", "-q"}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"}} {
+		if out, err := exec.Command("git", append([]string{"-C", ws}, args...)...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(ws, "before.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.Agents = map[string]config.AgentProfile{"mk": {Kind: "external", Command: "touch"}}
+	a := &app{cfg: cfg, workspace: ws, approver: fixedApprover(true)}
+	out, err := a.spawnAgent(context.Background(), "mk", "made.txt", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "--- new files ---\nmade.txt") {
+		t.Errorf("result does not list the created file:\n%s", out)
+	}
+	// A name outside ASCII comes back as written, not git-quoted.
+	if out, err = a.spawnAgent(context.Background(), "mk", "заметки.txt", ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "\nзаметки.txt") {
+		t.Errorf("result does not list the non-ASCII file as written:\n%s", out)
+	}
+	if strings.Contains(out, "before.txt") {
+		t.Errorf("result lists a file that was there before the agent ran:\n%s", out)
+	}
+
+	// An agent that commits what it made: nothing is untracked and the working
+	// tree matches the index, yet the work has to show.
+	script := filepath.Join(t.TempDir(), "commit.sh")
+	body := "#!/bin/sh\necho hi > committed.txt && git add committed.txt && git -c user.name=t -c user.email=t@t commit -q -m add\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	a.cfg.Agents["ci"] = config.AgentProfile{Kind: "external", Command: script}
+	out, err = a.spawnAgent(context.Background(), "ci", "commit it", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "committed.txt") {
+		t.Errorf("result does not show the file the agent committed:\n%s", out)
+	}
+
+	// The same in a repository with no commit yet: there is no HEAD to diff
+	// against, and the work must still show.
+	fresh := t.TempDir()
+	if out, err := exec.Command("git", "-C", fresh, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	a.cfg.Workspace, a.workspace = fresh, fresh
+	out, err = a.spawnAgent(context.Background(), "ci", "commit it", fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "committed.txt") {
+		t.Errorf("in a repository with no commit, the committed file does not show:\n%s", out)
 	}
 }
 
@@ -4775,6 +4882,75 @@ func TestSpawnAgentLocalRuns(t *testing.T) {
 	}
 	if !strings.Contains(out, "looks good") {
 		t.Errorf("sub-agent answer = %q", out)
+	}
+}
+
+// Spawns may run side by side only where they can't share files. Compared as
+// written, a symlink to a dir passed for a different dir, and two subdirs of one
+// git repository passed as separate though they share its index and HEAD.
+func TestSpawnWorkKeyFindsSharedTrees(t *testing.T) {
+	a := wiredApp(t)
+	base := t.TempDir()
+	repo := filepath.Join(base, "repo")
+	for _, d := range []string{"svc/a", "svc/b"} {
+		if err := os.MkdirAll(filepath.Join(repo, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("git", "-C", repo, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	plain, other := filepath.Join(base, "plain"), filepath.Join(base, "other")
+	for _, d := range []string{plain, other} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alias := filepath.Join(base, "alias")
+	if err := os.Symlink(plain, alias); err != nil {
+		t.Fatal(err)
+	}
+	key := a.spawnWorkKey
+	if key(filepath.Join(repo, "svc/a")) != key(filepath.Join(repo, "svc/b")) {
+		t.Error("two subdirs of one repository got different keys")
+	}
+	if key(alias) != key(plain) {
+		t.Error("a symlink and its target got different keys")
+	}
+	if key(plain) == key(other) || key(plain) == "" {
+		t.Errorf("separate dirs: %q vs %q — want distinct, non-empty", key(plain), key(other))
+	}
+	if key(filepath.Join(base, "missing")) != "" {
+		t.Error("an unresolvable dir must come back empty, so the batch runs one at a time")
+	}
+}
+
+// A delegate that runs out of steps hands back a note, not findings. Returned as
+// a plain answer, the parent read "(no final answer — step budget exhausted…)"
+// as the delegate's report and /jobs marked it ✓.
+func TestSpawnAgentThatStoppedIsAFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"file","arguments":"{\"action\":\"list\",\"params\":{\"path\":\".\"}}"}}]}}]}`)
+	}))
+	defer srv.Close()
+	cfg := config.Default()
+	cfg.Workspace = t.TempDir()
+	cfg.LLM.BaseURL = srv.URL + "/v1"
+	cfg.LLM.Type = ""
+	cfg.GoalMaxSteps = 2 // never answers: the budget runs out
+	cfg.Agents = map[string]config.AgentProfile{"loc": {Provider: "local"}}
+	kb, _ := knowledge.Open("")
+	a := &app{cfg: cfg, workspace: cfg.Workspace, kb: kb,
+		reader: bufio.NewReader(strings.NewReader("")), approver: fixedApprover(true)}
+	if err := a.wire(); err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.spawnAgent(context.Background(), "loc", "list the files", "")
+	if err == nil {
+		t.Fatalf("a delegate that ran out of steps came back as a success: %q", out)
+	}
+	if !strings.Contains(err.Error(), "stopped before finishing") {
+		t.Errorf("err = %v, want it to say the delegate stopped", err)
 	}
 }
 
@@ -7253,7 +7429,7 @@ func TestSteerDrainsOnce(t *testing.T) {
 	if a.btwPending() != 0 {
 		t.Error("buffer not cleared after drain")
 	}
-	if got := a.beforeTurn(); len(got) != 0 {
+	if got := a.beforeTurn(a.ag)(); len(got) != 0 {
 		t.Errorf("beforeTurn delivered %v — steers have their own hook now", got)
 	}
 }

@@ -834,8 +834,26 @@ func TestFileEditRefusesAnAmbiguousFind(t *testing.T) {
 	}
 }
 
+// A new file is created the way anything else is, under the user's umask —
+// not widened to 0644 by a chmod.
+func TestFileWriteNewFileFollowsUmask(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX modes")
+	}
+	old := setUmask(0o077)
+	defer setUmask(old)
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	if r := tl.Call(context.Background(), "write", map[string]any{"path": "new.txt", "content": "x"}); r.IsError {
+		t.Fatal(r.Content)
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "new.txt")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600 under umask 077", fi.Mode().Perm())
+	}
+}
+
 // A whole-file write keeps a UTF-8 byte order mark the file had: the model
-// never sees it, so it dropped it silently.
+// never sees it, so it dropped it silently. Not into an empty write, though.
 func TestFileWriteKeepsABOM(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "b.csv")
@@ -848,6 +866,12 @@ func TestFileWriteKeepsABOM(t *testing.T) {
 	}
 	if data, _ := os.ReadFile(p); string(data) != "\ufeffa,b,c\n" {
 		t.Errorf("result = %q, want the BOM kept", data)
+	}
+	if r := tl.Call(context.Background(), "write", map[string]any{"path": "b.csv", "content": ""}); r.IsError {
+		t.Fatal(r.Content)
+	}
+	if data, _ := os.ReadFile(p); len(data) != 0 {
+		t.Errorf("empty write left %q, want an empty file", data)
 	}
 }
 
@@ -1023,5 +1047,37 @@ func TestFileSearchLooksInCIDirectories(t *testing.T) {
 	}
 	if r := tl.Call(ctx, "search", map[string]any{"query": "nowhere-at-all"}); !strings.Contains(r.Content, "starting with a dot were skipped") {
 		t.Errorf("empty search = %q, want it to say what was skipped", r.Content)
+	}
+}
+
+// A whole-file replace must not cut links: through a symlink the target is what
+// gets written, and a file with another hard link is written in place so both
+// names see the new content.
+func TestFileWriteKeepsLinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX links")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.yaml")
+	if err := os.WriteFile(target, []byte("a: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real.yaml", filepath.Join(dir, "conf.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(target, filepath.Join(dir, "hard.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+	if r := tl.Call(context.Background(), "write", map[string]any{"path": "conf.yaml", "content": "a: 2\n"}); r.IsError {
+		t.Fatal(r.Content)
+	}
+	if fi, err := os.Lstat(filepath.Join(dir, "conf.yaml")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink was replaced by a file")
+	}
+	for _, name := range []string{"real.yaml", "hard.yaml"} {
+		if data, _ := os.ReadFile(filepath.Join(dir, name)); string(data) != "a: 2\n" {
+			t.Errorf("%s = %q, want the new content", name, data)
+		}
 	}
 }

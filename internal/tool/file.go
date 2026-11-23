@@ -66,7 +66,7 @@ func NewFile(p *policy.Engine, ap Approver, snap Snapshotter) Tool {
 			{Name: "read", Params: []Param{Req("path", "str"), Opt("offset", "int", "0"), Opt("limit", "int", "0")}, Note: "(offset/limit: line window, big files)", Run: f.read},
 			{Name: "write", Mutates: true, Params: []Param{Req("path", "str"), Opt("content", "str", "")}, Note: "(overwrites; omit content = empty file)", Run: f.write},
 			{Name: "append", Mutates: true, Params: []Param{Req("path", "str"), Req("content", "str")}, Run: f.appendFile},
-			{Name: "edit", Mutates: true, Params: []Param{Req("path", "str"), Opt("find", "str", ""), Opt("replace", "str", ""), Opt("replace_all", "bool", ""), Opt("edits", "str", "")}, Note: "(1st match; replace_all=all; or edits=JSON [{find,replace},…])", Run: f.edit},
+			{Name: "edit", Mutates: true, Params: []Param{Req("path", "str"), Opt("find", "str", ""), Opt("replace", "str", ""), Opt("replace_all", "bool", ""), Opt("edits", "str", "")}, Note: "(find must match exactly once, or set replace_all; or edits=JSON [{find,replace},…])", Run: f.edit},
 			{Name: "list", Params: []Param{Opt("path", "str", ".")}, Run: f.list},
 			{Name: "find", Params: []Param{Req("pattern", "str"), Opt("path", "str", ".")}, Note: "(glob names, e.g. **/*.go)", Run: f.find},
 			{Name: "search", Params: []Param{Req("query", "str"), Opt("path", "str", ".")}, Note: "(regex; file:line: match)", Run: f.search},
@@ -446,7 +446,7 @@ func (f *fileTool) writeFile(ctx context.Context, action string, a Args, appendM
 		// silently, and some tools (Windows ones above all) read the file
 		// differently without it.
 		const bom = "\ufeff"
-		if strings.HasPrefix(old, bom) && !strings.HasPrefix(content, bom) {
+		if content != "" && !strings.HasPrefix(content, bom) && startsWith(abs, bom) {
 			content = bom + content
 		}
 		if err := replaceFile(abs, []byte(content)); err != nil {
@@ -463,6 +463,19 @@ func (f *fileTool) writeFile(ctx context.Context, action string, a Args, appendM
 		res.Diff = udiff.Unified(path, path, old, content)
 	}
 	return res
+}
+
+// startsWith reports whether the file at abs begins with prefix, reading only
+// that much — the whole file may be too big to have been read.
+func startsWith(abs, prefix string) bool {
+	fh, err := os.Open(abs)
+	if err != nil {
+		return false
+	}
+	defer fh.Close()
+	buf := make([]byte, len(prefix))
+	n, _ := io.ReadFull(fh, buf)
+	return string(buf[:n]) == prefix
 }
 
 // toCRLF turns every lone \n into \r\n, leaving existing \r\n alone.
@@ -513,10 +526,20 @@ func notAFile(abs string) error {
 // failure part-way — a full disk, a kill — leaves the original as it was; the
 // old way truncated it first and could leave half a file, and /rewind keeps no
 // copy of a file over 1 MiB.
+//
+// A file with other hard links is written in place: a new file renamed over
+// one name would leave the others holding the old content.
 func replaceFile(abs string, data []byte) (err error) {
 	perm := os.FileMode(0o644)
-	if fi, e := os.Stat(abs); e == nil {
-		perm = fi.Mode().Perm()
+	fi, statErr := os.Stat(abs)
+	if statErr != nil {
+		// A new file has no old content to lose: create it directly, so the
+		// user's umask applies as it does to anything else written.
+		return writeInPlace(abs, data, perm)
+	}
+	perm = fi.Mode().Perm()
+	if linkCount(fi) > 1 {
+		return writeInPlace(abs, data, perm)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(abs), "."+filepath.Base(abs)+".ipco-*")
 	if err != nil {
@@ -541,7 +564,14 @@ func replaceFile(abs string, data []byte) (err error) {
 	if err = os.Chmod(tmp.Name(), perm); err != nil {
 		return err
 	}
-	return os.Rename(tmp.Name(), abs)
+	keepOwner(tmp.Name(), fi) // best effort: the new file is ours, the old may be a group's
+	if err = os.Rename(tmp.Name(), abs); err != nil {
+		// Renaming over can fail where writing doesn't — on Windows, a file
+		// another program holds open. Write in place rather than not at all.
+		os.Remove(tmp.Name())
+		return writeInPlace(abs, data, perm)
+	}
+	return nil
 }
 
 // writeInPlace truncates and rewrites abs, reporting a failed flush on close.

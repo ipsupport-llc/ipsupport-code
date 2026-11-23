@@ -8,6 +8,25 @@ import (
 	"syscall"
 )
 
+// linkCount is how many names the file has (hard links).
+func linkCount(fi os.FileInfo) int {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return int(st.Nlink)
+	}
+	return 1
+}
+
+// keepOwner gives path the owner and group fi had, where we may: a replaced
+// file otherwise belongs to whoever ran the agent. Errors are ignored — a
+// non-root user can only keep a group it is in, and that is still worth doing.
+func keepOwner(path string, fi os.FileInfo) {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		if os.Chown(path, int(st.Uid), int(st.Gid)) != nil {
+			os.Chown(path, -1, int(st.Gid))
+		}
+	}
+}
+
 // openAppend opens abs for appending. A named pipe is opened without blocking:
 // with no reader, opening it for writing would wait forever with the file lock
 // held; it fails at once instead (ENXIO). Once open, writes block as usual.

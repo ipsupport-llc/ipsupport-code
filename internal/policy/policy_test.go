@@ -269,6 +269,9 @@ func TestRunArgvFloorReadsShellGrammar(t *testing.T) {
 		"echo `rm -fr ~/w`",
 		"bash -c 'rm -fr ~/w'",
 		"sh -c \"FOO=1 rm -fr ~/w\"",
+		"FOO='a b' rm -fr ~/w", // a quoted value is one word, not two
+		"FOO=\"a b\" rm -fr ~/w",
+		"FOO=$(echo a b) rm -fr ~/w",
 	} {
 		if got := e.Run(cmd); got != Deny {
 			t.Errorf("Run(%q) = %v, want Deny (hard floor)", cmd, got)
@@ -279,6 +282,18 @@ func TestRunArgvFloorReadsShellGrammar(t *testing.T) {
 		if got := e.Run(cmd); got == Deny {
 			t.Errorf("Run(%q) = Deny, want it allowed — it deletes nothing", cmd)
 		}
+	}
+}
+
+// Nesting deeper than the parser follows is left as text the floor can't look
+// into: it is asked, never auto-run, even under run.default=allow.
+func TestRunAsksWhatItCannotParse(t *testing.T) {
+	c := config.Default()
+	c.Run = config.RunPolicy{Default: "allow"}
+	e := eng(t, c)
+	deep := "echo " + strings.Repeat("$(echo ", 40) + "rm -fr ~/w" + strings.Repeat(")", 40)
+	if got := e.Run(deep); got == Allow {
+		t.Errorf("Run(deeply nested rm) = Allow, want it asked or denied")
 	}
 }
 

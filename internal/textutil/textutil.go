@@ -131,8 +131,15 @@ func (w *HeadTailWriter) String() string {
 		return w.head.String()
 	}
 	head := w.head.Bytes()
-	for len(head) > 0 && !utf8.Valid(head) { // the cut may land mid-rune
-		head = head[:len(head)-1]
+	// The cut may land mid-rune: drop an incomplete last rune, never more —
+	// output that isn't UTF-8 at all keeps its head.
+	for i := 1; i <= utf8.UTFMax && i <= len(head); i++ {
+		if r := head[len(head)-i]; utf8.RuneStart(r) {
+			if !utf8.FullRune(head[len(head)-i:]) {
+				head = head[:len(head)-i]
+			}
+			break
+		}
 	}
 	tail := w.tail.String()
 	cut := w.total - len(head) - len(tail)

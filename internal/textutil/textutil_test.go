@@ -122,7 +122,23 @@ func TestHeadTailWriterKeepsTheEnd(t *testing.T) {
 	if !w.Truncated || !strings.HasPrefix(got, "line\nline") || !strings.HasSuffix(got, "FAIL: TestX\n") || !strings.Contains(got, "bytes cut from the middle") {
 		t.Errorf("over the cap: %q", got)
 	}
-	if kept := len(got) - len("\n…[ bytes cut from the middle]…\n") - len("232"); kept > 30 {
-		t.Errorf("kept %d bytes of text, cap 30", kept)
+	// 50×"line\n" + "FAIL: TestX\n" = 262 bytes; 10 kept at the head, 20 at the tail.
+	if !strings.Contains(got, "\n…[232 bytes cut from the middle]…\n") {
+		t.Errorf("cut count wrong: %q", got)
+	}
+}
+
+// Output that isn't UTF-8 at all keeps its head: only an incomplete last rune
+// at the cut is dropped.
+func TestHeadTailWriterKeepsABinaryHead(t *testing.T) {
+	w := NewHeadTailWriter(30)
+	w.Write([]byte("\xff\xfe" + strings.Repeat("b", 100)))
+	if got := w.String(); !strings.HasPrefix(got, "\xff\xfebbbbbbbb") {
+		t.Errorf("head = %q, want the binary bytes kept", got[:min(len(got), 12)])
+	}
+	w = NewHeadTailWriter(30)
+	w.Write([]byte(strings.Repeat("a", 9) + "é" + strings.Repeat("z", 100))) // é straddles the 10-byte head
+	if got := w.String(); !strings.HasPrefix(got, strings.Repeat("a", 9)+"\n…[") {
+		t.Errorf("head = %q, want the split rune dropped", got[:min(len(got), 14)])
 	}
 }

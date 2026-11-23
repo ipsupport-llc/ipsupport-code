@@ -10,6 +10,8 @@ import (
 
 func mkfifo(string) error { return errors.ErrUnsupported }
 
+func setUmask(int) int { return 0 }
+
 // os.UserHomeDir reads USERPROFILE on Windows, not the HOME the tests set, so
 // point it at a throwaway dir to keep tests out of the real user config.
 func TestMain(m *testing.M) {

@@ -979,6 +979,40 @@ func TestGitDefaultAndNamedRemotesStayInTheJail(t *testing.T) {
 	}
 }
 
+// clone names its own source: the workspace repository's origin has nothing to
+// do with it, and an origin outside the jail refused an unrelated clone.
+func TestGitCloneIgnoresTheWorkspaceOrigin(t *testing.T) {
+	outside := initRepo(t)
+	ws := initRepo(t)
+	exec.Command("git", "-C", ws, "remote", "add", "origin", outside).Run()
+	src := filepath.Join(ws, "src")
+	exec.Command("git", "init", "-q", src).Run()
+	exec.Command("git", "-C", src, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "s").Run()
+	tl := gitToolFor(t, ws, yes())
+	if r := tl.Call(context.Background(), "clone", map[string]any{"url": "./src", "dir": "copy"}); r.IsError {
+		t.Errorf("clone refused for the workspace's origin: %s", r.Content)
+	}
+}
+
+// Detached HEAD: a bare push has no branch and fails; the approval must not
+// name origin as where it goes. Nothing staged: no staged list in the approval.
+func TestGitApprovalsNameOnlyRealThings(t *testing.T) {
+	dir := initRepo(t)
+	exec.Command("git", "-C", dir, "commit", "-q", "--allow-empty", "-m", "a").Run()
+	exec.Command("git", "-C", dir, "remote", "add", "origin", "https://github.com/example/r.git").Run()
+	exec.Command("git", "-C", dir, "checkout", "-q", "--detach").Run()
+	var detail string
+	ap := approverFunc(func(_, d string) bool { detail = d; return false })
+	gitToolFor(t, dir, ap).Call(context.Background(), "push", map[string]any{})
+	if strings.Contains(detail, "origin (") {
+		t.Errorf("detached HEAD push approval names origin: %q", detail)
+	}
+	gitToolFor(t, dir, ap).Call(context.Background(), "commit", map[string]any{"message": "x"})
+	if strings.Contains(detail, "staged:") {
+		t.Errorf("commit with nothing staged lists: %q", detail)
+	}
+}
+
 // A checkout's config can rewrite a remote's URL (insteadOf). The approval
 // shows where git will really connect, not just the remote's name.
 func TestGitPushApprovalShowsTheRealURL(t *testing.T) {

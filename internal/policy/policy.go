@@ -188,13 +188,22 @@ func (e *Engine) Run(command string) Decision {
 	// the bodies of if/while/for, and code handed to sh -c / bash -c. The two
 	// splits above see none of them, and with run.default=allow the floor is
 	// the only thing between `echo $(rm -fr ~)` and the shell.
-	for _, c := range shellsplit.Parse(e.dialect(), cmd).Commands {
+	parsed := shellsplit.Parse(e.dialect(), cmd)
+	for _, c := range parsed.Commands {
 		if dangerousSegment(c) {
 			return Deny
 		}
 	}
 	if anyMatch(e.deny, cmd) { // configured deny globs + the glob floor, matched anywhere
 		return Deny
+	}
+	// Nesting past what the parser follows was left as text the floor could
+	// not look inside: never run that unasked, whatever allows it.
+	if parsed.Incomplete {
+		if d := parseDefault(e.runDefault); d == Deny {
+			return Deny
+		}
+		return Ask
 	}
 	if e.allowsAll(cmd, segs) {
 		return Allow
@@ -285,7 +294,57 @@ func looksLikeArgValue(s string) bool {
 // denied even under an allow glob, and can't be turned off by config. Best-effort:
 // it sees through common wrappers but not a full nested shell (sh -c "…"); the
 // ask-default is the real backstop when allow-globs aren't set.
-func dangerousSegment(seg string) bool { return dangerousArgv(strings.Fields(seg), 0) }
+func dangerousSegment(seg string) bool {
+	if windowsShell { // PowerShell and cmd quote and escape differently (` is an escape there)
+		return dangerousArgv(strings.Fields(seg), 0)
+	}
+	return dangerousArgv(shellFields(seg), 0)
+}
+
+// shellFields splits a command into words the way the shell does for this
+// purpose: on blanks outside quotes, $( ) and backticks. strings.Fields cut
+// FOO='a b' rm -fr x into FOO='a, b', rm — and b' was taken for the program.
+func shellFields(s string) []string {
+	var out []string
+	var b strings.Builder
+	inSingle, inDouble, inTick, depth := false, false, false, 0
+	rs := []rune(s)
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		switch {
+		case inSingle:
+			inSingle = r != '\''
+		case r == '\\' && i+1 < len(rs):
+			b.WriteRune(r)
+			i++
+			r = rs[i]
+		case r == '\'' && !inDouble && !inTick && depth == 0:
+			inSingle = true
+		case r == '"' && !inTick:
+			inDouble = !inDouble
+		case r == '`':
+			inTick = !inTick
+		case r == '$' && i+1 < len(rs) && rs[i+1] == '(':
+			depth++
+			b.WriteRune(r)
+			i++
+			r = rs[i]
+		case r == ')' && depth > 0:
+			depth--
+		case (r == ' ' || r == '\t' || r == '\n') && !inDouble && !inTick && depth == 0:
+			if b.Len() > 0 {
+				out = append(out, b.String())
+				b.Reset()
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+	if b.Len() > 0 {
+		out = append(out, b.String())
+	}
+	return out
+}
 
 // windowsShell: commands run in PowerShell or cmd (tool.Shell), where names
 // carry no case and maybe .exe, and the ways to wipe a tree or a disk have

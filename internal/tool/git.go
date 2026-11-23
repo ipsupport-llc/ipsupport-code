@@ -335,7 +335,7 @@ func (g *gitTool) runNetTo(ctx context.Context, action, remote string, args ...s
 	// approval read just "git push" with nowhere named, nor was a local path
 	// there checked against the jail. Resolve it the way git will.
 	target := remote
-	if target == "" {
+	if target == "" && (action == "push" || action == "pull") { // clone names its own source
 		target = g.defaultRemote(ctx, action)
 	}
 	if target != "" && !g.offline() {
@@ -349,7 +349,12 @@ func (g *gitTool) runNetTo(ctx context.Context, action, remote string, args ...s
 			u = g.run(ctx, action, false, "ls-remote", "--get-url", "--", target)
 		}
 		if !u.IsError {
-			urls := strings.Fields(u.Content)
+			var urls []string // one per line; a local path may hold spaces
+			for _, line := range strings.Split(u.Content, "\n") {
+				if line = strings.TrimSpace(line); line != "" {
+					urls = append(urls, line)
+				}
+			}
 			// A named remote's URL is a path on this machine too, when it is
 			// one: the jail applies to where git actually goes, not to the name.
 			for _, url := range urls {
@@ -395,7 +400,11 @@ func (g *gitTool) defaultRemote(ctx context.Context, action string) string {
 		return strings.TrimSpace(r.Content)
 	}
 	keys := []string{}
-	if b := get("symbolic-ref", "--quiet", "--short", "HEAD"); b != "" {
+	b := get("symbolic-ref", "--quiet", "--short", "HEAD")
+	if b == "" && action == "push" {
+		return "" // detached HEAD: a bare push has no branch to send, and fails — name nothing
+	}
+	if b != "" {
 		if action == "push" {
 			keys = append(keys, "branch."+b+".pushRemote", "remote.pushDefault")
 		}
@@ -700,8 +709,12 @@ func (g *gitTool) commit(ctx context.Context, a Args) Result {
 		return Err(err.Error())
 	}
 	var staged, blocked []string
-	for _, name := range strings.Split(listed.Content, "\x00") {
-		if name = strings.TrimSpace(name); name == "" {
+	names := listed.Content
+	if names == "(ok, no output)" { // run()'s sentinel: nothing is staged
+		names = ""
+	}
+	for _, name := range strings.Split(names, "\x00") {
+		if name == "" { // names are used exactly as git gives them — a space is part of one
 			continue
 		}
 		staged = append(staged, name)

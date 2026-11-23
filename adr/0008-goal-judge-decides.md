@@ -18,7 +18,9 @@ runaway guards and a hard step cap. **When goal mode is on, the judge decides**;
 the agent's own claim of completion is not enough.
 
 Guards against the loop itself: an unparseable judge reply is asked once more,
-then counts as **not met** and the goal is re-fed — a judge that cannot answer
+then counts as **not met** and the goal is re-fed (on a local server each ask is
+the continuation judge first, then the standalone one if that gives no verdict,
+so one verdict point can take up to four requests) — a judge that cannot answer
 has confirmed nothing; a re-fed run that finishes without doing any work gets one
 nudge, and if it idles again it goes to the judge like any other finish. A
 continuation judge (ADR-0015) that answers with a tool call has not answered, nor

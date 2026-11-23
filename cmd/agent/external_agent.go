@@ -137,6 +137,9 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 		cmd.Stdout, cmd.Stderr = stdout, stderr
 	}
 	untrackedBefore := untrackedFiles(root)
+	// Before the run: an agent that runs git init and commits must not turn
+	// "not listed" into an empty summary, nor one that removes .git the reverse.
+	notListed := notListedWhy(root)
 	headBefore := strings.TrimSpace(mustGit(root, "rev-parse", "--verify", "-q", "HEAD"))
 	if headBefore == "" && strings.TrimSpace(mustGit(root, "rev-parse", "--git-dir")) != "" {
 		// A repository with no commit yet: the starting point is the empty tree
@@ -165,6 +168,11 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 		diffArgs = append(diffArgs, headBefore)
 	}
 	body := externalResult(command, stdout, stderr, strings.TrimSpace(mustGit(root, diffArgs...)), created, runErr)
+	if notListed != "" {
+		// No change summary is possible there; say so, rather than let an empty
+		// one read as "it changed nothing".
+		body += "\n\n(" + root + " " + notListed + ", so its changes are not listed — look at the files to see what the agent did.)"
+	}
 	done := map[string]any{"agent": id, "profile": profile, "ok": runErr == nil}
 	if runErr != nil {
 		done["error"] = oneLine(runErr.Error(), 60)
@@ -211,6 +219,25 @@ func untrackedFiles(dir string) map[string]bool {
 		}
 	}
 	return set
+}
+
+// notListedWhy says why the changes in dir can't be summarised from git, or ""
+// when they can: dir is in a working tree. Git failing for some other reason
+// (a directory owned by another user, no git at all) is not the same as there
+// being no checkout, and is not reported as one.
+func notListedWhy(dir string) string {
+	out, err := gitOut(dir, "rev-parse", "--is-inside-work-tree")
+	switch {
+	case err == nil && strings.TrimSpace(out) == "true":
+		return ""
+	case err == nil:
+		return "is not a git working tree" // a bare repository, or inside .git
+	}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && strings.Contains(string(ee.Stderr), "not a git repository") {
+		return "is not a git checkout"
+	}
+	return "could not be read with git"
 }
 
 // maxCreatedListed caps the new-file list handed back to the parent model.

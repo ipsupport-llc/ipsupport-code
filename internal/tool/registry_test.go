@@ -186,6 +186,21 @@ func TestDispatchDoesNotOverwriteAlreadyGivenSoleParam(t *testing.T) {
 	}
 }
 
+// An action of another tool gets that tool's example only when what the model
+// sent fits it: run called with action "run" and a command meant a command,
+// and an example spawning a sub-agent would send it the wrong way.
+func TestExampleForAnotherToolsActionOnlyWhenTheParamsFit(t *testing.T) {
+	spawn := func(context.Context, string, string, string) (string, error) { return "", nil }
+	rt := runToolFor(t, t.TempDir(), "allow", yes(), nil)
+	r := NewRegistry(rt, NewAgent(spawn, nil), NewWebLive(nil, nil), NewCalc())
+	if tool, ex := r.Example("run", "run", map[string]any{"command": "ls"}); ex != "" {
+		t.Errorf("run+action run+command → %s example %s, want none", tool, ex)
+	}
+	if tool, ex := r.Example("calc", "fetch", map[string]any{"url": "https://example.com"}); tool != "web" || ex != `{"action":"fetch","params":{"url":"https://example.com"}}` {
+		t.Errorf("calc+fetch+url → %q %s, want web's fetch", tool, ex)
+	}
+}
+
 func TestOpenAIToolsSchema(t *testing.T) {
 	r := NewRegistry(&fakeTool{name: "calc", actions: []string{"calculate"}})
 	tools := r.OpenAITools()

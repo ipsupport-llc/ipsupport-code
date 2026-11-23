@@ -46,6 +46,9 @@ func TestDomainExampleIsACopyableCall(t *testing.T) {
 			{Name: "read", Params: []Param{Req("path", "str"), Opt("limit", "int", "200")}},
 			{Name: "write", Params: []Param{Req("path", "str"), Req("content", "str"), Opt("append", "bool", "false")}},
 			{Name: "list", Params: []Param{Opt("path", "str", ".")}},
+			{Name: "edit", Params: []Param{Req("path", "str"), Opt("find", "str", ""), Opt("replace", "str", ""), Opt("edits", "list", "")}},
+			{Name: "branch", Mutates: true, Params: []Param{Opt("name", "str", "")}},
+			{Name: "log"},
 		},
 	})
 	cases := []struct {
@@ -58,13 +61,26 @@ func TestDomainExampleIsACopyableCall(t *testing.T) {
 		// an optional param the model did give is kept
 		{"read", map[string]any{"limit": 5}, `{"action":"read","params":{"path":"<path>","limit":5}}`},
 		// a long value is never carried truncated
-		{"write", map[string]any{"content": strings.Repeat("x", 200)}, `{"action":"write","params":{"path":"<path>","content":"<the content you sent>"}}`},
+		{"write", map[string]any{"content": strings.Repeat("x", 200)}, `{"action":"write","params":{"path":"<path>","content":"<content>"}}`},
 		// a garbled action names the one it contains
 		{"read_file", map[string]any{"path": "a.go"}, `{"action":"read","params":{"path":"a.go"}}`},
 		{"WRITE", nil, `{"action":"write","params":{"path":"<path>","content":"<content>"}}`},
 		// nothing to match, or more than one: no example
 		{"delete", nil, ""},
 		{"read_then_write", nil, ""}, // names two actions: no guess
+		// nothing to correct — the call failed for another reason: no example
+		{"read", map[string]any{"path": "a.go"}, ""},
+		// an optional value is kept as sent, a lone space included
+		{"edit", map[string]any{"find": "abc", "replace": " "}, `{"action":"edit","params":{"path":"<path>","find":"abc","replace":" "}}`},
+		// a large value deep in a list is not repeated
+		{"edit", map[string]any{"edits": []any{map[string]any{"find": strings.Repeat("y", 300)}}}, `{"action":"edit","params":{"path":"<path>","edits":["<edits>"]}}`},
+		// a guess never lands on a mutating action
+		{"make_branch", map[string]any{"name": "feature"}, ""},
+		// whole words only: "catalog" does not name log
+		{"catalog", nil, ""},
+		{"readFile", map[string]any{"path": "a.go"}, `{"action":"read","params":{"path":"a.go"}}`},
+		// a value of the wrong type is a slot, not part of a correct call
+		{"read", map[string]any{"limit": "five"}, `{"action":"read","params":{"path":"<path>","limit":"<limit>"}}`},
 		{"", nil, ""},
 	}
 	for _, c := range cases {

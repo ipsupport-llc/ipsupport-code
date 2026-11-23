@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // Param declares one action parameter. It is the single source for BOTH the
@@ -169,8 +170,20 @@ func (d *Domain) Call(ctx context.Context, action string, params map[string]any)
 // placeholder for each required one it left out, anything undeclared dropped.
 // An action name that isn't the domain's own is matched to one it contains or
 // is contained in ("read_file" → read); "" when nothing matches.
+//
+// "" too when the example would correct nothing — every required param given
+// and the action already right. Then the call failed for some other reason (a
+// remote MCP tool's own validation, say), and labelling the same call "correct"
+// would only send the model back to it.
 func (d *Domain) Example(action string, given map[string]any) string {
+	return d.example(action, given, false)
+}
+
+// example is Example; corrected says the call is already being corrected
+// elsewhere (sent to the wrong tool), so even a complete one is worth showing.
+func (d *Domain) example(action string, given map[string]any, corrected bool) string {
 	a, ok := d.index[action]
+	corrected = corrected || !ok
 	if !ok {
 		a, ok = d.closestAction(action)
 		if !ok {
@@ -182,15 +195,15 @@ func (d *Domain) Example(action string, given map[string]any) string {
 	first := true
 	for _, p := range a.Params {
 		v, has := given[p.Name]
-		if has && isEmpty(v) {
-			has = false
-		}
 		var val string
 		switch {
-		case has:
+		case p.Required && (!has || isEmpty(v)):
+			// Validation counts a blank required value as missing.
+			val, corrected = placeholder(p), true
+		case has && v != nil:
+			// An optional value is kept as sent, a lone space included: replace=" "
+			// dropped from the example would turn a replace into a delete.
 			val = exampleValue(p, v)
-		case p.Required:
-			val = placeholder(p)
 		default:
 			continue
 		}
@@ -201,20 +214,44 @@ func (d *Domain) Example(action string, given map[string]any) string {
 		b.WriteString(jsonString(p.Name) + ":" + val)
 	}
 	b.WriteString("}}")
+	if !corrected {
+		return ""
+	}
 	return b.String()
 }
 
-// closestAction finds the one action whose name the given one contains, or is
-// contained in, ignoring case. Ambiguous or none: false.
+// declaresAny reports whether action declares any of the params given.
+func (d *Domain) declaresAny(action string, given map[string]any) bool {
+	a, ok := d.index[action]
+	if !ok {
+		return false
+	}
+	for _, p := range a.Params {
+		if _, has := given[p.Name]; has {
+			return true
+		}
+	}
+	return false
+}
+
+// closestAction finds the one action named by a word of the given name
+// ("read_file", "readFile", "file-read" → read), ignoring case. Whole words
+// only: "catalog" is not log, "check" is not checkout. Ambiguous or none: false.
+// Never a mutating one:
+// "list_branches" must not come back as git's branch, which creates a branch —
+// a guess may only point at something that changes nothing.
 func (d *Domain) closestAction(given string) (*Action, bool) {
-	g := strings.ToLower(strings.TrimSpace(given))
-	if g == "" {
+	words := nameWords(given)
+	if len(words) == 0 {
 		return nil, false
 	}
 	var found []*Action
 	for i := range d.spec.Actions {
 		n := strings.ToLower(d.spec.Actions[i].Name)
-		if strings.Contains(g, n) || strings.Contains(n, g) {
+		if d.spec.Actions[i].Mutates {
+			continue
+		}
+		if words[n] || strings.EqualFold(strings.TrimSpace(given), n) {
 			found = append(found, &d.spec.Actions[i])
 		}
 	}
@@ -224,28 +261,73 @@ func (d *Domain) closestAction(given string) (*Action, bool) {
 	return found[0], true
 }
 
-// exampleValue is the model's own value for p, as JSON. A long string is shown
-// as a placeholder instead: a copied example must never carry a truncated copy
-// of, say, a file's content.
-func exampleValue(p Param, v any) string {
-	if s, ok := v.(string); ok && len(s) > 80 {
-		return jsonString("<the " + p.Name + " you sent>")
+// nameWords splits an identifier into lower-case words: on anything not a letter
+// or digit, and at a lower-to-upper case change ("readFile" → read, file).
+func nameWords(s string) map[string]bool {
+	words := map[string]bool{}
+	var cur []rune
+	flush := func() {
+		if len(cur) > 0 {
+			words[strings.ToLower(string(cur))] = true
+			cur = cur[:0]
+		}
 	}
+	var prev rune
+	for _, r := range s {
+		switch {
+		case !unicode.IsLetter(r) && !unicode.IsDigit(r):
+			flush()
+		case unicode.IsUpper(r) && unicode.IsLower(prev):
+			flush()
+			cur = append(cur, r)
+		default:
+			cur = append(cur, r)
+		}
+		prev = r
+	}
+	flush()
+	return words
+}
+
+// maxExampleValue caps one value's JSON in an example.
+const maxExampleValue = 120
+
+// exampleValue is the model's own value for p, as JSON. A long one — at any
+// depth, a list of edits included — is shown as a placeholder instead: a copied
+// example must never carry a truncated copy of, say, a file's content, nor
+// repeat a large one into the prompt.
+//
+// The placeholder is the ordinary one, "<content>": a weak model copying the
+// example must see a slot to fill, not a sentence it could send as the content.
+// A value of the wrong JSON type for its param is a slot too — it is not part of
+// a correct call.
+func exampleValue(p Param, v any) string {
 	out, err := marshalPlain(v)
-	if err != nil {
+	if err != nil || len(out) > maxExampleValue || !typeMatches(p.Type, v) {
 		return placeholder(p)
 	}
 	return out
 }
 
-// placeholder stands in for a required value the model left out.
+// typeMatches reports whether a decoded JSON value fits a declared param type.
+func typeMatches(typ string, v any) bool {
+	switch v.(type) {
+	case string:
+		return typ == "str" || typ == ""
+	case float64, json.Number, int, int64:
+		return typ == "int" || typ == "number"
+	case bool:
+		return typ == "bool"
+	case []any:
+		return typ == "list"
+	}
+	return false
+}
+
+// placeholder stands in for a value the model has to supply. Always a marked
+// slot, whatever the type: a bare 1 or true would be copied as a real value.
 func placeholder(p Param) string {
-	switch p.Type {
-	case "int", "number":
-		return "1"
-	case "bool":
-		return "true"
-	case "list":
+	if p.Type == "list" {
 		return "[" + jsonString("<"+p.Name+">") + "]"
 	}
 	return jsonString("<" + p.Name + ">")

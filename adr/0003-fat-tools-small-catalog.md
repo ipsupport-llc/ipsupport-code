@@ -19,7 +19,11 @@ tokens; growth is treated as a cost, not a free addition.
 
 When a tool call fails, a matching lesson from past runs is injected into the
 error the model sees (ADR-0007), so the model doesn't need a separate
-"how do I use this" round trip.
+"how do I use this" round trip. A call that misuses a tool (a missing param, an
+unknown action) is also answered with a filled-in correct call for the action it
+meant — its own values kept, a placeholder for each one it left out — ahead of
+the tool's schema: a weak model copies an example more reliably than it builds
+a call from types.
 
 ## Consequences
 

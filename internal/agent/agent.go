@@ -3012,6 +3012,11 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool)
 		// to chase. The descriptions are kept lean, so this is cheap and only
 		// fires on errors.
 		if usageError(res.Content) {
+			// A filled-in call first: a weak model copies an example far more
+			// reliably than it builds one from the schema below.
+			if ex := a.reg.Example(c.Name, action, params); ex != "" {
+				extra = append(extra, "A correct "+c.Name+" call looks like this — use your real values in place of any <placeholder>:\n"+ex)
+			}
 			if u := strings.TrimSpace(a.reg.Usage(c.Name)); u != "" {
 				extra = append(extra, c.Name+" usage:\n"+u)
 			}

@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -159,6 +160,112 @@ func (d *Domain) Call(ctx context.Context, action string, params map[string]any)
 			strings.Join(required, ", "), strings.Join(given, ", ")))
 	}
 	return a.Run(ctx, Args{m: params})
+}
+
+// Example is a ready-to-copy arguments object for one of the domain's actions,
+// for a model that just called it wrongly: a weak model copies an example far
+// more reliably than it assembles a call from a typed schema. It is built from
+// what the model sent — its values for params the action declares, a
+// placeholder for each required one it left out, anything undeclared dropped.
+// An action name that isn't the domain's own is matched to one it contains or
+// is contained in ("read_file" → read); "" when nothing matches.
+func (d *Domain) Example(action string, given map[string]any) string {
+	a, ok := d.index[action]
+	if !ok {
+		a, ok = d.closestAction(action)
+		if !ok {
+			return ""
+		}
+	}
+	var b strings.Builder
+	b.WriteString(`{"action":` + jsonString(a.Name) + `,"params":{`)
+	first := true
+	for _, p := range a.Params {
+		v, has := given[p.Name]
+		if has && isEmpty(v) {
+			has = false
+		}
+		var val string
+		switch {
+		case has:
+			val = exampleValue(p, v)
+		case p.Required:
+			val = placeholder(p)
+		default:
+			continue
+		}
+		if !first {
+			b.WriteByte(',')
+		}
+		first = false
+		b.WriteString(jsonString(p.Name) + ":" + val)
+	}
+	b.WriteString("}}")
+	return b.String()
+}
+
+// closestAction finds the one action whose name the given one contains, or is
+// contained in, ignoring case. Ambiguous or none: false.
+func (d *Domain) closestAction(given string) (*Action, bool) {
+	g := strings.ToLower(strings.TrimSpace(given))
+	if g == "" {
+		return nil, false
+	}
+	var found []*Action
+	for i := range d.spec.Actions {
+		n := strings.ToLower(d.spec.Actions[i].Name)
+		if strings.Contains(g, n) || strings.Contains(n, g) {
+			found = append(found, &d.spec.Actions[i])
+		}
+	}
+	if len(found) != 1 {
+		return nil, false
+	}
+	return found[0], true
+}
+
+// exampleValue is the model's own value for p, as JSON. A long string is shown
+// as a placeholder instead: a copied example must never carry a truncated copy
+// of, say, a file's content.
+func exampleValue(p Param, v any) string {
+	if s, ok := v.(string); ok && len(s) > 80 {
+		return jsonString("<the " + p.Name + " you sent>")
+	}
+	out, err := marshalPlain(v)
+	if err != nil {
+		return placeholder(p)
+	}
+	return out
+}
+
+// placeholder stands in for a required value the model left out.
+func placeholder(p Param) string {
+	switch p.Type {
+	case "int", "number":
+		return "1"
+	case "bool":
+		return "true"
+	case "list":
+		return "[" + jsonString("<"+p.Name+">") + "]"
+	}
+	return jsonString("<" + p.Name + ">")
+}
+
+func jsonString(s string) string {
+	out, _ := marshalPlain(s)
+	return out
+}
+
+// marshalPlain is json.Marshal without HTML escaping: the example is read by a
+// model, and "\u003cpath\u003e" is not "<path>" to it.
+func marshalPlain(v any) (string, error) {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
 }
 
 // soleRequiredParam returns the sole action's name and its ONE required

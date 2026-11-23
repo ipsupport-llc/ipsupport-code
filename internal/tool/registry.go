@@ -235,6 +235,15 @@ func (r *Registry) Usage(name string) string {
 	return ""
 }
 
+// Example is a ready-to-copy arguments object for a call of name that went
+// wrong (see Domain.Example), or "" when the tool can't offer one.
+func (r *Registry) Example(name, action string, given map[string]any) string {
+	if d, ok := r.tools[name].(*Domain); ok {
+		return d.Example(action, given)
+	}
+	return ""
+}
+
 // Mutates reports whether (name, action) changes state — the gate plan mode uses.
 func (r *Registry) Mutates(name, action string) bool {
 	if t, ok := r.tools[name]; ok {

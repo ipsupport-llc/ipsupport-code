@@ -189,6 +189,9 @@ type Agent struct {
 	// goalGap is what the judge said was missing when this goal was last
 	// attempted — see SetGoalGap.
 	goalGap string
+	// pendingQuestion is what the last run on this goal stopped to ask the user
+	// (Transcript.Asked) — see SetPendingQuestion.
+	pendingQuestion string
 
 	// goalText is the STANDING goal's own text — what the judge accepts against
 	// and what a re-feed puts back in front of the model. Empty means "whatever
@@ -402,6 +405,12 @@ func (a *Agent) SetContextWindow(n int) { a.contextWindow = n }
 // give-up re-derived its own shortfall from scratch, at the cost of a fresh
 // judge round, while the answer sat on disk. Empty when there is none.
 func (a *Agent) SetGoalGap(text string) { a.goalGap = strings.TrimSpace(text) }
+
+// SetPendingQuestion says the last run on the standing goal stopped on this
+// question to the user (Transcript.Asked), so this run's message is the answer:
+// it carries the goal on and is judged like the goal itself, even when the model
+// just acknowledges it in prose. Empty clears.
+func (a *Agent) SetPendingQuestion(q string) { a.pendingQuestion = strings.TrimSpace(q) }
 
 // SetGoalText sets the standing goal's own text as the acceptance target,
 // independent of what any one run was asked to do.
@@ -1440,7 +1449,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 				// disk. Cancellation is excluded: esc means give control back, not
 				// spend another model call.
 				if !cancelled {
-					met, missing := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn,
+					met, missing, asked := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn,
 						"turn_failed", stopNote(msgs, false, err)+actionsDigest(msgs, a.reg)+a.priorGapNote(returns), msgs)
 					goalMet = met
 					if !met {
@@ -1456,7 +1465,10 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// not the model failing the goal, and no amount of re-feeding
 					// changes that: the verdict is recorded and the run ends, with
 					// the goal left standing and resumable.
-					if !met && returns < a.maxReturns && llm.IsDegenerateOutput(err) {
+					if asked {
+						tr.Asked = missing
+					}
+					if !met && !asked && returns < a.maxReturns && llm.IsDegenerateOutput(err) {
 						returns++
 						actedSinceReturn, idleNudged, degenerateNudged = false, false, false
 						told := goalReturn(a.target(goal, msgs), missing)
@@ -1464,7 +1476,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 						a.emit("continue", map[string]any{"return": returns, "of": a.maxReturns, "missing": missing, "told": told})
 						continue
 					}
-					tr.Final += goalNotConfirmedNote(a.maxReturns, met, tr.Missing)
+					tr.Final += goalEndNote(a.maxReturns, met, asked, tr.Missing)
 				}
 				tr.PromptTokens = promptTokens
 				a.emit("final", map[string]any{"text": tr.Final})
@@ -1608,13 +1620,16 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// go), a prose answer may be exactly what the goal asked for ("explain
 			// X", "write up Y"), and skipping the judge left such a goal open for
 			// good.
-			chatReply := !acted && strings.TrimSpace(clean) != "" && !a.runIsTheGoal(goal)
+			chatReply := !acted && strings.TrimSpace(clean) != "" && !a.runIsTheGoal(goal) && a.pendingQuestion == ""
 			asked := false // the judge found the run waiting on the user (judgeAsk)
 			if !a.planMode.Load() && a.maxReturns > 0 && !chatReply {
 				// The goal was re-fed and the model finished WITHOUT doing any work
 				// since. Push it once first: a nudge is cheaper than a judge call and
 				// spends no return.
-				if a.nudgeIdle && !idleNudged && returns > 0 && !actedSinceReturn {
+				// Not for a run that never used a tool: its re-fed goal is answered
+				// in prose ("explain X"), and "do it with tools" would push it off
+				// the work it was doing. The judge reads that reply instead.
+				if a.nudgeIdle && !idleNudged && returns > 0 && !actedSinceReturn && acted {
 					idleNudged = true
 					msgs = append(msgs, llm.User(idleNudge))
 					a.emit("nudge", map[string]any{"idle": true, "told": idleNudge})
@@ -1643,6 +1658,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 						why = "done"
 					}
 					verdict, missing := a.judgeGoal(ctx, why, a.target(goal, msgs), clean+actionsDigest(msgs, a.reg)+a.priorGapNote(returns), msgs)
+					verdict = askOnlyOnAQuestion(verdict, clean)
 					// Reported live: the judge's own decision (a separate LLM call)
 					// was entirely invisible in the debug log for its two NORMAL
 					// verdicts — only its failure ("goal judge failed") and
@@ -1812,7 +1828,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// actionsDigest gives it something real to go on instead: the actual
 					// files touched / commands run (and why they failed), the same record
 					// remember() below stores as cross-task memory.
-					met, missing := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn, "stuck_stop",
+					met, missing, asked := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn, "stuck_stop",
 						"(the agent got stuck repeating or failing tool calls before producing a coherent final answer.)"+actionsDigest(msgs, a.reg)+a.priorGapNote(returns),
 						msgs)
 					// Reported live: a single bad tool call, repeated until this stop,
@@ -1821,7 +1837,10 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// still alive and resumable. This fires even with no productive turn
 					// at all (hadProductiveTurn=false skips the judge above, but the goal
 					// wasn't abandoned — see goalNotConfirmedNote).
-					msg += goalNotConfirmedNote(a.maxReturns, met, missing)
+					msg += goalEndNote(a.maxReturns, met, asked, missing)
+					if asked {
+						tr.Asked = missing
+					}
 					tr.Final, tr.Stopped = msg, true
 					tr.Returns = returns
 					tr.GoalMet = met
@@ -1867,11 +1886,14 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	// is an isolated call with no access to msgs, so actionsDigest gives it
 	// something real to go on (files touched / commands run) instead of just
 	// the model's own possibly-empty final text.
-	met, missing := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn, "step_exhaustion",
+	met, missing, asked := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn, "step_exhaustion",
 		judgeResult+actionsDigest(msgs, a.reg)+a.priorGapNote(returns), msgs)
 	tr.GoalMet = met
 	tr.Missing = missing
-	clean += goalNotConfirmedNote(a.maxReturns, met, missing)
+	if asked {
+		tr.Asked = missing
+	}
+	clean += goalEndNote(a.maxReturns, met, asked, missing)
 	tr.Final = clean
 	tr.PromptTokens = promptTokens
 	a.emit("final", map[string]any{"text": clean, "suggest": suggest, "exhausted": true})
@@ -2168,6 +2190,9 @@ const idleNudge = `You re-read the GOAL but did nothing this turn — no tool ca
 // Silent once this run has produced a verdict of its own (returns > 0), which is
 // fresher than anything carried over.
 func (a *Agent) priorGapNote(returns int) string {
+	if returns == 0 && a.pendingQuestion != "" {
+		return "\n\n(the last attempt at this goal stopped to ask the user: " + a.pendingQuestion + " — the user's message in this run is their answer.)"
+	}
 	if returns > 0 || a.goalGap == "" {
 		return ""
 	}
@@ -2317,7 +2342,10 @@ func (v judgeVerdict) String() string {
 // reach a judge, even though real work happened in an earlier attempt at this
 // same goal. reason tags the "goal judge" debug log so it's clear which
 // give-up path triggered it.
-func (a *Agent) judgeOnGiveUp(ctx context.Context, goal string, returns int, hadProductiveTurn bool, reason, result string, convo []llm.Message) (met bool, missing string) {
+//
+// asked reports an ASK: the run gave up on a question only the user can answer,
+// and missing is that question.
+func (a *Agent) judgeOnGiveUp(ctx context.Context, goal string, returns int, hadProductiveTurn bool, reason, result string, convo []llm.Message) (met bool, missing string, asked bool) {
 	// NOT gated on returns >= maxReturns. That gate was removed from the normal
 	// path with the argument that funding an attempt and then refusing to grade
 	// it is the one combination that makes no sense — and then left standing
@@ -2325,11 +2353,16 @@ func (a *Agent) judgeOnGiveUp(ctx context.Context, goal string, returns int, had
 	// the default TTL of 6, a run that takes its sixth re-feed and then burns its
 	// step budget got no assessment at all.
 	if a.planMode.Load() || a.maxReturns == 0 || !(hadProductiveTurn || a.priorGoalProgress) {
-		return false, ""
+		return false, "", false
 	}
 	verdict, missing := a.judgeGoal(ctx, reason, goal, result, convo)
+	verdict = askOnlyOnAQuestion(verdict, lastAssistantText(convo))
 	slog.Debug("goal judge", a.debugArgs("verdict", verdict, "missing", missing, "return", returns, "of", a.maxReturns, "reason", reason)...)
 	met = verdict == judgeDone
+	if verdict == judgeAsk {
+		a.emit("judge", map[string]any{"ask": missing})
+		return false, missing, true
+	}
 	// judgeUnclear carries no real signal (met=false, missing="") — stay silent on
 	// it, same as the normal finalize path above, which only ever emits "judge" on
 	// a definite DONE. Without this, a give-up run's judge call was invisible on
@@ -2338,7 +2371,7 @@ func (a *Agent) judgeOnGiveUp(ctx context.Context, goal string, returns int, had
 	if met || missing != "" {
 		a.emit("judge", map[string]any{"done": met, "missing": missing})
 	}
-	return met, missing
+	return met, missing, false
 }
 
 // firstNonEmpty returns the first non-blank of its arguments.
@@ -2359,6 +2392,38 @@ func firstNonEmpty(vals ...string) string {
 // finalize path already uses for its own "goalStalled" case, so a give-up
 // doesn't read as the standing goal having silently died — only as unconfirmed
 // and resumable.
+// askOnlyOnAQuestion keeps an ASK only when the agent's last words hold a
+// question. The judge reads a record the agent wrote; an ASK on a reply that
+// asks nothing ("done, deployed") is a judge misreading it or being steered, and
+// would hand control back with nothing for the user to answer. It counts as no
+// verdict instead, which keeps the goal going.
+func askOnlyOnAQuestion(v judgeVerdict, agentText string) judgeVerdict {
+	if v == judgeAsk && !strings.ContainsAny(agentText, "?？") {
+		return judgeUnclear
+	}
+	return v
+}
+
+// lastAssistantText is the content of the last assistant message that has any.
+func lastAssistantText(msgs []llm.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "assistant" && strings.TrimSpace(msgs[i].Content) != "" {
+			return msgs[i].Content
+		}
+	}
+	return ""
+}
+
+// goalEndNote is goalNotConfirmedNote, or — when the judge found the run waiting
+// on the user — the question it waits on: "/goal go" would re-feed the goal over
+// a question only the user can answer.
+func goalEndNote(maxReturns int, met, asked bool, missing string) string {
+	if asked {
+		return "\n\n(the goal is waiting for your answer: " + missing + ")"
+	}
+	return goalNotConfirmedNote(maxReturns, met, missing)
+}
+
 func goalNotConfirmedNote(maxReturns int, met bool, missing string) string {
 	if maxReturns == 0 || met {
 		return ""
@@ -2567,15 +2632,12 @@ func parseJudgeReply(reply llm.Message) (verdict judgeVerdict, missing, source s
 			return judgeMore, missing, "content"
 		}
 		return judgeUnclear, "", ""
-	case sawAsk:
+	case sawAsk && askQuestion != "": // ask_user() with no question asks nothing: the rest decides
 		// ask_user() over a MORE in the text is unsettled: MORE wins, as above.
 		// Over done(), the question wins — the goal can't be met while the agent
 		// waits on the user.
 		if v, missing := parseVerdict(reply.Content); v == judgeMore {
 			return judgeMore, missing, "tool+content"
-		}
-		if askQuestion == "" {
-			return judgeUnclear, "", "" // a question nobody can see is no verdict
 		}
 		return judgeAsk, askQuestion, "tool"
 	case sawDone:
@@ -2609,6 +2671,9 @@ func parseJudgeReply(reply llm.Message) (verdict judgeVerdict, missing, source s
 // would read as DONE. A line that BEGINS with the token is a verdict; the same
 // word inside a sentence is not.
 var verdictLine = regexp.MustCompile("(?i)^[\\s>*_`\"'\\-]*(DONE|MORE)\\b[\\s:.\u2014-]*(.*)$")
+
+// sameLineMore finds a MORE verdict later on an ASK line.
+var sameLineMore = regexp.MustCompile(`(?i)\bMORE\s*:`)
 
 // askLine is the judge's "ASK: <question>". The colon and a question are
 // required: "Ask" opens ordinary sentences far more often than "Done" does.
@@ -2669,8 +2734,14 @@ func scanVerdictLines(s string, acceptDone bool) (judgeVerdict, string) {
 	for _, line := range strings.Split(s, "\n") {
 		line = strings.TrimSpace(line)
 		if a := askLine.FindStringSubmatch(line); a != nil {
-			if question == "" {
-				question, _ = textutil.Clip(strings.TrimSpace(a[1]), 160)
+			// "ASK: x — MORE: y" on one line is still a MORE.
+			if loc := sameLineMore.FindStringIndex(a[1]); loc != nil {
+				gap, _ := textutil.Clip(strings.TrimLeft(strings.TrimSpace(a[1][loc[1]:]), ":-—. \t"), 160)
+				return judgeMore, gap
+			}
+			// Markdown around the verdict ("**ASK:** ___") is not a question.
+			if q := strings.Trim(a[1], " \t*_`\"'"); question == "" && q != "" {
+				question, _ = textutil.Clip(q, 160)
 			}
 			continue
 		}
@@ -2703,7 +2774,7 @@ const judgeSystem = `You are a strict acceptance checker. Given a GOAL, what an 
 - "MORE: <what is still missing, in a few words>" if anything is incomplete, untested, or only described instead of done.
 - "ASK: <what the user has to answer, in a few words>" if the agent stopped to ask the user something the work cannot go on without.
 
-ASK is for a question only the user can answer: a choice between options they have to make, something only they know (what they meant, a credential, a preference), or a permission. A question the agent could answer itself — by reading the code, running a command, or just making a reasonable choice — is MORE: say what it should go and find out. When in doubt, MORE.
+ASK is for a question only the user can answer: a choice between options they have to make, something only they know (what they meant, a credential, a preference), or a permission. A question the agent could answer itself — by reading the code, running a command, or just making a reasonable choice — is MORE: say what it should go and find out. A question the user has already answered in the record is MORE too. When in doubt, MORE.
 
 You are shown the agent's whole working record for this run: what it was asked, every tool call it made, and every result those calls returned.
 

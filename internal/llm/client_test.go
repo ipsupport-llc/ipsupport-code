@@ -591,8 +591,60 @@ func TestChatRetriesAServerReportedStreamErrorOnce(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "context length exceeded") {
 		t.Fatalf("err = %v, want the server's own error", err)
 	}
-	if n != serverErrorAttempts {
-		t.Errorf("sent %d times, want %d", n, serverErrorAttempts)
+	if n != 2 {
+		t.Errorf("sent %d times, want 2 — one retry", n)
+	}
+}
+
+// A mid-stream error that says the server is busy or loading is the same as a
+// 503 before the stream: the full retry budget, not one retry.
+func TestABusyServerMidStreamKeepsTheFullRetryBudget(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "text/event-stream")
+		if n < 3 {
+			io.WriteString(w, "data: {\"error\":{\"message\":\"Model is loading\",\"type\":\"unavailable_error\",\"code\":503}}\n\n")
+			return
+		}
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+	msg, err := cl.Chat(context.Background(), []Message{User("hi")}, nil)
+	if err != nil || msg.Content != "ok" {
+		t.Errorf("content=%q err=%v after %d sends — a loading server got the one-retry cap", msg.Content, err, n)
+	}
+}
+
+// A dropped connection before the server's own error must not use up that
+// error's retry: drop, server error, then success.
+func TestAServerStreamErrorKeepsItsRetryAfterADrop(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n++
+		switch n {
+		case 1: // a drop mid-stream: one chunk, then the connection goes
+			conn, bufrw, _ := w.(http.Hijacker).Hijack()
+			bufrw.WriteString("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n")
+			data := "data: {\"choices\":[{\"delta\":{\"content\":\"par\"}}]}\n\n"
+			fmt.Fprintf(bufrw, "%x\r\n%s\r\n", len(data), data)
+			bufrw.Flush()
+			conn.Close()
+			return
+		case 2:
+			w.Header().Set("Content-Type", "text/event-stream")
+			io.WriteString(w, "data: {\"error\":{\"message\":\"generation failed\"}}\n\n")
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+	msg, err := cl.Chat(context.Background(), []Message{User("hi")}, nil)
+	if err != nil || msg.Content != "ok" {
+		t.Errorf("content=%q err=%v after %d sends — the drop used up the server error's retry", msg.Content, err, n)
 	}
 }
 

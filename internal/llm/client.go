@@ -393,6 +393,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	// errors) with exponential backoff instead of failing the whole task.
 	maxAttempts := t.retryAttempts // ride out a network glitch before giving up
 	var lastErr error
+	serverErrs := 0 // sends the server itself failed mid-stream (see serverStreamError)
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		// reqCompl counts THIS attempt's own live per-delta bumps (c.bumpToken),
 		// so a retriable failure can roll back exactly this attempt's own
@@ -418,8 +419,12 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 			break
 		}
 		var se *serverStreamError
-		if errors.As(err, &se) && attempt >= serverErrorAttempts {
-			break
+		if errors.As(err, &se) {
+			// Counted apart from dropped connections: a drop before it must not
+			// use up its retry.
+			if serverErrs++; serverErrs >= serverErrorAttempts {
+				break
+			}
 		}
 		c.rollbackCompletionCount(reqCompl) // undo only this attempt's own bumped estimate
 		wait := backoff(attempt)
@@ -697,6 +702,23 @@ func (e *serverStreamError) Error() string {
 // reporting an error mid-stream (see serverStreamError).
 const serverErrorAttempts = 2
 
+// transientStreamWords mark a mid-stream server error as the server being busy
+// rather than the request failing: those keep the full retry budget.
+var transientStreamWords = []string{"rate_limit", "rate limit", "overload", "busy", "loading", "unavailable",
+	"timeout", "timed out", "try again", "capacity", "server_error"}
+
+// transientStreamError reports whether a mid-stream error reads as the server
+// being busy, by its type, code or message.
+func transientStreamError(typ, code any, msg string) bool {
+	text := strings.ToLower(fmt.Sprint(typ) + " " + fmt.Sprint(code) + " " + msg)
+	for _, w := range transientStreamWords {
+		if strings.Contains(text, w) {
+			return true
+		}
+	}
+	return false
+}
+
 // authError is a 401: the server refused the key sent with the request.
 type authError struct {
 	err error
@@ -821,6 +843,11 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 		if ch.Error != nil {
 			// The server said the generation failed. What streamed before this
 			// is not an answer (found by review: it was returned as one).
+			if transientStreamError(ch.Error.Type, ch.Error.Code, ch.Error.Message) {
+				// Busy, overloaded, loading: the same as a 503 before the stream,
+				// and retried with the same full budget.
+				return Message{}, fmt.Errorf("llm stream: the server reported a transient error mid-stream: %s", ch.Error.Message)
+			}
 			return Message{}, &serverStreamError{msg: ch.Error.Message}
 		}
 		if len(ch.Choices) > 0 {
@@ -1077,6 +1104,11 @@ type streamChunk struct {
 	// chunk of its own (some servers do this and still end with [DONE]).
 	Error *struct {
 		Message string `json:"message"`
+		// Type and Code say what kind of failure it was; any, because servers
+		// disagree on whether a code is a string or a number, and a chunk that
+		// fails to decode is dropped whole.
+		Type any `json:"type"`
+		Code any `json:"code"`
 	} `json:"error"`
 	Choices []struct {
 		// FinishReason is the server's own stated reason for stopping this

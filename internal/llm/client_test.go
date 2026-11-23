@@ -617,6 +617,23 @@ func TestABusyServerMidStreamKeepsTheFullRetryBudget(t *testing.T) {
 	}
 }
 
+func TestTransientStreamErrorClassification(t *testing.T) {
+	for _, c := range []struct {
+		typ, msg string
+		want     bool
+	}{
+		{"unavailable_error", "Model is loading", true},
+		{"", "server busy, try again", true},
+		{"server_error", "context length exceeded", false}, // a generic type is no reason to resend
+		{"server_error", "something broke", false},
+		{"overloaded_error", "input too long for this model", false},
+	} {
+		if got := transientStreamError(c.typ, nil, c.msg); got != c.want {
+			t.Errorf("%q / %q → transient=%v, want %v", c.typ, c.msg, got, c.want)
+		}
+	}
+}
+
 // A dropped connection before the server's own error must not use up that
 // error's retry: drop, server error, then success.
 func TestAServerStreamErrorKeepsItsRetryAfterADrop(t *testing.T) {

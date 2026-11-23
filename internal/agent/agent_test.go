@@ -3023,6 +3023,21 @@ func TestTheAnswerToAQuestionCarriesTheGoalOn(t *testing.T) {
 	}
 }
 
+// /goal go while a question stands is a resume, not the answer: the judge must
+// not be told the user replied.
+func TestAResumeIsNotTheAnswer(t *testing.T) {
+	a := New(&scriptLLM{}, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 20)
+	a.SetGoalText("ship the report")
+	a.SetGoalGap("your answer: staging or prod")
+	a.SetPendingQuestion("staging or prod")
+	if note := a.priorGapNote(0, "ship the report"); strings.Contains(note, "is their answer") || !strings.Contains(note, "your answer: staging or prod") {
+		t.Errorf("resume note = %q — want the question still standing", note)
+	}
+	if note := a.priorGapNote(0, "staging"); !strings.Contains(note, "is their answer") {
+		t.Errorf("answer note = %q — want the judge told this is the answer", note)
+	}
+}
+
 // A question the run gave up on (steps ran out mid-question) is still a question:
 // the goal waits on the user, it is not "not confirmed — /goal go".
 func TestAGiveUpOnAQuestionWaitsForTheUser(t *testing.T) {

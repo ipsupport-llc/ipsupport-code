@@ -703,14 +703,25 @@ func (e *serverStreamError) Error() string {
 const serverErrorAttempts = 2
 
 // transientStreamWords mark a mid-stream server error as the server being busy
-// rather than the request failing: those keep the full retry budget.
+// rather than the request failing: those keep the full retry budget. Specific
+// conditions only — a generic type like "server_error" says nothing about
+// whether sending the same request again can work.
 var transientStreamWords = []string{"rate_limit", "rate limit", "overload", "busy", "loading", "unavailable",
-	"timeout", "timed out", "try again", "capacity", "server_error"}
+	"timeout", "timed out", "try again"}
+
+// permanentStreamWords mark the request itself as the problem; they win over
+// any transient word, so "server_error: context length exceeded" stays capped.
+var permanentStreamWords = []string{"context", "too long", "too many tokens", "exceed", "invalid", "not supported"}
 
 // transientStreamError reports whether a mid-stream error reads as the server
 // being busy, by its type, code or message.
 func transientStreamError(typ, code any, msg string) bool {
 	text := strings.ToLower(fmt.Sprint(typ) + " " + fmt.Sprint(code) + " " + msg)
+	for _, w := range permanentStreamWords {
+		if strings.Contains(text, w) {
+			return false
+		}
+	}
 	for _, w := range transientStreamWords {
 		if strings.Contains(text, w) {
 			return true

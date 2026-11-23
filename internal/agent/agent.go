@@ -1450,7 +1450,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 				// spend another model call.
 				if !cancelled {
 					met, missing, asked := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn,
-						"turn_failed", stopNote(msgs, false, err)+actionsDigest(msgs, a.reg)+a.priorGapNote(returns), msgs)
+						"turn_failed", stopNote(msgs, false, err)+actionsDigest(msgs, a.reg)+a.priorGapNote(returns, goal), msgs)
 					goalMet = met
 					if !met {
 						tr.Missing = firstNonEmpty(missing, lastMissing)
@@ -1657,7 +1657,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					if isDoneOnly(assistant.ToolCalls) {
 						why = "done"
 					}
-					verdict, missing := a.judgeGoal(ctx, why, a.target(goal, msgs), clean+actionsDigest(msgs, a.reg)+a.priorGapNote(returns), msgs)
+					verdict, missing := a.judgeGoal(ctx, why, a.target(goal, msgs), clean+actionsDigest(msgs, a.reg)+a.priorGapNote(returns, goal), msgs)
 					verdict = askOnlyOnAQuestion(verdict, clean)
 					// Reported live: the judge's own decision (a separate LLM call)
 					// was entirely invisible in the debug log for its two NORMAL
@@ -1829,7 +1829,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					// files touched / commands run (and why they failed), the same record
 					// remember() below stores as cross-task memory.
 					met, missing, asked := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn, "stuck_stop",
-						"(the agent got stuck repeating or failing tool calls before producing a coherent final answer.)"+actionsDigest(msgs, a.reg)+a.priorGapNote(returns),
+						"(the agent got stuck repeating or failing tool calls before producing a coherent final answer.)"+actionsDigest(msgs, a.reg)+a.priorGapNote(returns, goal),
 						msgs)
 					// Reported live: a single bad tool call, repeated until this stop,
 					// read as having killed the whole standing goal ("неправильный вызов
@@ -1887,7 +1887,7 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 	// something real to go on (files touched / commands run) instead of just
 	// the model's own possibly-empty final text.
 	met, missing, asked := a.judgeOnGiveUp(ctx, a.target(goal, msgs), returns, hadProductiveTurn, "step_exhaustion",
-		judgeResult+actionsDigest(msgs, a.reg)+a.priorGapNote(returns), msgs)
+		judgeResult+actionsDigest(msgs, a.reg)+a.priorGapNote(returns, goal), msgs)
 	tr.GoalMet = met
 	tr.Missing = missing
 	if asked {
@@ -2189,8 +2189,12 @@ const idleNudge = `You re-read the GOAL but did nothing this turn — no tool ca
 // to rediscover a shortfall that was already established and written down.
 // Silent once this run has produced a verdict of its own (returns > 0), which is
 // fresher than anything carried over.
-func (a *Agent) priorGapNote(returns int) string {
-	if returns == 0 && a.pendingQuestion != "" {
+//
+// A run that answers the question the last attempt stopped on is told so. A
+// resume of the goal itself (/goal go) is not an answer: it gets the ordinary
+// gap, "your answer: …", and the judge can see the question still stands.
+func (a *Agent) priorGapNote(returns int, goal string) string {
+	if returns == 0 && a.pendingQuestion != "" && !a.runIsTheGoal(goal) {
 		return "\n\n(the last attempt at this goal stopped to ask the user: " + a.pendingQuestion + " — the user's message in this run is their answer.)"
 	}
 	if returns > 0 || a.goalGap == "" {

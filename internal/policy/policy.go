@@ -405,9 +405,23 @@ var leadingNoise = map[string]bool{
 // it: `FOO=1 rm -fr x` runs rm.
 var shellAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
 
+// shellRedirect matches a redirection word: >out, 2>err, >>log, <in, &>all,
+// 2>&1. A bare operator (">" alone) takes the next word as its target.
+var shellRedirect = regexp.MustCompile(`^[0-9]*(>>?|<<?|&>>?|>&|<&)(.*)$`)
+
 func dangerousArgv(fields []string, depth int) bool {
-	for len(fields) > 0 && (leadingNoise[fields[0]] || shellAssignment.MatchString(fields[0])) {
-		fields = fields[1:]
+prefix:
+	for len(fields) > 0 {
+		switch m := shellRedirect.FindStringSubmatch(fields[0]); {
+		case leadingNoise[fields[0]] || shellAssignment.MatchString(fields[0]):
+			fields = fields[1:]
+		case m != nil && m[2] == "" && len(fields) > 1: // `> out rm …`
+			fields = fields[2:]
+		case m != nil: // `>out rm …`, `2>&1 rm …`
+			fields = fields[1:]
+		default:
+			break prefix
+		}
 	}
 	if len(fields) == 0 || depth > 4 {
 		return false

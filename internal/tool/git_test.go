@@ -1011,6 +1011,33 @@ func TestGitApprovalsNameOnlyRealThings(t *testing.T) {
 	if strings.Contains(detail, "staged:") {
 		t.Errorf("commit with nothing staged lists: %q", detail)
 	}
+
+	// Detached, but with a push default: a bare push can go somewhere, and
+	// where it goes is checked and named.
+	exec.Command("git", "-C", dir, "config", "remote.pushDefault", "origin").Run()
+	gitToolFor(t, dir, ap).Call(context.Background(), "push", map[string]any{})
+	if !strings.Contains(detail, "origin (https://github.com/example/r.git)") {
+		t.Errorf("detached push with a push default: approval = %q", detail)
+	}
+}
+
+// Committing the removal of a tracked secret is the cleanup, not a leak.
+func TestGitCommitAllowsRemovingASecret(t *testing.T) {
+	dir := initRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, ".env"), []byte("K=v"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exec.Command("git", "-C", dir, "add", ".env").Run()
+	exec.Command("git", "-C", dir, "commit", "-q", "-m", "oops").Run()
+	exec.Command("git", "-C", dir, "rm", "-q", "--cached", ".env").Run()
+	var asked string
+	tl := gitToolFor(t, dir, approverFunc(func(_, d string) bool { asked = d; return true }))
+	if r := tl.Call(context.Background(), "commit", map[string]any{"message": "untrack .env"}); r.IsError {
+		t.Fatalf("committing the removal was refused: %s", r.Content)
+	}
+	if !strings.Contains(asked, "staged: .env") {
+		t.Errorf("approval = %q, want the removal named", asked)
+	}
 }
 
 // A checkout's config can rewrite a remote's URL (insteadOf). The approval

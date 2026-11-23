@@ -818,6 +818,46 @@ func TestFileEditKeepsCRLF(t *testing.T) {
 	}
 }
 
+// In a file with mixed endings, a find given exactly as it appears names that
+// place; its CRLF form must not send the edit to another one.
+func TestFileEditPrefersTheExactMatch(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "m.txt")
+	if err := os.WriteFile(p, []byte("a\nb\r\na\r\nb\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+	if r := tl.Call(context.Background(), "edit", map[string]any{"path": "m.txt", "find": "a\nb", "replace": "X"}); r.IsError {
+		t.Fatalf("edit: %s", r.Content)
+	}
+	if data, _ := os.ReadFile(p); string(data) != "X\r\na\r\nb\r\n" {
+		t.Errorf("result = %q, want the first (exact) pair edited", data)
+	}
+}
+
+// A file a replacement can't stand in for — it carries an extended attribute
+// (POSIX ACLs are kept as one) — is written in place, keeping it.
+func TestFileWriteKeepsExtendedAttributes(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("user xattrs on Linux")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(p, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := setXattr(p, "user.ipco.test", "kept"); err != nil {
+		t.Skipf("filesystem without user xattrs: %v", err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+	if r := tl.Call(context.Background(), "write", map[string]any{"path": "x.txt", "content": "new"}); r.IsError {
+		t.Fatal(r.Content)
+	}
+	if v, err := getXattr(p, "user.ipco.test"); err != nil || v != "kept" {
+		t.Errorf("xattr after write = %q, %v — want it kept", v, err)
+	}
+}
+
 // A find that occurs more than once edited the first silently, often not the
 // one meant. It is refused, saying how many there are; replace_all still works.
 func TestFileEditRefusesAnAmbiguousFind(t *testing.T) {

@@ -538,7 +538,10 @@ func replaceFile(abs string, data []byte) (err error) {
 		return writeInPlace(abs, data, perm)
 	}
 	perm = fi.Mode().Perm()
-	if linkCount(fi) > 1 {
+	// What a new file renamed over this one can't carry over: other hard links
+	// to it, ACLs and extended attributes, and an owner other than us. Writing
+	// in place keeps them all; such files give up only the all-or-nothing write.
+	if linkCount(abs, fi) > 1 || hasXattrs(abs) || !ownedByUs(fi) {
 		return writeInPlace(abs, data, perm)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(abs), "."+filepath.Base(abs)+".ipco-*")
@@ -564,7 +567,7 @@ func replaceFile(abs string, data []byte) (err error) {
 	if err = os.Chmod(tmp.Name(), perm); err != nil {
 		return err
 	}
-	keepOwner(tmp.Name(), fi) // best effort: the new file is ours, the old may be a group's
+	keepOwner(tmp.Name(), fi) // the file is ours; its group may not be
 	if err = os.Rename(tmp.Name(), abs); err != nil {
 		// Renaming over can fail where writing doesn't — on Windows, a file
 		// another program holds open. Write in place rather than not at all.
@@ -713,8 +716,13 @@ func (f *fileTool) edit(ctx context.Context, a Args) Result {
 	updated := old
 	for i, p := range pairs {
 		find, repl := p.Find, p.Replace
+		// The text exactly as given first: in a file with mixed endings it can
+		// name a place the CRLF form of it would miss — or find elsewhere.
+		if crlf && !strings.Contains(updated, find) {
+			find = toCRLF(find)
+		}
 		if crlf {
-			find, repl = toCRLF(find), toCRLF(repl)
+			repl = toCRLF(repl)
 		}
 		clip, _ := textutil.Clip(p.Find, 60)
 		switch c := strings.Count(updated, find); {

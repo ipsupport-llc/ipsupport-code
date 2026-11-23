@@ -272,6 +272,9 @@ func TestRunArgvFloorReadsShellGrammar(t *testing.T) {
 		"FOO='a b' rm -fr ~/w", // a quoted value is one word, not two
 		"FOO=\"a b\" rm -fr ~/w",
 		"FOO=$(echo a b) rm -fr ~/w",
+		">out rm -fr ~/w", // a redirection in front is not the program
+		"> out rm -fr ~/w",
+		"2>/dev/null rm -fr ~/w",
 	} {
 		if got := e.Run(cmd); got != Deny {
 			t.Errorf("Run(%q) = %v, want Deny (hard floor)", cmd, got)

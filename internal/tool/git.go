@@ -348,6 +348,10 @@ func (g *gitTool) runNetTo(ctx context.Context, action, remote string, args ...s
 		if u.IsError {
 			u = g.run(ctx, action, false, "ls-remote", "--get-url", "--", target)
 		}
+		if !u.IsError && strings.HasSuffix(u.Content, "…[truncated]") {
+			// The URLs beyond the cap would go unchecked while git used them all.
+			return Err("too many URLs on remote " + target + " to check — git " + action + " it yourself")
+		}
 		if !u.IsError {
 			var urls []string // one per line; a local path may hold spaces
 			for _, line := range strings.Split(u.Content, "\n") {
@@ -402,7 +406,9 @@ func (g *gitTool) defaultRemote(ctx context.Context, action string) string {
 	keys := []string{}
 	b := get("symbolic-ref", "--quiet", "--short", "HEAD")
 	if b == "" && action == "push" {
-		return "" // detached HEAD: a bare push has no branch to send, and fails — name nothing
+		// Detached HEAD: only a configured push default can take a bare push
+		// anywhere (with a push refspec); without one, git refuses it.
+		return get("config", "--get", "remote.pushDefault")
 	}
 	if b != "" {
 		if action == "push" {
@@ -697,12 +703,18 @@ func (g *gitTool) commit(ctx context.Context, a Args) Result {
 	// session began — one push from published. Check the staged set, the same
 	// way, failing closed; and name it in the approval, which otherwise shows
 	// only the message.
+	// Deletions are left out of the check (--diff-filter=d): committing the
+	// removal of a tracked .env is the cleanup, not a leak. The approval still
+	// names everything staged.
 	listed := g.run(ctx, "commit", false, "diff", "--cached", "--name-only", "-z")
-	if listed.IsError {
-		return Err("could not check what is staged, so nothing was committed: " + listed.Content)
-	}
-	if strings.HasSuffix(listed.Content, "…[truncated]") {
-		return Err("too many staged files to check for secrets — commit them in smaller groups")
+	check := g.run(ctx, "commit", false, "diff", "--cached", "--name-only", "--diff-filter=d", "-z")
+	for _, r := range []Result{listed, check} {
+		if r.IsError {
+			return Err("could not check what is staged, so nothing was committed: " + r.Content)
+		}
+		if strings.HasSuffix(r.Content, "…[truncated]") {
+			return Err("too many staged files to check for secrets — commit them in smaller groups")
+		}
 	}
 	root, err := g.repoRoot(ctx)
 	if err != nil {
@@ -714,10 +726,14 @@ func (g *gitTool) commit(ctx context.Context, a Args) Result {
 		names = ""
 	}
 	for _, name := range strings.Split(names, "\x00") {
-		if name == "" { // names are used exactly as git gives them — a space is part of one
+		if name != "" { // names are used exactly as git gives them — a space is part of one
+			staged = append(staged, name)
+		}
+	}
+	for _, name := range strings.Split(check.Content, "\x00") {
+		if name == "" || name == "(ok, no output)" {
 			continue
 		}
-		staged = append(staged, name)
 		if abs, err := g.pol.Resolve(filepath.Join(root, name)); err != nil || g.pol.IsSecret(abs) {
 			blocked = append(blocked, name)
 		}

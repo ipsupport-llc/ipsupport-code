@@ -6,14 +6,31 @@ import (
 	"errors"
 	"os"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
 // linkCount is how many names the file has (hard links).
-func linkCount(fi os.FileInfo) int {
+func linkCount(_ string, fi os.FileInfo) int {
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
 		return int(st.Nlink)
 	}
 	return 1
+}
+
+// hasXattrs reports whether the file carries extended attributes — POSIX ACLs
+// among them — which a replacement file would not. An error reading them (an
+// unsupporting filesystem) counts as none.
+func hasXattrs(abs string) bool {
+	n, err := unix.Listxattr(abs, nil)
+	return err == nil && n > 0
+}
+
+// ownedByUs reports whether we own the file: a replacement is ours, and only
+// root could hand it back to another owner.
+func ownedByUs(fi os.FileInfo) bool {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return !ok || int(st.Uid) == os.Getuid()
 }
 
 // keepOwner gives path the owner and group fi had, where we may: a replaced

@@ -3758,7 +3758,11 @@ func (a *app) loadSession() {
 	if !ok {
 		return
 	}
-	a.ag.SetHistory(trimToFirstUser(sf.History))
+	h := trimToFirstUser(sf.History)
+	if dropped := len(sf.History) - len(h); dropped > 0 {
+		slog.Warn("session restored without messages that came before its first question", "dropped", dropped, "kept", len(h))
+	}
+	a.ag.SetHistory(h)
 	a.restoreWorkdir(sf.Workdir)
 	a.sessionLive = true
 }

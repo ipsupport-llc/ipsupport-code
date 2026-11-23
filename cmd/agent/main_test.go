@@ -2524,6 +2524,9 @@ func TestATaskFinishedBehindAPanelCompactsThenDrains(t *testing.T) {
 	if !ok {
 		t.Fatalf("cmd() = %T, want compactDoneMsg", msg)
 	}
+	if msg.err != nil || msg.n == 0 {
+		t.Fatalf("compact = (n=%d, err=%v), want a real compaction", msg.n, msg.err)
+	}
 	m.Update(msg)
 	if len(m.queued) != 0 {
 		t.Errorf("queue never drained once compaction finished: %v", m.queued)
@@ -5009,6 +5012,7 @@ func TestRestoredSessionOpensOnAQuestion(t *testing.T) {
 // result says so instead of an empty summary that reads as "changed nothing".
 func TestExternalAgentOutsideGitSaysChangesAreNotListed(t *testing.T) {
 	ws := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(ws)) // a temp dir inside some checkout must not find it
 	cfg := config.Default()
 	cfg.Workspace = ws
 	cfg.Agents = map[string]config.AgentProfile{"mk": {Kind: "external", Command: "touch"}}
@@ -5019,6 +5023,45 @@ func TestExternalAgentOutsideGitSaysChangesAreNotListed(t *testing.T) {
 	}
 	if !strings.Contains(out, "not a git checkout") {
 		t.Errorf("result does not say its changes can't be listed:\n%s", out)
+	}
+
+	// Decided before the run: an agent that makes the dir a repository and
+	// commits there still gets the note.
+	initer := filepath.Join(t.TempDir(), "init.sh")
+	if err := os.WriteFile(initer, []byte("#!/bin/sh\ngit init -q && echo x > f && git add f && git -c user.name=t -c user.email=t@t commit -qm x\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fresh := t.TempDir()
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(fresh))
+	a.cfg.Agents["init"] = config.AgentProfile{Kind: "external", Command: initer}
+	if out, err = a.spawnAgent(context.Background(), "init", "go", fresh); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "not a git checkout") {
+		t.Errorf("an agent that ran git init erased the note:\n%s", out)
+	}
+	t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(ws))
+
+	// Inside a checkout there is no note, from its root or a subdirectory.
+	sub := filepath.Join(ws, "sub")
+	if err := os.Mkdir(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command("git", "-C", ws, "init", "-q").CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, out)
+	}
+	for _, d := range []string{ws, sub} {
+		if why := notListedWhy(d); why != "" {
+			t.Errorf("%s inside a checkout: note %q, want none", d, why)
+		}
+	}
+	// A bare repository has no working tree to list.
+	bare := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v\n%s", err, out)
+	}
+	if why := notListedWhy(bare); why == "" {
+		t.Error("a bare repository got no note")
 	}
 }
 

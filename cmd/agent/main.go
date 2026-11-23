@@ -1979,6 +1979,9 @@ func (a *app) finishGoal(tr agent.Transcript) (met bool, worked time.Duration, r
 		if strings.TrimSpace(tr.Missing) != "" {
 			a.goal.Missing = tr.Missing
 		}
+		if strings.TrimSpace(tr.Asked) != "" {
+			a.goal.Missing = "your answer: " + tr.Asked // it stopped on a question to you
+		}
 		// OR, not overwrite: once ANY attempt at this goal ever had a productive
 		// turn, that stays true across every later resume, even one that stumbles
 		// again immediately — see goalState.Progressed and SetPriorGoalProgress.

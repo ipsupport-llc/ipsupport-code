@@ -573,6 +573,29 @@ func TestChatRetriesOnMidStreamDrop(t *testing.T) {
 	}
 }
 
+// An error the server puts in the stream is the server saying the generation
+// failed, not the network dropping: an over-long prompt fails the same way every
+// time. One retry, not the full budget of full-prompt resends.
+func TestChatRetriesAServerReportedStreamErrorOnce(t *testing.T) {
+	var n int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n++
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"par\"}}]}\n\n")
+		io.WriteString(w, "data: {\"error\":{\"message\":\"context length exceeded\"}}\n\n")
+	}))
+	defer srv.Close()
+
+	cl := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "fake"})
+	_, err := cl.Chat(context.Background(), []Message{User("hi")}, nil)
+	if err == nil || !strings.Contains(err.Error(), "context length exceeded") {
+		t.Fatalf("err = %v, want the server's own error", err)
+	}
+	if n != serverErrorAttempts {
+		t.Errorf("sent %d times, want %d", n, serverErrorAttempts)
+	}
+}
+
 // A stream that closes CLEANLY (a normal EOF, not a transport error) before
 // "[DONE]" ever arrived is a truncated response, not a completed one — a
 // proxy or the server itself cutting the connection mid-generation. Without

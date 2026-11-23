@@ -41,6 +41,10 @@ type Transcript struct {
 	// real hint instead of nothing at all. Empty when no such judge call ran,
 	// or when it said done/unclear.
 	Missing string
+	// Asked is set when the run ended on a question the judge found only the
+	// user can answer: the judge's account of what is needed. The goal stands,
+	// waiting on that answer.
+	Asked string
 	// PromptTokens is the real conversation's prompt size, snapshotted right
 	// after the last successful MAIN-turn llm.Chat call (before judgeGoal, which
 	// shares the same client absent a dedicated judge/reflect model, gets a
@@ -1604,13 +1608,8 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// go), a prose answer may be exactly what the goal asked for ("explain
 			// X", "write up Y"), and skipping the judge left such a goal open for
 			// good.
-			//
-			// A prose reply to the goal that the judge does not accept is not
-			// re-fed either: it may be a question back to the user ("which file
-			// do you mean?"), and re-feeding would answer it with the goal again
-			// instead of handing control back.
-			proseOnly := !acted && strings.TrimSpace(clean) != ""
-			chatReply := proseOnly && !a.runIsTheGoal(goal)
+			chatReply := !acted && strings.TrimSpace(clean) != "" && !a.runIsTheGoal(goal)
+			asked := false // the judge found the run waiting on the user (judgeAsk)
 			if !a.planMode.Load() && a.maxReturns > 0 && !chatReply {
 				// The goal was re-fed and the model finished WITHOUT doing any work
 				// since. Push it once first: a nudge is cheaper than a judge call and
@@ -1669,7 +1668,16 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 					if verdict == judgeDone {
 						goalMet = true // only an explicit DONE marks the goal verifiably met
 						a.emit("judge", map[string]any{"done": true})
-					} else if lastMissing = missing; returns < a.maxReturns && !proseOnly {
+					} else if verdict == judgeAsk {
+						// The run stopped on a question only the user can answer —
+						// which of two designs, a credential, what they meant. The
+						// judge decides that, not the agent: given a way to ask, a
+						// weak model would ask instead of working. Re-feeding the
+						// goal would answer the question with the goal; control goes
+						// back, the goal stands, and no return is spent.
+						asked, lastMissing = true, missing
+						a.emit("judge", map[string]any{"ask": missing})
+					} else if lastMissing = missing; returns < a.maxReturns {
 						returns++
 						actedSinceReturn, idleNudged = false, false
 						told := goalReturn(a.target(goal, msgs), missing)
@@ -1694,12 +1702,17 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 			// normal finalize path. Still gated on acted, though: a run where
 			// NOTHING ever happened (the empty-reply case just above) is better
 			// described by its own more specific message than by this one.
-			goalStalled := a.maxReturns > 0 && acted && !goalMet
+			goalStalled := a.maxReturns > 0 && acted && !goalMet && !asked
+			if asked {
+				tr.Asked = lastMissing
+			}
 			if strings.TrimSpace(clean) == "" {
 				// Blank final turn. If the model already did work via tools, say it
 				// finished (the changes/output are above); otherwise it produced
 				// nothing — flag that instead of ending on silence.
 				switch {
+				case asked:
+					clean = "(the goal is waiting for your answer: " + lastMissing + ")"
 				case goalStalled:
 					clean = fmt.Sprintf("(goal not confirmed complete — stopped after %d/%d continues; the model finished without further progress. `/goal go` to keep pushing, or switch to a stronger model with /model.)", returns, a.maxReturns)
 					if lastMissing != "" {
@@ -2229,7 +2242,7 @@ func judgeContinuation(criteria, goal, result string, convo []llm.Message) []llm
 	return append(out, llm.User(Note(judgeSystemWith(criteria)+
 		"\n\nThis is an acceptance check, not a task. The record to judge is the conversation above. "+
 		"The tools in this conversation are the agent's and the done()/more() tools are not available here: "+
-		"do not call any tool — reply with ONE line of plain text, DONE or MORE: <what is missing>."+
+		"do not call any tool — reply with ONE line of plain text: DONE, MORE: <what is missing>, or ASK: <what only the user can answer>."+
 		"\n\nGOAL:\n"+goal+
 		"\n\nWHAT THE AGENT SAYS IT DID:\n"+clipMarked(result, 2000))))
 }
@@ -2271,6 +2284,7 @@ const (
 	judgeUnclear judgeVerdict = iota // couldn't parse a verdict — treated as "not met" (see Run)
 	judgeDone                        // explicitly met
 	judgeMore                        // explicitly incomplete
+	judgeAsk                         // the agent is waiting on an answer only the user can give
 )
 
 func (v judgeVerdict) String() string {
@@ -2279,6 +2293,8 @@ func (v judgeVerdict) String() string {
 		return "done"
 	case judgeMore:
 		return "more"
+	case judgeAsk:
+		return "ask"
 	default:
 		return "unclear"
 	}
@@ -2481,6 +2497,17 @@ func judgeTools() []map[string]any {
 				"required": []string{"missing"},
 			},
 		}},
+		{"type": "function", "function": map[string]any{
+			"name":        "ask_user",
+			"description": "The agent stopped on a question only the user can answer; the goal cannot go on without it.",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"question": map[string]any{"type": "string", "description": "what the user has to answer, in a few words"},
+				},
+				"required": []string{"question"},
+			},
+		}},
 	}
 }
 
@@ -2495,6 +2522,7 @@ func parseJudgeReply(reply llm.Message) (verdict judgeVerdict, missing, source s
 	// first meant the verdict flipped with the order of the array. MORE wins,
 	// the same way it does in text.
 	sawDone, sawMore, sawOther, moreMissing := false, false, false, ""
+	sawAsk, askQuestion := false, ""
 	for _, tc := range reply.ToolCalls {
 		switch tc.Name {
 		case "done":
@@ -2508,6 +2536,15 @@ func parseJudgeReply(reply llm.Message) (verdict judgeVerdict, missing, source s
 				moreMissing = clipped
 			}
 			sawMore = true
+		case "ask_user":
+			var args struct {
+				Question string `json:"question"`
+			}
+			_ = json.Unmarshal([]byte(tc.Arguments), &args)
+			if clipped, _ := textutil.Clip(strings.TrimSpace(args.Question), 160); askQuestion == "" {
+				askQuestion = clipped
+			}
+			sawAsk = true
 		default:
 			// The judge has exactly two tools; anything else is it trying to go
 			// and look at something. Reported live: three judge calls in a row
@@ -2530,11 +2567,22 @@ func parseJudgeReply(reply llm.Message) (verdict judgeVerdict, missing, source s
 			return judgeMore, missing, "content"
 		}
 		return judgeUnclear, "", ""
+	case sawAsk:
+		// ask_user() over a MORE in the text is unsettled: MORE wins, as above.
+		// Over done(), the question wins — the goal can't be met while the agent
+		// waits on the user.
+		if v, missing := parseVerdict(reply.Content); v == judgeMore {
+			return judgeMore, missing, "tool+content"
+		}
+		if askQuestion == "" {
+			return judgeUnclear, "", "" // a question nobody can see is no verdict
+		}
+		return judgeAsk, askQuestion, "tool"
 	case sawDone:
 		// A done() call alongside text that says otherwise is the same
 		// unsettled answer in a different shape.
-		if v, missing := parseVerdict(reply.Content); v == judgeMore {
-			return judgeMore, missing, "tool+content"
+		if v, missing := parseVerdict(reply.Content); v == judgeMore || v == judgeAsk {
+			return v, missing, "tool+content"
 		}
 		return judgeDone, "", "tool"
 	}
@@ -2561,6 +2609,10 @@ func parseJudgeReply(reply llm.Message) (verdict judgeVerdict, missing, source s
 // would read as DONE. A line that BEGINS with the token is a verdict; the same
 // word inside a sentence is not.
 var verdictLine = regexp.MustCompile("(?i)^[\\s>*_`\"'\\-]*(DONE|MORE)\\b[\\s:.\u2014-]*(.*)$")
+
+// askLine is the judge's "ASK: <question>". The colon and a question are
+// required: "Ask" opens ordinary sentences far more often than "Done" does.
+var askLine = regexp.MustCompile("(?i)^[\\s>*_`\"'\\-]*ASK[\\s*_]*:[\\s*_]*(\\S.*)$")
 
 // parseReasonedVerdict recovers a MORE — and only a MORE — from the judge's
 // reasoning when it never wrote a verdict to Content.
@@ -2609,10 +2661,20 @@ func parseVerdict(s string) (judgeVerdict, string) {
 // A judge that says the work is NOT done must never be read as saying it is.
 // Anything that isn't a committed verdict is unclear, which keeps the goal
 // going — the only safe direction to be wrong in.
+//
+// ASK ranks between them: any MORE beats it, and it beats DONE. Like DONE it is
+// never taken from a draft.
 func scanVerdictLines(s string, acceptDone bool) (judgeVerdict, string) {
-	done := false
+	done, question := false, ""
 	for _, line := range strings.Split(s, "\n") {
-		m := verdictLine.FindStringSubmatch(strings.TrimSpace(line))
+		line = strings.TrimSpace(line)
+		if a := askLine.FindStringSubmatch(line); a != nil {
+			if question == "" {
+				question, _ = textutil.Clip(strings.TrimSpace(a[1]), 160)
+			}
+			continue
+		}
+		m := verdictLine.FindStringSubmatch(line)
 		if m == nil {
 			continue
 		}
@@ -2622,6 +2684,9 @@ func scanVerdictLines(s string, acceptDone bool) (judgeVerdict, string) {
 			return judgeMore, clipped
 		}
 		done = true
+	}
+	if question != "" && acceptDone {
+		return judgeAsk, question
 	}
 	if done && acceptDone {
 		return judgeDone, ""
@@ -2633,9 +2698,12 @@ func scanVerdictLines(s string, acceptDone bool) (judgeVerdict, string) {
 
 // judgeSystem instructs the side-call judge. Tight on purpose: a small local model
 // must answer in one parseable line.
-const judgeSystem = `You are a strict acceptance checker. Given a GOAL, what an agent did, and EVIDENCE (the actual results of its tool calls), decide if the goal is FULLY met. Answer either by calling a tool — done() if fully and verifiably accomplished, or more(missing: "...") if anything is incomplete, untested, or only described instead of done — or, if you prefer, reply with ONE line of plain text instead, nothing else:
+const judgeSystem = `You are a strict acceptance checker. Given a GOAL, what an agent did, and EVIDENCE (the actual results of its tool calls), decide if the goal is FULLY met. Answer either by calling a tool — done() if fully and verifiably accomplished, more(missing: "...") if anything is incomplete, untested, or only described instead of done, or ask_user(question: "...") if the agent stopped on a question only the user can answer — or, if you prefer, reply with ONE line of plain text instead, nothing else:
 - "DONE" if the goal is fully and verifiably accomplished.
 - "MORE: <what is still missing, in a few words>" if anything is incomplete, untested, or only described instead of done.
+- "ASK: <what the user has to answer, in a few words>" if the agent stopped to ask the user something the work cannot go on without.
+
+ASK is for a question only the user can answer: a choice between options they have to make, something only they know (what they meant, a credential, a preference), or a permission. A question the agent could answer itself — by reading the code, running a command, or just making a reasonable choice — is MORE: say what it should go and find out. When in doubt, MORE.
 
 You are shown the agent's whole working record for this run: what it was asked, every tool call it made, and every result those calls returned.
 

@@ -849,7 +849,11 @@ pass with no judge overhead — only an explicit goal gets the loop.
 An unparseable judge reply is asked once more, then counts as not met and the goal
 is re-fed; the re-feed budget above is what keeps a confused judge from trapping the
 agent. A prose answer to a side question asked while a goal stands is not judged;
-a run of the goal itself always is. If a re-fed model then finishes without doing
+a run of the goal itself always is. When the agent stops to ask you something, the
+judge decides whether only you can answer it (which option, what you meant, a
+credential): then control comes back with the question, the goal stands, and your
+reply carries it on. A question the agent could answer by looking is sent back
+to it as missing work. If a re-fed model then finishes without doing
 any work, it gets **one** push to act before the loop gives up (turn it off with
 `config set goal_nudge false`). And when the loop stops without the judge ever
 confirming success, it says so plainly — *"goal not confirmed complete, `/goal go`
@@ -987,8 +991,9 @@ edit at your own risk.)
   own state. Files *you* write (`.agent/config.json`, `system.md`, `judge.md`,
   `compact.md`, `instructions.md`) stay in the project. Older installs are moved
   out of `.agent/` once, on first start.
-- **Resilience.** Exponential-backoff retry on transient 5xx/network errors, an
-  idle watchdog that aborts a silently-stalled stream, and a stuck-loop guard.
+- **Resilience.** Exponential-backoff retry on transient 5xx/network errors (an
+  error the server itself reports mid-stream gets one retry, not the full budget),
+  an idle watchdog that aborts a silently-stalled stream, and a stuck-loop guard.
 - **Project instructions.** Reads a `CLAUDE.md` / `AGENTS.md` / `.agent/instructions.md`
   from the workspace into the system prompt.
 - **Trace = dataset.** Every step (goal, tool call, observation, final, lesson) is

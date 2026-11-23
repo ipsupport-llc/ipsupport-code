@@ -417,6 +417,10 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 		if !retriable || ctx.Err() != nil || attempt == maxAttempts {
 			break
 		}
+		var se *serverStreamError
+		if errors.As(err, &se) && attempt >= serverErrorAttempts {
+			break
+		}
 		c.rollbackCompletionCount(reqCompl) // undo only this attempt's own bumped estimate
 		wait := backoff(attempt)
 		if c.OnRetry != nil {
@@ -677,6 +681,22 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 	return m, err, false
 }
 
+// serverStreamError is an error the server itself put in the stream: it is up
+// and answering, and says this generation failed. Unlike a dropped connection or
+// a stall, that is rarely transient — an over-long prompt fails the same way
+// every time, and each retry pays for the whole prompt again — so it gets
+// serverErrorAttempts, not the full retry budget. The one retry covers a server
+// that was swapping the model out.
+type serverStreamError struct{ msg string }
+
+func (e *serverStreamError) Error() string {
+	return "llm stream: the server reported an error mid-stream: " + e.msg
+}
+
+// serverErrorAttempts is how many times a request is sent when the server keeps
+// reporting an error mid-stream (see serverStreamError).
+const serverErrorAttempts = 2
+
 // authError is a 401: the server refused the key sent with the request.
 type authError struct {
 	err error
@@ -801,8 +821,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 		if ch.Error != nil {
 			// The server said the generation failed. What streamed before this
 			// is not an answer (found by review: it was returned as one).
-			// A plain error: the retry loop treats it as transient.
-			return Message{}, fmt.Errorf("llm stream: the server reported an error mid-stream: %s", ch.Error.Message)
+			return Message{}, &serverStreamError{msg: ch.Error.Message}
 		}
 		if len(ch.Choices) > 0 {
 			if fr := ch.Choices[0].FinishReason; fr != "" {

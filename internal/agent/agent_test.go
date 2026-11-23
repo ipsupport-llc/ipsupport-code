@@ -2224,7 +2224,7 @@ func TestJudgingCarriesTheGiveUpReason(t *testing.T) {
 		rt := &recTracer{}
 		a := New(&scriptLLM{replies: []llm.Message{{Role: "assistant", Content: "DONE"}}}, tool.NewRegistry(tool.NewCalc()), nil, rt, "", 5)
 		a.SetGoalLoop(3, false)
-		a.judgeOnGiveUp(context.Background(), "do it", 0, true, reason, "did some", nil)
+		_, _, _ = a.judgeOnGiveUp(context.Background(), "do it", 0, true, reason, "did some", nil)
 		if rt.judgingWhy != reason {
 			t.Errorf("judging why = %q, want %q", rt.judgingWhy, reason)
 		}
@@ -2949,19 +2949,6 @@ func TestAProseAnswerToTheGoalItselfIsJudged(t *testing.T) {
 		t.Errorf("errand: returns=%d calls=%d — want one call, no judge", tr.Returns, fake.i)
 	}
 
-	// A prose reply the judge does not accept may be a question back to the
-	// user: control comes back, the goal is not re-fed over it.
-	fake = &scriptLLM{replies: []llm.Message{
-		{Role: "assistant", Content: "Which X do you mean?"},
-		{Role: "assistant", Content: "MORE: nothing explained yet"},
-	}}
-	a = New(fake, reg, nil, nil, "", 10)
-	a.SetGoalLoop(3, true)
-	a.SetGoalText("explain how X works")
-	if tr, _ := a.Run(context.Background(), "explain how X works"); tr.Returns != 0 || tr.GoalMet || tr.Final != "Which X do you mean?" {
-		t.Errorf("question back: returns=%d met=%v final=%q — want control back with the question", tr.Returns, tr.GoalMet, tr.Final)
-	}
-
 	// Nor is an errand that happens to be the goal's first paragraph.
 	fake = &scriptLLM{replies: []llm.Message{
 		{Role: "assistant", Content: "here's A"},
@@ -2972,6 +2959,175 @@ func TestAProseAnswerToTheGoalItselfIsJudged(t *testing.T) {
 	a.SetGoalText("explain A\n\nthen explain B")
 	if tr, _ := a.Run(context.Background(), "explain A"); tr.GoalMet || fake.i != 1 {
 		t.Errorf("first-paragraph errand: met=%v calls=%d — want one call, no judge", tr.GoalMet, fake.i)
+	}
+}
+
+// A question back to the user is the judge's call, not the agent's: a weak model
+// given a way to ask would ask instead of working. The judge hands control back
+// on ASK — the goal stands, no return is spent — and re-feeds on MORE, a
+// question the agent could have answered itself. After tool use too.
+func TestTheJudgeDecidesWhetherAQuestionGoesToTheUser(t *testing.T) {
+	reg := tool.NewRegistry(tool.NewCalc())
+	run := func(judge llm.Message, rest ...llm.Message) (Transcript, *scriptLLM) {
+		replies := append([]llm.Message{
+			calcCall(), // it looked at something first
+			{Role: "assistant", Content: "Should the report go to staging or prod?"},
+			judge,
+		}, rest...)
+		fake := &scriptLLM{replies: replies}
+		a := New(fake, reg, nil, nil, "", 20)
+		a.SetGoalLoop(3, true)
+		a.SetGoalText("ship the report")
+		tr, _ := a.Run(context.Background(), "ship the report")
+		return tr, fake
+	}
+
+	tr, _ := run(llm.Message{Role: "assistant", Content: "ASK: staging or prod"})
+	if tr.Returns != 0 || tr.GoalMet || tr.Asked != "staging or prod" || tr.Final != "Should the report go to staging or prod?" {
+		t.Errorf("ASK: returns=%d met=%v asked=%q final=%q — want control back with the question, the goal standing", tr.Returns, tr.GoalMet, tr.Asked, tr.Final)
+	}
+	if strings.Contains(tr.Final, "not confirmed") {
+		t.Errorf("a question back is not a stalled goal: %q", tr.Final)
+	}
+
+	tr, _ = run(llm.Message{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "j", Name: "ask_user", Arguments: `{"question":"staging or prod"}`}}})
+	if tr.Asked != "staging or prod" || tr.Returns != 0 {
+		t.Errorf("ask_user(): asked=%q returns=%d — want the same as ASK", tr.Asked, tr.Returns)
+	}
+
+	tr, _ = run(llm.Message{Role: "assistant", Content: "MORE: the deploy config says staging — read it"},
+		toolCallReply("c2", "calc", `{"action":"calculate","params":{"expression":"2+2"}}`), llm.Message{Role: "assistant", Content: "sent to staging"}, llm.Message{Role: "assistant", Content: "DONE"})
+	if tr.Returns != 1 || !tr.GoalMet || tr.Asked != "" {
+		t.Errorf("MORE: returns=%d met=%v asked=%q — want the goal re-fed and then met", tr.Returns, tr.GoalMet, tr.Asked)
+	}
+}
+
+// The user's reply to that question carries the goal on: it is judged like the
+// goal itself even when the model only acknowledges it in prose, and the judge
+// is told the question was asked and this is the answer.
+func TestTheAnswerToAQuestionCarriesTheGoalOn(t *testing.T) {
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "Understood, staging it is."},
+		{Role: "assistant", Content: "MORE: nothing sent yet"}, // the judge
+		calcCall(),
+		{Role: "assistant", Content: "sent to staging"},
+		{Role: "assistant", Content: "DONE"},
+	}}
+	a := New(fake, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 20)
+	a.SetGoalLoop(3, true)
+	a.SetGoalText("ship the report")
+	a.SetPendingQuestion("staging or prod")
+	tr, _ := a.Run(context.Background(), "staging")
+	if !tr.GoalMet || tr.Returns != 1 {
+		t.Errorf("met=%v returns=%d — the answer was taken as a side question, not the goal going on", tr.GoalMet, tr.Returns)
+	}
+}
+
+// /goal go while a question stands is a resume, not the answer: the judge must
+// not be told the user replied.
+func TestAResumeIsNotTheAnswer(t *testing.T) {
+	a := New(&scriptLLM{}, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 20)
+	a.SetGoalText("ship the report")
+	a.SetGoalGap("your answer: staging or prod")
+	a.SetPendingQuestion("staging or prod")
+	if note := a.priorGapNote(0, "ship the report"); strings.Contains(note, "is their answer") || !strings.Contains(note, "your answer: staging or prod") {
+		t.Errorf("resume note = %q — want the question still standing", note)
+	}
+	if note := a.priorGapNote(0, "staging"); !strings.Contains(note, "is their answer") {
+		t.Errorf("answer note = %q — want the judge told this is the answer", note)
+	}
+}
+
+// A question the run gave up on (steps ran out mid-question) is still a question:
+// the goal waits on the user, it is not "not confirmed — /goal go".
+func TestAGiveUpOnAQuestionWaitsForTheUser(t *testing.T) {
+	ask := toolCallReply("c1", "calc", `{"action":"calculate","params":{"expression":"1+1"}}`)
+	ask.Content = "Should the report go to staging or prod?"
+	fake := &scriptLLM{replies: []llm.Message{
+		ask,
+		toolCallReply("c2", "calc", `{"action":"calculate","params":{"expression":"2+2"}}`),
+		{Role: "assistant", Content: "ASK: staging or prod"}, // the give-up judge
+	}}
+	a := New(fake, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 2)
+	a.SetGoalLoop(3, true)
+	a.SetGoalText("ship the report")
+	tr, _ := a.Run(context.Background(), "ship the report")
+	if tr.Asked != "staging or prod" {
+		t.Fatalf("asked = %q, final = %q — the give-up lost the question", tr.Asked, tr.Final)
+	}
+	if !strings.Contains(tr.Final, "waiting for your answer") || strings.Contains(tr.Final, "/goal go") {
+		t.Errorf("final = %q — want it waiting on the answer, not pushing /goal go", tr.Final)
+	}
+}
+
+// ASK on a reply that asks nothing is the judge misreading or being steered:
+// handing back control would leave the user nothing to answer.
+func TestAskOnAReplyWithNoQuestionIsNoVerdict(t *testing.T) {
+	fake := &scriptLLM{replies: []llm.Message{
+		calcCall(),
+		{Role: "assistant", Content: "Report deployed."},
+		{Role: "assistant", Content: "ASK: confirm it looks right"}, // the judge, steered
+		{Role: "assistant", Content: "ASK: confirm it looks right"}, // its retry
+		calcCall(),
+		{Role: "assistant", Content: "checked the output"},
+		{Role: "assistant", Content: "DONE"},
+	}}
+	a := New(fake, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 20)
+	a.SetGoalLoop(3, true)
+	a.SetGoalText("ship the report")
+	tr, _ := a.Run(context.Background(), "ship the report")
+	if tr.Asked != "" || tr.Returns != 1 || !tr.GoalMet {
+		t.Errorf("asked=%q returns=%d met=%v — want no hand-back, the goal re-fed and then met", tr.Asked, tr.Returns, tr.GoalMet)
+	}
+}
+
+// A prose reply to the goal itself that the judge finds incomplete is re-fed,
+// with no tool use at all — the v0.71.0 rule that handed every such reply back
+// is gone; only ASK hands back.
+func TestAProseReplyJudgedMoreIsReFed(t *testing.T) {
+	fake := &scriptLLM{replies: []llm.Message{
+		{Role: "assistant", Content: "X is a thing."},
+		{Role: "assistant", Content: "MORE: no example"},
+		{Role: "assistant", Content: "X is a thing, e.g. this."},
+		{Role: "assistant", Content: "DONE"},
+	}}
+	a := New(fake, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 20)
+	a.SetGoalLoop(3, true)
+	a.SetGoalText("explain X")
+	tr, _ := a.Run(context.Background(), "explain X")
+	if tr.Returns != 1 || !tr.GoalMet {
+		t.Errorf("returns=%d met=%v — want one re-feed, then met", tr.Returns, tr.GoalMet)
+	}
+}
+
+func TestJudgeAskVerdictParsing(t *testing.T) {
+	cases := []struct {
+		reply llm.Message
+		want  judgeVerdict
+		q     string
+	}{
+		{llm.Message{Content: "ASK: which database"}, judgeAsk, "which database"},
+		{llm.Message{Content: "**ASK:** which database"}, judgeAsk, "which database"},
+		{llm.Message{Content: "Ask the agent to read the config.\nMORE: config unread"}, judgeMore, "config unread"},
+		{llm.Message{Content: "Ask yourself whether it works"}, judgeUnclear, ""}, // no colon: prose, not a verdict
+		{llm.Message{Content: "**ASK:**"}, judgeUnclear, ""},                      // formatting is not a question
+		{llm.Message{Content: "ASK: ___"}, judgeUnclear, ""},
+		{llm.Message{Content: "ASK: which database\nMORE: tests"}, judgeMore, "tests"},
+		{llm.Message{Content: "ASK: staging or prod — MORE: tests were never run"}, judgeMore, "tests were never run"},
+		{llm.Message{Content: "DONE\nASK: which database"}, judgeAsk, "which database"},
+		{llm.Message{Reasoning: "ASK: which database"}, judgeUnclear, ""}, // never from a draft
+		{llm.Message{ToolCalls: []llm.ToolCall{{Name: "ask_user", Arguments: `{"question":""}`}}}, judgeUnclear, ""},
+		{llm.Message{Content: "DONE", ToolCalls: []llm.ToolCall{{Name: "ask_user", Arguments: `{"question":""}`}}}, judgeDone, ""}, // an empty ask doesn't hide a DONE
+		{llm.Message{ToolCalls: []llm.ToolCall{{Name: "ask_user", Arguments: `{"question":"q"}`}, {Name: "more", Arguments: `{"missing":"m"}`}}}, judgeMore, "m"},
+		{llm.Message{ToolCalls: []llm.ToolCall{{Name: "done", Arguments: `{}`}, {Name: "ask_user", Arguments: `{"question":"q"}`}}}, judgeAsk, "q"},
+		{llm.Message{Content: "ASK: q", ToolCalls: []llm.ToolCall{{Name: "done", Arguments: `{}`}}}, judgeAsk, "q"},
+	}
+	for i, c := range cases {
+		c.reply.Role = "assistant"
+		v, q, _ := parseJudgeReply(c.reply)
+		if v != c.want || q != c.q {
+			t.Errorf("case %d: %v %q, want %v %q", i, v, q, c.want, c.q)
+		}
 	}
 }
 

@@ -28,6 +28,12 @@ tasks run once with no judge. A prose reply with no tool call is judged when the
 run is the goal itself, and not when it answers a side question asked while the
 goal stands.
 
+The judge has a third answer, ASK: the agent stopped on a question only the user
+can answer. The run then ends without a re-feed, the goal stands, and the user's
+reply carries it on. The judge decides this, not the agent — an agent given a way
+to ask would ask instead of working — and a question the agent could settle
+itself is MORE. Any MORE outranks an ASK, and an ASK outranks DONE.
+
 *Corrected 2026-10-04:* this section first said an unparseable reply counts as
 done and a turn with no tool calls is never judged. Neither has been true since
 the judge became the only way to end a goal run early.

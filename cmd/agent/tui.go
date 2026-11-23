@@ -3339,6 +3339,9 @@ func (m *tuiModel) renderEvent(e uiEvent) []string {
 		if done, _ := e.fields["done"].(bool); done {
 			return []string{cOk.Render("  ✓ judge: goal met")}
 		}
+		if q, _ := e.fields["ask"].(string); strings.TrimSpace(q) != "" {
+			return []string{"  " + m.attention("? waiting for your answer") + cDim.Render(" — "+oneLine(q, 80)+" · the goal goes on from your reply")}
+		}
 		// The give-up paths (stuck-stop, step-exhaustion) emit this with done=false
 		// when the judge found a real gap — the normal re-feed path already shows
 		// its own "continue" line, so this only ever fires for a run that's ending

@@ -1540,6 +1540,31 @@ func TestFinishGoalPersistsMissingHint(t *testing.T) {
 	}
 }
 
+// A run that stopped on a question to the user leaves the goal standing, and
+// /goal says what it waits on — not a gap in the work.
+func TestFinishGoalRecordsAQuestionToTheUser(t *testing.T) {
+	a := &app{workspace: t.TempDir(), cfg: config.Default()}
+	a.setGoal("ship the report")
+	a.finishGoal(agent.Transcript{Missing: "staging or prod", Asked: "staging or prod"})
+	if a.goal.Status != "incomplete" || a.goal.Missing != "your answer: staging or prod" || a.goal.Asked != "staging or prod" {
+		t.Errorf("goal = %+v, want it standing, waiting on the answer", a.goal)
+	}
+	// The next run took the answer; whatever it ends on, the question is spent.
+	a.finishGoal(agent.Transcript{Missing: "nothing sent yet"})
+	if a.goal.Asked != "" || a.goal.Missing != "nothing sent yet" {
+		t.Errorf("goal = %+v, want the question cleared after the answering run", a.goal)
+	}
+}
+
+// The judge's ASK shows as a line saying the goal waits for the user's reply.
+func TestJudgeAskRendersAsWaitingForTheUser(t *testing.T) {
+	m := &tuiModel{app: &app{cfg: config.Default()}}
+	got := stripAnsi(strings.Join(m.renderEvent(uiEvent{kind: "judge", fields: map[string]any{"ask": "staging or prod"}}), " "))
+	if !strings.Contains(got, "waiting for your answer") || !strings.Contains(got, "staging or prod") {
+		t.Errorf("rendered %q", got)
+	}
+}
+
 // finishGoal marks a goal "incomplete" with Progressed=true when the run had a
 // productive turn (tr.Productive). setGoal, resuming the SAME text (/goal go),
 // must preserve that instead of wiping it wholesale — otherwise the next run's

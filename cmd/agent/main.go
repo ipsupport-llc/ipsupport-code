@@ -1705,6 +1705,10 @@ type goalState struct {
 	// with different text.
 	Worked time.Duration `json:"worked_ns,omitempty"`
 	Runs   int           `json:"runs,omitempty"`
+	// Asked is the question the last run stopped on, for the user to answer
+	// (agent.Transcript.Asked); the next run takes their message as the answer.
+	// Set or cleared by every run that finishes while the goal stands.
+	Asked string `json:"asked,omitempty"`
 }
 
 // addGoalWork counts a finished run's working time toward the standing goal,
@@ -1979,6 +1983,10 @@ func (a *app) finishGoal(tr agent.Transcript) (met bool, worked time.Duration, r
 		if strings.TrimSpace(tr.Missing) != "" {
 			a.goal.Missing = tr.Missing
 		}
+		if strings.TrimSpace(tr.Asked) != "" {
+			a.goal.Missing = "your answer: " + tr.Asked // it stopped on a question to you
+		}
+		a.goal.Asked = strings.TrimSpace(tr.Asked)
 		// OR, not overwrite: once ANY attempt at this goal ever had a productive
 		// turn, that stays true across every later resume, even one that stumbles
 		// again immediately — see goalState.Progressed and SetPriorGoalProgress.
@@ -4684,6 +4692,7 @@ func (a *app) runOne(ctx context.Context, goal string) error {
 	a.ag.SetGoalText(a.goalSnapshot().target())            // the judge accepts against the GOAL, never against this run's errand
 	a.ag.SetJudgeCriteria(loadJudgeCriteria(a.workspace))  // project acceptance criteria, re-read each run
 	a.ag.SetGoalGap(a.goalSnapshot().Missing)              // what the last attempt was found to be missing — see SetGoalGap
+	a.ag.SetPendingQuestion(a.goalSnapshot().Asked)        // the question it stopped on: this run's message answers it
 	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again
 	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()
@@ -4772,6 +4781,7 @@ func (a *app) runTaskStreaming(ctx context.Context, goal string, epoch int64) (a
 	a.ag.SetGoalText(a.goalSnapshot().target())            // the judge accepts against the GOAL, never against this run's errand
 	a.ag.SetJudgeCriteria(loadJudgeCriteria(a.workspace))  // project acceptance criteria, re-read each run
 	a.ag.SetGoalGap(a.goalSnapshot().Missing)              // what the last attempt was found to be missing — see SetGoalGap
+	a.ag.SetPendingQuestion(a.goalSnapshot().Asked)        // the question it stopped on: this run's message answers it
 	a.ag.SetPriorGoalProgress(a.goalSnapshot().Progressed) // credit an earlier attempt's real progress on a resume that stumbles again
 	waitSnapshot := a.approvalWaitNS.Load()
 	start := time.Now()

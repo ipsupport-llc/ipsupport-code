@@ -387,7 +387,15 @@ func (a *Agent) System() string { return a.system }
 // compact does, so a low cap makes that happen on every single turn once a
 // session runs long. Memory "raw" callers raise this a lot, turning the trim
 // into a rare safety backstop instead of everyday routine.
-func (a *Agent) SetMaxHistory(n int) { a.maxHistory = n }
+//
+// A positive cap below 2 is raised to 2: one question and its answer is the
+// least that can be kept, and a cap of 1 left history empty after every task.
+func (a *Agent) SetMaxHistory(n int) {
+	if n > 0 && n < 2 {
+		n = 2
+	}
+	a.maxHistory = n
+}
 
 // SetContextWindow tells the agent the active connection's real context size
 // (tokens), so a single long-running task can watch its OWN growing tool-call

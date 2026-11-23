@@ -4238,6 +4238,19 @@ func TestTwoCollapsedGenerationsStillStop(t *testing.T) {
 	}
 }
 
+// A cap of 1 kept no pair at all: every task's question was cut with its answer.
+func TestAHistoryCapOfOneKeepsTheLastPair(t *testing.T) {
+	fake := &scriptLLM{replies: []llm.Message{calcCall(), {Role: "assistant", Content: "answer"}}}
+	a := New(fake, tool.NewRegistry(tool.NewCalc()), nil, nil, "", 10)
+	a.SetMaxHistory(1)
+	if _, err := a.Run(context.Background(), "task"); err != nil {
+		t.Fatal(err)
+	}
+	if h := a.History(); len(h) != 2 {
+		t.Errorf("history = %v, want the task and its answer", h)
+	}
+}
+
 // The rolling cap cuts by count. An odd cap left the previous task's answer at
 // the front with its question cut away, and a history that opens on an assistant
 // turn is rejected by chat templates that enforce user/assistant order.

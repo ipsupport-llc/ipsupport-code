@@ -165,6 +165,11 @@ func (a *app) spawnExternalAgent(ctx context.Context, profile string, p config.A
 		diffArgs = append(diffArgs, headBefore)
 	}
 	body := externalResult(command, stdout, stderr, strings.TrimSpace(mustGit(root, diffArgs...)), created, runErr)
+	if strings.TrimSpace(mustGit(root, "rev-parse", "--git-dir")) == "" {
+		// No change summary is possible outside a checkout; say so, rather than
+		// let an empty one read as "it changed nothing".
+		body += "\n\n(" + root + " is not a git checkout, so its changes are not listed — look at the files to see what the agent did.)"
+	}
 	done := map[string]any{"agent": id, "profile": profile, "ok": runErr == nil}
 	if runErr != nil {
 		done["error"] = oneLine(runErr.Error(), 60)

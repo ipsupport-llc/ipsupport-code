@@ -2425,7 +2425,10 @@ func TestPlanReviewHandshake(t *testing.T) {
 // auto-compact before draining the queue — otherwise any task/command left
 // queued behind a finishing task perpetually skips the between-task
 // compaction check (see the taskDoneMsg handler).
-func TestQueuedTaskChecksAutoCompactBeforeDraining(t *testing.T) {
+// autoCompactDueApp is a wired app whose last real prompt is well past 75% of a
+// small window, so shouldAutoCompact() fires for real.
+func autoCompactDueApp(t *testing.T) *app {
+	t.Helper()
 	// Same canned-usage trick as TestRunOneAutoCompactResetsCheckpoints: a
 	// prompt_tokens well past 75% of a small window makes shouldAutoCompact()
 	// fire for real, not a hand-rolled stand-in for the gating logic.
@@ -2433,7 +2436,7 @@ func TestQueuedTaskChecksAutoCompactBeforeDraining(t *testing.T) {
 		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],`+
 			`"usage":{"prompt_tokens":9000,"completion_tokens":5}}`)
 	}))
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
 	cfg := config.Default()
 	cfg.Workspace = t.TempDir()
@@ -2460,7 +2463,11 @@ func TestQueuedTaskChecksAutoCompactBeforeDraining(t *testing.T) {
 	if !a.shouldAutoCompact() {
 		t.Fatal("test setup: expected shouldAutoCompact() to be true after the warm-up runs")
 	}
+	return a
+}
 
+func TestQueuedTaskChecksAutoCompactBeforeDraining(t *testing.T) {
+	a := autoCompactDueApp(t)
 	m := &tuiModel{app: a, state: stRunning, width: 80, input: textarea.New(), ctx: context.Background()}
 	m.epoch = a.taskEpoch.Add(1)
 	m.queued = []string{"/help"} // something queued behind this finishing task
@@ -2494,6 +2501,32 @@ func TestQueuedTaskChecksAutoCompactBeforeDraining(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(m.history, "\n"), "commands") {
 		t.Error("the queued /help should have executed on drain")
+	}
+}
+
+// A task that finished behind /config compacts first when the panel closes, and
+// the queue waits for it — the same as a task that finished in plain view.
+func TestATaskFinishedBehindAPanelCompactsThenDrains(t *testing.T) {
+	a := autoCompactDueApp(t)
+	m := &tuiModel{app: a, state: stConfig, width: 80, input: textarea.New(), ctx: context.Background()}
+	m.epoch = a.taskEpoch.Add(1)
+	m.queued = []string{"/help"}
+	m.Update(taskDoneMsg{epoch: m.epoch})
+	if m.state != stConfig || !m.taskDoneAway {
+		t.Fatalf("state=%v taskDoneAway=%v — want the panel kept open over the finished task", m.state, m.taskDoneAway)
+	}
+
+	_, cmd := m.closePanel()
+	if m.state != stRunning || len(m.queued) != 1 || cmd == nil {
+		t.Fatalf("closing the panel → state=%v queued=%v cmd=%v — want compaction first, the queue waiting", m.state, m.queued, cmd != nil)
+	}
+	msg, ok := cmd().(compactDoneMsg)
+	if !ok {
+		t.Fatalf("cmd() = %T, want compactDoneMsg", msg)
+	}
+	m.Update(msg)
+	if len(m.queued) != 0 {
+		t.Errorf("queue never drained once compaction finished: %v", m.queued)
 	}
 }
 
@@ -4947,6 +4980,45 @@ func TestSpawnWorkKeyFindsSharedTrees(t *testing.T) {
 	}
 	if key(filepath.Join(base, "missing")) != "" {
 		t.Error("an unresolvable dir must come back empty, so the batch runs one at a time")
+	}
+}
+
+// A session saved before the history cap kept pairs together can open on an
+// answer; it is restored from the first question on.
+func TestRestoredSessionOpensOnAQuestion(t *testing.T) {
+	a := wiredApp(t)
+	sf := sessionFile{History: []llm.Message{
+		{Role: "assistant", Content: "an orphaned answer"},
+		llm.User("second task"),
+		{Role: "assistant", Content: "second answer"},
+	}}
+	data, _ := json.Marshal(sf)
+	if err := os.MkdirAll(filepath.Dir(a.sessionPath()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(a.sessionPath(), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.loadSession()
+	if h := a.ag.History(); len(h) != 2 || h[0].Role != "user" {
+		t.Errorf("restored history = %v, want it to open on the question", h)
+	}
+}
+
+// An external agent outside a git checkout can't have its changes listed; the
+// result says so instead of an empty summary that reads as "changed nothing".
+func TestExternalAgentOutsideGitSaysChangesAreNotListed(t *testing.T) {
+	ws := t.TempDir()
+	cfg := config.Default()
+	cfg.Workspace = ws
+	cfg.Agents = map[string]config.AgentProfile{"mk": {Kind: "external", Command: "touch"}}
+	a := &app{cfg: cfg, workspace: ws, approver: fixedApprover(true)}
+	out, err := a.spawnAgent(context.Background(), "mk", "made.txt", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "not a git checkout") {
+		t.Errorf("result does not say its changes can't be listed:\n%s", out)
 	}
 }
 

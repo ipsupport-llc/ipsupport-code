@@ -3733,6 +3733,18 @@ func decodeSessionFile(data []byte) (sessionFile, bool) {
 	return sessionFile{}, false
 }
 
+// trimToFirstUser drops what comes before the first user message. A session saved
+// before the history cap learned to keep question and answer together can open on
+// an answer, which chat templates that insist on user/assistant order reject.
+func trimToFirstUser(h []llm.Message) []llm.Message {
+	for i, m := range h {
+		if m.Role == "user" {
+			return h[i:]
+		}
+	}
+	return nil
+}
+
 func (a *app) loadSession() {
 	path := a.existingSessionPath()
 	if path == "" {
@@ -3746,7 +3758,7 @@ func (a *app) loadSession() {
 	if !ok {
 		return
 	}
-	a.ag.SetHistory(sf.History)
+	a.ag.SetHistory(trimToFirstUser(sf.History))
 	a.restoreWorkdir(sf.Workdir)
 	a.sessionLive = true
 }

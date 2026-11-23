@@ -248,14 +248,13 @@ func (d *Domain) closestAction(given string) (*Action, bool) {
 	var found []*Action
 	for i := range d.spec.Actions {
 		n := strings.ToLower(d.spec.Actions[i].Name)
-		if d.spec.Actions[i].Mutates {
-			continue
-		}
 		if words[n] || strings.EqualFold(strings.TrimSpace(given), n) {
 			found = append(found, &d.spec.Actions[i])
 		}
 	}
-	if len(found) != 1 {
+	// Ambiguity first, then the mutation rule: "read_then_write" names two
+	// actions, and dropping write first would make it look like a clear read.
+	if len(found) != 1 || found[0].Mutates {
 		return nil, false
 	}
 	return found[0], true
@@ -302,6 +301,17 @@ const maxExampleValue = 120
 // A value of the wrong JSON type for its param is a slot too — it is not part of
 // a correct call.
 func exampleValue(p Param, v any) string {
+	// A list or object sent for a str param goes in as the JSON string the
+	// param is declared to take — file.edit's edits, mcp's args — rather than
+	// being thrown away for a placeholder.
+	switch v.(type) {
+	case []any, map[string]any:
+		if p.Type == "str" {
+			if js, err := marshalPlain(v); err == nil {
+				v = js
+			}
+		}
+	}
 	out, err := marshalPlain(v)
 	if err != nil || len(out) > maxExampleValue || !typeMatches(p.Type, v) {
 		return placeholder(p)
@@ -311,10 +321,13 @@ func exampleValue(p Param, v any) string {
 
 // typeMatches reports whether a decoded JSON value fits a declared param type.
 func typeMatches(typ string, v any) bool {
-	switch v.(type) {
+	switch n := v.(type) {
 	case string:
 		return typ == "str" || typ == ""
-	case float64, json.Number, int, int64:
+	case float64:
+		// 0.5 for an int param is not a correct value: the reader truncates it.
+		return typ == "number" || typ == "int" && n == float64(int64(n))
+	case json.Number, int, int64:
 		return typ == "int" || typ == "number"
 	case bool:
 		return typ == "bool"

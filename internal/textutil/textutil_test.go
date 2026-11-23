@@ -1,6 +1,7 @@
 package textutil
 
 import (
+	"strings"
 	"testing"
 	"unicode/utf8"
 )
@@ -101,5 +102,27 @@ func TestBoundedTailWriterNoTruncationWithinCap(t *testing.T) {
 	w.Write([]byte("hello"))
 	if got := w.String(); got != "hello" || w.Truncated {
 		t.Errorf("String()=%q Truncated=%v, want %q,false", got, w.Truncated, "hello")
+	}
+}
+
+// Under the cap everything is kept; over it, the start and — most of the budget —
+// the end, with the cut marked between them, never more than max bytes of text.
+func TestHeadTailWriterKeepsTheEnd(t *testing.T) {
+	w := NewHeadTailWriter(30)
+	w.Write([]byte("short"))
+	if w.Truncated || w.String() != "short" {
+		t.Fatalf("under the cap: %q truncated=%v", w.String(), w.Truncated)
+	}
+	w = NewHeadTailWriter(30)
+	for i := 0; i < 50; i++ {
+		w.Write([]byte("line\n"))
+	}
+	w.Write([]byte("FAIL: TestX\n"))
+	got := w.String()
+	if !w.Truncated || !strings.HasPrefix(got, "line\nline") || !strings.HasSuffix(got, "FAIL: TestX\n") || !strings.Contains(got, "bytes cut from the middle") {
+		t.Errorf("over the cap: %q", got)
+	}
+	if kept := len(got) - len("\n…[ bytes cut from the middle]…\n") - len("232"); kept > 30 {
+		t.Errorf("kept %d bytes of text, cap 30", kept)
 	}
 }

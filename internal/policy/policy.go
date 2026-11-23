@@ -17,6 +17,7 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/shellsplit"
 )
 
 // Decision is the outcome of a policy check.
@@ -46,6 +47,7 @@ func (d Decision) String() string {
 type Engine struct {
 	file       config.FilePolicy
 	runDefault string
+	shell      string           // run.shell: on Windows, "cmd" means cmd.exe, else PowerShell
 	allow      []*regexp.Regexp // anchored
 	deny       []*regexp.Regexp // unanchored
 	workspace  string           // absolute
@@ -59,6 +61,7 @@ func New(c config.Config) (*Engine, error) {
 	e := &Engine{
 		file:       c.File,
 		runDefault: c.Run.Default,
+		shell:      c.Run.Shell,
 		allow:      compileGlobs(c.Run.Allow, true),
 		deny:       compileGlobs(c.Run.Deny, false),
 		workspace:  filepath.Clean(c.Workspace),
@@ -181,6 +184,15 @@ func (e *Engine) Run(command string) Decision {
 			return Deny
 		}
 	}
+	// And every command the shell grammar nests: $( ), backticks, { }, ( ),
+	// the bodies of if/while/for, and code handed to sh -c / bash -c. The two
+	// splits above see none of them, and with run.default=allow the floor is
+	// the only thing between `echo $(rm -fr ~)` and the shell.
+	for _, c := range shellsplit.Parse(e.dialect(), cmd).Commands {
+		if dangerousSegment(c) {
+			return Deny
+		}
+	}
 	if anyMatch(e.deny, cmd) { // configured deny globs + the glob floor, matched anywhere
 		return Deny
 	}
@@ -188,6 +200,19 @@ func (e *Engine) Run(command string) Decision {
 		return Allow
 	}
 	return parseDefault(e.runDefault)
+}
+
+// dialect is the shell grammar commands are written in — the same choice
+// tool.Shell and the risk model make: sh off Windows, cmd.exe when run.shell
+// is exactly "cmd", else PowerShell.
+func (e *Engine) dialect() shellsplit.Dialect {
+	switch {
+	case !windowsShell:
+		return shellsplit.Sh
+	case e.shell == "cmd":
+		return shellsplit.Cmd
+	}
+	return shellsplit.PowerShell
 }
 
 // allowsAll reports whether every chained segment matches an allow glob. Command
@@ -309,7 +334,22 @@ func windowsRecursive(args []string) bool {
 	return false
 }
 
+// leadingNoise are words in front of a command that don't name it: shell
+// keywords that open or continue a compound command, grouping, and the
+// PowerShell call operator. `then rm -fr x` runs rm.
+var leadingNoise = map[string]bool{
+	"if": true, "then": true, "elif": true, "else": true, "while": true, "until": true,
+	"do": true, "!": true, "{": true, "(": true, "&": true,
+}
+
+// shellAssignment matches VAR=value, which the shell sets for the command after
+// it: `FOO=1 rm -fr x` runs rm.
+var shellAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
 func dangerousArgv(fields []string, depth int) bool {
+	for len(fields) > 0 && (leadingNoise[fields[0]] || shellAssignment.MatchString(fields[0])) {
+		fields = fields[1:]
+	}
 	if len(fields) == 0 || depth > 4 {
 		return false
 	}

@@ -847,6 +847,49 @@ func TestGitPushRefusesAForceRefspec(t *testing.T) {
 	}
 }
 
+// add refuses to stage a secret, but a .env staged some other way (run git add,
+// or before the session) went through commit untouched, one push from
+// published. commit checks the staged set too, and names it in the approval.
+func TestGitCommitRefusesAStagedSecret(t *testing.T) {
+	dir := initRepo(t)
+	for name, body := range map[string]string{".env": "API_KEY=hunter2", "main.go": "package main"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if out, err := exec.Command("git", "-C", dir, "add", ".env", "main.go").CombinedOutput(); err != nil {
+		t.Fatalf("git add: %v\n%s", err, out)
+	}
+	tl := gitToolFor(t, dir, yes())
+	r := tl.Call(context.Background(), "commit", map[string]any{"message": "wip"})
+	if !r.IsError || !strings.Contains(r.Content, ".env") {
+		t.Fatalf("a staged .env was committed: %+v", r)
+	}
+
+	if out, err := exec.Command("git", "-C", dir, "rm", "-q", "--cached", ".env").CombinedOutput(); err != nil {
+		t.Fatalf("git rm --cached: %v\n%s", err, out)
+	}
+	var asked string
+	tl = gitToolFor(t, dir, approverFunc(func(_, detail string) bool { asked = detail; return true }))
+	if r := tl.Call(context.Background(), "commit", map[string]any{"message": "add main"}); r.IsError {
+		t.Fatalf("commit: %s", r.Content)
+	}
+	if !strings.Contains(asked, "staged: main.go") {
+		t.Errorf("approval = %q, want the staged files named", asked)
+	}
+}
+
+// A refspec with an empty source deletes the remote branch — as destructive as
+// a force push, and it reads as an ordinary push in the approval.
+func TestGitPushRefusesADeletingRefspec(t *testing.T) {
+	dir := initRepo(t)
+	tl := gitToolFor(t, dir, yes())
+	r := tl.Call(context.Background(), "push", map[string]any{"remote": "origin", "branch": ":refs/heads/main"})
+	if !r.IsError || !strings.Contains(r.Content, "delete") {
+		t.Errorf("a deleting refspec was not refused: %+v", r)
+	}
+}
+
 // show by raw object ID reads a blob with no path to check: a committed .env
 // came back whole (found by review). A blob must be named <rev>:<path>.
 func TestGitShowRefusesARawBlob(t *testing.T) {
@@ -901,6 +944,38 @@ func TestGitLocalPathsStayInTheJail(t *testing.T) {
 		if localGitPath(v) != local {
 			t.Errorf("localGitPath(%q) = %v", v, !local)
 		}
+	}
+}
+
+// A push or pull with no remote named goes to the upstream, and a named
+// remote's URL can be a path on this machine: both are where git really goes,
+// and both are checked against the jail and named in the approval.
+func TestGitDefaultAndNamedRemotesStayInTheJail(t *testing.T) {
+	outside := initRepo(t)
+	exec.Command("git", "-C", outside, "commit", "--allow-empty", "-m", "seed").Run()
+	ws := initRepo(t)
+	exec.Command("git", "-C", ws, "commit", "--allow-empty", "-m", "seed").Run()
+	exec.Command("git", "-C", ws, "remote", "add", "origin", outside).Run() // set outside the tool
+	tl := gitToolFor(t, ws, yes())
+	for action, args := range map[string]map[string]any{
+		"push":         {},
+		"pull":         {},
+		"fetch":        {"remote": "origin"},
+		"push (named)": {"remote": "origin"},
+	} {
+		name := strings.Fields(action)[0]
+		if r := tl.Call(context.Background(), name, args); !r.IsError || !strings.Contains(r.Content, "outside the workspace") {
+			t.Errorf("%s to a remote whose URL is outside the jail: %+v", action, r)
+		}
+	}
+
+	dir := initRepo(t)
+	exec.Command("git", "-C", dir, "remote", "add", "origin", "https://github.com/example/r.git").Run()
+	var detail string
+	ap := approverFunc(func(_, d string) bool { detail = d; return false })
+	gitToolFor(t, dir, ap).Call(context.Background(), "push", map[string]any{})
+	if !strings.Contains(detail, "origin (https://github.com/example/r.git)") {
+		t.Errorf("a push with no remote named did not say where it goes: %q", detail)
 	}
 }
 

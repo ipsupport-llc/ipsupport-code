@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -145,5 +146,33 @@ func TestOutputBudgetScalesToTheContextWindow(t *testing.T) {
 	// A tiny window still leaves room for a real error message.
 	if got := OutputBudget(1_000); got != minRunOutput {
 		t.Errorf("tiny window = %d, want the %d floor", got, minRunOutput)
+	}
+}
+
+// A long build's last lines — the failure, the summary — survive the output
+// cap; only the middle is cut.
+func TestRunKeepsTheEndOfLongOutput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("uses seq")
+	}
+	tl := runToolFor(t, t.TempDir(), "allow", yes(), nil)
+	r := tl.Call(context.Background(), "shell", map[string]any{"command": "seq 1 200000; echo FINAL-LINE"})
+	if !strings.HasPrefix(r.Content, "exit 0\n1\n2\n") || !strings.HasSuffix(r.Content, "FINAL-LINE") || !strings.Contains(r.Content, "cut from the middle") {
+		t.Errorf("long output kept as: %.80q … %q", r.Content, r.Content[max(0, len(r.Content)-80):])
+	}
+}
+
+// A command is approved for where it runs: `rm notes.txt` in sub/ deletes a
+// different file than the same command in the session's directory.
+func TestRunApprovalNamesTheDirectory(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var asked string
+	tl := runToolFor(t, dir, "ask", approverFunc(func(_, d string) bool { asked = d; return false }), nil)
+	tl.Call(context.Background(), "shell", map[string]any{"command": "rm notes.txt", "cwd": "sub"})
+	if !strings.Contains(asked, "in: sub") {
+		t.Errorf("approval = %q, want the directory named", asked)
 	}
 }

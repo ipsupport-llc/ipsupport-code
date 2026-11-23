@@ -250,6 +250,38 @@ func TestRunArgvFloorSeesThroughWrappers(t *testing.T) {
 	}
 }
 
+// The floor reads shell grammar, not just the first word of each chained
+// segment: a leading assignment, a compound command's keywords, a group, a
+// command substitution, or code handed to another shell all run the delete.
+// With run.default=allow nothing else stands in front of them.
+func TestRunArgvFloorReadsShellGrammar(t *testing.T) {
+	c := config.Default()
+	c.Run = config.RunPolicy{Default: "allow"}
+	e := eng(t, c)
+	for _, cmd := range []string{
+		"FOO=1 rm -fr ~/w",
+		"{ rm -fr ~/w; }",
+		"if true; then rm -fr ~/w; fi",
+		"while true; do rm -fr ~/w; done",
+		"! rm -fr ~/w",
+		"(rm -fr ~/w)",
+		"echo $(rm -fr ~/w)",
+		"echo `rm -fr ~/w`",
+		"bash -c 'rm -fr ~/w'",
+		"sh -c \"FOO=1 rm -fr ~/w\"",
+	} {
+		if got := e.Run(cmd); got != Deny {
+			t.Errorf("Run(%q) = %v, want Deny (hard floor)", cmd, got)
+		}
+	}
+	// Text that only mentions a delete is not one.
+	for _, cmd := range []string{"echo 'rm -fr ~/w'", "git commit -m \"then rm -fr old dir\"", "grep -r 'rm -rf' ."} {
+		if got := e.Run(cmd); got == Deny {
+			t.Errorf("Run(%q) = Deny, want it allowed — it deletes nothing", cmd)
+		}
+	}
+}
+
 // An allow glob must not auto-run shell redirection/backgrounding — it writes
 // outside the file jail's view.
 func TestRunAllowRejectsRedirection(t *testing.T) {

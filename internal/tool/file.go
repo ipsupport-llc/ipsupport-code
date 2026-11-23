@@ -331,7 +331,7 @@ func (f *fileTool) search(ctx context.Context, a Args) Result {
 			return nil
 		}
 		if d.IsDir() {
-			if p != abs && (skipDir[d.Name()] || strings.HasPrefix(d.Name(), ".")) {
+			if p != abs && prunedDir(d.Name(), skipDir) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -367,7 +367,7 @@ func (f *fileTool) search(ctx context.Context, a Args) Result {
 		return nil
 	})
 	if n == 0 {
-		return Ok("(no matches for " + query + ")")
+		return Ok("(no matches for " + query + ")" + hiddenDirsNote)
 	}
 	return Ok(strings.TrimRight(b.String(), "\n"))
 }
@@ -413,6 +413,9 @@ func (f *fileTool) writeFile(ctx context.Context, action string, a Args, appendM
 	if f.pol.DeniedWrite(abs) {
 		return Err(action + " " + path + " denied by workspace policy")
 	}
+	if err := notAFile(abs); err != nil && !(appendMode && isFIFO(abs)) {
+		return Err(action + " " + path + ": " + err.Error())
+	}
 	f.snapshot(abs) // checkpoint the prior content before we change it
 	var old string
 	if !appendMode {
@@ -425,19 +428,30 @@ func (f *fileTool) writeFile(ctx context.Context, action string, a Args, appendM
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return Fail("file", action, "cannot create parent directory for "+path, err)
 	}
-	flag := os.O_CREATE | os.O_WRONLY
 	if appendMode {
-		flag |= os.O_APPEND
+		fh, err := openAppend(abs)
+		if err != nil {
+			return Fail("file", action, "cannot open "+path, err)
+		}
+		_, werr := fh.WriteString(content)
+		if cerr := fh.Close(); werr == nil {
+			werr = cerr // a failed flush on close is a failed write too
+		}
+		if werr != nil {
+			return Fail("file", action, "write to "+path+" failed", werr)
+		}
 	} else {
-		flag |= os.O_TRUNC
-	}
-	fh, err := os.OpenFile(abs, flag, 0o644)
-	if err != nil {
-		return Fail("file", action, "cannot open "+path, err)
-	}
-	defer fh.Close()
-	if _, err := fh.WriteString(content); err != nil {
-		return Fail("file", action, "write to "+path+" failed", err)
+		// A file that opened with a UTF-8 byte order mark keeps it: the model
+		// never sees the BOM as a character, so a whole-file write dropped it
+		// silently, and some tools (Windows ones above all) read the file
+		// differently without it.
+		const bom = "\ufeff"
+		if strings.HasPrefix(old, bom) && !strings.HasPrefix(content, bom) {
+			content = bom + content
+		}
+		if err := replaceFile(abs, []byte(content)); err != nil {
+			return Fail("file", action, "write to "+path+" failed", err)
+		}
 	}
 
 	verb := "wrote"
@@ -449,6 +463,98 @@ func (f *fileTool) writeFile(ctx context.Context, action string, a Args, appendM
 		res.Diff = udiff.Unified(path, path, old, content)
 	}
 	return res
+}
+
+// toCRLF turns every lone \n into \r\n, leaving existing \r\n alone.
+func toCRLF(s string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(s, "\r\n", "\n"), "\n", "\r\n")
+}
+
+// contentDotDirs are dot-directories that hold the project's own files — CI
+// workflows, editor and container setup — and are searched like any other.
+var contentDotDirs = map[string]bool{".github": true, ".gitlab": true, ".circleci": true, ".devcontainer": true}
+
+// prunedDir reports whether a walk skips the directory: the named ones, and any
+// other dot-directory — caches, virtualenvs, build state — unless it holds the
+// project's own files.
+func prunedDir(name string, skip map[string]bool) bool {
+	return skip[name] || strings.HasPrefix(name, ".") && !contentDotDirs[name]
+}
+
+// hiddenDirsNote follows a search that found nothing: hidden directories were
+// not looked in, and the model can name one to look there.
+const hiddenDirsNote = "\n(directories starting with a dot were skipped, except " +
+	".github, .gitlab, .circleci and .devcontainer — give one as path to search it)"
+
+// isFIFO reports whether abs is a named pipe. Appending to one that something
+// reads is a real use; openAppend makes the one nobody reads fail instead of
+// block.
+func isFIFO(abs string) bool {
+	fi, err := os.Stat(abs)
+	return err == nil && fi.Mode()&os.ModeNamedPipe != 0
+}
+
+// notAFile refuses an existing path that is not a regular file: opening a FIFO
+// for writing blocks until something reads it, with fileMu held — one such call
+// wedged the file tool for the rest of the session. A missing path is fine.
+func notAFile(abs string) error {
+	fi, err := os.Stat(abs)
+	if err != nil || fi.Mode().IsRegular() {
+		return nil
+	}
+	if fi.IsDir() {
+		return errors.New("is a directory")
+	}
+	return errors.New("is not a regular file (a pipe, socket or device)")
+}
+
+// replaceFile writes data over abs all at once: into a temporary file beside it,
+// flushed to disk, then renamed over the original, keeping its permissions. A
+// failure part-way — a full disk, a kill — leaves the original as it was; the
+// old way truncated it first and could leave half a file, and /rewind keeps no
+// copy of a file over 1 MiB.
+func replaceFile(abs string, data []byte) (err error) {
+	perm := os.FileMode(0o644)
+	if fi, e := os.Stat(abs); e == nil {
+		perm = fi.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(abs), "."+filepath.Base(abs)+".ipco-*")
+	if err != nil {
+		// No room for a file beside it (a directory we may not create in, though
+		// the file itself is writable): write in place, as before.
+		return writeInPlace(abs, data, perm)
+	}
+	defer func() {
+		if err != nil {
+			os.Remove(tmp.Name())
+		}
+	}()
+	if _, err = tmp.Write(data); err == nil {
+		err = tmp.Sync()
+	}
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if err = os.Chmod(tmp.Name(), perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), abs)
+}
+
+// writeInPlace truncates and rewrites abs, reporting a failed flush on close.
+func writeInPlace(abs string, data []byte, perm os.FileMode) error {
+	fh, err := os.OpenFile(abs, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, perm)
+	if err != nil {
+		return err
+	}
+	_, err = fh.Write(data)
+	if cerr := fh.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 type editPair struct {
@@ -552,6 +658,9 @@ func (f *fileTool) edit(ctx context.Context, a Args) Result {
 	if f.pol.DeniedWrite(abs) {
 		return Err("edit " + path + " denied by workspace policy")
 	}
+	if err := notAFile(abs); err != nil {
+		return Err("edit " + path + ": " + err.Error())
+	}
 	f.snapshot(abs) // checkpoint the prior content before we change it
 	if fi, e := os.Stat(abs); e == nil && fi.Size() > maxEditBytes {
 		return Err(fmt.Sprintf("%s is %d MB — too large to edit by text replacement; rewrite it with write, or use a tool made for large files", path, fi.Size()>>20))
@@ -563,21 +672,35 @@ func (f *fileTool) edit(ctx context.Context, a Args) Result {
 	old := string(data)
 
 	n := 1
-	if a.Bool("replace_all") {
+	all := a.Bool("replace_all")
+	if all {
 		n = -1 // strings.Replace: n<0 replaces every occurrence
 	}
+	// A file with Windows line endings: the model writes "\n" in find and
+	// replace, so a multi-line find never matched and a multi-line replace left
+	// mixed endings. Both are put in the file's own endings.
+	crlf := strings.Count(old, "\r\n") > strings.Count(old, "\n")/2
 	updated := old
 	for i, p := range pairs {
-		if !strings.Contains(updated, p.Find) {
-			clip, _ := textutil.Clip(p.Find, 60)
-			return Err(fmt.Sprintf("edit: 'find' text not present in %s (edit #%d): %s", path, i+1, clip))
+		find, repl := p.Find, p.Replace
+		if crlf {
+			find, repl = toCRLF(find), toCRLF(repl)
 		}
-		updated = strings.Replace(updated, p.Find, p.Replace, n)
+		clip, _ := textutil.Clip(p.Find, 60)
+		switch c := strings.Count(updated, find); {
+		case c == 0:
+			return Err(fmt.Sprintf("edit: 'find' text not present in %s (edit #%d): %s", path, i+1, clip))
+		case c > 1 && !all:
+			// The first of several was edited silently, and it is often not the
+			// one meant — the classic `return nil`.
+			return Err(fmt.Sprintf("edit: 'find' text occurs %d times in %s (edit #%d): %s — include enough surrounding lines to make it unique, or set replace_all to change every one", c, path, i+1, clip))
+		}
+		updated = strings.Replace(updated, find, repl, n)
 	}
 	if updated == old {
 		return Err("edit: no change made to " + path)
 	}
-	if err := os.WriteFile(abs, []byte(updated), 0o644); err != nil {
+	if err := replaceFile(abs, []byte(updated)); err != nil {
 		return Fail("file", "edit", "write to "+path+" failed", err)
 	}
 	diff := udiff.Unified(path, path, old, updated)
@@ -612,7 +735,7 @@ func (f *fileTool) find(ctx context.Context, a Args) Result {
 			return nil
 		}
 		if d.IsDir() {
-			if p != abs && (skipDir[d.Name()] || strings.HasPrefix(d.Name(), ".")) {
+			if p != abs && prunedDir(d.Name(), skipDir) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -621,6 +744,7 @@ func (f *fileTool) find(ctx context.Context, a Args) Result {
 			return nil
 		}
 		rel, _ := filepath.Rel(abs, p)
+		rel = filepath.ToSlash(rel) // patterns use /, and so do the paths shown; Windows' Rel gives \
 		ok, _ := doublestar.Match(pattern, rel)
 		if !ok { // also match the bare name, so "*.go" works without a **/ prefix
 			ok, _ = doublestar.Match(pattern, d.Name())
@@ -635,7 +759,7 @@ func (f *fileTool) find(ctx context.Context, a Args) Result {
 		return nil
 	})
 	if len(out) == 0 {
-		return Ok("(no files match " + pattern + ")")
+		return Ok("(no files match " + pattern + ")" + hiddenDirsNote)
 	}
 	sort.Strings(out)
 	if stopped {

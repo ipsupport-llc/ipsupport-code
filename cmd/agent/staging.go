@@ -396,6 +396,9 @@ func (m *tuiModel) applyStaged(e stagedEdit) (cmd tea.Cmd, rewire, ok bool) {
 			a.modelEpoch.Add(1)
 		}
 		m.push(cDim.Render("  model → " + e.value + " (" + e.prov + ")"))
+		for _, note := range runOnlyNote() {
+			m.push(cDim.Render(note))
+		}
 		return nil, true, ok
 	case "reasoning", "judge_reasoning":
 		k := e.prov + "/" + e.model

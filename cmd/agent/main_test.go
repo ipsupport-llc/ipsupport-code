@@ -10827,6 +10827,32 @@ func TestModelFlagNeverReachesDisk(t *testing.T) {
 	if c := load(); c.Providers["openai"].APIKey != "sk-added" || c.Providers["openai"].Model != "" || c.Provider != "" {
 		t.Errorf("built-in preset after a key save: %+v provider %q — want the key, no -m model, provider unchanged", c.Providers["openai"], c.Provider)
 	}
+
+	// With no key added, the preset -m made is not saved at all — not even
+	// with the context size detection found for its model.
+	if err := config.SaveProviders("", map[string]config.LLM{"lab": {BaseURL: "http://lab/v1", Model: "lab-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	config.ClearRunOnlyModel()
+	t.Setenv("GROQ_API_KEY", "gsk-test")
+	p2, cleanup4, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "groq:some-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup4()
+	ps2 := map[string]config.LLM{}
+	for k, v := range p2.cfg.Providers {
+		ps2[k] = v
+	}
+	g := ps2["groq"]
+	g.ContextWindow = 32768 // what detection writes in memory
+	ps2["groq"] = g
+	if err := config.SaveProviders(p2.cfg.Provider, ps2); err != nil {
+		t.Fatal(err)
+	}
+	if c := load(); func() bool { _, ok := c.Providers["groq"]; return ok }() {
+		t.Errorf("the preset -m made was saved: %+v", c.Providers["groq"])
+	}
 }
 
 // The piped text follows the task, marked off; no input leaves the task as is.
@@ -10905,5 +10931,74 @@ func TestReadPiped(t *testing.T) {
 	got, _ = readPiped(strings.NewReader(strings.Repeat("y", 3000)), 2048)
 	if !strings.HasPrefix(got, strings.Repeat("y", 2048)) || !strings.Contains(got, "input cut at 2 KB") {
 		t.Errorf("large input kept as %q…", got[:40])
+	}
+}
+
+// More of what a -m session must not do to the saved settings: a session
+// /model resetting the saved model's hand-set context size; a preset added in
+// the session taking a later session /model; removing the saved provider
+// leaving its name behind.
+func TestModelFlagSessionEdgeSaves(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
+	ws := t.TempDir()
+	load := func() config.Config {
+		c, err := config.Load(ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	if err := config.SaveGlobal("me", config.LLM{BaseURL: "http://127.0.0.1:1/v1", Model: "home", ContextWindow: 8000, ContextWindowManual: true}); err != nil {
+		t.Fatal(err)
+	}
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "run-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	a.setModel("other") // resets the manual size in memory, for the new model
+	if c := load(); c.LLM.Model != "home" || c.LLM.ContextWindow != 8000 || !c.LLM.ContextWindowManual {
+		t.Errorf("saved local after a session /model: %+v — want home with its own size", c.LLM)
+	}
+
+	// A preset added in the session is held to the model it was added with.
+	ps := map[string]config.LLM{"newp": {BaseURL: "http://newp/v1", Model: "A"}}
+	if err := config.SaveProviders("", ps); err != nil {
+		t.Fatal(err)
+	}
+	ps["newp"] = config.LLM{BaseURL: "http://newp/v1", Model: "B"} // a session /model on it
+	if err := config.SaveProviders("newp", ps); err != nil {
+		t.Fatal(err)
+	}
+	if c := load(); c.Providers["newp"].Model != "A" {
+		t.Errorf("added preset's saved model = %q, want the one it was added with", c.Providers["newp"].Model)
+	}
+}
+
+// The provider saved before -m, removed in the session, is not saved by name.
+func TestModelFlagRemovedProviderFallsBackToLocal(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
+	ws := t.TempDir()
+	if err := config.SaveProviders("lab", map[string]config.LLM{"lab": {BaseURL: "http://lab/v1", Model: "lab-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "local:x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := config.SaveProviders(a.cfg.Provider, map[string]config.LLM{}); err != nil { // lab removed
+		t.Fatal(err)
+	}
+	c, err := config.Load(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Provider != "" {
+		t.Errorf("saved provider = %q after removing it, want local", c.Provider)
 	}
 }

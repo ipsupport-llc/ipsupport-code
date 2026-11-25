@@ -562,7 +562,7 @@ func SaveGlobal(name string, l LLM) error {
 	if name == "" {
 		name = "ipsupport-code"
 	}
-	l = runOnly.local(l)
+	l = runOnly.localLLM(l)
 	// Merge, don't overwrite: the global file also holds providers (with keys),
 	// channel, prices, agents, retention — clobbering them on a /model or /rename
 	// would silently lose the user's keys/config.
@@ -807,10 +807,26 @@ var runOnly runOnlyModel
 type runOnlyModel struct {
 	mu       sync.Mutex
 	set      bool
-	provider string            // the provider saved before -m
-	model    string            // the local model saved before -m
-	presets  map[string]string // each preset's model before -m
-	made     string            // a preset -m alone created (a built-in that had none)
+	provider string             // the provider saved before -m
+	local    modelOf            // the local connection's model before -m
+	presets  map[string]modelOf // each preset's model before -m, or when added in the session
+	made     string             // a preset -m alone created (a built-in that had none)
+}
+
+// modelOf is what follows the model: the model and the context size set for it.
+// A session /model resets a hand-set size for the old model; on disk the saved
+// model keeps its own.
+type modelOf struct {
+	model  string
+	window int
+	manual bool
+}
+
+func modelFields(l LLM) modelOf { return modelOf{l.Model, l.ContextWindow, l.ContextWindowManual} }
+
+func (m modelOf) onto(l LLM) LLM {
+	l.Model, l.ContextWindow, l.ContextWindowManual = m.model, m.window, m.manual
+	return l
 }
 
 // SetRunOnlyModel records the connection before -m turned it into after.
@@ -818,10 +834,10 @@ func SetRunOnlyModel(before, after Config) {
 	runOnly.mu.Lock()
 	defer runOnly.mu.Unlock()
 	r := &runOnly
-	r.set, r.provider, r.model, r.made = true, before.Provider, before.LLM.Model, ""
-	r.presets = map[string]string{}
+	r.set, r.provider, r.local, r.made = true, before.Provider, modelFields(before.LLM), ""
+	r.presets = map[string]modelOf{}
 	for name, p := range before.Providers {
-		r.presets[name] = p.Model
+		r.presets[name] = modelFields(p)
 	}
 	if _, had := before.Providers[after.Provider]; !had && after.Provider != "" && after.Provider != "local" {
 		r.made = after.Provider
@@ -843,19 +859,20 @@ func ClearRunOnlyModel() {
 	runOnly.mu.Unlock()
 }
 
-// local is l as it may be saved: with the model from before -m.
-func (r *runOnlyModel) local(l LLM) LLM {
+// localLLM is l as it may be saved: with the model from before -m.
+func (r *runOnlyModel) localLLM(l LLM) LLM {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.set {
-		l.Model = r.model
+		l = r.local.onto(l)
 	}
 	return l
 }
 
 // providers is the active provider and presets as they may be saved: the
 // provider from before -m, and each preset's model from before it. A preset
-// added in the session keeps its own; one -m alone made is not saved.
+// added in the session is held to the model it was added with; the one -m
+// alone made keeps everything but -m's model.
 func (r *runOnlyModel) providers(provider string, ps map[string]LLM) (string, map[string]LLM) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -864,16 +881,27 @@ func (r *runOnlyModel) providers(provider string, ps map[string]LLM) (string, ma
 	}
 	out := make(map[string]LLM, len(ps))
 	for name, p := range ps {
-		if model, ok := r.presets[name]; ok {
-			p.Model = model
-		}
-		if name == r.made {
-			p.Model = "" // -m's model, on a preset that had none: the rest of it (a key added since) is kept
+		switch m, ok := r.presets[name]; {
+		case name == r.made:
+			// -m's model, and the context size found for it, on a preset that had
+			// none: the rest of it (a key added since) is kept.
+			p = modelOf{}.onto(p)
 			if reflect.DeepEqual(p, LLM{}) {
 				continue
 			}
+		case ok:
+			p = m.onto(p)
+		default:
+			r.presets[name] = modelFields(p) // added in the session: as first saved
 		}
 		out[name] = p
+	}
+	// The provider saved before -m was removed in the session: saving its name
+	// would leave the next launch on a provider that is gone. Local, then.
+	if _, kept := out[r.provider]; r.provider != "" && r.provider != "local" && !kept {
+		if _, builtin := ProviderTemplates[r.provider]; !builtin {
+			r.provider = ""
+		}
 	}
 	return r.provider, out
 }

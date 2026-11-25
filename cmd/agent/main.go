@@ -867,6 +867,8 @@ func build(workspace, sessionName string, overrides []string, readOnly bool, rea
 			return nil, nil, fmt.Errorf("-m %s: %w", modelSpec, err)
 		}
 		config.SetRunOnlyModel(before, cfg) // saves write what was there before -m
+	} else {
+		config.ClearRunOnlyModel() // a process builds once; a test builds many
 	}
 	// A read-only run sends nothing off the machine but its model's requests:
 	// no web tool (a fetched URL can carry the code it was shown), no update
@@ -3750,6 +3752,9 @@ func (a *app) setMode(m mode) string {
 }
 
 func (a *app) reconfigure() error {
+	// The settings are read back from disk: whatever -m chose is gone from
+	// the session, and so is the rule that kept it from being saved.
+	config.ClearRunOnlyModel()
 	cfg, err := config.Load(a.workspace)
 	if err != nil {
 		return err
@@ -5060,6 +5065,7 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	case "/agents", "/agent":
 		printLines(a.agentsCommand(ctx, rest))
 	case "/login", "/init":
+		config.ClearRunOnlyModel() // setting up the connection is saving it — -m or not
 		maybeInit(a.reader, true)
 		if err := a.reconfigure(); err != nil {
 			fmt.Println("reconfigure failed:", err)
@@ -5280,13 +5286,14 @@ func (a *app) addProvider(arg string) []string {
 	if err != nil {
 		return []string{"error: " + err.Error()}
 	}
-	if a.cfg.Provider == name {
-		return []string{msg}
+	switch {
+	case a.cfg.Provider == name:
+	case key != "":
+		msg = fmt.Sprintf("added %q → %s with a key — /ai %s to use it", name, a.cfg.Providers[name].BaseURL, name)
+	default:
+		msg = fmt.Sprintf("added %q → %s — next: /ai key %s <token>, then /ai %s", name, a.cfg.Providers[name].BaseURL, name, name)
 	}
-	if key != "" {
-		return []string{fmt.Sprintf("added %q → %s with a key — /ai %s to use it", name, a.cfg.Providers[name].BaseURL, name)}
-	}
-	return []string{fmt.Sprintf("added %q → %s — next: /ai key %s <token>, then /ai %s", name, a.cfg.Providers[name].BaseURL, name, name)}
+	return append([]string{msg}, runOnlyNote()...) // a model given here is for the session too
 }
 
 func (a *app) providerList() []string {

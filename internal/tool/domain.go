@@ -2,9 +2,11 @@ package tool
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // Param declares one action parameter. It is the single source for BOTH the
@@ -159,6 +161,206 @@ func (d *Domain) Call(ctx context.Context, action string, params map[string]any)
 			strings.Join(required, ", "), strings.Join(given, ", ")))
 	}
 	return a.Run(ctx, Args{m: params})
+}
+
+// Example is a ready-to-copy arguments object for one of the domain's actions,
+// for a model that just called it wrongly: a weak model copies an example far
+// more reliably than it assembles a call from a typed schema. It is built from
+// what the model sent — its values for params the action declares, a
+// placeholder for each required one it left out, anything undeclared dropped.
+// An action name that isn't the domain's own is matched to one it contains or
+// is contained in ("read_file" → read); "" when nothing matches.
+//
+// "" too when the example would correct nothing — every required param given
+// and the action already right. Then the call failed for some other reason (a
+// remote MCP tool's own validation, say), and labelling the same call "correct"
+// would only send the model back to it.
+func (d *Domain) Example(action string, given map[string]any) string {
+	return d.example(action, given, false)
+}
+
+// example is Example; corrected says the call is already being corrected
+// elsewhere (sent to the wrong tool), so even a complete one is worth showing.
+func (d *Domain) example(action string, given map[string]any, corrected bool) string {
+	a, ok := d.index[action]
+	corrected = corrected || !ok
+	if !ok {
+		a, ok = d.closestAction(action)
+		if !ok {
+			return ""
+		}
+	}
+	var b strings.Builder
+	b.WriteString(`{"action":` + jsonString(a.Name) + `,"params":{`)
+	first := true
+	for _, p := range a.Params {
+		v, has := given[p.Name]
+		var val string
+		switch {
+		case p.Required && (!has || isEmpty(v)):
+			// Validation counts a blank required value as missing.
+			val, corrected = placeholder(p), true
+		case has && v != nil:
+			// An optional value is kept as sent, a lone space included: replace=" "
+			// dropped from the example would turn a replace into a delete.
+			val = exampleValue(p, v)
+		default:
+			continue
+		}
+		if !first {
+			b.WriteByte(',')
+		}
+		first = false
+		b.WriteString(jsonString(p.Name) + ":" + val)
+	}
+	b.WriteString("}}")
+	if !corrected {
+		return ""
+	}
+	return b.String()
+}
+
+// declaresAny reports whether action declares any of the params given.
+func (d *Domain) declaresAny(action string, given map[string]any) bool {
+	a, ok := d.index[action]
+	if !ok {
+		return false
+	}
+	for _, p := range a.Params {
+		if _, has := given[p.Name]; has {
+			return true
+		}
+	}
+	return false
+}
+
+// closestAction finds the one action named by a word of the given name
+// ("read_file", "readFile", "file-read" → read), ignoring case. Whole words
+// only: "catalog" is not log, "check" is not checkout. Ambiguous or none: false.
+// Never a mutating one:
+// "list_branches" must not come back as git's branch, which creates a branch —
+// a guess may only point at something that changes nothing.
+func (d *Domain) closestAction(given string) (*Action, bool) {
+	words := nameWords(given)
+	if len(words) == 0 {
+		return nil, false
+	}
+	var found []*Action
+	for i := range d.spec.Actions {
+		n := strings.ToLower(d.spec.Actions[i].Name)
+		if words[n] || strings.EqualFold(strings.TrimSpace(given), n) {
+			found = append(found, &d.spec.Actions[i])
+		}
+	}
+	// Ambiguity first, then the mutation rule: "read_then_write" names two
+	// actions, and dropping write first would make it look like a clear read.
+	if len(found) != 1 || found[0].Mutates {
+		return nil, false
+	}
+	return found[0], true
+}
+
+// nameWords splits an identifier into lower-case words: on anything not a letter
+// or digit, and at a lower-to-upper case change ("readFile" → read, file).
+func nameWords(s string) map[string]bool {
+	words := map[string]bool{}
+	var cur []rune
+	flush := func() {
+		if len(cur) > 0 {
+			words[strings.ToLower(string(cur))] = true
+			cur = cur[:0]
+		}
+	}
+	var prev rune
+	for _, r := range s {
+		switch {
+		case !unicode.IsLetter(r) && !unicode.IsDigit(r):
+			flush()
+		case unicode.IsUpper(r) && unicode.IsLower(prev):
+			flush()
+			cur = append(cur, r)
+		default:
+			cur = append(cur, r)
+		}
+		prev = r
+	}
+	flush()
+	return words
+}
+
+// maxExampleValue caps one value's JSON in an example.
+const maxExampleValue = 120
+
+// exampleValue is the model's own value for p, as JSON. A long one — at any
+// depth, a list of edits included — is shown as a placeholder instead: a copied
+// example must never carry a truncated copy of, say, a file's content, nor
+// repeat a large one into the prompt.
+//
+// The placeholder is the ordinary one, "<content>": a weak model copying the
+// example must see a slot to fill, not a sentence it could send as the content.
+// A value of the wrong JSON type for its param is a slot too — it is not part of
+// a correct call.
+func exampleValue(p Param, v any) string {
+	// A list or object sent for a str param goes in as the JSON string the
+	// param is declared to take — file.edit's edits, mcp's args — rather than
+	// being thrown away for a placeholder.
+	switch v.(type) {
+	case []any, map[string]any:
+		if p.Type == "str" {
+			if js, err := marshalPlain(v); err == nil {
+				v = js
+			}
+		}
+	}
+	out, err := marshalPlain(v)
+	if err != nil || len(out) > maxExampleValue || !typeMatches(p.Type, v) {
+		return placeholder(p)
+	}
+	return out
+}
+
+// typeMatches reports whether a decoded JSON value fits a declared param type.
+func typeMatches(typ string, v any) bool {
+	switch n := v.(type) {
+	case string:
+		return typ == "str" || typ == ""
+	case float64:
+		// 0.5 for an int param is not a correct value: the reader truncates it.
+		return typ == "number" || typ == "int" && n == float64(int64(n))
+	case json.Number, int, int64:
+		return typ == "int" || typ == "number"
+	case bool:
+		return typ == "bool"
+	case []any:
+		return typ == "list"
+	}
+	return false
+}
+
+// placeholder stands in for a value the model has to supply. Always a marked
+// slot, whatever the type: a bare 1 or true would be copied as a real value.
+func placeholder(p Param) string {
+	if p.Type == "list" {
+		return "[" + jsonString("<"+p.Name+">") + "]"
+	}
+	return jsonString("<" + p.Name + ">")
+}
+
+func jsonString(s string) string {
+	out, _ := marshalPlain(s)
+	return out
+}
+
+// marshalPlain is json.Marshal without HTML escaping: the example is read by a
+// model, and "\u003cpath\u003e" is not "<path>" to it.
+func marshalPlain(v any) (string, error) {
+	var b strings.Builder
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(b.String(), "\n"), nil
 }
 
 // soleRequiredParam returns the sole action's name and its ONE required

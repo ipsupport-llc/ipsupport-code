@@ -262,6 +262,103 @@ func TestFileReadWindowSkipsFIFO(t *testing.T) {
 	}
 }
 
+// write, edit and append must not hang on a FIFO nobody reads: opening one for
+// writing blocks until a reader appears, with the file lock held, wedging the
+// tool for good. (append to a pipe something reads still works — see the
+// snapshot test in cmd/agent.)
+func TestFileWritesRefuseFIFO(t *testing.T) {
+	dir := t.TempDir()
+	if err := mkfifo(filepath.Join(dir, "pipe")); err != nil {
+		t.Skipf("mkfifo unsupported here: %v", err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+	for _, c := range []struct {
+		action string
+		params map[string]any
+	}{
+		{"write", map[string]any{"path": "pipe", "content": "x"}},
+		{"append", map[string]any{"path": "pipe", "content": "x"}},
+		{"edit", map[string]any{"path": "pipe", "find": "a", "replace": "b"}},
+	} {
+		done := make(chan Result, 1)
+		go func() { done <- tl.Call(context.Background(), c.action, c.params) }()
+		select {
+		case r := <-done:
+			if !r.IsError {
+				t.Errorf("%s to a FIFO should be refused, got: %s", c.action, r.Content)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s hung on a FIFO", c.action)
+		}
+	}
+}
+
+// write and edit replace a file whole — a new file renamed over the old — so a
+// failure part-way can't leave half of it. The file keeps its permissions and
+// nothing is left behind beside it.
+func TestFileWriteReplacesWholeAndKeepsMode(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "script.sh")
+	if err := os.WriteFile(p, []byte("old\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+	if r := tl.Call(context.Background(), "write", map[string]any{"path": "script.sh", "content": "new\n"}); r.IsError {
+		t.Fatal(r.Content)
+	}
+	if after, err := os.Stat(p); err == nil && runtime.GOOS != "windows" && os.SameFile(before, after) {
+		t.Error("write rewrote the file in place — a failure part-way would leave half of it")
+	}
+	if r := tl.Call(context.Background(), "edit", map[string]any{"path": "script.sh", "find": "new", "replace": "newer"}); r.IsError {
+		t.Fatal(r.Content)
+	}
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(p); string(data) != "newer\n" {
+		t.Errorf("content = %q", data)
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o755 {
+		t.Errorf("mode = %v, want 0755 kept", fi.Mode().Perm())
+	}
+	if ents, _ := os.ReadDir(dir); len(ents) != 1 {
+		t.Errorf("left beside it: %v", ents)
+	}
+}
+
+// A writable file in a directory we can't create in still gets written — in
+// place, as before, since there is nowhere to put the new copy.
+func TestFileWriteInAReadOnlyDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX directory permissions and a non-root user")
+	}
+	root := t.TempDir()
+	dir := filepath.Join(root, "ro")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(p, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	tl := fileToolFor(t, root, "allow", yes())
+	if r := tl.Call(context.Background(), "write", map[string]any{"path": "ro/f.txt", "content": "new"}); r.IsError {
+		t.Fatalf("write failed: %s", r.Content)
+	}
+	if data, _ := os.ReadFile(p); string(data) != "new" {
+		t.Errorf("content = %q", data)
+	}
+}
+
 // Reading a binary file (a compiled executable, in this case) as "text" used
 // to just dump its raw bytes back — huge, useless to the model, and capable
 // of corrupting the terminal that renders the tool-call output (embedded
@@ -704,6 +801,120 @@ func TestFileMultiEdit(t *testing.T) {
 	}
 }
 
+// On a file with Windows line endings the model writes "\n": a multi-line find
+// never matched, and a multi-line replace left mixed endings.
+func TestFileEditKeepsCRLF(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "w.txt")
+	if err := os.WriteFile(p, []byte("one\r\ntwo\r\nthree\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+	if r := tl.Call(context.Background(), "edit", map[string]any{"path": "w.txt", "find": "one\ntwo", "replace": "uno\ndos\nmas"}); r.IsError {
+		t.Fatalf("edit: %s", r.Content)
+	}
+	if data, _ := os.ReadFile(p); string(data) != "uno\r\ndos\r\nmas\r\nthree\r\n" {
+		t.Errorf("result = %q, want every line ending CRLF", data)
+	}
+}
+
+// In a file with mixed endings, a find given exactly as it appears names that
+// place; its CRLF form must not send the edit to another one.
+func TestFileEditPrefersTheExactMatch(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "m.txt")
+	if err := os.WriteFile(p, []byte("a\nb\r\na\r\nb\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+	if r := tl.Call(context.Background(), "edit", map[string]any{"path": "m.txt", "find": "a\nb", "replace": "X"}); r.IsError {
+		t.Fatalf("edit: %s", r.Content)
+	}
+	if data, _ := os.ReadFile(p); string(data) != "X\r\na\r\nb\r\n" {
+		t.Errorf("result = %q, want the first (exact) pair edited", data)
+	}
+}
+
+// A file a replacement can't stand in for — it carries an extended attribute
+// (POSIX ACLs are kept as one) — is written in place, keeping it.
+func TestFileWriteKeepsExtendedAttributes(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("user xattrs on Linux")
+	}
+	dir := t.TempDir()
+	p := filepath.Join(dir, "x.txt")
+	if err := os.WriteFile(p, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := setXattr(p, "user.ipco.test", "kept"); err != nil {
+		t.Skipf("filesystem without user xattrs: %v", err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+	if r := tl.Call(context.Background(), "write", map[string]any{"path": "x.txt", "content": "new"}); r.IsError {
+		t.Fatal(r.Content)
+	}
+	if v, err := getXattr(p, "user.ipco.test"); err != nil || v != "kept" {
+		t.Errorf("xattr after write = %q, %v — want it kept", v, err)
+	}
+}
+
+// A find that occurs more than once edited the first silently, often not the
+// one meant. It is refused, saying how many there are; replace_all still works.
+func TestFileEditRefusesAnAmbiguousFind(t *testing.T) {
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+	tl.Call(ctx, "write", map[string]any{"path": "f.go", "content": "if a { return nil }\nif b { return nil }\n"})
+	r := tl.Call(ctx, "edit", map[string]any{"path": "f.go", "find": "return nil", "replace": "return err"})
+	if !r.IsError || !strings.Contains(r.Content, "2 times") {
+		t.Errorf("ambiguous find: %+v, want refused with the count", r)
+	}
+	if data, _ := os.ReadFile(filepath.Join(dir, "f.go")); strings.Contains(string(data), "err") {
+		t.Errorf("the file changed anyway: %q", data)
+	}
+}
+
+// A new file is created the way anything else is, under the user's umask —
+// not widened to 0644 by a chmod.
+func TestFileWriteNewFileFollowsUmask(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX modes")
+	}
+	old := setUmask(0o077)
+	defer setUmask(old)
+	dir := t.TempDir()
+	tl := fileToolFor(t, dir, "allow", yes())
+	if r := tl.Call(context.Background(), "write", map[string]any{"path": "new.txt", "content": "x"}); r.IsError {
+		t.Fatal(r.Content)
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "new.txt")); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600 under umask 077", fi.Mode().Perm())
+	}
+}
+
+// A whole-file write keeps a UTF-8 byte order mark the file had: the model
+// never sees it, so it dropped it silently. Not into an empty write, though.
+func TestFileWriteKeepsABOM(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "b.csv")
+	if err := os.WriteFile(p, []byte("\ufeffa,b\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+	if r := tl.Call(context.Background(), "write", map[string]any{"path": "b.csv", "content": "a,b,c\n"}); r.IsError {
+		t.Fatal(r.Content)
+	}
+	if data, _ := os.ReadFile(p); string(data) != "\ufeffa,b,c\n" {
+		t.Errorf("result = %q, want the BOM kept", data)
+	}
+	if r := tl.Call(context.Background(), "write", map[string]any{"path": "b.csv", "content": ""}); r.IsError {
+		t.Fatal(r.Content)
+	}
+	if data, _ := os.ReadFile(p); len(data) != 0 {
+		t.Errorf("empty write left %q, want an empty file", data)
+	}
+}
+
 func TestFileEditReplaceAll(t *testing.T) {
 	dir := t.TempDir()
 	tl := fileToolFor(t, dir, "allow", yes())
@@ -845,5 +1056,68 @@ func TestSearchAndFindStopWhenCancelled(t *testing.T) {
 	}
 	if r := tl.Call(ctx, "find", map[string]any{"pattern": "*.txt"}); strings.Count(r.Content, ".txt") == 50 {
 		t.Errorf("find walked the whole tree after cancellation")
+	}
+}
+
+// Search and find skip caches and virtualenvs (dot-directories), but not the
+// ones holding the project's own files — a CI workflow in .github was
+// invisible. A search that finds nothing says what it skipped.
+func TestFileSearchLooksInCIDirectories(t *testing.T) {
+	dir := t.TempDir()
+	for p, body := range map[string]string{
+		".github/workflows/ci.yml": "run: make deploy-target",
+		".cache/x.txt":             "deploy-target",
+	} {
+		full := filepath.Join(dir, p)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+	ctx := context.Background()
+	r := tl.Call(ctx, "search", map[string]any{"query": "deploy-target"})
+	if !strings.Contains(r.Content, "ci.yml") || strings.Contains(r.Content, ".cache") {
+		t.Errorf("search = %q, want the workflow found and the cache skipped", r.Content)
+	}
+	if r := tl.Call(ctx, "find", map[string]any{"pattern": "**/*.yml"}); !strings.Contains(r.Content, ".github/workflows/ci.yml") {
+		t.Errorf("find = %q, want the workflow", r.Content)
+	}
+	if r := tl.Call(ctx, "search", map[string]any{"query": "nowhere-at-all"}); !strings.Contains(r.Content, "starting with a dot were skipped") {
+		t.Errorf("empty search = %q, want it to say what was skipped", r.Content)
+	}
+}
+
+// A whole-file replace must not cut links: through a symlink the target is what
+// gets written, and a file with another hard link is written in place so both
+// names see the new content.
+func TestFileWriteKeepsLinks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX links")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.yaml")
+	if err := os.WriteFile(target, []byte("a: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("real.yaml", filepath.Join(dir, "conf.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(target, filepath.Join(dir, "hard.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	tl := fileToolFor(t, dir, "allow", yes())
+	if r := tl.Call(context.Background(), "write", map[string]any{"path": "conf.yaml", "content": "a: 2\n"}); r.IsError {
+		t.Fatal(r.Content)
+	}
+	if fi, err := os.Lstat(filepath.Join(dir, "conf.yaml")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Error("the symlink was replaced by a file")
+	}
+	for _, name := range []string{"real.yaml", "hard.yaml"} {
+		if data, _ := os.ReadFile(filepath.Join(dir, name)); string(data) != "a: 2\n" {
+			t.Errorf("%s = %q, want the new content", name, data)
+		}
 	}
 }

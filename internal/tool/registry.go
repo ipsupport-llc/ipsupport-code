@@ -235,6 +235,36 @@ func (r *Registry) Usage(name string) string {
 	return ""
 }
 
+// Example is a ready-to-copy arguments object for a call of name that went
+// wrong (see Domain.Example), and the tool it is for: an action that belongs to
+// one other tool gets that tool's example, the one the error sends it to. ""
+// when there is none to give — an action several other tools share included.
+func (r *Registry) Example(name, action string, given map[string]any) (tool, example string) {
+	moved := false
+	if t, ok := r.tools[name]; ok && !contains(t.Actions(), action) {
+		owners := otherOwners(r.actionToTool[action], name)
+		if len(owners) > 1 {
+			return "", ""
+		}
+		if len(owners) == 1 {
+			// Only when what the model sent fits that tool's action: run called
+			// with action "run" and a command meant a shell command, not agent's
+			// run — an example spawning a sub-agent would push it the wrong way.
+			d, ok := r.tools[owners[0]].(*Domain)
+			if !ok || !d.declaresAny(action, given) {
+				return "", ""
+			}
+			name, moved = owners[0], true
+		}
+	}
+	if d, ok := r.tools[name].(*Domain); ok {
+		if ex := d.example(action, given, moved); ex != "" {
+			return name, ex
+		}
+	}
+	return "", ""
+}
+
 // Mutates reports whether (name, action) changes state — the gate plan mode uses.
 func (r *Registry) Mutates(name, action string) bool {
 	if t, ok := r.tools[name]; ok {

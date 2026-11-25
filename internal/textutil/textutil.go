@@ -3,6 +3,7 @@ package textutil
 
 import (
 	"bytes"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 )
@@ -81,6 +82,69 @@ func (w *BoundedWriter) Write(p []byte) (int, error) {
 
 // String returns the retained bytes.
 func (w *BoundedWriter) String() string { return w.buf.String() }
+
+// HeadTailWriter keeps at most max bytes of what is written to it: all of it
+// while it fits, else the first third and the last two thirds with a marker
+// between them. A long build's output is worth most at its end — the failing
+// tests, the error, the summary — and a head-only cap threw exactly that away.
+type HeadTailWriter struct {
+	max, headMax int
+	head         bytes.Buffer
+	tail         *BoundedTailWriter
+	total        int
+	Truncated    bool
+}
+
+// NewHeadTailWriter returns a HeadTailWriter retaining at most max bytes.
+func NewHeadTailWriter(max int) *HeadTailWriter {
+	if max < 0 {
+		max = 0
+	}
+	return &HeadTailWriter{max: max, headMax: max / 3}
+}
+
+func (w *HeadTailWriter) Write(p []byte) (int, error) {
+	n := len(p)
+	w.total += n
+	if w.tail == nil {
+		if w.head.Len()+len(p) <= w.max {
+			w.head.Write(p)
+			return n, nil
+		}
+		// Over the cap: keep the first third as the head, and everything after
+		// it goes through a tail that keeps the rest of the budget.
+		w.Truncated = true
+		all := append(w.head.Bytes()[:w.head.Len():w.head.Len()], p...)
+		w.head.Reset()
+		w.head.Write(all[:w.headMax])
+		w.tail = NewBoundedTailWriter(w.max - w.headMax)
+		w.tail.Write(all[w.headMax:])
+		return n, nil
+	}
+	w.tail.Write(p)
+	return n, nil
+}
+
+// String returns what was kept, with the cut marked in the middle.
+func (w *HeadTailWriter) String() string {
+	if w.tail == nil {
+		return w.head.String()
+	}
+	head := w.head.Bytes()
+	// The cut may land mid-rune: drop an incomplete last rune, never more —
+	// output that isn't UTF-8 at all keeps its head.
+	for i := 1; i <= utf8.UTFMax && i <= len(head); i++ {
+		if r := head[len(head)-i]; utf8.RuneStart(r) {
+			if !utf8.FullRune(head[len(head)-i:]) {
+				head = head[:len(head)-i]
+			}
+			break
+		}
+	}
+	tail := w.tail.String()
+	cut := w.total - len(head) - len(tail)
+	return string(head) + fmt.Sprintf("\n…[%d bytes cut from the middle]…\n", cut) + tail
+}
 
 // BoundedTailWriter is an io.Writer that keeps only the most recent max
 // bytes written to it — the tail counterpart of BoundedWriter — without ever

@@ -3131,6 +3131,66 @@ func TestJudgeAskVerdictParsing(t *testing.T) {
 	}
 }
 
+// A wrong call is answered with a filled-in correct one ahead of the schema: a
+// weak model copies an example far more reliably than it builds a call from types.
+func TestAMisusedToolGetsACopyableExample(t *testing.T) {
+	wrote := ""
+	file := tool.NewDomain(tool.DomainSpec{
+		Name: "file", Summary: "Files.",
+		Actions: []tool.Action{{Name: "write", Mutates: true,
+			Params: []tool.Param{tool.Req("path", "str"), tool.Req("content", "str")},
+			Run: func(_ context.Context, a tool.Args) tool.Result {
+				wrote = a.Str("path") + "=" + a.Str("content")
+				return tool.Ok("written")
+			}}},
+	})
+	fake := &scriptLLM{replies: []llm.Message{
+		toolCallReply("1", "file", `{"action":"write","params":{"path":"notes.txt","text":"hi"}}`),
+		{Role: "assistant", Content: "ok"},
+	}}
+	a := New(fake, tool.NewRegistry(file), nil, nil, "", 5)
+	tr, _ := a.Run(context.Background(), "write notes")
+	var result string
+	for _, m := range tr.Messages {
+		if m.Role == "tool" {
+			result = m.Content
+		}
+	}
+	want := `{"action":"write","params":{"path":"notes.txt","content":"<content>"}}`
+	if !strings.Contains(result, want) {
+		t.Errorf("the error reply carries no copyable call:\n%s", result)
+	}
+	if i, j := strings.Index(result, want), strings.Index(result, "file usage:"); i < 0 || j < 0 || i > j {
+		t.Error("the example does not lead the schema")
+	}
+	if wrote != "" {
+		t.Errorf("the wrong call ran: %q", wrote)
+	}
+
+	// An action of another tool gets that tool's example, the one the error
+	// sends the model to — even when nothing else about the call was wrong.
+	web := tool.NewDomain(tool.DomainSpec{
+		Name: "web", Summary: "Web.",
+		Actions: []tool.Action{{Name: "fetch",
+			Params: []tool.Param{tool.Req("url", "str")},
+			Run:    func(context.Context, tool.Args) tool.Result { return tool.Ok("page") }}},
+	})
+	fake = &scriptLLM{replies: []llm.Message{
+		toolCallReply("1", "file", `{"action":"fetch","params":{"url":"https://example.com"}}`),
+		{Role: "assistant", Content: "ok"},
+	}}
+	a = New(fake, tool.NewRegistry(file, web), nil, nil, "", 5)
+	tr, _ = a.Run(context.Background(), "fetch it")
+	for _, m := range tr.Messages {
+		if m.Role == "tool" {
+			result = m.Content
+		}
+	}
+	if !strings.Contains(result, "A correct web call") || !strings.Contains(result, `{"action":"fetch","params":{"url":"https://example.com"}}`) {
+		t.Errorf("an action of another tool got no example for that tool:\n%s", result)
+	}
+}
+
 // A tool-less reply still never reaches the judge. The goal loop is in force for
 // EVERY prompt while a goal stands (see the host's goalLoopBudget), so judging a
 // plain conversational turn against the goal and re-feeding it would trap an

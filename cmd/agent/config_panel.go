@@ -462,9 +462,18 @@ func (m *tuiModel) configRowView(key string) (label, value, hint string) {
 		}
 		return "max steps/task", v, "enter: cycle (0 = auto-scale from context window)"
 	case "max_history":
-		v := fmt.Sprintf("auto (%d)", autoMaxHistory(act.ContextWindow))
-		if m.app.cfg.MaxHistory > 0 {
-			v = fmt.Sprintf("%d", m.app.cfg.MaxHistory)
+		// The cap in force, which is not always the one set: raw memory raises
+		// auto's, and the agent raises a cap below one question and its answer.
+		eff := autoMaxHistory(act.ContextWindow)
+		if m.app.ag != nil {
+			eff = m.app.ag.MaxHistory()
+		}
+		v := fmt.Sprintf("auto (%d)", eff)
+		if set := m.app.cfg.MaxHistory; set > 0 {
+			v = fmt.Sprintf("%d", set)
+			if m.app.ag != nil && eff != set {
+				v = fmt.Sprintf("%d (set %d)", eff, set)
+			}
 		}
 		return "max history", v, "enter: cycle (0 = auto-scale from context window)"
 	case "max_stuck_turns":

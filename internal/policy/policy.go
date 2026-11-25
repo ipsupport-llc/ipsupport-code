@@ -17,6 +17,7 @@ import (
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/ipsupport-llc/ipsupport-code/internal/config"
+	"github.com/ipsupport-llc/ipsupport-code/internal/shellsplit"
 )
 
 // Decision is the outcome of a policy check.
@@ -46,6 +47,7 @@ func (d Decision) String() string {
 type Engine struct {
 	file       config.FilePolicy
 	runDefault string
+	shell      string           // run.shell: on Windows, "cmd" means cmd.exe, else PowerShell
 	allow      []*regexp.Regexp // anchored
 	deny       []*regexp.Regexp // unanchored
 	workspace  string           // absolute
@@ -59,6 +61,7 @@ func New(c config.Config) (*Engine, error) {
 	e := &Engine{
 		file:       c.File,
 		runDefault: c.Run.Default,
+		shell:      c.Run.Shell,
 		allow:      compileGlobs(c.Run.Allow, true),
 		deny:       compileGlobs(c.Run.Deny, false),
 		workspace:  filepath.Clean(c.Workspace),
@@ -181,13 +184,44 @@ func (e *Engine) Run(command string) Decision {
 			return Deny
 		}
 	}
+	// And every command the shell grammar nests: $( ), backticks, { }, ( ),
+	// the bodies of if/while/for, and code handed to sh -c / bash -c. The two
+	// splits above see none of them, and with run.default=allow the floor is
+	// the only thing between `echo $(rm -fr ~)` and the shell.
+	parsed := shellsplit.Parse(e.dialect(), cmd)
+	for _, c := range parsed.Commands {
+		if dangerousSegment(c) {
+			return Deny
+		}
+	}
 	if anyMatch(e.deny, cmd) { // configured deny globs + the glob floor, matched anywhere
 		return Deny
+	}
+	// Nesting past what the parser follows was left as text the floor could
+	// not look inside: never run that unasked, whatever allows it.
+	if parsed.Incomplete {
+		if d := parseDefault(e.runDefault); d == Deny {
+			return Deny
+		}
+		return Ask
 	}
 	if e.allowsAll(cmd, segs) {
 		return Allow
 	}
 	return parseDefault(e.runDefault)
+}
+
+// dialect is the shell grammar commands are written in — the same choice
+// tool.Shell and the risk model make: sh off Windows, cmd.exe when run.shell
+// is exactly "cmd", else PowerShell.
+func (e *Engine) dialect() shellsplit.Dialect {
+	switch {
+	case !windowsShell:
+		return shellsplit.Sh
+	case e.shell == "cmd":
+		return shellsplit.Cmd
+	}
+	return shellsplit.PowerShell
 }
 
 // allowsAll reports whether every chained segment matches an allow glob. Command
@@ -260,7 +294,57 @@ func looksLikeArgValue(s string) bool {
 // denied even under an allow glob, and can't be turned off by config. Best-effort:
 // it sees through common wrappers but not a full nested shell (sh -c "…"); the
 // ask-default is the real backstop when allow-globs aren't set.
-func dangerousSegment(seg string) bool { return dangerousArgv(strings.Fields(seg), 0) }
+func dangerousSegment(seg string) bool {
+	if windowsShell { // PowerShell and cmd quote and escape differently (` is an escape there)
+		return dangerousArgv(strings.Fields(seg), 0)
+	}
+	return dangerousArgv(shellFields(seg), 0)
+}
+
+// shellFields splits a command into words the way the shell does for this
+// purpose: on blanks outside quotes, $( ) and backticks. strings.Fields cut
+// FOO='a b' rm -fr x into FOO='a, b', rm — and b' was taken for the program.
+func shellFields(s string) []string {
+	var out []string
+	var b strings.Builder
+	inSingle, inDouble, inTick, depth := false, false, false, 0
+	rs := []rune(s)
+	for i := 0; i < len(rs); i++ {
+		r := rs[i]
+		switch {
+		case inSingle:
+			inSingle = r != '\''
+		case r == '\\' && i+1 < len(rs):
+			b.WriteRune(r)
+			i++
+			r = rs[i]
+		case r == '\'' && !inDouble && !inTick && depth == 0:
+			inSingle = true
+		case r == '"' && !inTick:
+			inDouble = !inDouble
+		case r == '`':
+			inTick = !inTick
+		case r == '$' && i+1 < len(rs) && rs[i+1] == '(':
+			depth++
+			b.WriteRune(r)
+			i++
+			r = rs[i]
+		case r == ')' && depth > 0:
+			depth--
+		case (r == ' ' || r == '\t' || r == '\n') && !inDouble && !inTick && depth == 0:
+			if b.Len() > 0 {
+				out = append(out, b.String())
+				b.Reset()
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+	if b.Len() > 0 {
+		out = append(out, b.String())
+	}
+	return out
+}
 
 // windowsShell: commands run in PowerShell or cmd (tool.Shell), where names
 // carry no case and maybe .exe, and the ways to wipe a tree or a disk have
@@ -309,7 +393,36 @@ func windowsRecursive(args []string) bool {
 	return false
 }
 
+// leadingNoise are words in front of a command that don't name it: shell
+// keywords that open or continue a compound command, grouping, and the
+// PowerShell call operator. `then rm -fr x` runs rm.
+var leadingNoise = map[string]bool{
+	"if": true, "then": true, "elif": true, "else": true, "while": true, "until": true,
+	"do": true, "!": true, "{": true, "(": true, "&": true,
+}
+
+// shellAssignment matches VAR=value, which the shell sets for the command after
+// it: `FOO=1 rm -fr x` runs rm.
+var shellAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+
+// shellRedirect matches a redirection word: >out, 2>err, >>log, <in, &>all,
+// 2>&1. A bare operator (">" alone) takes the next word as its target.
+var shellRedirect = regexp.MustCompile(`^[0-9]*(>>?|<<?|&>>?|>&|<&)(.*)$`)
+
 func dangerousArgv(fields []string, depth int) bool {
+prefix:
+	for len(fields) > 0 {
+		switch m := shellRedirect.FindStringSubmatch(fields[0]); {
+		case leadingNoise[fields[0]] || shellAssignment.MatchString(fields[0]):
+			fields = fields[1:]
+		case m != nil && m[2] == "" && len(fields) > 1: // `> out rm …`
+			fields = fields[2:]
+		case m != nil: // `>out rm …`, `2>&1 rm …`
+			fields = fields[1:]
+		default:
+			break prefix
+		}
+	}
 	if len(fields) == 0 || depth > 4 {
 		return false
 	}

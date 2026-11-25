@@ -94,18 +94,9 @@ func NewRun(p *policy.Engine, ap Approver, defaultTimeout time.Duration, ctxWind
 func (r *runTool) shell(ctx context.Context, a Args) Result {
 	command := a.Str("command")
 
-	switch r.pol.Run(command) {
-	case policy.Deny:
-		return Err("command denied by workspace policy: " + command)
-	case policy.Ask:
-		if ok, gone := Ask(ctx, r.ap, "run", command); !ok {
-			if gone != "" {
-				return Err(gone)
-			}
-			return Err("command denied by user: " + command)
-		}
-	}
-
+	// The directory first: a command is approved for where it runs. `rm
+	// notes.txt` with cwd "sub" deletes sub/notes.txt, and the prompt showed
+	// only the command, as if it ran where the session is.
 	cwd := a.Str("cwd")
 	if cwd == "" {
 		cwd = "."
@@ -113,6 +104,22 @@ func (r *runTool) shell(ctx context.Context, a Args) Result {
 	dir, err := r.pol.Resolve(cwd)
 	if err != nil {
 		return Err(err.Error())
+	}
+	detail := command
+	if cwd != "." {
+		detail += "\n  in: " + cwd
+	}
+
+	switch r.pol.Run(command) {
+	case policy.Deny:
+		return Err("command denied by workspace policy: " + command)
+	case policy.Ask:
+		if ok, gone := Ask(ctx, r.ap, "run", detail); !ok {
+			if gone != "" {
+				return Err(gone)
+			}
+			return Err("command denied by user: " + command)
+		}
 	}
 
 	timeout := r.timeout
@@ -140,15 +147,12 @@ func (r *runTool) shell(ctx context.Context, a Args) Result {
 	// that outlives the shell while holding the output pipe (a dev server, a
 	// backgrounded process) can't hang this tool call forever.
 	procgroup.Set(cmd)
-	out := textutil.NewBoundedWriter(r.maxOut)
+	out := textutil.NewHeadTailWriter(r.maxOut) // the end — errors, the summary — survives a long log
 	cmd.Stdout = out
 	cmd.Stderr = out
 	runErr := cmd.Run()
 
 	body := strings.TrimRight(r.sh.CleanOutput(out.String()), "\n")
-	if out.Truncated {
-		body += "\n…[truncated]"
-	}
 
 	exit := 0
 	if runErr != nil {

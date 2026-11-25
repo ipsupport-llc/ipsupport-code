@@ -3012,6 +3012,11 @@ func (a *Agent) execOne(ctx context.Context, c llm.ToolCall) (llm.Message, bool)
 		// to chase. The descriptions are kept lean, so this is cheap and only
 		// fires on errors.
 		if usageError(res.Content) {
+			// A filled-in call first: a weak model copies an example far more
+			// reliably than it builds one from the schema below.
+			if owner, ex := a.reg.Example(c.Name, action, params); ex != "" {
+				extra = append(extra, "A correct "+owner+" call looks like this — use your real values in place of any <placeholder>:\n"+ex)
+			}
 			if u := strings.TrimSpace(a.reg.Usage(c.Name)); u != "" {
 				extra = append(extra, c.Name+" usage:\n"+u)
 			}
@@ -3260,7 +3265,7 @@ func parseArgs(raw string) (action string, params map[string]any, warn string) {
 			// path"), and retried the identical broken shape until the run died.
 			// The error wasn't wrong about what arrived — it just described the
 			// wreckage instead of the crash. Say what actually happened.
-			warn = fmt.Sprintf("note: \"params\" arrived as a JSON string rather than an object, and that string is not valid JSON (truncated or mis-escaped) — nothing could be read out of it, which is why the call below saw no params at all. Send params as a real JSON object, e.g. {\"action\": \"write\", \"params\": {\"path\": \"x.md\", \"content\": \"...\"}}. What arrived was: %s", clip(p, 200))
+			warn = fmt.Sprintf("note: \"params\" arrived as a JSON string rather than an object, and that string is not valid JSON (truncated or mis-escaped) — nothing could be read out of it, which is why the call below saw no params at all. Send params as a real JSON object — {\"action\": \"...\", \"params\": {...}} — not a string holding one. What arrived was: %s", clip(p, 200))
 			break
 		}
 		if a, ok := inner["action"].(string); ok && action == "" {

@@ -250,6 +250,56 @@ func TestRunArgvFloorSeesThroughWrappers(t *testing.T) {
 	}
 }
 
+// The floor reads shell grammar, not just the first word of each chained
+// segment: a leading assignment, a compound command's keywords, a group, a
+// command substitution, or code handed to another shell all run the delete.
+// With run.default=allow nothing else stands in front of them.
+func TestRunArgvFloorReadsShellGrammar(t *testing.T) {
+	c := config.Default()
+	c.Run = config.RunPolicy{Default: "allow"}
+	e := eng(t, c)
+	for _, cmd := range []string{
+		"FOO=1 rm -fr ~/w",
+		"{ rm -fr ~/w; }",
+		"if true; then rm -fr ~/w; fi",
+		"while true; do rm -fr ~/w; done",
+		"! rm -fr ~/w",
+		"(rm -fr ~/w)",
+		"echo $(rm -fr ~/w)",
+		"echo `rm -fr ~/w`",
+		"bash -c 'rm -fr ~/w'",
+		"sh -c \"FOO=1 rm -fr ~/w\"",
+		"FOO='a b' rm -fr ~/w", // a quoted value is one word, not two
+		"FOO=\"a b\" rm -fr ~/w",
+		"FOO=$(echo a b) rm -fr ~/w",
+		">out rm -fr ~/w", // a redirection in front is not the program
+		"> out rm -fr ~/w",
+		"2>/dev/null rm -fr ~/w",
+	} {
+		if got := e.Run(cmd); got != Deny {
+			t.Errorf("Run(%q) = %v, want Deny (hard floor)", cmd, got)
+		}
+	}
+	// Text that only mentions a delete is not one.
+	for _, cmd := range []string{"echo 'rm -fr ~/w'", "git commit -m \"then rm -fr old dir\"", "grep -r 'rm -rf' ."} {
+		if got := e.Run(cmd); got == Deny {
+			t.Errorf("Run(%q) = Deny, want it allowed — it deletes nothing", cmd)
+		}
+	}
+}
+
+// Nesting deeper than the parser follows is left as text the floor can't look
+// into: it is asked, never auto-run, even under run.default=allow.
+func TestRunAsksWhatItCannotParse(t *testing.T) {
+	c := config.Default()
+	c.Run = config.RunPolicy{Default: "allow"}
+	e := eng(t, c)
+	deep := "echo " + strings.Repeat("$(echo ", 40) + "rm -fr ~/w" + strings.Repeat(")", 40)
+	if got := e.Run(deep); got == Allow {
+		t.Errorf("Run(deeply nested rm) = Allow, want it asked or denied")
+	}
+}
+
 // An allow glob must not auto-run shell redirection/backgrounding — it writes
 // outside the file jail's view.
 func TestRunAllowRejectsRedirection(t *testing.T) {

@@ -1121,6 +1121,14 @@ func TestConfigPanelMaxStepsAndMaxHistoryCycle(t *testing.T) {
 		t.Errorf("after two cycles, MaxHistory = %v, want 32", m.app.cfg.MaxHistory)
 	}
 
+	// The row shows the cap in force: one below a question and its answer is
+	// raised, and the row says so instead of showing what can't take effect.
+	m.app.cfg.MaxHistory = 1
+	_ = m.app.wire()
+	if _, v, _ := m.configRowView("max_history"); v != "2 (set 1)" {
+		t.Errorf("max_history row = %q, want the cap in force", v)
+	}
+
 	loaded, err := config.Load(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

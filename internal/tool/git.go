@@ -258,6 +258,12 @@ func (g *gitTool) push(ctx context.Context, a Args) Result {
 	if strings.HasPrefix(branch, "+") {
 		return Err("refusing a force push (a refspec starting with +): push without it, or force-push yourself")
 	}
+	// A refspec with nothing before its colon (":main") pushes nothing into
+	// the remote branch, which deletes it — as destructive as a force push, and
+	// it reads as an ordinary push in the approval. local:remote still works.
+	if strings.HasPrefix(branch, ":") {
+		return Err("refusing to delete a remote branch (a refspec starting with :): delete it yourself if you mean to")
+	}
 	args := []string{"push"}
 	if a.Bool("set_upstream") {
 		args = append(args, "--set-upstream")
@@ -325,19 +331,46 @@ func (g *gitTool) runNet(ctx context.Context, action string, args ...string) Res
 // person approving never saw (found by review).
 func (g *gitTool) runNetTo(ctx context.Context, action, remote string, args ...string) Result {
 	note := ""
-	if remote != "" && !g.offline() {
+	// No remote named: git goes to the branch's upstream (or origin), and the
+	// approval read just "git push" with nowhere named, nor was a local path
+	// there checked against the jail. Resolve it the way git will.
+	target := remote
+	if target == "" && (action == "push" || action == "pull") { // clone names its own source
+		target = g.defaultRemote(ctx, action)
+	}
+	if target != "" && !g.offline() {
 		// A push goes to the push URL(s) when the remote has them; get-url
 		// fails for a remote given as a URL, which ls-remote still expands.
 		u := Result{IsError: true}
 		if action == "push" {
-			u = g.run(ctx, action, false, "remote", "get-url", "--push", "--all", "--", remote)
+			u = g.run(ctx, action, false, "remote", "get-url", "--push", "--all", "--", target)
 		}
 		if u.IsError {
-			u = g.run(ctx, action, false, "ls-remote", "--get-url", "--", remote)
+			u = g.run(ctx, action, false, "ls-remote", "--get-url", "--", target)
+		}
+		if !u.IsError && strings.HasSuffix(u.Content, "…[truncated]") {
+			// The URLs beyond the cap would go unchecked while git used them all.
+			return Err("too many URLs on remote " + target + " to check — git " + action + " it yourself")
 		}
 		if !u.IsError {
-			if url := strings.Join(strings.Fields(u.Content), ", "); url != "" && url != remote {
+			var urls []string // one per line; a local path may hold spaces
+			for _, line := range strings.Split(u.Content, "\n") {
+				if line = strings.TrimSpace(line); line != "" {
+					urls = append(urls, line)
+				}
+			}
+			// A named remote's URL is a path on this machine too, when it is
+			// one: the jail applies to where git actually goes, not to the name.
+			for _, url := range urls {
+				if err := g.checkLocalGitPath(url); err != nil {
+					return Err(err.Error())
+				}
+			}
+			if url := strings.Join(urls, ", "); url != "" && url != remote {
 				note = "   → " + url
+				if remote == "" {
+					note = "   → " + target + " (" + url + ")"
+				}
 			}
 		}
 	}
@@ -357,6 +390,41 @@ func (g *gitTool) runNetTo(ctx context.Context, action, remote string, args ...s
 		env = append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes")
 	}
 	return g.runWith(ctx, action, true, gitNetTimeout, env, flags, note, args...)
+}
+
+// defaultRemote is the remote a push or pull with none named goes to, as git
+// picks it: the branch's pushRemote, then remote.pushDefault (push only), then
+// the branch's remote, then origin when there is one. "" when none applies.
+func (g *gitTool) defaultRemote(ctx context.Context, action string) string {
+	get := func(args ...string) string {
+		r := g.run(ctx, action, false, args...)
+		if r.IsError {
+			return ""
+		}
+		return strings.TrimSpace(r.Content)
+	}
+	keys := []string{}
+	b := get("symbolic-ref", "--quiet", "--short", "HEAD")
+	if b == "" && action == "push" {
+		// Detached HEAD: only a configured push default can take a bare push
+		// anywhere (with a push refspec); without one, git refuses it.
+		return get("config", "--get", "remote.pushDefault")
+	}
+	if b != "" {
+		if action == "push" {
+			keys = append(keys, "branch."+b+".pushRemote", "remote.pushDefault")
+		}
+		keys = append(keys, "branch."+b+".remote")
+	}
+	for _, k := range keys {
+		if v := get("config", "--get", k); v != "" {
+			return v
+		}
+	}
+	if get("config", "--get", "remote.origin.url") != "" {
+		return "origin"
+	}
+	return ""
 }
 
 func (g *gitTool) initRepo(ctx context.Context, _ Args) Result {
@@ -630,7 +698,62 @@ func addedPath(line string) (string, bool) {
 }
 
 func (g *gitTool) commit(ctx context.Context, a Args) Result {
-	return g.run(ctx, "commit", true, "commit", "-m", a.Str("message"))
+	// add refuses to stage a secrets file, but commit takes whatever is staged,
+	// however it got there — a .env staged with `run git add .env`, or before the
+	// session began — one push from published. Check the staged set, the same
+	// way, failing closed; and name it in the approval, which otherwise shows
+	// only the message.
+	// Deletions are left out of the check (--diff-filter=d): committing the
+	// removal of a tracked .env is the cleanup, not a leak. The approval still
+	// names everything staged.
+	listed := g.run(ctx, "commit", false, "diff", "--cached", "--name-only", "-z")
+	check := g.run(ctx, "commit", false, "diff", "--cached", "--name-only", "--diff-filter=d", "-z")
+	for _, r := range []Result{listed, check} {
+		if r.IsError {
+			return Err("could not check what is staged, so nothing was committed: " + r.Content)
+		}
+		if strings.HasSuffix(r.Content, "…[truncated]") {
+			return Err("too many staged files to check for secrets — commit them in smaller groups")
+		}
+	}
+	root, err := g.repoRoot(ctx)
+	if err != nil {
+		return Err(err.Error())
+	}
+	var staged, blocked []string
+	names := listed.Content
+	if names == "(ok, no output)" { // run()'s sentinel: nothing is staged
+		names = ""
+	}
+	for _, name := range strings.Split(names, "\x00") {
+		if name != "" { // names are used exactly as git gives them — a space is part of one
+			staged = append(staged, name)
+		}
+	}
+	for _, name := range strings.Split(check.Content, "\x00") {
+		if name == "" || name == "(ok, no output)" {
+			continue
+		}
+		if abs, err := g.pol.Resolve(filepath.Join(root, name)); err != nil || g.pol.IsSecret(abs) {
+			blocked = append(blocked, name)
+		}
+	}
+	if len(blocked) > 0 {
+		return Err("refusing to commit " + strings.Join(blocked, ", ") +
+			" — it looks like a secrets/credentials file, and a committed secret is one push from published. Unstage it (git restore --staged) first")
+	}
+	note := ""
+	if len(staged) > 0 {
+		shown := staged
+		if len(shown) > 10 {
+			shown = shown[:10]
+		}
+		note = "\n  staged: " + strings.Join(shown, ", ")
+		if len(staged) > len(shown) {
+			note += " … and " + strconv.Itoa(len(staged)-len(shown)) + " more"
+		}
+	}
+	return g.runWith(ctx, "commit", true, defaultRunTimeout, nil, nil, note, "commit", "-m", a.Str("message"))
 }
 
 func (g *gitTool) branch(ctx context.Context, a Args) Result {

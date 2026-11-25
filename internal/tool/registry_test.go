@@ -186,6 +186,35 @@ func TestDispatchDoesNotOverwriteAlreadyGivenSoleParam(t *testing.T) {
 	}
 }
 
+// An action of another tool gets that tool's example only when what the model
+// sent fits it: run called with action "run" and a command meant a command,
+// and an example spawning a sub-agent would send it the wrong way.
+func TestExampleForAnotherToolsActionOnlyWhenTheParamsFit(t *testing.T) {
+	spawn := func(context.Context, string, string, string) (string, error) { return "", nil }
+	rt := runToolFor(t, t.TempDir(), "allow", yes(), nil)
+	r := NewRegistry(rt, NewAgent(spawn, nil), NewWebLive(nil, nil), NewCalc())
+	if tool, ex := r.Example("run", "run", map[string]any{"command": "ls"}); ex != "" {
+		t.Errorf("run+action run+command → %s example %s, want none", tool, ex)
+	}
+	if tool, ex := r.Example("calc", "fetch", map[string]any{"url": "https://example.com"}); tool != "web" || ex != `{"action":"fetch","params":{"url":"https://example.com"}}` {
+		t.Errorf("calc+fetch+url → %q %s, want web's fetch", tool, ex)
+	}
+}
+
+// Against the real file tool: an ambiguous name naming a mutation gets nothing,
+// and native edits sent with the path missing come back as the JSON string
+// edits takes, not as a placeholder.
+func TestExampleAgainstTheRealFileTool(t *testing.T) {
+	r := NewRegistry(fileToolFor(t, t.TempDir(), "allow", yes()))
+	if _, ex := r.Example("file", "read_then_write", map[string]any{"path": "a"}); ex != "" {
+		t.Errorf("read_then_write → %s, want none (it names two actions)", ex)
+	}
+	_, ex := r.Example("file", "edit", map[string]any{"edits": []any{map[string]any{"find": "a", "replace": "b"}}})
+	if want := `{"action":"edit","params":{"path":"<path>","edits":"[{\"find\":\"a\",\"replace\":\"b\"}]"}}`; ex != want {
+		t.Errorf("native edits:\n got  %s\n want %s", ex, want)
+	}
+}
+
 func TestOpenAIToolsSchema(t *testing.T) {
 	r := NewRegistry(&fakeTool{name: "calc", actions: []string{"calculate"}})
 	tools := r.OpenAITools()

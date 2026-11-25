@@ -10795,9 +10795,37 @@ func TestModelFlagNeverReachesDisk(t *testing.T) {
 		t.Errorf("after a provider save: provider %q lab model %q — want neither changed", c.Provider, c.Providers["lab"].Model)
 	}
 
-	b.setModel("lab-2") // an explicit choice — even of the -m model itself — is kept, provider and all
-	if c := load(); c.Providers["lab"].Model != "lab-2" || c.Provider != "lab" {
-		t.Errorf("after /model lab-2: provider %q lab model %q, want both saved", c.Provider, c.Providers["lab"].Model)
+	// /model and /ai in a -m session switch for the session only, and say so:
+	// a rule with exceptions leaked through each entry point it missed.
+	out := strings.Join(b.setModel("lab-3"), "\n")
+	if b.activeLLM().Model != "lab-3" || !strings.Contains(out, "this session only") {
+		t.Errorf("/model in a -m session: model %q, said %q", b.activeLLM().Model, out)
+	}
+	if c := load(); c.Providers["lab"].Model != "lab-1" || c.Provider != "" {
+		t.Errorf("after /model: provider %q lab model %q — want the saved ones kept", c.Provider, c.Providers["lab"].Model)
+	}
+
+	// A built-in -m named had no preset: a key added in the session is saved,
+	// the -m model is not.
+	config.ClearRunOnlyModel()
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	o, cleanup3, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "openai:gpt-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup3()
+	ps := map[string]config.LLM{}
+	for k, v := range o.cfg.Providers {
+		ps[k] = v
+	}
+	p := ps["openai"]
+	p.APIKey = "sk-added"
+	ps["openai"] = p
+	if err := config.SaveProviders(o.cfg.Provider, ps); err != nil {
+		t.Fatal(err)
+	}
+	if c := load(); c.Providers["openai"].APIKey != "sk-added" || c.Providers["openai"].Model != "" || c.Provider != "" {
+		t.Errorf("built-in preset after a key save: %+v provider %q — want the key, no -m model, provider unchanged", c.Providers["openai"], c.Provider)
 	}
 }
 

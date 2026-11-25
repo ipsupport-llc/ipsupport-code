@@ -5325,7 +5325,6 @@ func (a *app) providerList() []string {
 }
 
 func (a *app) setProvider(name string) []string {
-	config.ClearRunOnlyModel() // as setModel
 	if name != "local" {
 		l, ok := config.ResolveProvider(a.cfg, name)
 		if !ok {
@@ -5353,7 +5352,7 @@ func (a *app) setProvider(name string) []string {
 	}
 	a.maybeDetectWindowSync() // REPL only — the TUI re-detects off-thread
 	act := a.activeLLM()
-	return []string{fmt.Sprintf("→ %s · %s · model %s", a.providerName(), act.BaseURL, act.Model)}
+	return append([]string{fmt.Sprintf("→ %s · %s · model %s", a.providerName(), act.BaseURL, act.Model)}, runOnlyNote()...)
 }
 
 func (a *app) setProviderKey(name, token string) []string {
@@ -5514,7 +5513,6 @@ func modelLines(ctx context.Context, act config.LLM, provider string) []string {
 }
 
 func (a *app) setModel(name string) []string {
-	config.ClearRunOnlyModel() // a model chosen here is the user's to keep, -m or not
 	// Another model has another context size: a size set by hand for the old
 	// one no longer holds, and detection takes over again.
 	if err := a.updateActive(func(l *config.LLM) {
@@ -5531,7 +5529,16 @@ func (a *app) setModel(name string) []string {
 		return []string{"error: " + err.Error()}
 	}
 	a.maybeDetectWindowSync() // REPL only — the TUI re-detects off-thread
-	return []string{"model → " + name}
+	return append([]string{"model → " + name}, runOnlyNote()...)
+}
+
+// runOnlyNote says a model or provider choice holds for this session only: it
+// was started with -m, which keeps the saved ones as they were.
+func runOnlyNote() []string {
+	if !config.RunOnlyModel() {
+		return nil
+	}
+	return []string{"  (for this session only — it was started with -m, which leaves the saved model and provider as they were)"}
 }
 
 // toggleLoopDetection flips DisableLoopDetection for the CURRENTLY ACTIVE

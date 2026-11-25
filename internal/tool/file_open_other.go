@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -44,6 +45,9 @@ func keepOwner(path string, fi os.FileInfo) {
 	}
 }
 
+// fifoReaderWait is how long append waits for a pipe's reader to open it.
+const fifoReaderWait = time.Second
+
 // openAppend opens abs for appending. A named pipe is opened without blocking:
 // with no reader, opening it for writing would wait forever with the file lock
 // held; it fails at once instead (ENXIO). Once open, writes block as usual.
@@ -51,7 +55,16 @@ func openAppend(abs string) (*os.File, error) {
 	if !isFIFO(abs) {
 		return os.OpenFile(abs, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	}
-	fh, err := os.OpenFile(abs, os.O_WRONLY|os.O_APPEND|syscall.O_NONBLOCK, 0)
+	// A reader that is about to open the pipe gets a moment to: a blocking
+	// open would have waited for it; this one waits a second, not forever.
+	var fh *os.File
+	var err error
+	for deadline := time.Now().Add(fifoReaderWait); ; time.Sleep(20 * time.Millisecond) {
+		fh, err = os.OpenFile(abs, os.O_WRONLY|os.O_APPEND|syscall.O_NONBLOCK, 0)
+		if !errors.Is(err, syscall.ENXIO) || time.Now().After(deadline) {
+			break
+		}
+	}
 	if errors.Is(err, syscall.ENXIO) {
 		return nil, errors.New("nothing is reading this pipe, so nothing can be written to it")
 	}

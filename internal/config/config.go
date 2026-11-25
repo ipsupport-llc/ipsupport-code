@@ -794,81 +794,88 @@ func SaveProviders(provider string, providers map[string]LLM) error {
 	return mergeGlobalKeys(map[string]any{"provider": provider, "providers": providers})
 }
 
-// runOnly is the model -m chose for this process, with what the config held
-// before it. Saving the connection writes the latter: every save takes the
-// whole connection (SaveGlobal the local one, SaveProviders the provider and
-// the presets), so /rename, a key or a temperature edit would otherwise have
-// written the run's model to disk. An explicit /model or /ai choice ends it
-// (ClearRunOnlyModel): from then on the model in use is the user's to keep.
+// runOnly holds, for a process started with -m, the model and provider the
+// config had before it. Every save of the connection writes those back in
+// place of what is in memory: the saves take the whole connection (SaveGlobal
+// the local one, SaveProviders the provider and the presets), so /rename, a key
+// or a temperature edit would otherwise have written the run's model to disk.
+// The rule has no exceptions — /model and /ai in such a session switch for the
+// session only — because a rule with exceptions leaked through each entry
+// point it missed.
 var runOnly runOnlyModel
 
 type runOnlyModel struct {
-	mu             sync.Mutex
-	set            bool
-	provider       string // the provider -m made active ("" = local)
-	model          string // the model it set on it ("" = left as it was)
-	beforeProvider string
-	beforeModel    string // that provider's model before -m
-	beforeHad      bool   // the provider had a preset before -m (a built-in may not)
+	mu       sync.Mutex
+	set      bool
+	provider string            // the provider saved before -m
+	model    string            // the local model saved before -m
+	presets  map[string]string // each preset's model before -m
+	made     string            // a preset -m alone created (a built-in that had none)
 }
 
-// SetRunOnlyModel records that -m turned before into after, for this process.
+// SetRunOnlyModel records the connection before -m turned it into after.
 func SetRunOnlyModel(before, after Config) {
 	runOnly.mu.Lock()
 	defer runOnly.mu.Unlock()
 	r := &runOnly
-	r.set, r.provider, r.beforeProvider = true, after.Provider, before.Provider
-	if after.Provider == "" || after.Provider == "local" {
-		r.model, r.beforeModel, r.beforeHad = after.LLM.Model, before.LLM.Model, true
-	} else {
-		r.model = after.Providers[after.Provider].Model
-		var p LLM
-		p, r.beforeHad = before.Providers[after.Provider]
-		r.beforeModel = p.Model
+	r.set, r.provider, r.model, r.made = true, before.Provider, before.LLM.Model, ""
+	r.presets = map[string]string{}
+	for name, p := range before.Providers {
+		r.presets[name] = p.Model
+	}
+	if _, had := before.Providers[after.Provider]; !had && after.Provider != "" && after.Provider != "local" {
+		r.made = after.Provider
 	}
 }
 
-// ClearRunOnlyModel ends the run-only model: the user chose one themselves.
+// RunOnlyModel reports whether this process was started with -m: model and
+// provider choices are then for the session only.
+func RunOnlyModel() bool {
+	runOnly.mu.Lock()
+	defer runOnly.mu.Unlock()
+	return runOnly.set
+}
+
+// ClearRunOnlyModel forgets -m (for tests).
 func ClearRunOnlyModel() {
 	runOnly.mu.Lock()
 	runOnly.set = false
 	runOnly.mu.Unlock()
 }
 
-// local is l as it may be saved: the run-only model back to what it was.
+// local is l as it may be saved: with the model from before -m.
 func (r *runOnlyModel) local(l LLM) LLM {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.set && (r.provider == "" || r.provider == "local") && l.Model == r.model {
-		l.Model = r.beforeModel
+	if r.set {
+		l.Model = r.model
 	}
 	return l
 }
 
-// providers is the active provider and presets as they may be saved.
+// providers is the active provider and presets as they may be saved: the
+// provider from before -m, and each preset's model from before it. A preset
+// added in the session keeps its own; one -m alone made is not saved.
 func (r *runOnlyModel) providers(provider string, ps map[string]LLM) (string, map[string]LLM) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if !r.set {
 		return provider, ps
 	}
-	if provider == r.provider && r.provider != r.beforeProvider {
-		provider = r.beforeProvider
-	}
-	if p, ok := ps[r.provider]; ok && r.provider != "" && r.provider != "local" && p.Model == r.model {
-		out := make(map[string]LLM, len(ps))
-		for k, v := range ps {
-			out[k] = v
+	out := make(map[string]LLM, len(ps))
+	for name, p := range ps {
+		if model, ok := r.presets[name]; ok {
+			p.Model = model
 		}
-		p.Model = r.beforeModel
-		if !r.beforeHad && reflect.DeepEqual(p, LLM{}) {
-			delete(out, r.provider) // a built-in -m named had no preset; it gets none
-		} else {
-			out[r.provider] = p
+		if name == r.made {
+			p.Model = "" // -m's model, on a preset that had none: the rest of it (a key added since) is kept
+			if reflect.DeepEqual(p, LLM{}) {
+				continue
+			}
 		}
-		ps = out
+		out[name] = p
 	}
-	return provider, ps
+	return r.provider, out
 }
 
 // ---- dotted-path get/set/unset for the `config` subcommand --------------

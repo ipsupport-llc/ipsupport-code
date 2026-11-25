@@ -136,6 +136,8 @@ settings: `-m gemma-4` on the provider in use, `-m openai:gpt-5` for a provider
 and its model, `-m local:gemma-4` back on your local server, `-m openai:` for a
 provider with its own model. A model name may hold a colon itself
 (`qwen2.5-coder:7b`): the part before it switches provider only when it names one.
+In a session started with `-m`, `/model` and `/ai` switch for that session only
+and say so; the saved model and provider stay as they were.
 
 Pasting a key on Linux? A middle-click paste is swallowed by the mouse-wheel
 scroll tracking — use **Ctrl+Shift+V** (bracketed paste), which always works.

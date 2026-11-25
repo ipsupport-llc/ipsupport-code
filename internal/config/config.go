@@ -15,8 +15,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
@@ -560,6 +562,7 @@ func SaveGlobal(name string, l LLM) error {
 	if name == "" {
 		name = "ipsupport-code"
 	}
+	l = runOnly.local(l)
 	// Merge, don't overwrite: the global file also holds providers (with keys),
 	// channel, prices, agents, retention — clobbering them on a /model or /rename
 	// would silently lose the user's keys/config.
@@ -787,7 +790,85 @@ func SaveAgents(agents map[string]AgentProfile) error {
 // SaveProviders persists the active provider name and the external provider
 // presets (which may include API keys — the file is written 0600).
 func SaveProviders(provider string, providers map[string]LLM) error {
+	provider, providers = runOnly.providers(provider, providers)
 	return mergeGlobalKeys(map[string]any{"provider": provider, "providers": providers})
+}
+
+// runOnly is the model -m chose for this process, with what the config held
+// before it. Saving the connection writes the latter: every save takes the
+// whole connection (SaveGlobal the local one, SaveProviders the provider and
+// the presets), so /rename, a key or a temperature edit would otherwise have
+// written the run's model to disk. An explicit /model or /ai choice ends it
+// (ClearRunOnlyModel): from then on the model in use is the user's to keep.
+var runOnly runOnlyModel
+
+type runOnlyModel struct {
+	mu             sync.Mutex
+	set            bool
+	provider       string // the provider -m made active ("" = local)
+	model          string // the model it set on it ("" = left as it was)
+	beforeProvider string
+	beforeModel    string // that provider's model before -m
+	beforeHad      bool   // the provider had a preset before -m (a built-in may not)
+}
+
+// SetRunOnlyModel records that -m turned before into after, for this process.
+func SetRunOnlyModel(before, after Config) {
+	runOnly.mu.Lock()
+	defer runOnly.mu.Unlock()
+	r := &runOnly
+	r.set, r.provider, r.beforeProvider = true, after.Provider, before.Provider
+	if after.Provider == "" || after.Provider == "local" {
+		r.model, r.beforeModel, r.beforeHad = after.LLM.Model, before.LLM.Model, true
+	} else {
+		r.model = after.Providers[after.Provider].Model
+		var p LLM
+		p, r.beforeHad = before.Providers[after.Provider]
+		r.beforeModel = p.Model
+	}
+}
+
+// ClearRunOnlyModel ends the run-only model: the user chose one themselves.
+func ClearRunOnlyModel() {
+	runOnly.mu.Lock()
+	runOnly.set = false
+	runOnly.mu.Unlock()
+}
+
+// local is l as it may be saved: the run-only model back to what it was.
+func (r *runOnlyModel) local(l LLM) LLM {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.set && (r.provider == "" || r.provider == "local") && l.Model == r.model {
+		l.Model = r.beforeModel
+	}
+	return l
+}
+
+// providers is the active provider and presets as they may be saved.
+func (r *runOnlyModel) providers(provider string, ps map[string]LLM) (string, map[string]LLM) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.set {
+		return provider, ps
+	}
+	if provider == r.provider && r.provider != r.beforeProvider {
+		provider = r.beforeProvider
+	}
+	if p, ok := ps[r.provider]; ok && r.provider != "" && r.provider != "local" && p.Model == r.model {
+		out := make(map[string]LLM, len(ps))
+		for k, v := range ps {
+			out[k] = v
+		}
+		p.Model = r.beforeModel
+		if !r.beforeHad && reflect.DeepEqual(p, LLM{}) {
+			delete(out, r.provider) // a built-in -m named had no preset; it gets none
+		} else {
+			out[r.provider] = p
+		}
+		ps = out
+	}
+	return provider, ps
 }
 
 // ---- dotted-path get/set/unset for the `config` subcommand --------------

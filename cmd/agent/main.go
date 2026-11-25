@@ -110,6 +110,10 @@ func main() {
 	flag.StringVar(&modelSpec, "m", "", "use this model for this run only, not persisted: \"model\" on the provider in use, or \"provider:model\" (e.g. -m openai:gpt-5, -m local:gemma-4); \"provider:\" alone keeps that provider's own model")
 	flag.Usage = printUsage
 	flag.Parse()
+	if modelSet := flagGiven("m"); modelSet && strings.TrimSpace(modelSpec) == "" {
+		fmt.Fprintln(os.Stderr, `error: -m needs a model: -m gemma-4, or -m provider:model`)
+		os.Exit(2)
+	}
 	if !readOnly {
 		selfupdate.RemoveOld() // the binary a Windows update moved aside, now no longer running
 	}
@@ -208,11 +212,18 @@ func main() {
 	// else takes stdin — a read-only run asks nothing on it.
 	var piped string
 	if readOnly && !isTTY() {
-		var err error
-		if piped, err = readPiped(reader, maxPipedBytes); err != nil {
+		text, arrived, err := pipedInput(os.Stdin, reader, pipedWait, maxPipedBytes)
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "error: reading stdin:", err)
 			os.Exit(1)
 		}
+		if !arrived && isPipe(os.Stdin) {
+			fmt.Fprintf(os.Stderr, "read-only: nothing arrived on stdin in %s — running the task without it\n", pipedWait)
+		}
+		piped = text
+		// Approvals must not read the task's input: past the cap, a line "y" in a
+		// diff would have answered one. A read-only run asks little; it gets no.
+		reader = bufio.NewReader(strings.NewReader(""))
 	}
 
 	app, cleanup, err := build(workspace, sessionName, []string(overrides), readOnly, reader, modelSpec)
@@ -257,10 +268,7 @@ func main() {
 	app.startTelemetry(ctx)
 	defer app.waitTelemetry(3 * time.Second)
 
-	taskText := strings.TrimSpace(strings.Join(flag.Args(), " "))
-	if piped != "" {
-		taskText += "\n\n--- piped input ---\n" + piped + "\n--- end of piped input ---"
-	}
+	taskText := withPipedInput(strings.TrimSpace(strings.Join(flag.Args(), " ")), piped)
 	switch {
 	case taskText != "" && !(interactive && isTTY()):
 		if !newSession && !readOnly {
@@ -310,6 +318,59 @@ func main() {
 // maxPipedBytes caps what a read-only run takes from stdin into its task.
 const maxPipedBytes = 512 << 10
 
+// flagGiven reports whether the named flag was on the command line at all —
+// -m "" is a mistake to say, not a flag to ignore.
+func flagGiven(name string) bool {
+	given := false
+	flag.Visit(func(f *flag.Flag) { given = given || f.Name == name })
+	return given
+}
+
+// withPipedInput is the task with what was piped in after it, marked off.
+func withPipedInput(task, piped string) string {
+	if piped == "" {
+		return task
+	}
+	return task + "\n\n--- piped input ---\n" + piped + "\n--- end of piped input ---"
+}
+
+// pipedWait is how long a read-only run waits for the first byte of piped
+// input. A stdin that is not a terminal is not always input: ssh, a supervisor
+// or a CI step can hand over a pipe nobody writes to, and waiting for its end
+// hung the run before it began.
+const pipedWait = 10 * time.Second
+
+// isPipe reports whether f is a pipe or a file — something that can carry
+// input — rather than a terminal or a device such as /dev/null.
+func isPipe(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice == 0
+}
+
+// pipedInput reads what is piped into a read-only run: nothing from a device,
+// nothing when no byte comes within wait (arrived false), else up to max bytes.
+// A reader blocked on an idle pipe is left behind; nothing else reads stdin.
+func pipedInput(f *os.File, r *bufio.Reader, wait time.Duration, max int) (text string, arrived bool, err error) {
+	if !isPipe(f) {
+		return "", false, nil
+	}
+	first := make(chan error, 1)
+	go func() { _, e := r.Peek(1); first <- e }()
+	select {
+	case e := <-first:
+		if errors.Is(e, io.EOF) {
+			return "", true, nil // closed without a byte: an empty input, not an idle one
+		}
+		if e != nil {
+			return "", false, e
+		}
+	case <-time.After(wait):
+		return "", false, nil
+	}
+	text, err = readPiped(r, max)
+	return text, true, err
+}
+
 // readPiped reads what was piped in, up to max bytes, saying so when there was
 // more: a diff cut silently would be reviewed as if it ended there.
 func readPiped(r io.Reader, max int) (string, error) {
@@ -334,7 +395,9 @@ func applyModelFlag(cfg *config.Config, spec string) error {
 	if spec == "" {
 		return errors.New("no model given")
 	}
-	if p, m, ok := strings.Cut(spec, ":"); ok && isProviderName(*cfg, p) {
+	if p, m, ok := strings.Cut(spec, ":"); ok && strings.TrimSpace(p) == "" {
+		return errors.New(`nothing before the colon — use "model" or "provider:model"`)
+	} else if p = strings.TrimSpace(p); ok && isProviderName(*cfg, p) {
 		if p == "local" {
 			p = ""
 		}
@@ -799,9 +862,11 @@ func build(workspace, sessionName string, overrides []string, readOnly bool, rea
 		}
 	}
 	if modelSpec != "" {
+		before := cfg
 		if err := applyModelFlag(&cfg, modelSpec); err != nil {
 			return nil, nil, fmt.Errorf("-m %s: %w", modelSpec, err)
 		}
+		config.SetRunOnlyModel(before, cfg) // saves write what was there before -m
 	}
 	// A read-only run sends nothing off the machine but its model's requests:
 	// no web tool (a fetched URL can carry the code it was shown), no update
@@ -5260,6 +5325,7 @@ func (a *app) providerList() []string {
 }
 
 func (a *app) setProvider(name string) []string {
+	config.ClearRunOnlyModel() // as setModel
 	if name != "local" {
 		l, ok := config.ResolveProvider(a.cfg, name)
 		if !ok {
@@ -5448,6 +5514,7 @@ func modelLines(ctx context.Context, act config.LLM, provider string) []string {
 }
 
 func (a *app) setModel(name string) []string {
+	config.ClearRunOnlyModel() // a model chosen here is the user's to keep, -m or not
 	// Another model has another context size: a size set by hand for the old
 	// one no longer holds, and detection takes over again.
 	if err := a.updateActive(func(l *config.LLM) {

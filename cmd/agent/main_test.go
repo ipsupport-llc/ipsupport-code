@@ -10736,9 +10736,110 @@ func TestApplyModelFlag(t *testing.T) {
 			t.Errorf("%q changed the loaded providers map", c.spec)
 		}
 	}
+	for _, bad := range []string{" ", ":foo", " : x"} {
+		cfg := base()
+		if err := applyModelFlag(&cfg, bad); err == nil {
+			t.Errorf("-m %q was accepted", bad)
+		}
+	}
 	cfg := base()
-	if err := applyModelFlag(&cfg, " "); err == nil {
-		t.Error("an empty -m was accepted")
+	if err := applyModelFlag(&cfg, " lab : lab-9 "); err != nil || cfg.Provider != "lab" || cfg.Providers["lab"].Model != "lab-9" {
+		t.Errorf("spaced provider:model → %q %q %v", cfg.Provider, cfg.Providers["lab"].Model, err)
+	}
+}
+
+// Every save takes the whole connection — /rename the local one, a key or a
+// temperature edit the provider and presets — so -m's model and provider must
+// be kept out of what is written. An explicit /model choice is then the user's.
+func TestModelFlagNeverReachesDisk(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
+	if err := config.SaveProviders("", map[string]config.LLM{"lab": {BaseURL: "http://lab/v1", Model: "lab-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveGlobal("me", config.LLM{BaseURL: "http://127.0.0.1:1/v1", Model: "home-model"}); err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
+	load := func() config.Config {
+		c, err := config.Load(ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "run-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	if err := config.SaveGlobal("renamed", a.cfg.LLM); err != nil { // what /rename does
+		t.Fatal(err)
+	}
+	if c := load(); c.LLM.Model != "home-model" || c.Name != "renamed" {
+		t.Errorf("after /rename: model %q name %q — want the saved model kept, the rename saved", c.LLM.Model, c.Name)
+	}
+	config.ClearRunOnlyModel()
+
+	b, cleanup2, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "lab:lab-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup2()
+	if err := config.SaveProviders(b.cfg.Provider, b.cfg.Providers); err != nil { // what a key edit does
+		t.Fatal(err)
+	}
+	if c := load(); c.Provider != "" || c.Providers["lab"].Model != "lab-1" {
+		t.Errorf("after a provider save: provider %q lab model %q — want neither changed", c.Provider, c.Providers["lab"].Model)
+	}
+
+	b.setModel("lab-2") // an explicit choice — even of the -m model itself — is kept, provider and all
+	if c := load(); c.Providers["lab"].Model != "lab-2" || c.Provider != "lab" {
+		t.Errorf("after /model lab-2: provider %q lab model %q, want both saved", c.Provider, c.Providers["lab"].Model)
+	}
+}
+
+// The piped text follows the task, marked off; no input leaves the task as is.
+func TestWithPipedInput(t *testing.T) {
+	if got := withPipedInput("review", ""); got != "review" {
+		t.Errorf("no input: %q", got)
+	}
+	if got := withPipedInput("review this diff", "+x"); got != "review this diff\n\n--- piped input ---\n+x\n--- end of piped input ---" {
+		t.Errorf("with input: %q", got)
+	}
+}
+
+// Piped input for a read-only run: none from a device, none from a pipe that
+// stays idle (ssh, a supervisor), an empty input from one closed at once.
+func TestPipedInput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX pipes and /dev/null")
+	}
+	null, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer null.Close()
+	if text, arrived, err := pipedInput(null, bufio.NewReader(null), time.Second, 100); text != "" || arrived || err != nil {
+		t.Errorf("/dev/null: %q %v %v", text, arrived, err)
+	}
+
+	idleR, idleW, _ := os.Pipe()
+	defer idleW.Close()
+	start := time.Now()
+	if text, arrived, _ := pipedInput(idleR, bufio.NewReader(idleR), 200*time.Millisecond, 100); text != "" || arrived {
+		t.Errorf("idle pipe: %q %v", text, arrived)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Error("an idle pipe held the run")
+	}
+
+	r, w, _ := os.Pipe()
+	go func() { w.Write([]byte("diff\n+x\n")); w.Close() }()
+	if text, arrived, err := pipedInput(r, bufio.NewReader(r), time.Second, 100); text != "diff\n+x" || !arrived || err != nil {
+		t.Errorf("a piped diff: %q %v %v", text, arrived, err)
 	}
 }
 
@@ -10746,6 +10847,7 @@ func TestApplyModelFlag(t *testing.T) {
 func TestModelFlagSetsTheRunsModelOnly(t *testing.T) {
 	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
 	ws := t.TempDir()
 	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "some-model-x")
 	if err != nil {

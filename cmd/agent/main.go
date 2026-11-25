@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"maps"
@@ -89,6 +90,7 @@ func main() {
 		interactive     bool
 		showThinking    bool
 		readOnly        bool
+		modelSpec       string
 	)
 	flag.StringVar(&workspace, "C", ".", "workspace directory")
 	flag.BoolVar(&doInit, "init", false, "re-run first-time setup (server URL, API key, model)")
@@ -104,7 +106,8 @@ func main() {
 	flag.BoolVar(&clearOnStart, "clear", false, "wipe this thread's history, learned facts and lessons, and session permissions before starting (like /clear, but at launch)")
 	flag.BoolVar(&interactive, "it", false, "with a [task] argument, open the interactive TUI and auto-submit it instead of one-shot mode (same dispatch as typing it in — a /command or !shell line works too)")
 	flag.BoolVar(&showThinking, "show-thinking", false, "start with the live reasoning view on (same as pressing ctrl+t once a task is running)")
-	flag.BoolVar(&readOnly, "read-only", false, "with a [task] argument, answer it without changing anything: file writes and git changes are refused, commands run without asking inside an OS sandbox where the workspace is read-only and there is no network (refused where there is no such sandbox), and the session is neither restored nor saved")
+	flag.BoolVar(&readOnly, "read-only", false, "with a [task] argument, answer it without changing anything: file writes and git changes are refused, commands run without asking inside an OS sandbox where the workspace is read-only and there is no network (refused where there is no such sandbox), the agent's own internet use is off (web, update checks, statistics — the model connection is untouched), and the session is neither restored nor saved; text piped in is added to the task (e.g. git diff main | ipsupport-code -read-only \"review this diff\")")
+	flag.StringVar(&modelSpec, "m", "", "use this model for this run only, not persisted: \"model\" on the provider in use, or \"provider:model\" (e.g. -m openai:gpt-5, -m local:gemma-4); \"provider:\" alone keeps that provider's own model")
 	flag.Usage = printUsage
 	flag.Parse()
 	if !readOnly {
@@ -200,7 +203,19 @@ func main() {
 	// construction time, so applying it after wire() (as a prior version of
 	// this code did) left those two pointed at the previous name's archive for
 	// the whole run even though the session file itself picked up the change.
-	app, cleanup, err := build(workspace, sessionName, []string(overrides), readOnly, reader)
+	// Text piped into a read-only run is part of its task: `git diff main |
+	// ipsupport-code -read-only "review this diff"`. Read now, before anything
+	// else takes stdin — a read-only run asks nothing on it.
+	var piped string
+	if readOnly && !isTTY() {
+		var err error
+		if piped, err = readPiped(reader, maxPipedBytes); err != nil {
+			fmt.Fprintln(os.Stderr, "error: reading stdin:", err)
+			os.Exit(1)
+		}
+	}
+
+	app, cleanup, err := build(workspace, sessionName, []string(overrides), readOnly, reader, modelSpec)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -243,6 +258,9 @@ func main() {
 	defer app.waitTelemetry(3 * time.Second)
 
 	taskText := strings.TrimSpace(strings.Join(flag.Args(), " "))
+	if piped != "" {
+		taskText += "\n\n--- piped input ---\n" + piped + "\n--- end of piped input ---"
+	}
 	switch {
 	case taskText != "" && !(interactive && isTTY()):
 		if !newSession && !readOnly {
@@ -287,6 +305,69 @@ func main() {
 		}
 		app.repl(ctx)
 	}
+}
+
+// maxPipedBytes caps what a read-only run takes from stdin into its task.
+const maxPipedBytes = 512 << 10
+
+// readPiped reads what was piped in, up to max bytes, saying so when there was
+// more: a diff cut silently would be reviewed as if it ended there.
+func readPiped(r io.Reader, max int) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(r, int64(max)+1))
+	if err != nil {
+		return "", err
+	}
+	text := strings.TrimRight(string(data), "\n")
+	if len(data) > max {
+		cut, _ := textutil.Clip(string(data[:max]), max)
+		text = cut + fmt.Sprintf("\n…[input cut at %d KB — the rest was not read]", max>>10)
+	}
+	return text, nil
+}
+
+// applyModelFlag points this run at a model (-m): "model" on the provider in
+// use, or "provider:model". A model name may hold a colon itself (Ollama's
+// "qwen2.5-coder:7b"), so the part before it is a provider only when it names
+// one: "local", a built-in, or one in the config.
+func applyModelFlag(cfg *config.Config, spec string) error {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return errors.New("no model given")
+	}
+	if p, m, ok := strings.Cut(spec, ":"); ok && isProviderName(*cfg, p) {
+		if p == "local" {
+			p = ""
+		}
+		cfg.Provider, spec = p, strings.TrimSpace(m)
+	}
+	if spec == "" { // "provider:" — that provider with its own model
+		return nil
+	}
+	if cfg.Provider == "" || cfg.Provider == "local" {
+		cfg.LLM.Model = spec
+		return nil
+	}
+	providers := make(map[string]config.LLM, len(cfg.Providers)+1) // a copy: the loaded map may be shared
+	for k, v := range cfg.Providers {
+		providers[k] = v
+	}
+	p := providers[cfg.Provider]
+	p.Model = spec
+	providers[cfg.Provider] = p
+	cfg.Providers = providers
+	return nil
+}
+
+// isProviderName reports whether name is a provider -m can switch to.
+func isProviderName(cfg config.Config, name string) bool {
+	if name == "local" {
+		return true
+	}
+	if _, ok := cfg.Providers[name]; ok {
+		return true
+	}
+	_, ok := config.ProviderTemplates[name]
+	return ok
 }
 
 // checkReadOnly rejects what -read-only can't be combined with: it is a single
@@ -698,7 +779,7 @@ type app struct {
 	offlineNow atomic.Bool
 }
 
-func build(workspace, sessionName string, overrides []string, readOnly bool, reader *bufio.Reader) (*app, func(), error) {
+func build(workspace, sessionName string, overrides []string, readOnly bool, reader *bufio.Reader, modelSpec string) (*app, func(), error) {
 	cfg, err := config.Load(workspace)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load config: %w", err)
@@ -716,6 +797,17 @@ func build(workspace, sessionName string, overrides []string, readOnly bool, rea
 		if err := config.ApplyOverride(&cfg, key, val); err != nil {
 			return nil, nil, fmt.Errorf("-override %s: %w", key, err)
 		}
+	}
+	if modelSpec != "" {
+		if err := applyModelFlag(&cfg, modelSpec); err != nil {
+			return nil, nil, fmt.Errorf("-m %s: %w", modelSpec, err)
+		}
+	}
+	// A read-only run sends nothing off the machine but its model's requests:
+	// no web tool (a fetched URL can carry the code it was shown), no update
+	// check, no statistics. Not overridable — that is the promise of the mode.
+	if readOnly {
+		cfg.Offline = true
 	}
 	// An active provider that doesn't resolve is refused HERE, before anything
 	// runs. /ai use has always validated the name (see setProvider); -override
@@ -1254,7 +1346,8 @@ func (a *app) buildSubReg(pol *policy.Engine, root string) *tool.Registry {
 		tools = append(tools, tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, tool.Shell(a.cfg.Run.Shell), a.sandboxWrapperFor(root)))
 	}
 	tools = append(tools, a.gitTools(pol, root)...)
-	tools = append(tools, tool.NewWebLive(nil, a.offlineNow.Load), tool.NewCalc(), tool.NewDone())
+	tools = append(tools, a.webTools()...)
+	tools = append(tools, tool.NewCalc(), tool.NewDone())
 	if a.skills != nil && a.skills.HasEnabled() {
 		tools = append(tools, tool.NewSkill(a.skills))
 	}
@@ -3281,6 +3374,16 @@ func (a *app) sandboxSpec(root string) (string, sandbox.Spec) {
 	return mode, sandbox.Spec{WritableRoots: roots, AllowNetwork: !a.cfg.Offline && !a.readOnly}
 }
 
+// webTools is the web tool, or none in a read-only run: its internet use is
+// off there for good, so offering the tool only spent a turn on a refusal that
+// told the model to turn offline mode off.
+func (a *app) webTools() []tool.Tool {
+	if a.readOnly {
+		return nil
+	}
+	return []tool.Tool{tool.NewWebLive(nil, a.offlineNow.Load)} // nil → its own 30s-timeout client; task ctx has no deadline of its own
+}
+
 // readOnlyRun reports whether read-only mode can let commands run, and the git
 // tool: only inside a sandbox that keeps them from writing the workspace. why
 // says what stops it.
@@ -3368,8 +3471,7 @@ func (a *app) wire() error {
 	tools := slices.Concat([]tool.Tool{
 		tool.NewFile(pol, gatedApprover{a}, a.snapFile),
 		tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, tool.Shell(a.cfg.Run.Shell), a.sandboxWrapper()),
-	}, a.gitTools(pol, a.hostSandboxRoot()), []tool.Tool{
-		tool.NewWebLive(nil, a.offlineNow.Load), // nil → its own 30s-timeout client; task ctx has no deadline of its own
+	}, a.gitTools(pol, a.hostSandboxRoot()), a.webTools(), []tool.Tool{
 		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),
 		tool.NewCalc(),
 		tool.NewDone(),

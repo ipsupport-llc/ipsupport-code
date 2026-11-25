@@ -24,7 +24,7 @@ import (
 func gateApp(t *testing.T, overrides ...string) (*app, *policy.Engine, *countingApprover) {
 	t.Helper()
 	setHome(t, t.TempDir())
-	a, cleanup, err := build(t.TempDir(), "", overrides, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", overrides, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}

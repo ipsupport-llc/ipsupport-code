@@ -131,6 +131,12 @@ hard task, then drop back to your local one:
 /model                    pick from the server's models (↑↓, type to filter)   ·   /model gpt-4o   switch directly
 ```
 
+For one run, from the command line, `-m` picks the model without changing the
+settings: `-m gemma-4` on the provider in use, `-m openai:gpt-5` for a provider
+and its model, `-m local:gemma-4` back on your local server, `-m openai:` for a
+provider with its own model. A model name may hold a colon itself
+(`qwen2.5-coder:7b`): the part before it switches provider only when it names one.
+
 Pasting a key on Linux? A middle-click paste is swallowed by the mouse-wheel
 scroll tracking — use **Ctrl+Shift+V** (bracketed paste), which always works.
 
@@ -428,9 +434,15 @@ allowed to change:
 
 ```sh
 ./ipsupport-code -read-only "review the diff against main"
+git diff main | ./ipsupport-code -read-only "review this diff"
 ```
 
-File writes, git changes and MCP servers are refused. Commands run without
+Text piped in is added to the task (up to 512 KB; a longer input is cut, and
+the task says so).
+
+File writes, git changes and MCP servers are refused, and the agent's own
+internet use is off as in `/offline` — no web tool, update check or statistics;
+the model connection is untouched. Commands run without
 asking, inside the OS sandbox (Landlock on Linux 6.7 or later, Seatbelt on macOS,
 whatever `sandbox` is set to) with the workspace read-only like the rest of the
 disk: only temp dirs and the user cache dir are writable, and there is no

@@ -929,6 +929,13 @@ func (r *runOnlyModel) saved(ps map[string]LLM) {
 			delete(r.presets, name)
 		}
 	}
+	// The provider saved before -m is gone from disk now (local was written in
+	// its place): added again later, it is a new preset, not the one to restore.
+	if _, kept := ps[r.provider]; r.provider != "" && r.provider != "local" && !kept {
+		if _, builtin := ProviderTemplates[r.provider]; !builtin {
+			r.provider = ""
+		}
+	}
 }
 
 // ---- dotted-path get/set/unset for the `config` subcommand --------------

@@ -11005,6 +11005,53 @@ func TestModelFlagRemovedAndReaddedPreset(t *testing.T) {
 	if c.Providers["lab"].Model != "lab-9" {
 		t.Errorf("re-added lab saved with model %q, want the one it was added with", c.Providers["lab"].Model)
 	}
+
+	// A save that never reached disk moves no baseline: a preset whose first
+	// save failed is taken as given by the save that succeeds.
+	good, _ := os.ReadFile(config.GlobalPath())
+	if err := os.WriteFile(config.GlobalPath(), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ps := map[string]config.LLM{"lab": c.Providers["lab"], "fresh": {BaseURL: "http://fresh/v1", Model: "F1"}}
+	if err := config.SaveProviders("", ps); err == nil {
+		t.Fatal("a save over a corrupt file succeeded")
+	}
+	if err := os.WriteFile(config.GlobalPath(), good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ps["fresh"] = config.LLM{BaseURL: "http://fresh/v1", Model: "F2"}
+	if err := config.SaveProviders("", ps); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := config.Load(ws); c.Providers["fresh"].Model != "F2" {
+		t.Errorf("fresh saved with %q — a failed save fixed its baseline", c.Providers["fresh"].Model)
+	}
+}
+
+// The provider saved before -m, removed and then added again (not selected),
+// is not made active again by the overlay.
+func TestModelFlagReaddedProviderIsNotReactivated(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
+	ws := t.TempDir()
+	if err := config.SaveProviders("lab", map[string]config.LLM{"lab": {BaseURL: "http://lab/v1", Model: "lab-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "local:x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := config.SaveProviders(a.cfg.Provider, map[string]config.LLM{}); err != nil { // removed
+		t.Fatal(err)
+	}
+	if err := config.SaveProviders(a.cfg.Provider, map[string]config.LLM{"lab": {BaseURL: "http://lab/v1", Model: "lab-9"}}); err != nil { // added again
+		t.Fatal(err)
+	}
+	if c, _ := config.Load(ws); c.Provider != "" {
+		t.Errorf("saved provider = %q, want local — lab was re-added, not selected", c.Provider)
+	}
 }
 
 // A reload that fails keeps the session as it was — -m and its protection

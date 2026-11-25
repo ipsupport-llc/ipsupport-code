@@ -3755,15 +3755,15 @@ func (a *app) reconfigure() error {
 	if err != nil {
 		return err // the session keeps what it had, -m and its protection included
 	}
-	// The settings are read back from disk: whatever -m chose is gone from
-	// the session, and so is the rule that kept it from being saved.
-	config.ClearRunOnlyModel()
 	oldServers := a.cfg.McpServers
 	a.cfg = cfg
 	a.invalidateStaleMCP(oldServers)
 	if err := a.wire(); err != nil {
 		return err
 	}
+	// The settings are read back from disk and in use: whatever -m chose is
+	// gone from the session, and so is the rule that kept it from being saved.
+	config.ClearRunOnlyModel()
 	a.loadSession()          // a fresh agent — restore the persisted session
 	a.windowDetected = false // model may have changed (/login) — re-detect
 	a.modelEpoch.Add(1)      // orphan any in-flight probe for the old model

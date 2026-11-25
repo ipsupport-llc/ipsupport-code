@@ -843,6 +843,7 @@ type app struct {
 }
 
 func build(workspace, sessionName string, overrides []string, readOnly bool, reader *bufio.Reader, modelSpec string) (*app, func(), error) {
+	config.ClearRunOnlyModel() // a process builds once; a test builds many — none inherits another's -m
 	cfg, err := config.Load(workspace)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load config: %w", err)
@@ -867,8 +868,6 @@ func build(workspace, sessionName string, overrides []string, readOnly bool, rea
 			return nil, nil, fmt.Errorf("-m %s: %w", modelSpec, err)
 		}
 		config.SetRunOnlyModel(before, cfg) // saves write what was there before -m
-	} else {
-		config.ClearRunOnlyModel() // a process builds once; a test builds many
 	}
 	// A read-only run sends nothing off the machine but its model's requests:
 	// no web tool (a fetched URL can carry the code it was shown), no update
@@ -3752,13 +3751,13 @@ func (a *app) setMode(m mode) string {
 }
 
 func (a *app) reconfigure() error {
+	cfg, err := config.Load(a.workspace)
+	if err != nil {
+		return err // the session keeps what it had, -m and its protection included
+	}
 	// The settings are read back from disk: whatever -m chose is gone from
 	// the session, and so is the rule that kept it from being saved.
 	config.ClearRunOnlyModel()
-	cfg, err := config.Load(a.workspace)
-	if err != nil {
-		return err
-	}
 	oldServers := a.cfg.McpServers
 	a.cfg = cfg
 	a.invalidateStaleMCP(oldServers)
@@ -5282,6 +5281,7 @@ func (a *app) addProvider(arg string) []string {
 	if len(f) >= 3 {
 		model = f[2]
 	}
+	_, existed := a.cfg.Providers[name]
 	msg, err := a.addProviderFields(name, url, model, key)
 	if err != nil {
 		return []string{"error: " + err.Error()}
@@ -5293,7 +5293,10 @@ func (a *app) addProvider(arg string) []string {
 	default:
 		msg = fmt.Sprintf("added %q → %s — next: /ai key %s <token>, then /ai %s", name, a.cfg.Providers[name].BaseURL, name, name)
 	}
-	return append([]string{msg}, runOnlyNote()...) // a model given here is for the session too
+	if !existed {
+		return []string{msg} // a new preset is saved as given
+	}
+	return append([]string{msg}, runOnlyNote()...) // an edited one keeps its saved model
 }
 
 func (a *app) providerList() []string {

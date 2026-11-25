@@ -10977,6 +10977,66 @@ func TestModelFlagSessionEdgeSaves(t *testing.T) {
 	}
 }
 
+// Overlay bookkeeping follows what reached disk: a preset removed and added
+// again starts over, and a failed save changes nothing.
+func TestModelFlagRemovedAndReaddedPreset(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
+	ws := t.TempDir()
+	if err := config.SaveProviders("", map[string]config.LLM{"lab": {BaseURL: "http://lab/v1", Model: "lab-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "x"); err != nil {
+		t.Fatal(err)
+	} else {
+		defer cleanup()
+	}
+	if err := config.SaveProviders("", map[string]config.LLM{}); err != nil { // lab removed
+		t.Fatal(err)
+	}
+	if err := config.SaveProviders("", map[string]config.LLM{"lab": {BaseURL: "http://lab2/v1", Model: "lab-9"}}); err != nil { // added again
+		t.Fatal(err)
+	}
+	c, err := config.Load(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Providers["lab"].Model != "lab-9" {
+		t.Errorf("re-added lab saved with model %q, want the one it was added with", c.Providers["lab"].Model)
+	}
+}
+
+// A reload that fails keeps the session as it was — -m and its protection
+// with it; one that succeeds ends both.
+func TestReconfigureEndsModelFlagOnlyWhenItLoads(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
+	ws := t.TempDir()
+	if err := config.SaveGlobal("me", config.LLM{BaseURL: "http://127.0.0.1:1/v1", Model: "home"}); err != nil {
+		t.Fatal(err)
+	}
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	good, _ := os.ReadFile(config.GlobalPath())
+	if err := os.WriteFile(config.GlobalPath(), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.reconfigure(); err == nil || !config.RunOnlyModel() {
+		t.Errorf("a failed reload: err=%v, run-only still on=%v — want an error and -m kept", err, config.RunOnlyModel())
+	}
+	if err := os.WriteFile(config.GlobalPath(), good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.reconfigure(); err != nil || config.RunOnlyModel() {
+		t.Errorf("a good reload: err=%v, run-only still on=%v — want -m ended", err, config.RunOnlyModel())
+	}
+}
+
 // The provider saved before -m, removed in the session, is not saved by name.
 func TestModelFlagRemovedProviderFallsBackToLocal(t *testing.T) {
 	setHome(t, t.TempDir())

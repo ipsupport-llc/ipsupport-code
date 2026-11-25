@@ -790,8 +790,13 @@ func SaveAgents(agents map[string]AgentProfile) error {
 // SaveProviders persists the active provider name and the external provider
 // presets (which may include API keys — the file is written 0600).
 func SaveProviders(provider string, providers map[string]LLM) error {
+	saved := providers
 	provider, providers = runOnly.providers(provider, providers)
-	return mergeGlobalKeys(map[string]any{"provider": provider, "providers": providers})
+	if err := mergeGlobalKeys(map[string]any{"provider": provider, "providers": providers}); err != nil {
+		return err
+	}
+	runOnly.saved(saved) // only once it is on disk
+	return nil
 }
 
 // runOnly holds, for a process started with -m, the model and provider the
@@ -882,7 +887,7 @@ func (r *runOnlyModel) providers(provider string, ps map[string]LLM) (string, ma
 	out := make(map[string]LLM, len(ps))
 	for name, p := range ps {
 		switch m, ok := r.presets[name]; {
-		case name == r.made:
+		case name == r.made && !ok:
 			// -m's model, and the context size found for it, on a preset that had
 			// none: the rest of it (a key added since) is kept.
 			p = modelOf{}.onto(p)
@@ -891,19 +896,39 @@ func (r *runOnlyModel) providers(provider string, ps map[string]LLM) (string, ma
 			}
 		case ok:
 			p = m.onto(p)
-		default:
-			r.presets[name] = modelFields(p) // added in the session: as first saved
 		}
-		out[name] = p
+		out[name] = p // one added in the session is written as given; saved() takes it as its baseline
 	}
-	// The provider saved before -m was removed in the session: saving its name
+	// The provider saved before -m, removed in the session: saving its name
 	// would leave the next launch on a provider that is gone. Local, then.
-	if _, kept := out[r.provider]; r.provider != "" && r.provider != "local" && !kept {
-		if _, builtin := ProviderTemplates[r.provider]; !builtin {
-			r.provider = ""
+	saveAs := r.provider
+	if _, kept := out[saveAs]; saveAs != "" && saveAs != "local" && !kept {
+		if _, builtin := ProviderTemplates[saveAs]; !builtin {
+			saveAs = ""
 		}
 	}
-	return r.provider, out
+	return saveAs, out
+}
+
+// saved updates the baselines once a save of ps is on disk: a preset added in
+// the session is held to the model it was saved with from then on, and one no
+// longer there is forgotten — added again, it starts over.
+func (r *runOnlyModel) saved(ps map[string]LLM) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.set {
+		return
+	}
+	for name, p := range ps {
+		if _, ok := r.presets[name]; !ok && name != r.made {
+			r.presets[name] = modelFields(p)
+		}
+	}
+	for name := range r.presets {
+		if _, ok := ps[name]; !ok {
+			delete(r.presets, name)
+		}
+	}
 }
 
 // ---- dotted-path get/set/unset for the `config` subcommand --------------

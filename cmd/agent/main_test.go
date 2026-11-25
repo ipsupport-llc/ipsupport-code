@@ -1011,7 +1011,7 @@ func TestManualContextWindowSurvivesRestart(t *testing.T) {
 
 	// Simulate a restart: a brand-new app, windowDetected back at its Go
 	// zero-value before build() seeds it from the persisted flag.
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1034,7 +1034,7 @@ func TestBuildAppliesOverridesInMemoryNotToFile(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	ws := t.TempDir()
 
-	a, cleanup, err := build(ws, "", []string{"run.default=allow", "llm.temperature=0.7"}, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", []string{"run.default=allow", "llm.temperature=0.7"}, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1059,7 +1059,7 @@ func TestBuildAppliesOverridesInMemoryNotToFile(t *testing.T) {
 
 	// A fresh build with NO overrides must see the untouched defaults — proving
 	// the overrides above never reached disk.
-	plain, cleanup2, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
+	plain, cleanup2, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1078,7 +1078,7 @@ func TestBuildRejectsMalformedOverride(t *testing.T) {
 	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
-	_, _, err := build(t.TempDir(), "", []string{"not-a-key-value-pair"}, false, bufio.NewReader(strings.NewReader("")))
+	_, _, err := build(t.TempDir(), "", []string{"not-a-key-value-pair"}, false, bufio.NewReader(strings.NewReader("")), "")
 	if err == nil {
 		t.Error("want an error for a malformed -override, got nil")
 	}
@@ -5145,7 +5145,7 @@ func TestBuildAppliesSessionNameBeforeWire(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, cleanup, err := build(ws, "myname", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "myname", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5181,7 +5181,7 @@ func TestRenameRebindsArchive(t *testing.T) {
 	}
 
 	ws := t.TempDir()
-	a, cleanup, err := build(ws, "old-name", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "old-name", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5422,7 +5422,7 @@ func TestRunOneFailedFirstRequestSignalsErrorAndRecordsUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5454,7 +5454,7 @@ func TestRunOneRecordsDurationInUsageLedger(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5535,7 +5535,7 @@ func TestReflectionTokensFlushedBeforeRunOneReturns(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5581,7 +5581,7 @@ func TestRunTaskStreamingLeavesTheLearningPassToItsCaller(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5634,7 +5634,7 @@ func TestReflectionBilledToTheModelThatRanIt(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -5697,7 +5697,7 @@ func TestModelSwitchDoesNotMisattributeReflectionTokens(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7139,7 +7139,7 @@ func TestLastRealContextSurvivesReflectionClobber(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7193,7 +7193,7 @@ func TestDetectContextWindowReWiresLiveAgentOnChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -8109,7 +8109,7 @@ func TestSaveSessionHappensBeforeSlowReflection(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9046,7 +9046,7 @@ func TestANewTaskLetsTheLearningPassFinish(t *testing.T) {
 // pass, but a call already returning at that instant still lands.)
 func TestLessonsLandingUnderARunningTaskAreHeldUntilItEnds(t *testing.T) {
 	setHome(t, t.TempDir())
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9103,7 +9103,7 @@ func cfgCursorTo(t *testing.T, m *tuiModel, key string) {
 // not the only way to avoid that: stage it, and replay it when the task ends.
 func TestConfigEditsStageWhileATaskRunsAndApplyWhenItEnds(t *testing.T) {
 	setHome(t, t.TempDir())
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9149,7 +9149,7 @@ func TestConfigEditsStageWhileATaskRunsAndApplyWhenItEnds(t *testing.T) {
 // keystrokes — and it lands where pressing it twice live would have.
 func TestStagedConfigEditsReplayInOrder(t *testing.T) {
 	setHome(t, t.TempDir())
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9306,7 +9306,7 @@ func TestTwoSessionsDoNotClobberEachOthersFacts(t *testing.T) {
 	ws := t.TempDir()
 	open := func(session string) *app {
 		t.Helper()
-		a, cleanup, err := build(ws, session, nil, false, bufio.NewReader(strings.NewReader("")))
+		a, cleanup, err := build(ws, session, nil, false, bufio.NewReader(strings.NewReader("")), "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -9352,7 +9352,7 @@ func TestTwoRunsDoNotClobberEachOthersPromptHistory(t *testing.T) {
 	ws := t.TempDir()
 	open := func() *app {
 		t.Helper()
-		a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
+		a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -9545,7 +9545,7 @@ func TestRiskShadowCanBeTurnedOff(t *testing.T) {
 func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 	setHome(t, t.TempDir())
 	ws := t.TempDir()
-	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9607,7 +9607,7 @@ func TestAnApprovalAnswerTeachesTheRiskModel(t *testing.T) {
 func TestRiskCommandReportsAndResets(t *testing.T) {
 	setHome(t, t.TempDir())
 	ws := t.TempDir()
-	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9654,7 +9654,7 @@ func TestRiskCommandReportsAndResets(t *testing.T) {
 func TestRiskResetIsNotUndoneByAnInFlightSave(t *testing.T) {
 	setHome(t, t.TempDir())
 	ws := t.TempDir()
-	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9747,7 +9747,7 @@ func TestRiskNoteIsEmptyBelowTheThreshold(t *testing.T) {
 func TestLearningDoesNotBlockTheApproval(t *testing.T) {
 	setHome(t, t.TempDir())
 	ws := t.TempDir()
-	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9830,7 +9830,7 @@ func TestOnlyARealAnswerTeaches(t *testing.T) {
 func TestASubAgentGetsItsOwnRiskObserver(t *testing.T) {
 	setHome(t, t.TempDir())
 	ws := t.TempDir()
-	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -9923,7 +9923,7 @@ func TestLearningKeepsTheCachedPrefix(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -10310,7 +10310,7 @@ func TestReadOnlyBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a, cleanup, err := build(ws, "", []string{"sandbox=off", "offline=false"}, true, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", []string{"sandbox=off", "offline=false"}, true, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -10343,13 +10343,30 @@ func TestReadOnlyBuild(t *testing.T) {
 	if _, err := os.Stat(legacy); err != nil {
 		t.Errorf("the legacy state was moved out of the workspace: %v", err)
 	}
+	// Nothing leaves the machine but the model's own requests — even with
+	// offline=false given: the web tool (a URL can carry code it was shown),
+	// update checks and statistics are off.
+	if !a.cfg.Offline || !a.offlineNow.Load() {
+		t.Error("a read-only run is not offline")
+	}
+	for _, ts := range a.ag.ToolSchemas() {
+		if ts["function"].(map[string]any)["name"] == "web" {
+			t.Error("a read-only run offers the web tool")
+		}
+	}
+	on := true
+	a.cfg.Telemetry = &on                          // even with statistics turned on,
+	t.Setenv("IPS_API_BASE", "http://127.0.0.1:1") // and a server a dev build would send to
+	if _, active, why := a.telemetryStatus(); active {
+		t.Errorf("statistics would be sent from a read-only run (%s)", why)
+	}
 	a.saveSession()
 	if _, err := os.Stat(a.sessionPath()); !os.IsNotExist(err) {
 		t.Errorf("a read-only session was saved: %v", err)
 	}
 
 	// Without -read-only nothing of this applies.
-	plain, cleanup2, err := build(t.TempDir(), "", []string{"sandbox=off"}, false, bufio.NewReader(strings.NewReader("")))
+	plain, cleanup2, err := build(t.TempDir(), "", []string{"sandbox=off"}, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -10380,7 +10397,7 @@ func TestReadOnlyRunsCommandsWhereTheSandboxHoldsTheWorkspace(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
-	a, cleanup, err := build(ws, "", nil, true, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", nil, true, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -10407,7 +10424,7 @@ func TestReadOnlyStartsNoServerAndLearnsNothing(t *testing.T) {
 		return false
 	}
 	for _, readOnly := range []bool{false, true} {
-		a, cleanup, err := build(t.TempDir(), "", nil, readOnly, bufio.NewReader(strings.NewReader("")))
+		a, cleanup, err := build(t.TempDir(), "", nil, readOnly, bufio.NewReader(strings.NewReader("")), "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -10466,7 +10483,7 @@ func TestReadOnlyRefusesCommandsWhereTheRepositoryIsWritable(t *testing.T) {
 	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	a, cleanup, err := build(ws, "", nil, true, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", nil, true, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -10479,7 +10496,7 @@ func TestReadOnlyRefusesCommandsWhereTheRepositoryIsWritable(t *testing.T) {
 	if err := os.Mkdir(jail, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	b, cleanupB, err := build(ws, "", []string{"file.jail=" + jail}, true, bufio.NewReader(strings.NewReader("")))
+	b, cleanupB, err := build(ws, "", []string{"file.jail=" + jail}, true, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -10502,7 +10519,7 @@ func TestReadOnlyRefusesCommandsWhereNoGitCanSayWhereTheRepositoryIs(t *testing.
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", t.TempDir())
-	a, cleanup, err := build(ws, "", nil, true, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(ws, "", nil, true, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -10538,7 +10555,7 @@ func TestReadOnlyLeavesTheStoresAndSandboxesGit(t *testing.T) {
 	setHome(t, t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	ws := t.TempDir()
-	seed, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")))
+	seed, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -10548,7 +10565,7 @@ func TestReadOnlyLeavesTheStoresAndSandboxesGit(t *testing.T) {
 	}
 	cleanup()
 	for _, readOnly := range []bool{true, false} {
-		a, cleanup, err := build(ws, "", []string{"usage_retention_days=1"}, readOnly, bufio.NewReader(strings.NewReader("")))
+		a, cleanup, err := build(ws, "", []string{"usage_retention_days=1"}, readOnly, bufio.NewReader(strings.NewReader("")), "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -10602,13 +10619,13 @@ func TestReadOnlyRefusesStoresThatLeadIntoTheWorkspace(t *testing.T) {
 		{ws, "usage_path=" + filepath.Join(ws, "u.json")},                              // a symlink out: the rename over it lands here
 		{filepath.Join(ws, "wt"), "trace_path=" + filepath.Join(main, ".git", "HEAD")}, // the worktree's common git dir
 	} {
-		if _, _, err := build(c.ws, "", []string{c.kv}, true, bufio.NewReader(strings.NewReader(""))); err == nil {
+		if _, _, err := build(c.ws, "", []string{c.kv}, true, bufio.NewReader(strings.NewReader("")), ""); err == nil {
 			t.Errorf("%s: a read-only build started", c.kv)
 		}
 	}
 	setHome(t, ws) // the settings dir, where the rating state is kept, in the workspace
 	if _, _, err := build(ws, "", []string{"trace_path=" + filepath.Join(t.TempDir(), "t.jsonl"), "usage_path=" + outside,
-		"skills_path=" + t.TempDir(), "kb_path=" + filepath.Join(t.TempDir(), "kb.json")}, true, bufio.NewReader(strings.NewReader(""))); err == nil {
+		"skills_path=" + t.TempDir(), "kb_path=" + filepath.Join(t.TempDir(), "kb.json")}, true, bufio.NewReader(strings.NewReader("")), ""); err == nil {
 		t.Error("a settings dir in the workspace: a read-only build started")
 	}
 }
@@ -10623,17 +10640,17 @@ func TestReadOnlyRefusesStoresInTheWorkspace(t *testing.T) {
 	t.Chdir(ws)
 	for _, kv := range []string{"trace_path=.agent/trace.jsonl", "usage_path=" + filepath.Join(ws, "u.json"), "skills_path=skills", "kb_path=./kb.json",
 		"skills_path=", "trace_path="} { // empty: the working directory
-		if _, _, err := build(ws, "", []string{kv}, true, bufio.NewReader(strings.NewReader(""))); err == nil {
+		if _, _, err := build(ws, "", []string{kv}, true, bufio.NewReader(strings.NewReader("")), ""); err == nil {
 			t.Errorf("%s: a read-only build started", kv)
 		}
-		_, cleanup, err := build(ws, "", []string{kv}, false, bufio.NewReader(strings.NewReader("")))
+		_, cleanup, err := build(ws, "", []string{kv}, false, bufio.NewReader(strings.NewReader("")), "")
 		if err != nil {
 			t.Errorf("%s: a plain build failed: %v", kv, err)
 			continue
 		}
 		cleanup()
 	}
-	if _, cleanup, err := build(ws, "", []string{"trace_path=" + filepath.Join(t.TempDir(), "t.jsonl")}, true, bufio.NewReader(strings.NewReader(""))); err != nil {
+	if _, cleanup, err := build(ws, "", []string{"trace_path=" + filepath.Join(t.TempDir(), "t.jsonl")}, true, bufio.NewReader(strings.NewReader("")), ""); err != nil {
 		t.Errorf("a store outside the workspace was refused: %v", err)
 	} else {
 		cleanup()
@@ -10680,4 +10697,415 @@ func TestNoCarriageReturnReachesTheTerminal(t *testing.T) {
 	m.rewindRows = []rewindRow{{goal: "edit notes", files: 1}}
 	m.rewindPrev = m.renderDiff("notes.txt", "@@ -1,2 +1,2 @@\r\n kept line\r\n-old line\r\n+new line\r\n")
 	check("rewind preview", "kept line", "old line", "new line")
+}
+
+// -m picks the model for one run: a model on the provider in use, or
+// provider:model. A model name may hold a colon itself, so only a real
+// provider name before it switches provider.
+func TestApplyModelFlag(t *testing.T) {
+	base := func() config.Config {
+		c := config.Default()
+		c.Providers = map[string]config.LLM{"lab": {BaseURL: "http://lab/v1", Model: "lab-1"}}
+		return c
+	}
+	cases := []struct {
+		spec, provider, model string
+	}{
+		{"gemma-4", "", "gemma-4"},
+		{"qwen2.5-coder:7b", "", "qwen2.5-coder:7b"}, // not a provider: the whole thing is the model
+		{"local:gemma-4", "", "gemma-4"},
+		{"openai:gpt-5", "openai", "gpt-5"},
+		{"lab:lab-2", "lab", "lab-2"},
+		{"lab:", "lab", "lab-1"}, // provider alone keeps its own model
+	}
+	for _, c := range cases {
+		cfg := base()
+		shared := cfg.Providers
+		if err := applyModelFlag(&cfg, c.spec); err != nil {
+			t.Errorf("%q: %v", c.spec, err)
+			continue
+		}
+		got := cfg.LLM.Model
+		if cfg.Provider != "" {
+			got = cfg.Providers[cfg.Provider].Model
+		}
+		if cfg.Provider != c.provider || got != c.model {
+			t.Errorf("%q → provider %q model %q, want %q %q", c.spec, cfg.Provider, got, c.provider, c.model)
+		}
+		if shared["lab"].Model != "lab-1" {
+			t.Errorf("%q changed the loaded providers map", c.spec)
+		}
+	}
+	for _, bad := range []string{" ", ":foo", " : x"} {
+		cfg := base()
+		if err := applyModelFlag(&cfg, bad); err == nil {
+			t.Errorf("-m %q was accepted", bad)
+		}
+	}
+	cfg := base()
+	if err := applyModelFlag(&cfg, " lab : lab-9 "); err != nil || cfg.Provider != "lab" || cfg.Providers["lab"].Model != "lab-9" {
+		t.Errorf("spaced provider:model → %q %q %v", cfg.Provider, cfg.Providers["lab"].Model, err)
+	}
+}
+
+// Every save takes the whole connection — /rename the local one, a key or a
+// temperature edit the provider and presets — so -m's model and provider must
+// be kept out of what is written. An explicit /model choice is then the user's.
+func TestModelFlagNeverReachesDisk(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
+	if err := config.SaveProviders("", map[string]config.LLM{"lab": {BaseURL: "http://lab/v1", Model: "lab-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveGlobal("me", config.LLM{BaseURL: "http://127.0.0.1:1/v1", Model: "home-model"}); err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
+	load := func() config.Config {
+		c, err := config.Load(ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "run-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	if err := config.SaveGlobal("renamed", a.cfg.LLM); err != nil { // what /rename does
+		t.Fatal(err)
+	}
+	if c := load(); c.LLM.Model != "home-model" || c.Name != "renamed" {
+		t.Errorf("after /rename: model %q name %q — want the saved model kept, the rename saved", c.LLM.Model, c.Name)
+	}
+	config.ClearRunOnlyModel()
+
+	b, cleanup2, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "lab:lab-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup2()
+	if err := config.SaveProviders(b.cfg.Provider, b.cfg.Providers); err != nil { // what a key edit does
+		t.Fatal(err)
+	}
+	if c := load(); c.Provider != "" || c.Providers["lab"].Model != "lab-1" {
+		t.Errorf("after a provider save: provider %q lab model %q — want neither changed", c.Provider, c.Providers["lab"].Model)
+	}
+
+	// /model and /ai in a -m session switch for the session only, and say so:
+	// a rule with exceptions leaked through each entry point it missed.
+	out := strings.Join(b.setModel("lab-3"), "\n")
+	if b.activeLLM().Model != "lab-3" || !strings.Contains(out, "this session only") {
+		t.Errorf("/model in a -m session: model %q, said %q", b.activeLLM().Model, out)
+	}
+	if c := load(); c.Providers["lab"].Model != "lab-1" || c.Provider != "" {
+		t.Errorf("after /model: provider %q lab model %q — want the saved ones kept", c.Provider, c.Providers["lab"].Model)
+	}
+
+	// A built-in -m named had no preset: a key added in the session is saved,
+	// the -m model is not.
+	config.ClearRunOnlyModel()
+	t.Setenv("OPENAI_API_KEY", "sk-test")
+	o, cleanup3, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "openai:gpt-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup3()
+	ps := map[string]config.LLM{}
+	for k, v := range o.cfg.Providers {
+		ps[k] = v
+	}
+	p := ps["openai"]
+	p.APIKey = "sk-added"
+	ps["openai"] = p
+	if err := config.SaveProviders(o.cfg.Provider, ps); err != nil {
+		t.Fatal(err)
+	}
+	if c := load(); c.Providers["openai"].APIKey != "sk-added" || c.Providers["openai"].Model != "" || c.Provider != "" {
+		t.Errorf("built-in preset after a key save: %+v provider %q — want the key, no -m model, provider unchanged", c.Providers["openai"], c.Provider)
+	}
+
+	// With no key added, the preset -m made is not saved at all — not even
+	// with the context size detection found for its model.
+	if err := config.SaveProviders("", map[string]config.LLM{"lab": {BaseURL: "http://lab/v1", Model: "lab-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	config.ClearRunOnlyModel()
+	t.Setenv("GROQ_API_KEY", "gsk-test")
+	p2, cleanup4, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "groq:some-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup4()
+	ps2 := map[string]config.LLM{}
+	for k, v := range p2.cfg.Providers {
+		ps2[k] = v
+	}
+	g := ps2["groq"]
+	g.ContextWindow = 32768 // what detection writes in memory
+	ps2["groq"] = g
+	if err := config.SaveProviders(p2.cfg.Provider, ps2); err != nil {
+		t.Fatal(err)
+	}
+	if c := load(); func() bool { _, ok := c.Providers["groq"]; return ok }() {
+		t.Errorf("the preset -m made was saved: %+v", c.Providers["groq"])
+	}
+}
+
+// The piped text follows the task, marked off; no input leaves the task as is.
+func TestWithPipedInput(t *testing.T) {
+	if got := withPipedInput("review", ""); got != "review" {
+		t.Errorf("no input: %q", got)
+	}
+	if got := withPipedInput("review this diff", "+x"); got != "review this diff\n\n--- piped input ---\n+x\n--- end of piped input ---" {
+		t.Errorf("with input: %q", got)
+	}
+}
+
+// Piped input for a read-only run: none from a device, none from a pipe that
+// stays idle (ssh, a supervisor), an empty input from one closed at once.
+func TestPipedInput(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX pipes and /dev/null")
+	}
+	null, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer null.Close()
+	if text, arrived, err := pipedInput(null, bufio.NewReader(null), time.Second, 100); text != "" || arrived || err != nil {
+		t.Errorf("/dev/null: %q %v %v", text, arrived, err)
+	}
+
+	idleR, idleW, _ := os.Pipe()
+	defer idleW.Close()
+	start := time.Now()
+	if text, arrived, _ := pipedInput(idleR, bufio.NewReader(idleR), 200*time.Millisecond, 100); text != "" || arrived {
+		t.Errorf("idle pipe: %q %v", text, arrived)
+	}
+	if time.Since(start) > 2*time.Second {
+		t.Error("an idle pipe held the run")
+	}
+
+	r, w, _ := os.Pipe()
+	go func() { w.Write([]byte("diff\n+x\n")); w.Close() }()
+	if text, arrived, err := pipedInput(r, bufio.NewReader(r), time.Second, 100); text != "diff\n+x" || !arrived || err != nil {
+		t.Errorf("a piped diff: %q %v %v", text, arrived, err)
+	}
+}
+
+// -m reaches the connection the run uses, and is not written anywhere.
+func TestModelFlagSetsTheRunsModelOnly(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
+	ws := t.TempDir()
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "some-model-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	if got := a.activeLLM().Model; got != "some-model-x" {
+		t.Errorf("model = %q, want the -m one", got)
+	}
+	again, cleanup2, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup2()
+	if again.activeLLM().Model == "some-model-x" {
+		t.Error("-m was persisted: a plain launch still uses it")
+	}
+}
+
+// What is piped into a read-only run joins its task, up to a cap — and a cut
+// says so, so a diff is never reviewed as if it ended where it was cut.
+func TestReadPiped(t *testing.T) {
+	got, err := readPiped(strings.NewReader("diff --git a/x b/x\n+line\n"), 100)
+	if err != nil || got != "diff --git a/x b/x\n+line" {
+		t.Errorf("small input = %q, %v", got, err)
+	}
+	got, _ = readPiped(strings.NewReader(strings.Repeat("y", 3000)), 2048)
+	if !strings.HasPrefix(got, strings.Repeat("y", 2048)) || !strings.Contains(got, "input cut at 2 KB") {
+		t.Errorf("large input kept as %q…", got[:40])
+	}
+}
+
+// More of what a -m session must not do to the saved settings: a session
+// /model resetting the saved model's hand-set context size; a preset added in
+// the session taking a later session /model; removing the saved provider
+// leaving its name behind.
+func TestModelFlagSessionEdgeSaves(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
+	ws := t.TempDir()
+	load := func() config.Config {
+		c, err := config.Load(ws)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	if err := config.SaveGlobal("me", config.LLM{BaseURL: "http://127.0.0.1:1/v1", Model: "home", ContextWindow: 8000, ContextWindowManual: true}); err != nil {
+		t.Fatal(err)
+	}
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "run-model")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	a.setModel("other") // resets the manual size in memory, for the new model
+	if c := load(); c.LLM.Model != "home" || c.LLM.ContextWindow != 8000 || !c.LLM.ContextWindowManual {
+		t.Errorf("saved local after a session /model: %+v — want home with its own size", c.LLM)
+	}
+
+	// A preset added in the session is held to the model it was added with.
+	ps := map[string]config.LLM{"newp": {BaseURL: "http://newp/v1", Model: "A"}}
+	if err := config.SaveProviders("", ps); err != nil {
+		t.Fatal(err)
+	}
+	ps["newp"] = config.LLM{BaseURL: "http://newp/v1", Model: "B"} // a session /model on it
+	if err := config.SaveProviders("newp", ps); err != nil {
+		t.Fatal(err)
+	}
+	if c := load(); c.Providers["newp"].Model != "A" {
+		t.Errorf("added preset's saved model = %q, want the one it was added with", c.Providers["newp"].Model)
+	}
+}
+
+// Overlay bookkeeping follows what reached disk: a preset removed and added
+// again starts over, and a failed save changes nothing.
+func TestModelFlagRemovedAndReaddedPreset(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
+	ws := t.TempDir()
+	if err := config.SaveProviders("", map[string]config.LLM{"lab": {BaseURL: "http://lab/v1", Model: "lab-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "x"); err != nil {
+		t.Fatal(err)
+	} else {
+		defer cleanup()
+	}
+	if err := config.SaveProviders("", map[string]config.LLM{}); err != nil { // lab removed
+		t.Fatal(err)
+	}
+	if err := config.SaveProviders("", map[string]config.LLM{"lab": {BaseURL: "http://lab2/v1", Model: "lab-9"}}); err != nil { // added again
+		t.Fatal(err)
+	}
+	c, err := config.Load(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Providers["lab"].Model != "lab-9" {
+		t.Errorf("re-added lab saved with model %q, want the one it was added with", c.Providers["lab"].Model)
+	}
+
+	// A save that never reached disk moves no baseline: a preset whose first
+	// save failed is taken as given by the save that succeeds.
+	good, _ := os.ReadFile(config.GlobalPath())
+	if err := os.WriteFile(config.GlobalPath(), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ps := map[string]config.LLM{"lab": c.Providers["lab"], "fresh": {BaseURL: "http://fresh/v1", Model: "F1"}}
+	if err := config.SaveProviders("", ps); err == nil {
+		t.Fatal("a save over a corrupt file succeeded")
+	}
+	if err := os.WriteFile(config.GlobalPath(), good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ps["fresh"] = config.LLM{BaseURL: "http://fresh/v1", Model: "F2"}
+	if err := config.SaveProviders("", ps); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := config.Load(ws); c.Providers["fresh"].Model != "F2" {
+		t.Errorf("fresh saved with %q — a failed save fixed its baseline", c.Providers["fresh"].Model)
+	}
+}
+
+// The provider saved before -m, removed and then added again (not selected),
+// is not made active again by the overlay.
+func TestModelFlagReaddedProviderIsNotReactivated(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
+	ws := t.TempDir()
+	if err := config.SaveProviders("lab", map[string]config.LLM{"lab": {BaseURL: "http://lab/v1", Model: "lab-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "local:x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := config.SaveProviders(a.cfg.Provider, map[string]config.LLM{}); err != nil { // removed
+		t.Fatal(err)
+	}
+	if err := config.SaveProviders(a.cfg.Provider, map[string]config.LLM{"lab": {BaseURL: "http://lab/v1", Model: "lab-9"}}); err != nil { // added again
+		t.Fatal(err)
+	}
+	if c, _ := config.Load(ws); c.Provider != "" {
+		t.Errorf("saved provider = %q, want local — lab was re-added, not selected", c.Provider)
+	}
+}
+
+// A reload that fails keeps the session as it was — -m and its protection
+// with it; one that succeeds ends both.
+func TestReconfigureEndsModelFlagOnlyWhenItLoads(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
+	ws := t.TempDir()
+	if err := config.SaveGlobal("me", config.LLM{BaseURL: "http://127.0.0.1:1/v1", Model: "home"}); err != nil {
+		t.Fatal(err)
+	}
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	good, _ := os.ReadFile(config.GlobalPath())
+	if err := os.WriteFile(config.GlobalPath(), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.reconfigure(); err == nil || !config.RunOnlyModel() {
+		t.Errorf("a failed reload: err=%v, run-only still on=%v — want an error and -m kept", err, config.RunOnlyModel())
+	}
+	if err := os.WriteFile(config.GlobalPath(), good, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.reconfigure(); err != nil || config.RunOnlyModel() {
+		t.Errorf("a good reload: err=%v, run-only still on=%v — want -m ended", err, config.RunOnlyModel())
+	}
+}
+
+// The provider saved before -m, removed in the session, is not saved by name.
+func TestModelFlagRemovedProviderFallsBackToLocal(t *testing.T) {
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Cleanup(config.ClearRunOnlyModel)
+	ws := t.TempDir()
+	if err := config.SaveProviders("lab", map[string]config.LLM{"lab": {BaseURL: "http://lab/v1", Model: "lab-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "local:x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if err := config.SaveProviders(a.cfg.Provider, map[string]config.LLM{}); err != nil { // lab removed
+		t.Fatal(err)
+	}
+	c, err := config.Load(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Provider != "" {
+		t.Errorf("saved provider = %q after removing it, want local", c.Provider)
+	}
 }

@@ -15,8 +15,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/ipsupport-llc/ipsupport-code/internal/atomicfile"
 	"github.com/ipsupport-llc/ipsupport-code/internal/filelock"
@@ -560,6 +562,7 @@ func SaveGlobal(name string, l LLM) error {
 	if name == "" {
 		name = "ipsupport-code"
 	}
+	l = runOnly.localLLM(l)
 	// Merge, don't overwrite: the global file also holds providers (with keys),
 	// channel, prices, agents, retention — clobbering them on a /model or /rename
 	// would silently lose the user's keys/config.
@@ -787,7 +790,152 @@ func SaveAgents(agents map[string]AgentProfile) error {
 // SaveProviders persists the active provider name and the external provider
 // presets (which may include API keys — the file is written 0600).
 func SaveProviders(provider string, providers map[string]LLM) error {
-	return mergeGlobalKeys(map[string]any{"provider": provider, "providers": providers})
+	saved := providers
+	provider, providers = runOnly.providers(provider, providers)
+	if err := mergeGlobalKeys(map[string]any{"provider": provider, "providers": providers}); err != nil {
+		return err
+	}
+	runOnly.saved(saved) // only once it is on disk
+	return nil
+}
+
+// runOnly holds, for a process started with -m, the model and provider the
+// config had before it. Every save of the connection writes those back in
+// place of what is in memory: the saves take the whole connection (SaveGlobal
+// the local one, SaveProviders the provider and the presets), so /rename, a key
+// or a temperature edit would otherwise have written the run's model to disk.
+// The rule has no exceptions — /model and /ai in such a session switch for the
+// session only — because a rule with exceptions leaked through each entry
+// point it missed.
+var runOnly runOnlyModel
+
+type runOnlyModel struct {
+	mu       sync.Mutex
+	set      bool
+	provider string             // the provider saved before -m
+	local    modelOf            // the local connection's model before -m
+	presets  map[string]modelOf // each preset's model before -m, or when added in the session
+	made     string             // a preset -m alone created (a built-in that had none)
+}
+
+// modelOf is what follows the model: the model and the context size set for it.
+// A session /model resets a hand-set size for the old model; on disk the saved
+// model keeps its own.
+type modelOf struct {
+	model  string
+	window int
+	manual bool
+}
+
+func modelFields(l LLM) modelOf { return modelOf{l.Model, l.ContextWindow, l.ContextWindowManual} }
+
+func (m modelOf) onto(l LLM) LLM {
+	l.Model, l.ContextWindow, l.ContextWindowManual = m.model, m.window, m.manual
+	return l
+}
+
+// SetRunOnlyModel records the connection before -m turned it into after.
+func SetRunOnlyModel(before, after Config) {
+	runOnly.mu.Lock()
+	defer runOnly.mu.Unlock()
+	r := &runOnly
+	r.set, r.provider, r.local, r.made = true, before.Provider, modelFields(before.LLM), ""
+	r.presets = map[string]modelOf{}
+	for name, p := range before.Providers {
+		r.presets[name] = modelFields(p)
+	}
+	if _, had := before.Providers[after.Provider]; !had && after.Provider != "" && after.Provider != "local" {
+		r.made = after.Provider
+	}
+}
+
+// RunOnlyModel reports whether this process was started with -m: model and
+// provider choices are then for the session only.
+func RunOnlyModel() bool {
+	runOnly.mu.Lock()
+	defer runOnly.mu.Unlock()
+	return runOnly.set
+}
+
+// ClearRunOnlyModel forgets -m (for tests).
+func ClearRunOnlyModel() {
+	runOnly.mu.Lock()
+	runOnly.set = false
+	runOnly.mu.Unlock()
+}
+
+// localLLM is l as it may be saved: with the model from before -m.
+func (r *runOnlyModel) localLLM(l LLM) LLM {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.set {
+		l = r.local.onto(l)
+	}
+	return l
+}
+
+// providers is the active provider and presets as they may be saved: the
+// provider from before -m, and each preset's model from before it. A preset
+// added in the session is held to the model it was added with; the one -m
+// alone made keeps everything but -m's model.
+func (r *runOnlyModel) providers(provider string, ps map[string]LLM) (string, map[string]LLM) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.set {
+		return provider, ps
+	}
+	out := make(map[string]LLM, len(ps))
+	for name, p := range ps {
+		switch m, ok := r.presets[name]; {
+		case name == r.made && !ok:
+			// -m's model, and the context size found for it, on a preset that had
+			// none: the rest of it (a key added since) is kept.
+			p = modelOf{}.onto(p)
+			if reflect.DeepEqual(p, LLM{}) {
+				continue
+			}
+		case ok:
+			p = m.onto(p)
+		}
+		out[name] = p // one added in the session is written as given; saved() takes it as its baseline
+	}
+	// The provider saved before -m, removed in the session: saving its name
+	// would leave the next launch on a provider that is gone. Local, then.
+	saveAs := r.provider
+	if _, kept := out[saveAs]; saveAs != "" && saveAs != "local" && !kept {
+		if _, builtin := ProviderTemplates[saveAs]; !builtin {
+			saveAs = ""
+		}
+	}
+	return saveAs, out
+}
+
+// saved updates the baselines once a save of ps is on disk: a preset added in
+// the session is held to the model it was saved with from then on, and one no
+// longer there is forgotten — added again, it starts over.
+func (r *runOnlyModel) saved(ps map[string]LLM) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.set {
+		return
+	}
+	for name, p := range ps {
+		if _, ok := r.presets[name]; !ok && name != r.made {
+			r.presets[name] = modelFields(p)
+		}
+	}
+	for name := range r.presets {
+		if _, ok := ps[name]; !ok {
+			delete(r.presets, name)
+		}
+	}
+	// The provider saved before -m is gone from disk now (local was written in
+	// its place): added again later, it is a new preset, not the one to restore.
+	if _, kept := ps[r.provider]; r.provider != "" && r.provider != "local" && !kept {
+		if _, builtin := ProviderTemplates[r.provider]; !builtin {
+			r.provider = ""
+		}
+	}
 }
 
 // ---- dotted-path get/set/unset for the `config` subcommand --------------

@@ -12,6 +12,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"maps"
@@ -89,6 +90,7 @@ func main() {
 		interactive     bool
 		showThinking    bool
 		readOnly        bool
+		modelSpec       string
 	)
 	flag.StringVar(&workspace, "C", ".", "workspace directory")
 	flag.BoolVar(&doInit, "init", false, "re-run first-time setup (server URL, API key, model)")
@@ -104,9 +106,14 @@ func main() {
 	flag.BoolVar(&clearOnStart, "clear", false, "wipe this thread's history, learned facts and lessons, and session permissions before starting (like /clear, but at launch)")
 	flag.BoolVar(&interactive, "it", false, "with a [task] argument, open the interactive TUI and auto-submit it instead of one-shot mode (same dispatch as typing it in — a /command or !shell line works too)")
 	flag.BoolVar(&showThinking, "show-thinking", false, "start with the live reasoning view on (same as pressing ctrl+t once a task is running)")
-	flag.BoolVar(&readOnly, "read-only", false, "with a [task] argument, answer it without changing anything: file writes and git changes are refused, commands run without asking inside an OS sandbox where the workspace is read-only and there is no network (refused where there is no such sandbox), and the session is neither restored nor saved")
+	flag.BoolVar(&readOnly, "read-only", false, "with a [task] argument, answer it without changing anything: file writes and git changes are refused, commands run without asking inside an OS sandbox where the workspace is read-only and there is no network (refused where there is no such sandbox), the agent's own internet use is off (web, update checks, statistics — the model connection is untouched), and the session is neither restored nor saved; text piped in is added to the task (e.g. git diff main | ipsupport-code -read-only \"review this diff\")")
+	flag.StringVar(&modelSpec, "m", "", "use this model for this run only, not persisted: \"model\" on the provider in use, or \"provider:model\" (e.g. -m openai:gpt-5, -m local:gemma-4); \"provider:\" alone keeps that provider's own model")
 	flag.Usage = printUsage
 	flag.Parse()
+	if modelSet := flagGiven("m"); modelSet && strings.TrimSpace(modelSpec) == "" {
+		fmt.Fprintln(os.Stderr, `error: -m needs a model: -m gemma-4, or -m provider:model`)
+		os.Exit(2)
+	}
 	if !readOnly {
 		selfupdate.RemoveOld() // the binary a Windows update moved aside, now no longer running
 	}
@@ -200,7 +207,26 @@ func main() {
 	// construction time, so applying it after wire() (as a prior version of
 	// this code did) left those two pointed at the previous name's archive for
 	// the whole run even though the session file itself picked up the change.
-	app, cleanup, err := build(workspace, sessionName, []string(overrides), readOnly, reader)
+	// Text piped into a read-only run is part of its task: `git diff main |
+	// ipsupport-code -read-only "review this diff"`. Read now, before anything
+	// else takes stdin — a read-only run asks nothing on it.
+	var piped string
+	if readOnly && !isTTY() {
+		text, arrived, err := pipedInput(os.Stdin, reader, pipedWait, maxPipedBytes)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error: reading stdin:", err)
+			os.Exit(1)
+		}
+		if !arrived && isPipe(os.Stdin) {
+			fmt.Fprintf(os.Stderr, "read-only: nothing arrived on stdin in %s — running the task without it\n", pipedWait)
+		}
+		piped = text
+		// Approvals must not read the task's input: past the cap, a line "y" in a
+		// diff would have answered one. A read-only run asks little; it gets no.
+		reader = bufio.NewReader(strings.NewReader(""))
+	}
+
+	app, cleanup, err := build(workspace, sessionName, []string(overrides), readOnly, reader, modelSpec)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -242,7 +268,7 @@ func main() {
 	app.startTelemetry(ctx)
 	defer app.waitTelemetry(3 * time.Second)
 
-	taskText := strings.TrimSpace(strings.Join(flag.Args(), " "))
+	taskText := withPipedInput(strings.TrimSpace(strings.Join(flag.Args(), " ")), piped)
 	switch {
 	case taskText != "" && !(interactive && isTTY()):
 		if !newSession && !readOnly {
@@ -287,6 +313,124 @@ func main() {
 		}
 		app.repl(ctx)
 	}
+}
+
+// maxPipedBytes caps what a read-only run takes from stdin into its task.
+const maxPipedBytes = 512 << 10
+
+// flagGiven reports whether the named flag was on the command line at all —
+// -m "" is a mistake to say, not a flag to ignore.
+func flagGiven(name string) bool {
+	given := false
+	flag.Visit(func(f *flag.Flag) { given = given || f.Name == name })
+	return given
+}
+
+// withPipedInput is the task with what was piped in after it, marked off.
+func withPipedInput(task, piped string) string {
+	if piped == "" {
+		return task
+	}
+	return task + "\n\n--- piped input ---\n" + piped + "\n--- end of piped input ---"
+}
+
+// pipedWait is how long a read-only run waits for the first byte of piped
+// input. A stdin that is not a terminal is not always input: ssh, a supervisor
+// or a CI step can hand over a pipe nobody writes to, and waiting for its end
+// hung the run before it began.
+const pipedWait = 10 * time.Second
+
+// isPipe reports whether f is a pipe or a file — something that can carry
+// input — rather than a terminal or a device such as /dev/null.
+func isPipe(f *os.File) bool {
+	fi, err := f.Stat()
+	return err == nil && fi.Mode()&os.ModeCharDevice == 0
+}
+
+// pipedInput reads what is piped into a read-only run: nothing from a device,
+// nothing when no byte comes within wait (arrived false), else up to max bytes.
+// A reader blocked on an idle pipe is left behind; nothing else reads stdin.
+func pipedInput(f *os.File, r *bufio.Reader, wait time.Duration, max int) (text string, arrived bool, err error) {
+	if !isPipe(f) {
+		return "", false, nil
+	}
+	first := make(chan error, 1)
+	go func() { _, e := r.Peek(1); first <- e }()
+	select {
+	case e := <-first:
+		if errors.Is(e, io.EOF) {
+			return "", true, nil // closed without a byte: an empty input, not an idle one
+		}
+		if e != nil {
+			return "", false, e
+		}
+	case <-time.After(wait):
+		return "", false, nil
+	}
+	text, err = readPiped(r, max)
+	return text, true, err
+}
+
+// readPiped reads what was piped in, up to max bytes, saying so when there was
+// more: a diff cut silently would be reviewed as if it ended there.
+func readPiped(r io.Reader, max int) (string, error) {
+	data, err := io.ReadAll(io.LimitReader(r, int64(max)+1))
+	if err != nil {
+		return "", err
+	}
+	text := strings.TrimRight(string(data), "\n")
+	if len(data) > max {
+		cut, _ := textutil.Clip(string(data[:max]), max)
+		text = cut + fmt.Sprintf("\n…[input cut at %d KB — the rest was not read]", max>>10)
+	}
+	return text, nil
+}
+
+// applyModelFlag points this run at a model (-m): "model" on the provider in
+// use, or "provider:model". A model name may hold a colon itself (Ollama's
+// "qwen2.5-coder:7b"), so the part before it is a provider only when it names
+// one: "local", a built-in, or one in the config.
+func applyModelFlag(cfg *config.Config, spec string) error {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return errors.New("no model given")
+	}
+	if p, m, ok := strings.Cut(spec, ":"); ok && strings.TrimSpace(p) == "" {
+		return errors.New(`nothing before the colon — use "model" or "provider:model"`)
+	} else if p = strings.TrimSpace(p); ok && isProviderName(*cfg, p) {
+		if p == "local" {
+			p = ""
+		}
+		cfg.Provider, spec = p, strings.TrimSpace(m)
+	}
+	if spec == "" { // "provider:" — that provider with its own model
+		return nil
+	}
+	if cfg.Provider == "" || cfg.Provider == "local" {
+		cfg.LLM.Model = spec
+		return nil
+	}
+	providers := make(map[string]config.LLM, len(cfg.Providers)+1) // a copy: the loaded map may be shared
+	for k, v := range cfg.Providers {
+		providers[k] = v
+	}
+	p := providers[cfg.Provider]
+	p.Model = spec
+	providers[cfg.Provider] = p
+	cfg.Providers = providers
+	return nil
+}
+
+// isProviderName reports whether name is a provider -m can switch to.
+func isProviderName(cfg config.Config, name string) bool {
+	if name == "local" {
+		return true
+	}
+	if _, ok := cfg.Providers[name]; ok {
+		return true
+	}
+	_, ok := config.ProviderTemplates[name]
+	return ok
 }
 
 // checkReadOnly rejects what -read-only can't be combined with: it is a single
@@ -698,7 +842,8 @@ type app struct {
 	offlineNow atomic.Bool
 }
 
-func build(workspace, sessionName string, overrides []string, readOnly bool, reader *bufio.Reader) (*app, func(), error) {
+func build(workspace, sessionName string, overrides []string, readOnly bool, reader *bufio.Reader, modelSpec string) (*app, func(), error) {
+	config.ClearRunOnlyModel() // a process builds once; a test builds many — none inherits another's -m
 	cfg, err := config.Load(workspace)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load config: %w", err)
@@ -716,6 +861,19 @@ func build(workspace, sessionName string, overrides []string, readOnly bool, rea
 		if err := config.ApplyOverride(&cfg, key, val); err != nil {
 			return nil, nil, fmt.Errorf("-override %s: %w", key, err)
 		}
+	}
+	if modelSpec != "" {
+		before := cfg
+		if err := applyModelFlag(&cfg, modelSpec); err != nil {
+			return nil, nil, fmt.Errorf("-m %s: %w", modelSpec, err)
+		}
+		config.SetRunOnlyModel(before, cfg) // saves write what was there before -m
+	}
+	// A read-only run sends nothing off the machine but its model's requests:
+	// no web tool (a fetched URL can carry the code it was shown), no update
+	// check, no statistics. Not overridable — that is the promise of the mode.
+	if readOnly {
+		cfg.Offline = true
 	}
 	// An active provider that doesn't resolve is refused HERE, before anything
 	// runs. /ai use has always validated the name (see setProvider); -override
@@ -1254,7 +1412,8 @@ func (a *app) buildSubReg(pol *policy.Engine, root string) *tool.Registry {
 		tools = append(tools, tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, tool.Shell(a.cfg.Run.Shell), a.sandboxWrapperFor(root)))
 	}
 	tools = append(tools, a.gitTools(pol, root)...)
-	tools = append(tools, tool.NewWebLive(nil, a.offlineNow.Load), tool.NewCalc(), tool.NewDone())
+	tools = append(tools, a.webTools()...)
+	tools = append(tools, tool.NewCalc(), tool.NewDone())
 	if a.skills != nil && a.skills.HasEnabled() {
 		tools = append(tools, tool.NewSkill(a.skills))
 	}
@@ -3281,6 +3440,16 @@ func (a *app) sandboxSpec(root string) (string, sandbox.Spec) {
 	return mode, sandbox.Spec{WritableRoots: roots, AllowNetwork: !a.cfg.Offline && !a.readOnly}
 }
 
+// webTools is the web tool, or none in a read-only run: its internet use is
+// off there for good, so offering the tool only spent a turn on a refusal that
+// told the model to turn offline mode off.
+func (a *app) webTools() []tool.Tool {
+	if a.readOnly {
+		return nil
+	}
+	return []tool.Tool{tool.NewWebLive(nil, a.offlineNow.Load)} // nil → its own 30s-timeout client; task ctx has no deadline of its own
+}
+
 // readOnlyRun reports whether read-only mode can let commands run, and the git
 // tool: only inside a sandbox that keeps them from writing the workspace. why
 // says what stops it.
@@ -3368,8 +3537,7 @@ func (a *app) wire() error {
 	tools := slices.Concat([]tool.Tool{
 		tool.NewFile(pol, gatedApprover{a}, a.snapFile),
 		tool.NewRun(pol, gatedApprover{a}, time.Duration(a.cfg.Run.TimeoutSeconds)*time.Second, a.activeLLM().ContextWindow, tool.Shell(a.cfg.Run.Shell), a.sandboxWrapper()),
-	}, a.gitTools(pol, a.hostSandboxRoot()), []tool.Tool{
-		tool.NewWebLive(nil, a.offlineNow.Load), // nil → its own 30s-timeout client; task ctx has no deadline of its own
+	}, a.gitTools(pol, a.hostSandboxRoot()), a.webTools(), []tool.Tool{
 		tool.NewHelp(a.kb, func(d string) string { return reg.Usage(d) }),
 		tool.NewCalc(),
 		tool.NewDone(),
@@ -3585,7 +3753,7 @@ func (a *app) setMode(m mode) string {
 func (a *app) reconfigure() error {
 	cfg, err := config.Load(a.workspace)
 	if err != nil {
-		return err
+		return err // the session keeps what it had, -m and its protection included
 	}
 	oldServers := a.cfg.McpServers
 	a.cfg = cfg
@@ -3593,6 +3761,9 @@ func (a *app) reconfigure() error {
 	if err := a.wire(); err != nil {
 		return err
 	}
+	// The settings are read back from disk and in use: whatever -m chose is
+	// gone from the session, and so is the rule that kept it from being saved.
+	config.ClearRunOnlyModel()
 	a.loadSession()          // a fresh agent — restore the persisted session
 	a.windowDetected = false // model may have changed (/login) — re-detect
 	a.modelEpoch.Add(1)      // orphan any in-flight probe for the old model
@@ -4893,6 +5064,7 @@ func (a *app) command(ctx context.Context, line string) (quit bool) {
 	case "/agents", "/agent":
 		printLines(a.agentsCommand(ctx, rest))
 	case "/login", "/init":
+		config.ClearRunOnlyModel() // setting up the connection is saving it — -m or not
 		maybeInit(a.reader, true)
 		if err := a.reconfigure(); err != nil {
 			fmt.Println("reconfigure failed:", err)
@@ -5109,17 +5281,22 @@ func (a *app) addProvider(arg string) []string {
 	if len(f) >= 3 {
 		model = f[2]
 	}
+	_, existed := a.cfg.Providers[name]
 	msg, err := a.addProviderFields(name, url, model, key)
 	if err != nil {
 		return []string{"error: " + err.Error()}
 	}
-	if a.cfg.Provider == name {
-		return []string{msg}
+	switch {
+	case a.cfg.Provider == name:
+	case key != "":
+		msg = fmt.Sprintf("added %q → %s with a key — /ai %s to use it", name, a.cfg.Providers[name].BaseURL, name)
+	default:
+		msg = fmt.Sprintf("added %q → %s — next: /ai key %s <token>, then /ai %s", name, a.cfg.Providers[name].BaseURL, name, name)
 	}
-	if key != "" {
-		return []string{fmt.Sprintf("added %q → %s with a key — /ai %s to use it", name, a.cfg.Providers[name].BaseURL, name)}
+	if !existed {
+		return []string{msg} // a new preset is saved as given
 	}
-	return []string{fmt.Sprintf("added %q → %s — next: /ai key %s <token>, then /ai %s", name, a.cfg.Providers[name].BaseURL, name, name)}
+	return append([]string{msg}, runOnlyNote()...) // an edited one keeps its saved model
 }
 
 func (a *app) providerList() []string {
@@ -5185,7 +5362,7 @@ func (a *app) setProvider(name string) []string {
 	}
 	a.maybeDetectWindowSync() // REPL only — the TUI re-detects off-thread
 	act := a.activeLLM()
-	return []string{fmt.Sprintf("→ %s · %s · model %s", a.providerName(), act.BaseURL, act.Model)}
+	return append([]string{fmt.Sprintf("→ %s · %s · model %s", a.providerName(), act.BaseURL, act.Model)}, runOnlyNote()...)
 }
 
 func (a *app) setProviderKey(name, token string) []string {
@@ -5362,7 +5539,16 @@ func (a *app) setModel(name string) []string {
 		return []string{"error: " + err.Error()}
 	}
 	a.maybeDetectWindowSync() // REPL only — the TUI re-detects off-thread
-	return []string{"model → " + name}
+	return append([]string{"model → " + name}, runOnlyNote()...)
+}
+
+// runOnlyNote says a model or provider choice holds for this session only: it
+// was started with -m, which keeps the saved ones as they were.
+func runOnlyNote() []string {
+	if !config.RunOnlyModel() {
+		return nil
+	}
+	return []string{"  (for this session only — it was started with -m, which leaves the saved model and provider as they were)"}
 }
 
 // toggleLoopDetection flips DisableLoopDetection for the CURRENTLY ACTIVE

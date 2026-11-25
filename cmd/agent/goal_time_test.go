@@ -112,7 +112,7 @@ func TestARunThatMeetsTheGoalSaysSo(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+	a, cleanup, err := build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1317,7 +1317,7 @@ const goalCheckNote = `A GOAL stands: a separate checker judges your tool result
 
 // readOnlyDirective is plan mode's for a task answered without changing
 // anything — a review, a question about the code.
-const readOnlyDirective = `READ-ONLY MODE: do NOT change anything. Investigate with read-only tools (file.read, file.list, git's read actions, web, calc), then answer the task and stop with no tool call. Anything that writes files or changes git is blocked.`
+const readOnlyDirective = `READ-ONLY MODE: do NOT change anything. Investigate with read-only tools (file.read, file.list, file.search, git's read actions, calc), then answer the task and stop with no tool call. Anything that writes files or changes git is blocked.`
 
 const readOnlyRunNote = ` run.shell works: commands run in a sandbox where the workspace and the rest of the disk are read-only, only temp dirs are writable, and there is no network.`
 

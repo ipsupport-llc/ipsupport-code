@@ -63,7 +63,7 @@ func TestPlainRunSaysTheModelIsMissingAndTheWindowBorrowed(t *testing.T) {
 	quiet := stderrOf(t, func() {
 		var cleanup func()
 		var err error
-		a, cleanup, err = build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")))
+		a, cleanup, err = build(t.TempDir(), "", nil, false, bufio.NewReader(strings.NewReader("")), "")
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -213,12 +213,18 @@ func (m *tuiModel) configAddKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case cfgPhaseModel: // optional — empty means "pick one later with /model"
 			m.cfgPhase = cfgPhaseKey
 		default: // key (optional — empty = keyless, e.g. Ollama/vLLM): save
+			_, existed := m.app.cfg.Providers[strings.TrimSpace(d.name.value())]
 			msg, err := m.app.addProviderFields(d.name.value(), d.url.value(), d.model.value(), d.key.value())
 			if err != nil {
 				d.err = err.Error()
 				return m, nil
 			}
 			m.push(cDim.Render("  " + msg))
+			if existed { // an edited preset keeps its saved model in a -m session, as /ai add says
+				for _, note := range runOnlyNote() {
+					m.push(cDim.Render(note))
+				}
+			}
 			m.cfgPhase = cfgPhaseList
 			m.cfgDraft = newProviderDraft()
 			return m, m.detectWindowCmd() // the provider in use may have moved

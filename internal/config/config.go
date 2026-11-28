@@ -110,22 +110,31 @@ type LLM struct {
 	Extra map[string]any `json:"-"`
 }
 
-// WireAPI is a connection's request format — see LLM.WireAPI. Any other value
-// is refused when the config is read: a typo would otherwise mean chat, and
-// show only as a model the server says it doesn't serve.
+// WireAPI is a connection's request format — see LLM.WireAPI.
 type WireAPI string
 
-func (w *WireAPI) UnmarshalJSON(data []byte) error {
-	var s string
-	if err := json.Unmarshal(data, &s); err != nil {
+// checkWireAPI refuses a request format the client doesn't know: a typo would
+// otherwise mean chat, and show only as a model the server says it doesn't
+// serve. Checked on the user's own file only — a workspace's connection
+// settings are thrown away (see Load), so a bad value there must not stop a
+// run either.
+func checkWireAPI(cfg Config) error {
+	check := func(where string, w WireAPI) error {
+		switch w {
+		case "", "chat", "responses", "auto":
+			return nil
+		}
+		return fmt.Errorf("%s: wire_api %q: want chat, responses or auto", where, w)
+	}
+	if err := check("llm", cfg.LLM.WireAPI); err != nil {
 		return err
 	}
-	switch s {
-	case "", "chat", "responses", "auto":
-		*w = WireAPI(s)
-		return nil
+	for name, p := range cfg.Providers {
+		if err := check("providers."+name, p.WireAPI); err != nil {
+			return err
+		}
 	}
-	return fmt.Errorf("wire_api %q: want chat, responses or auto", s)
+	return nil
 }
 
 // clone copies l without sharing its slices.
@@ -1300,6 +1309,9 @@ func Load(workspace string) (Config, error) {
 
 	if err := mergeFile(&cfg, GlobalPath()); err != nil {
 		return cfg, err
+	}
+	if err := checkWireAPI(cfg); err != nil {
+		return cfg, fmt.Errorf("%s: %w", GlobalPath(), err)
 	}
 	// The workspace file is repo-controlled — untrusted checkouts merge it too
 	// (see below) — while the global file is the user's own machine-level

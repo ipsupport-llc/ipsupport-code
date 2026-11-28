@@ -220,6 +220,15 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 		}
 		return ""
 	}
+	// newKey names a call nothing identifies yet — its own, even with no ids.
+	newKey := func(itemID string) string {
+		if itemID != "" {
+			return "item:" + itemID
+		}
+		return fmt.Sprintf("call#%d", len(order))
+	}
+	// at is the call under key, made if new; the ids it was found by are
+	// remembered for the events after.
 	at := func(key, itemID string, idx *int) *ToolCall {
 		cur, ok := calls[key]
 		if !ok {
@@ -236,15 +245,19 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 		last = key
 		return cur
 	}
-	// call is the call an item describes (output_item events, the finished
-	// response's output).
-	call := func(it *responsesItem, idx *int) *ToolCall {
+	// call is the call an output_item event describes. finishing is its done
+	// event: one naming a call_id not seen yet finishes the call streaming now
+	// if that call had none — a server may show the id only at the end.
+	call := func(it *responsesItem, idx *int, finishing bool) *ToolCall {
 		key := it.CallID
 		if _, known := calls[key]; key == "" || !known {
-			if k := find(it.ID, idx); k != "" {
+			switch k := find(it.ID, idx); {
+			case k != "":
 				key = k // the same call, seen before under its item id or index
-			} else if key == "" {
-				key = "item:" + it.ID
+			case finishing && last != "" && calls[last].ID == "":
+				key = last
+			case key == "":
+				key = newKey(it.ID)
 			}
 		}
 		cur := at(key, it.ID, idx)
@@ -256,16 +269,17 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 		}
 		return cur
 	}
-	// argsOf is the call an arguments event is about.
+	// argsOf is the call an arguments event is about. Matched to the call
+	// streaming now, the event's ids are not remembered as that call's: they
+	// may belong to a call not announced yet.
 	argsOf := func(itemID string, idx *int) *ToolCall {
-		key := find(itemID, idx)
-		if key == "" {
-			key = last
+		if key := find(itemID, idx); key != "" {
+			return at(key, itemID, idx)
 		}
-		if key == "" {
-			key = "item:" + itemID
+		if last != "" {
+			return calls[last]
 		}
-		return at(key, itemID, idx)
+		return at(newKey(itemID), itemID, idx)
 	}
 	events, dropped := 0, 0
 	var final *responsesReply
@@ -306,7 +320,7 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 			if ev.Item == nil || ev.Item.Type != "function_call" {
 				continue
 			}
-			if cur := call(ev.Item, ev.Index); ev.Item.Arguments != "" {
+			if cur := call(ev.Item, ev.Index, ev.Type == "response.output_item.done"); ev.Item.Arguments != "" {
 				cur.Arguments = string(ev.Item.Arguments) // the finished item is the whole call
 			}
 		case "response.function_call_arguments.delta":
@@ -349,18 +363,40 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 			events, text.content.Len(), text.reasoning.Len(), argsLen)
 	}
 	// The finished response lists its output again. With no calls streamed, its
-	// calls are the turn's; with some, it only fills in what they lack — a call
-	// it names that matches none of them is not run, since a server that gave
-	// it a fresh id there would have the same call run twice.
+	// calls are the turn's; with some, it only fills in what they lack. A call
+	// it names that matches none of them fills the next streamed call that never
+	// showed a call_id — the same call under churned ids — and is otherwise not
+	// run: a server that gave it a fresh id there would have it run twice.
 	streamedCalls := len(order) > 0
+	var unnamed []string
+	for _, k := range order {
+		if calls[k].ID == "" {
+			unnamed = append(unnamed, k)
+		}
+	}
 	for i := range final.Output {
 		it := final.Output[i]
 		switch it.Type {
 		case "function_call":
-			if _, known := calls[it.CallID]; streamedCalls && !known && find(it.ID, nil) == "" {
+			if _, known := calls[it.CallID]; streamedCalls && !(it.CallID != "" && known) && find(it.ID, nil) == "" {
+				for len(unnamed) > 0 && calls[unnamed[0]].ID != "" {
+					unnamed = unnamed[1:] // named since by a matching item
+				}
+				if len(unnamed) == 0 {
+					continue
+				}
+				cur := calls[unnamed[0]]
+				unnamed = unnamed[1:]
+				cur.ID = it.CallID
+				if cur.Name == "" {
+					cur.Name = it.Name
+				}
+				if cur.Arguments == "" {
+					cur.Arguments = string(it.Arguments)
+				}
 				continue
 			}
-			if cur := call(&it, nil); cur.Arguments == "" {
+			if cur := call(&it, nil, false); cur.Arguments == "" {
 				cur.Arguments = string(it.Arguments)
 			}
 		case "message":

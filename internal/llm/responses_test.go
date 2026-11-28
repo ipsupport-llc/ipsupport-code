@@ -503,6 +503,29 @@ func TestResponsesCallsSurviveChangingItemIDs(t *testing.T) {
 			`{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"e4","delta":"{\"a\":1}"}`,
 			`{"type":"response.completed","response":{"status":"completed"}}`,
 		}, `call_A file {"a":1}|call_B calc {"b":2}`},
+		{"arguments only, named at the end", []string{
+			`{"type":"response.function_call_arguments.delta","item_id":"e1","delta":"{\"a\":1}"}`,
+			`{"type":"response.function_call_arguments.done","item_id":"e2","arguments":"{\"a\":1}"}`,
+			`{"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","id":"e9","call_id":"call_A","name":"file","arguments":"{\"a\":1}"}]}}`,
+		}, `call_A file {"a":1}`},
+		{"call_id shown only when done", []string{
+			`{"type":"response.output_item.added","item":{"type":"function_call","id":"e1","name":"file"}}`,
+			`{"type":"response.function_call_arguments.delta","item_id":"e1","delta":"{\"a\":1}"}`,
+			`{"type":"response.output_item.done","item":{"type":"function_call","id":"e2","call_id":"call_A","name":"file","arguments":"{\"a\":1}"}}`,
+			`{"type":"response.completed","response":{"status":"completed"}}`,
+		}, `call_A file {"a":1}`},
+		{"a delta ahead of its call doesn't swallow it", []string{
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"e1","call_id":"call_A","name":"file","arguments":"{\"a\":1}"}}`,
+			`{"type":"response.function_call_arguments.delta","output_index":1,"item_id":"e7","delta":""}`,
+			`{"type":"response.function_call_arguments.done","output_index":1,"item_id":"e7","arguments":"{\"a\":1}"}`,
+			`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"e8","call_id":"call_B","name":"calc","arguments":"{\"b\":2}"}}`,
+			`{"type":"response.completed","response":{"status":"completed"}}`,
+		}, `call_A file {"a":1}|call_B calc {"b":2}`},
+		{"no ids at all", []string{
+			`{"type":"response.output_item.added","item":{"type":"function_call","name":"file","arguments":"{\"a\":1}"}}`,
+			`{"type":"response.output_item.added","item":{"type":"function_call","name":"calc","arguments":"{\"b\":2}"}}`,
+			`{"type":"response.completed","response":{"status":"completed"}}`,
+		}, ` file {"a":1}| calc {"b":2}`},
 		{"no index: the call streaming now", []string{
 			`{"type":"response.output_item.added","item":{"type":"function_call","id":"e1","call_id":"call_A","name":"file"}}`,
 			`{"type":"response.function_call_arguments.delta","item_id":"e2","delta":"{\"a\":1}"}`,

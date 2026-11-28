@@ -685,4 +685,20 @@ func TestWireAPITypoIsAnError(t *testing.T) {
 			t.Errorf("%s: err %v, want one naming wire_api", tc.value, err)
 		}
 	}
+	// A workspace's connection settings are thrown away, a bad one included:
+	// a checkout can't stop the run with it.
+	if err := os.WriteFile(GlobalPath(), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, ".agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	bad := `{"llm":{"wire_api":"x"},"providers":{"gw":{"base_url":"https://gw.example/v1","wire_api":"x"}}}`
+	if err := os.WriteFile(filepath.Join(ws, ".agent", "config.json"), []byte(bad), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(ws); err != nil {
+		t.Errorf("a workspace's wire_api stopped the load: %v", err)
+	}
 }

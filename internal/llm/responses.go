@@ -211,6 +211,7 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 	calls := map[string]*ToolCall{}
 	var order []string
 	byItem, byIndex, last := map[string]string{}, map[int]string{}, ""
+	byCall := map[string]string{} // call_id → the key its call is kept under
 	find := func(itemID string, idx *int) string {
 		if k, ok := byItem[itemID]; ok && itemID != "" {
 			return k
@@ -262,7 +263,9 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 	// (see below) rather than run with a guessed id.
 	call := func(it *responsesItem, idx *int, finishing bool) *ToolCall {
 		key := it.CallID
-		if _, known := calls[key]; key == "" || !known {
+		if k, known := byCall[key]; key != "" && known {
+			key = k
+		} else {
 			if k := find(it.ID, idx); k != "" {
 				key = k // the same call, seen before under its item id or index
 			} else if k := soleUnnamed(); finishing && k != "" {
@@ -274,6 +277,7 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 		cur := at(key, it.ID, idx)
 		if it.CallID != "" {
 			cur.ID = it.CallID // what the tool's output answers, not the item id
+			byCall[it.CallID] = key
 		}
 		if it.Name != "" {
 			cur.Name = it.Name
@@ -388,14 +392,15 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 		it := final.Output[i]
 		switch it.Type {
 		case "function_call":
-			if _, known := calls[it.CallID]; streamedCalls && !(it.CallID != "" && known) && find(it.ID, nil) == "" {
+			if _, known := byCall[it.CallID]; streamedCalls && !(it.CallID != "" && known) && find(it.ID, nil) == "" {
 				k := soleUnnamed()
 				if it.CallID == "" || k == "" {
+					slog.Warn("responses: a call in the finished response matches none streamed — not run", "call_id", it.CallID, "name", it.Name)
 					continue
 				}
 				cur := calls[k]
 				cur.ID = it.CallID
-				calls[it.CallID] = cur // a later item with this call_id finds it
+				byCall[it.CallID] = k // a later item with this call_id finds it
 				if cur.Name == "" {
 					cur.Name = it.Name
 				}

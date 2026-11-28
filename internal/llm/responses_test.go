@@ -532,6 +532,18 @@ func TestResponsesCallsSurviveChangingItemIDs(t *testing.T) {
 			`{"type":"response.output_item.done","item":{"type":"function_call","id":"e3","call_id":"call_A","name":"file","arguments":"{\"a\":1}"}}`,
 			`{"type":"response.completed","response":{"status":"completed"}}`,
 		}, `error`},
+		{"finished without an index under a new id", []string{
+			`{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"e1","delta":"{\"a\":1}"}`,
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"e2","call_id":"call_A","name":"file"}}`,
+			`{"type":"response.output_item.done","item":{"type":"function_call","id":"e3","call_id":"call_A","name":"file","arguments":"{\"a\":1}"}}`,
+			`{"type":"response.completed","response":{"status":"completed"}}`,
+		}, `call_A file {"a":1}`},
+		{"a named call listed again under a new id: no second call gets its id", []string{
+			`{"type":"response.function_call_arguments.delta","output_index":1,"item_id":"e1","delta":"{\"b\":2}"}`,
+			`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"e2","call_id":"call_B","name":"calc"}}`,
+			`{"type":"response.output_item.added","output_index":2,"item":{"type":"function_call","id":"e3","name":"file","arguments":"{\"a\":1}"}}`,
+			`{"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","id":"e9","call_id":"call_B","name":"calc","arguments":"{\"b\":2}"}]}}`,
+		}, `error`},
 		{"no index: the call streaming now", []string{
 			`{"type":"response.output_item.added","item":{"type":"function_call","id":"e1","call_id":"call_A","name":"file"}}`,
 			`{"type":"response.function_call_arguments.delta","item_id":"e2","delta":"{\"a\":1}"}`,

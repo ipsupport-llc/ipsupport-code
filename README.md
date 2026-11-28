@@ -124,7 +124,7 @@ OpenAI-compatible API and switch in one command — run a strong cloud model for
 hard task, then drop back to your local one:
 
 ```
-/ai                       pick a provider from a list (built-ins: openai, anthropic, grok, groq, openrouter, zai)
+/ai                       pick a provider from a list (built-ins: openai, anthropic, grok, groq, openrouter, zai, copilot)
 /ai key openai sk-…       add an API key for a built-in provider (one command)
 /ai add mylab https://api.lab.co/v1 llama-3.1 key=sk-…   add a CUSTOM provider + key in one step
 /ai openai                switch to it   ·   /ai local   back to your local server
@@ -157,7 +157,20 @@ It's then active at launch and switchable via `/ai ollama` and `/config`.
 Switching keeps your session, tokens, and mode. Keys live in
 `~/.config/ipsupport-code/config.json` (written `chmod 600`) or fall back to the
 env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`,
-`OPENROUTER_API_KEY`, `ZAI_API_KEY`).
+`OPENROUTER_API_KEY`, `ZAI_API_KEY`, `COPILOT_GITHUB_TOKEN`).
+
+`copilot` is GitHub Copilot through the GitHub CLI: with `gh` installed and
+signed in, `/ai copilot` (or `-m copilot:<model>`) needs no key — it runs
+`gh auth token` as its key command. Which models answer depends on your
+Copilot plan; `/model` lists them. For GitHub Enterprise on its own domain,
+set the provider's `base_url` and `api_key_cmd` (e.g.
+`["gh", "auth", "token", "--hostname", "<host>"]`) yourself. This uses
+Copilot's API directly, which GitHub documents only through its own SDK.
+
+Some models are served only on `/responses` (OpenAI's Responses API), not
+`/chat/completions`. A provider's `wire_api` picks the format: `"chat"` (the
+default), `"responses"`, or `"auto"` — read the server's model list once and use
+`/responses` for a model listed as served only there (copilot's default).
 
 For an endpoint that only issues short-lived keys, give the provider a command
 that prints one instead of a key:

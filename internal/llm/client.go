@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -127,6 +128,20 @@ type OpenAIClient struct {
 	// pattern), which is not a repetition loop.
 	liveReasoning strings.Builder
 	liveContent   strings.Builder
+
+	// wireAPI is the configured request format (config.LLM.WireAPI); responses
+	// is the one in use — set at construction for "responses", by lookup for
+	// "auto".
+	wireAPI   string
+	responses atomic.Bool
+	// window is the configured context window (0 = unknown). When it is unknown
+	// and the key comes from api_key_cmd — so no probe could read the model
+	// list before the first request — lookup reads it, and foundWindow holds
+	// what the list said (see FoundWindow).
+	window      int
+	foundWindow atomic.Int64
+	lookupMu    sync.Mutex
+	looked      bool
 }
 
 // tuning is the per-request part of a connection's settings.
@@ -240,10 +255,57 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 		},
 		idle:      idle,
 		maxRespTk: maxResponseTokens(c.ContextWindow),
+		wireAPI:   c.WireAPI,
+		window:    c.ContextWindow,
 	}
+	cl.responses.Store(c.WireAPI == "responses")
 	cl.SetTuning(c)
 	return cl
 }
+
+// lookupTimeout bounds the one model-list read before the first request.
+const lookupTimeout = 5 * time.Second
+
+// lookup reads this client's model from the server's model list once, before
+// the first request, when something depends on it: an "auto" wire format, or
+// a window nobody could detect because the key only exists once api_key_cmd
+// has run. Best-effort: a failed read leaves /chat/completions and the
+// configured window, and is not tried again.
+func (c *OpenAIClient) lookup(ctx context.Context) {
+	if c.wireAPI != "auto" && (c.window > 0 || c.keys == nil) {
+		return
+	}
+	c.lookupMu.Lock()
+	defer c.lookupMu.Unlock()
+	if c.looked {
+		return
+	}
+	key := c.apiKey
+	if c.keys != nil {
+		k, err := c.keys.Key(ctx, c.keyTTL)
+		if err != nil {
+			return // the request reports it; try again then
+		}
+		key = k
+	}
+	c.looked = true
+	lctx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
+	info := lookupModel(lctx, c.baseURL, key, c.model, c.hc)
+	if c.window == 0 && info.window > 0 {
+		c.foundWindow.Store(int64(info.window))
+	}
+	if c.wireAPI == "auto" && !slices.Contains(info.endpoints, "/chat/completions") && slices.Contains(info.endpoints, "/responses") {
+		c.responses.Store(true)
+	}
+	slog.Debug("model lookup", "model", c.model, "window", info.window, "endpoints", info.endpoints, "responses", c.responses.Load())
+}
+
+// FoundWindow is the context window the server's model list gave for this
+// client's model when none was configured (0 when none was found or looked
+// for) — so a run that starts before any probe could read it still knows
+// when its context is filling up.
+func (c *OpenAIClient) FoundWindow() int { return int(c.foundWindow.Load()) }
 
 // maxResponseTokens is the per-turn generation cap: a generous 32k floor, or 4×
 // the context window when that's larger (big-context models may legitimately
@@ -343,6 +405,26 @@ type wireMessage struct {
 
 // Chat sends the conversation (and tool catalog) and returns the model's reply.
 func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[string]any) (Message, error) {
+	c.lookup(ctx)
+	t := c.tuning.Load()
+	if t == nil { // a client not made by NewOpenAIClient
+		t = &tuning{retryAttempts: retryAttempts(0)}
+	}
+	var buf []byte
+	var err error
+	if c.responses.Load() {
+		buf, err = c.responsesBody(msgs, tools, t)
+	} else {
+		buf, err = c.chatBody(msgs, tools, t)
+	}
+	if err != nil {
+		return Message{}, err
+	}
+	return c.roundTrip(ctx, buf, t)
+}
+
+// chatBody builds a /chat/completions request.
+func (c *OpenAIClient) chatBody(msgs []Message, tools []map[string]any, t *tuning) ([]byte, error) {
 	wm := make([]wireMessage, len(msgs))
 	for i, m := range msgs {
 		wm[i] = toWire(m)
@@ -358,10 +440,6 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	// (e.g. OpenAI gpt-5.x / chat-latest) reject any non-default temperature with
 	// a 400; omitting the field lets the server use its default and keeps them
 	// working, while local models still honor a configured value.
-	t := c.tuning.Load()
-	if t == nil { // a client not made by NewOpenAIClient
-		t = &tuning{retryAttempts: retryAttempts(0)}
-	}
 	if t.temp > 0 {
 		body["temperature"] = t.temp
 	}
@@ -383,11 +461,11 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 		body["tools"] = tools
 		body["tool_choice"] = "auto"
 	}
-	buf, err := json.Marshal(body)
-	if err != nil {
-		return Message{}, err
-	}
+	return json.Marshal(body)
+}
 
+// roundTrip sends a built request, retrying what is worth retrying.
+func (c *OpenAIClient) roundTrip(ctx context.Context, buf []byte, t *tuning) (Message, error) {
 	// Local servers (LM Studio) hiccup with transient 5xx and need time to
 	// reload a model unloaded by the idle timeout. Retry those (and network
 	// errors) with exponential backoff instead of failing the whole task.
@@ -610,7 +688,12 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 	// the caller knows to retry rather than abort.
 	stalled := func() bool { return reqCtx.Err() != nil && ctx.Err() == nil }
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.baseURL+"/chat/completions", bytes.NewReader(buf))
+	responses := c.responses.Load()
+	path := "/chat/completions"
+	if responses {
+		path = "/responses"
+	}
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.baseURL+path, bytes.NewReader(buf))
 	if err != nil {
 		return Message{}, err, false
 	}
@@ -664,7 +747,11 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 				tick()
 			}
 		}
-		m, err := c.parseStream(resp.Body, tick, alive, c.maxRespTk, reqCompl, promptEstimate)
+		parse := c.parseStream
+		if responses {
+			parse = c.parseResponsesStream
+		}
+		m, err := parse(resp.Body, tick, alive, c.maxRespTk, reqCompl, promptEstimate)
 		if err != nil {
 			var re *runawayError
 			var de *degenerateOutputError
@@ -681,6 +768,10 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 			}
 		}
 		return m, nil, false
+	}
+	if responses {
+		m, err := c.parseResponsesJSON(resp.Body, promptEstimate)
+		return m, err, false
 	}
 	m, err := c.parseJSON(resp.Body, promptEstimate) // server ignored stream (e.g. a test fake)
 	return m, err, false
@@ -753,7 +844,6 @@ func oneLine(s string) string { return textutil.OneLine(s, 150) }
 func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, reqCompl *int, promptEstimate int) (Message, error) {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
-	var content strings.Builder
 	calls := map[int]*ToolCall{}
 	var order []int
 	// chunks/finishReason are diagnostics only: chunks counts every "data:"
@@ -766,13 +856,6 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 	chunks, dropped := 0, 0
 	var finishReason string
 	var served string // the model the server says answered (first chunk that names one)
-	// reasoning accumulates this call's own reasoning/thinking text — still
-	// never sent back to the model (toWire only maps the fields it explicitly
-	// lists), but surfaced on the returned Message so a debug log can show
-	// WHAT the model was thinking when it ends up with empty content: a
-	// refusal, a trailed-off thought, or nothing at all are very different
-	// failures that "content=\"\"" alone can't tell apart.
-	var reasoning strings.Builder
 	// progress marks a REAL token delta: it counts it and pushes the idle deadline
 	// back. Only real progress resets the watchdog — SSE heartbeats / keep-alive
 	// comments (": ping", blank lines from proxies) must NOT, or a wedged-but-
@@ -787,23 +870,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 		c.bumpToken()
 		tick()
 	}
-	// degenerate-repetition detector, shared across content and reasoning text
-	// (whichever the model is currently emitting) — see degenerateRunThreshold.
-	var lastRune rune
-	var runLen int
-	checkDegenerate := func(s string) error {
-		for _, r := range s {
-			if r == lastRune {
-				runLen++
-			} else {
-				lastRune, runLen = r, 1
-			}
-			if runLen >= degenerateRunThreshold {
-				return &degenerateOutputError{lastRune, runLen}
-			}
-		}
-		return nil
-	}
+	text := &streamText{c: c, progress: progress}
 	done := false      // only set at a real "[DONE]" — see the check after the loop
 	usageSeen := false // did the server ever send a real (nonzero) usage chunk this call?
 	// A real usage report is accumulated into these LOCAL variables as it
@@ -866,66 +933,15 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 				finishReason = fr
 			}
 			d := ch.Choices[0].Delta
-			if d.Content != "" {
-				content.WriteString(d.Content)
-				// Also buffer into the live-output view (see Live) — a plain
-				// model with no separate reasoning phase (most local models,
-				// e.g. gemma) never sends reasoning_content/reasoning at all, so
-				// the live view has to fall back to the actual answer text as it
-				// streams, or it would show nothing while tokens are visibly
-				// still ticking up (reported live: "counter grows, screen empty
-				// — Open WebUI shows what it's doing" for exactly this model).
-				c.mu.Lock()
-				c.live.WriteString(d.Content)
-				c.liveContent.WriteString(d.Content)
-				chanAll := c.liveContent.String()
-				c.mu.Unlock()
-				if !c.loopDetectionOff() {
-					if err := checkDegenerate(d.Content); err != nil {
-						return Message{}, err
-					}
-					if err := checkPhraseRepeat(chanAll); err != nil {
-						return Message{}, err
-					}
-				}
-				progress()
+			if err := text.addContent(d.Content); err != nil {
+				return Message{}, err
 			}
-			// Count reasoning deltas toward live progress (reconciled to the
-			// server's real total by the usage chunk), and buffer the text itself
-			// so a UI tick can show it live (see Live) — never sent to the model
-			// or included in the final Message, just for display.
-			if rc := d.ReasoningContent; rc != "" {
-				reasoning.WriteString(rc)
-				c.mu.Lock()
-				c.live.WriteString(rc)
-				c.liveReasoning.WriteString(rc)
-				chanAll := c.liveReasoning.String()
-				c.mu.Unlock()
-				if !c.loopDetectionOff() {
-					if err := checkDegenerate(rc); err != nil {
-						return Message{}, err
-					}
-					if err := checkPhraseRepeat(chanAll); err != nil {
-						return Message{}, err
-					}
-				}
-				progress()
-			} else if rc := d.Reasoning; rc != "" {
-				reasoning.WriteString(rc)
-				c.mu.Lock()
-				c.live.WriteString(rc)
-				c.liveReasoning.WriteString(rc)
-				chanAll := c.liveReasoning.String()
-				c.mu.Unlock()
-				if !c.loopDetectionOff() {
-					if err := checkDegenerate(rc); err != nil {
-						return Message{}, err
-					}
-					if err := checkPhraseRepeat(chanAll); err != nil {
-						return Message{}, err
-					}
-				}
-				progress()
+			rc := d.ReasoningContent
+			if rc == "" {
+				rc = d.Reasoning
+			}
+			if err := text.addReasoning(rc); err != nil {
+				return Message{}, err
 			}
 			for _, tc := range d.ToolCalls {
 				cur, ok := calls[tc.Index]
@@ -981,7 +997,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 			argsLen += len(calls[idx].Arguments)
 		}
 		return Message{}, fmt.Errorf("llm stream ended without completing (no [DONE]): %d chunks, %d content bytes, %d reasoning bytes, %d tool-call arg bytes accumulated before it cut off",
-			chunks, content.Len(), reasoning.Len(), argsLen)
+			chunks, text.content.Len(), text.reasoning.Len(), argsLen)
 	}
 	if dropped > 0 && len(order) > 0 {
 		// A dropped chunk in a turn with tool calls may have carried part of
@@ -1009,7 +1025,7 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 		c.lastPromptTk = promptEstimate
 	}
 	c.mu.Unlock()
-	msg := Message{Role: "assistant", Content: stripChannelTokens(content.String()), Reasoning: reasoning.String(), FinishReason: finishReason}
+	msg := Message{Role: "assistant", Content: stripChannelTokens(text.content.String()), Reasoning: text.reasoning.String(), FinishReason: finishReason}
 	for _, idx := range order {
 		c := *calls[idx]
 		c.Arguments = validArgs(c.Arguments)
@@ -1017,6 +1033,79 @@ func (c *OpenAIClient) parseStream(r io.Reader, tick, alive func(), maxTk int, r
 	}
 	c.checkServed(served)
 	return msg, nil
+}
+
+// streamText is one reply's text as it streams in, whichever wire format
+// carries it: kept for the returned Message, mirrored into the live view (see
+// Live), checked for a collapse into repetition, and counted as progress.
+type streamText struct {
+	c        *OpenAIClient
+	progress func()
+	content  strings.Builder
+	// reasoning is the model's thinking text — never sent back to the model
+	// (toWire only maps the fields it explicitly lists), but surfaced on the
+	// returned Message so a debug log can show WHAT the model was thinking when
+	// it ends up with empty content: a refusal, a trailed-off thought, or
+	// nothing at all are very different failures that empty content alone
+	// can't tell apart.
+	reasoning strings.Builder
+	// The degenerate-repetition detector runs across content and reasoning
+	// alike (whichever the model is emitting) — see degenerateRunThreshold.
+	lastRune rune
+	runLen   int
+}
+
+// addContent takes a piece of the answer. The live view shows it too: a plain
+// model with no separate reasoning phase (most local models, e.g. gemma) never
+// sends reasoning at all, so the live view has to fall back to the answer text
+// as it streams, or it would show nothing while tokens are visibly still
+// ticking up (reported live: "counter grows, screen empty — Open WebUI shows
+// what it's doing" for exactly this model).
+func (s *streamText) addContent(d string) error {
+	if d == "" {
+		return nil
+	}
+	s.content.WriteString(d)
+	return s.live(d, &s.c.liveContent)
+}
+
+// addReasoning takes a piece of the model's thinking: counted toward live
+// progress (reconciled to the server's real total by the usage report) and
+// shown live, never sent to the model.
+func (s *streamText) addReasoning(d string) error {
+	if d == "" {
+		return nil
+	}
+	s.reasoning.WriteString(d)
+	return s.live(d, &s.c.liveReasoning)
+}
+
+// live mirrors d into the live view and its own channel's buffer, runs the
+// repetition checks against that channel alone, and counts the progress.
+func (s *streamText) live(d string, channel *strings.Builder) error {
+	c := s.c
+	c.mu.Lock()
+	c.live.WriteString(d)
+	channel.WriteString(d)
+	chanAll := channel.String()
+	c.mu.Unlock()
+	if !c.loopDetectionOff() {
+		for _, r := range d {
+			if r == s.lastRune {
+				s.runLen++
+			} else {
+				s.lastRune, s.runLen = r, 1
+			}
+			if s.runLen >= degenerateRunThreshold {
+				return &degenerateOutputError{s.lastRune, s.runLen}
+			}
+		}
+		if err := checkPhraseRepeat(chanAll); err != nil {
+			return err
+		}
+	}
+	s.progress()
+	return nil
 }
 
 func (c *OpenAIClient) parseJSON(r io.Reader, promptEstimate int) (Message, error) {

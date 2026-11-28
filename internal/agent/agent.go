@@ -665,6 +665,20 @@ func (a *Agent) PromptTokens() int { return int(a.lastPrompt.Load()) }
 // MaxHistory reports the current trim cap (see SetMaxHistory).
 func (a *Agent) MaxHistory() int { return a.maxHistory }
 
+// trimWindow is the window a run trims against: the one this agent was told
+// about, else the one the client found in the server's model list before its
+// first request — the only source when the key comes from a command, which no
+// probe runs before a task does.
+func (a *Agent) trimWindow() int {
+	if a.contextWindow > 0 {
+		return a.contextWindow
+	}
+	if f, ok := a.llm.(interface{ FoundWindow() int }); ok {
+		return f.FoundWindow()
+	}
+	return 0
+}
+
 // ContextWindow reports the context window this agent was told about (see
 // SetContextWindow); 0 means none is known.
 func (a *Agent) ContextWindow() int { return a.contextWindow }
@@ -1790,8 +1804,8 @@ func (a *Agent) Run(ctx context.Context, goal string) (tr Transcript, err error)
 		for _, r := range results {
 			tr.ToolUses[r.Name]++
 		}
-		if a.contextWindow > 0 {
-			if freed := trimIfNearWindow(msgs, a.contextWindow, sentEst, promptTokens); freed > 0 {
+		if w := a.trimWindow(); w > 0 {
+			if freed := trimIfNearWindow(msgs, w, sentEst, promptTokens); freed > 0 {
 				a.emit("context_trim", map[string]any{"bytes_freed": freed})
 			}
 		}

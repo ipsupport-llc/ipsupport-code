@@ -172,6 +172,10 @@ func TestChatRefreshesARejectedKeyOnce(t *testing.T) {
 	var seen []string
 	accept := "key-2"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" { // the window lookup before the first request — not what this counts
+			http.NotFound(w, r)
+			return
+		}
 		mu.Lock()
 		got := r.Header.Get("Authorization")
 		seen = append(seen, got)

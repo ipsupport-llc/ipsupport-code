@@ -64,16 +64,31 @@ func ListModels(ctx context.Context, baseURL, apiKey string, hc *http.Client) ([
 }
 
 // DetectModelContext returns the advertised context length of `model` from an
-// OpenAI-style /v1/models list that carries a context_length field. OpenRouter
-// does (top-level and under top_provider); most others omit it → 0. Best-effort:
-// 0 on any failure, so the caller keeps its current window.
+// OpenAI-style /v1/models list. OpenRouter lists context_length (top-level and
+// under top_provider), GitHub Copilot capabilities.limits; most others omit it
+// → 0. Best-effort: 0 on any failure, so the caller keeps its current window.
 func DetectModelContext(ctx context.Context, baseURL, apiKey, model string, hc *http.Client) int {
+	return lookupModel(ctx, baseURL, apiKey, model, hc).window
+}
+
+// modelInfo is what a /models list says about one model.
+type modelInfo struct {
+	window int
+	// endpoints are the paths the server says serve the model (GitHub
+	// Copilot's supported_endpoints, e.g. "/chat/completions", "/responses");
+	// nil when the list doesn't say.
+	endpoints []string
+}
+
+// lookupModel reads model's entry from the server's /models list. Best-effort:
+// the zero value on any failure.
+func lookupModel(ctx context.Context, baseURL, apiKey, model string, hc *http.Client) modelInfo {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
 	if err != nil {
-		return 0
+		return modelInfo{}
 	}
 	setUserAgent(req)
 	if apiKey != "" {
@@ -81,11 +96,11 @@ func DetectModelContext(ctx context.Context, baseURL, apiKey, model string, hc *
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return 0
+		return modelInfo{}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0
+		return modelInfo{}
 	}
 	var out struct {
 		Data []struct {
@@ -94,20 +109,35 @@ func DetectModelContext(ctx context.Context, baseURL, apiKey, model string, hc *
 			TopProvider   struct {
 				ContextLength int `json:"context_length"`
 			} `json:"top_provider"`
+			Capabilities struct {
+				Limits struct {
+					// The prompt cap is what a request must stay under; the
+					// whole window also holds the reply.
+					MaxPromptTokens        int `json:"max_prompt_tokens"`
+					MaxContextWindowTokens int `json:"max_context_window_tokens"`
+				} `json:"limits"`
+			} `json:"capabilities"`
+			SupportedEndpoints []string `json:"supported_endpoints"`
 		} `json:"data"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&out) != nil {
-		return 0
+		return modelInfo{}
 	}
 	for _, m := range out.Data {
-		if m.ID == model {
-			if m.ContextLength > 0 {
-				return m.ContextLength
-			}
-			return m.TopProvider.ContextLength
+		if m.ID != model {
+			continue
 		}
+		info := modelInfo{endpoints: m.SupportedEndpoints}
+		lim := m.Capabilities.Limits
+		for _, n := range []int{m.ContextLength, m.TopProvider.ContextLength, lim.MaxPromptTokens, lim.MaxContextWindowTokens} {
+			if n > 0 {
+				info.window = n
+				break
+			}
+		}
+		return info
 	}
-	return 0
+	return modelInfo{}
 }
 
 // LMModel is one entry from LM Studio's native /api/v0/models.

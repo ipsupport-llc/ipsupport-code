@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -63,6 +64,11 @@ type LLM struct {
 	// Type selects extra capabilities: "lmstudio" uses LM Studio's native API
 	// (rich model list, context detection); anything else is plain OpenAI-compat.
 	Type string `json:"type,omitempty"`
+	// WireAPI picks the request format: "" or "chat" sends /chat/completions,
+	// "responses" sends /responses (models served only there, e.g. newer GPTs
+	// behind some gateways), "auto" reads the server's model list once and uses
+	// /responses for a model listed as served only there.
+	WireAPI string `json:"wire_api,omitempty"`
 	// ContextWindow is the model's context size in tokens; auto-compact triggers
 	// as the prompt approaches it. 0 disables auto-compact.
 	// No omitempty: Default() sets this to a nonzero 8192, so an explicit 0
@@ -304,6 +310,10 @@ var ProviderTemplates = map[string]LLM{
 	"groq":       {BaseURL: "https://api.groq.com/openai/v1", Model: "llama-3.3-70b-versatile"},
 	"openrouter": {BaseURL: "https://openrouter.ai/api/v1", Model: "openai/gpt-4o-mini"},
 	"zai":        {BaseURL: "https://api.z.ai/api/paas/v4", Model: "glm-5.2"}, // Z.ai (Zhipu GLM), OpenAI-compat endpoint
+	// GitHub Copilot, signed in through the GitHub CLI. Some of its models are
+	// served only on /responses, hence auto. The key command is attached at
+	// resolve time and only for this address — see ResolveProvider.
+	"copilot": {BaseURL: "https://api.githubcopilot.com", Model: "gpt-4.1", WireAPI: "auto", APIKeyCmd: []string{"gh", "auth", "token"}},
 }
 
 // providerEnvKey maps a provider to the env var its API key falls back to.
@@ -314,6 +324,7 @@ var providerEnvKey = map[string]string{
 	"groq":       "GROQ_API_KEY",
 	"openrouter": "OPENROUTER_API_KEY",
 	"zai":        "ZAI_API_KEY",
+	"copilot":    "COPILOT_GITHUB_TOKEN",
 }
 
 // KnownProviders lists the built-in template names (sorted), for help/listing.
@@ -352,17 +363,34 @@ func ResolveProvider(cfg Config, name string) (LLM, bool) {
 		if p.Model == "" {
 			p.Model = tmpl.Model
 		}
+		if p.WireAPI == "" {
+			p.WireAPI = tmpl.WireAPI
+		}
 	}
 	if p.APIKey == "" {
 		if env := providerEnvKey[name]; env != "" {
 			p.APIKey = os.Getenv(env)
 		}
 	}
+	// The template's key command prints a credential meant for the template's
+	// own server: a preset pointed elsewhere doesn't get it. Nor does a machine
+	// without the program — the provider would look ready and fail on use.
+	// Never saved: the preset keeps whatever the user wrote.
+	if hasTmpl && len(tmpl.APIKeyCmd) > 0 && p.APIKey == "" && len(p.APIKeyCmd) == 0 && p.BaseURL == tmpl.BaseURL && HasProgram(tmpl.APIKeyCmd[0]) {
+		p.APIKeyCmd = append([]string(nil), tmpl.APIKeyCmd...)
+	}
 	// Leave Temperature and MaxSteps at 0 unless the user set one: the client
 	// omits a zero temperature so hosted models that only accept their default
 	// (OpenAI gpt-5.x, chat-latest) keep working, and 0 MaxSteps means "auto-scale
 	// from this connection's own context window" (cmd/agent's stepBudget).
 	return p, true
+}
+
+// HasProgram reports whether a command can be found to run. A variable so tests
+// don't depend on what the machine has installed.
+var HasProgram = func(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
 }
 
 // Non-overridable safety floor, always unioned into the resolved policy.

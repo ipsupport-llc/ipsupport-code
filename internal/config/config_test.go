@@ -603,3 +603,60 @@ func TestLoadWorkspaceCannotSetTheKeyCommand(t *testing.T) {
 		t.Error("workspace added a provider with a key command")
 	}
 }
+
+// The copilot template signs in through the GitHub CLI: its key command is
+// attached when resolving — only for its own address, and only when nothing
+// else gives a key — and never lands in the saved preset.
+func TestResolveCopilotKeyCommand(t *testing.T) {
+	t.Setenv("COPILOT_GITHUB_TOKEN", "")
+	installed := true
+	defer func(f func(string) bool) { HasProgram = f }(HasProgram)
+	HasProgram = func(name string) bool { return installed && name == "gh" }
+	gh := []string{"gh", "auth", "token"}
+	for _, tc := range []struct {
+		name   string
+		preset LLM
+		env    string
+		want   []string
+	}{
+		{"bare", LLM{}, "", gh},
+		{"own key", LLM{APIKey: "k"}, "", nil},
+		{"env key", LLM{}, "from-env", nil},
+		{"own command", LLM{APIKeyCmd: []string{"my-cmd"}}, "", []string{"my-cmd"}},
+		{"other address", LLM{BaseURL: "https://gateway.example/v1"}, "", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("COPILOT_GITHUB_TOKEN", tc.env)
+			cfg := Config{Providers: map[string]LLM{"copilot": tc.preset}}
+			got, ok := ResolveProvider(cfg, "copilot")
+			if !ok {
+				t.Fatal("copilot is not a provider")
+			}
+			if strings.Join(got.APIKeyCmd, " ") != strings.Join(tc.want, " ") {
+				t.Errorf("api_key_cmd = %v, want %v", got.APIKeyCmd, tc.want)
+			}
+			if got.WireAPI != "auto" {
+				t.Errorf("wire_api = %q, want auto", got.WireAPI)
+			}
+			if len(cfg.Providers["copilot"].APIKeyCmd) != len(tc.preset.APIKeyCmd) {
+				t.Error("resolving changed the saved preset")
+			}
+			if len(got.APIKeyCmd) > 0 {
+				got.APIKeyCmd[0] = "changed"
+				if ProviderTemplates["copilot"].APIKeyCmd[0] != "gh" {
+					t.Fatal("the resolved command shares the template's slice")
+				}
+			}
+		})
+	}
+	// Without the GitHub CLI there is no key to get: not ready, not offered.
+	installed = false
+	if got, _ := ResolveProvider(Config{}, "copilot"); got.HasKey() {
+		t.Errorf("copilot has a key with no gh installed: %v", got.APIKeyCmd)
+	}
+	installed = true
+	// A preset of another provider never gets it.
+	if got, _ := ResolveProvider(Config{}, "openai"); len(got.APIKeyCmd) != 0 || got.WireAPI != "" {
+		t.Errorf("openai resolved with %v / %q", got.APIKeyCmd, got.WireAPI)
+	}
+}

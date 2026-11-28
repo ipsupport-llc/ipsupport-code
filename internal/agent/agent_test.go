@@ -241,6 +241,48 @@ func TestRunTrimsOldLargeToolResultsMidTask(t *testing.T) {
 	}
 }
 
+// windowFinder is a client that found its model's window itself, before the
+// first request — the only window a run has when the key comes from a command.
+type windowFinder struct {
+	*scriptLLM
+	window int
+}
+
+func (w windowFinder) FoundWindow() int { return w.window }
+
+// With no window set on the agent, a run trims against the one its client
+// found: a run that started before any probe could read the window still
+// keeps its own trail inside it.
+func TestRunTrimsAgainstTheClientsFoundWindow(t *testing.T) {
+	blobSize := trimMinResultSize * 6
+	bigBlob := func(ctx context.Context, a tool.Args) tool.Result { return tool.Ok(strings.Repeat("x", blobSize)) }
+	reg := tool.NewRegistry(tool.NewDomain(tool.DomainSpec{
+		Name: "big", Summary: "test-only: returns a large fixed blob",
+		Actions: []tool.Action{{Name: "get", Run: bigBlob}},
+	}))
+	const rounds = 8
+	var replies []llm.Message
+	for i := 0; i < rounds; i++ {
+		replies = append(replies, toolCallReply(fmt.Sprintf("c%d", i), "big", fmt.Sprintf(`{"action":"get","params":{"n":%d}}`, i)))
+	}
+	replies = append(replies, llm.Message{Role: "assistant", Content: "done"})
+	fake := &scriptLLM{replies: replies}
+
+	a := New(windowFinder{fake, 1000}, reg, nil, nil, "", rounds+2) // no SetContextWindow
+	if _, err := a.Run(context.Background(), "fetch the big thing repeatedly"); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	trimmed := 0
+	for _, m := range fake.lastMsgs {
+		if m.Role == "tool" && strings.Contains(m.Content, "trimmed") {
+			trimmed++
+		}
+	}
+	if trimmed == 0 {
+		t.Error("nothing trimmed: the client's found window was not used")
+	}
+}
+
 // Bug repro: a tool call's Arguments (e.g. a file.write's large embedded
 // "content" param) gets resent verbatim on every subsequent request — see
 // client.go's toWire(), which copies ToolCall.Arguments into the wire

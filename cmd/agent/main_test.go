@@ -11109,3 +11109,39 @@ func TestModelFlagRemovedProviderFallsBackToLocal(t *testing.T) {
 		t.Errorf("saved provider = %q after removing it, want local", c.Provider)
 	}
 }
+
+// -m copilot:<model> runs on the GitHub CLI sign-in with the template's wire
+// choice, and none of that — nor the -m model — reaches the saved settings.
+func TestModelFlagCopilotStaysOffDisk(t *testing.T) {
+	defer func(f func(string) bool) { config.HasProgram = f }(config.HasProgram)
+	config.HasProgram = func(name string) bool { return name == "gh" }
+	setHome(t, t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("COPILOT_GITHUB_TOKEN", "")
+	t.Cleanup(config.ClearRunOnlyModel)
+	if err := config.SaveGlobal("me", config.LLM{BaseURL: "http://127.0.0.1:1/v1", Model: "home-model"}); err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
+	a, cleanup, err := build(ws, "", nil, false, bufio.NewReader(strings.NewReader("")), "copilot:gpt-6-sol")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	act := a.activeLLM()
+	if a.providerName() != "copilot" || act.Model != "gpt-6-sol" || act.WireAPI != "auto" || strings.Join(act.APIKeyCmd, " ") != "gh auth token --hostname github.com" {
+		t.Fatalf("active = %s %+v", a.providerName(), act)
+	}
+	if err := config.SaveProviders(a.cfg.Provider, a.cfg.Providers); err != nil { // what a key edit does
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(config.GlobalPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, leak := range []string{"gpt-6-sol", "api_key_cmd", "wire_api", `"provider": "copilot"`} {
+		if strings.Contains(string(data), leak) {
+			t.Errorf("saved settings carry %s:\n%s", leak, data)
+		}
+	}
+}

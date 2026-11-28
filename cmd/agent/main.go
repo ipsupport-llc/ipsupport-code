@@ -2748,8 +2748,9 @@ func (a *app) withReasoning(l config.LLM, provider, scope string) config.LLM {
 func reasoningShape(provider, level string) (json.RawMessage, bool) {
 	off := level == "off"
 	switch provider {
-	case "local", "openai", "grok", "groq":
-		// OpenAI-style reasoning_effort. "off" has no portable value → caller deletes.
+	case "local", "openai", "grok", "groq", "copilot":
+		// OpenAI-style reasoning_effort (a /responses request carries it as
+		// reasoning.effort — the client moves it). "off" has no portable value → caller deletes.
 		if off {
 			return nil, true
 		}
@@ -5323,7 +5324,10 @@ func (a *app) providerList() []string {
 	for _, n := range names {
 		l, _ := config.ResolveProvider(a.cfg, n)
 		note := "no key"
-		if l.HasKey() {
+		switch {
+		case l.APIKey == "" && len(l.APIKeyCmd) > 0:
+			note = "key from: " + strings.Join(l.APIKeyCmd, " ")
+		case l.HasKey():
 			note = "key set"
 		}
 		if _, tmpl := config.ProviderTemplates[n]; !tmpl {
@@ -6637,7 +6641,11 @@ func initCloudProvider(reader *bufio.Reader, def config.Config) {
 		l.BaseURL = strings.TrimRight(url, "/")
 	}
 	key := askSecret(reader, "API key", existing.APIKey)
-	if key == "" {
+	switch {
+	case key != "":
+	case len(existing.APIKeyCmd) > 0:
+		fmt.Printf("  the key comes from: %s\n", strings.Join(existing.APIKeyCmd, " "))
+	default:
 		fmt.Printf("  ⚠ no key set — add one later with: /ai key %s <token>\n", name)
 	}
 	l.APIKey = key

@@ -220,13 +220,9 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 		}
 		return ""
 	}
-	// newKey names a call nothing identifies yet — its own, even with no ids.
-	newKey := func(itemID string) string {
-		if itemID != "" {
-			return "item:" + itemID
-		}
-		return fmt.Sprintf("call#%d", len(order))
-	}
+	// newKey names a call nothing but its item id identifies yet. (One with
+	// neither id is refused below anyway.)
+	newKey := func(itemID string) string { return "item:" + itemID }
 	// at is the call under key, made if new; the ids it was found by are
 	// remembered for the events after.
 	at := func(key, itemID string, idx *int) *ToolCall {
@@ -245,18 +241,33 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 		last = key
 		return cur
 	}
+	// soleUnnamed is the one call so far without a call_id, when there is
+	// exactly one: the only call an id shown late can belong to.
+	soleUnnamed := func() string {
+		found := ""
+		for _, k := range order {
+			if calls[k].ID == "" {
+				if found != "" {
+					return ""
+				}
+				found = k
+			}
+		}
+		return found
+	}
 	// call is the call an output_item event describes. finishing is its done
-	// event: one naming a call_id not seen yet finishes the call streaming now
-	// if that call had none — a server may show the id only at the end.
+	// event: one naming a call_id not seen yet finishes the call that had none
+	// — a server may show the id only at the end — when only one such call is
+	// open. With more it starts its own, and the unnamed ones stop the turn
+	// (see below) rather than run with a guessed id.
 	call := func(it *responsesItem, idx *int, finishing bool) *ToolCall {
 		key := it.CallID
 		if _, known := calls[key]; key == "" || !known {
-			switch k := find(it.ID, idx); {
-			case k != "":
+			if k := find(it.ID, idx); k != "" {
 				key = k // the same call, seen before under its item id or index
-			case finishing && last != "" && calls[last].ID == "":
-				key = last
-			case key == "":
+			} else if k := soleUnnamed(); finishing && k != "" {
+				key = k
+			} else if key == "" {
 				key = newKey(it.ID)
 			}
 		}
@@ -269,12 +280,16 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 		}
 		return cur
 	}
-	// argsOf is the call an arguments event is about. Matched to the call
-	// streaming now, the event's ids are not remembered as that call's: they
-	// may belong to a call not announced yet.
+	// argsOf is the call an arguments event is about. One whose output_index
+	// is new belongs to a call not announced yet, which finds these arguments
+	// by that index when it is; only an event with no index at all goes to the
+	// call streaming now — and its ids are not remembered as that call's.
 	argsOf := func(itemID string, idx *int) *ToolCall {
 		if key := find(itemID, idx); key != "" {
 			return at(key, itemID, idx)
+		}
+		if idx != nil {
+			return at(fmt.Sprintf("index:%d", *idx), itemID, idx)
 		}
 		if last != "" {
 			return calls[last]
@@ -364,30 +379,23 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 	}
 	// The finished response lists its output again. With no calls streamed, its
 	// calls are the turn's; with some, it only fills in what they lack. A call
-	// it names that matches none of them fills the next streamed call that never
-	// showed a call_id — the same call under churned ids — and is otherwise not
-	// run: a server that gave it a fresh id there would have it run twice.
+	// it names that matches none of them names the one streamed call that never
+	// showed a call_id, when there is exactly one — the same call under churned
+	// ids — and is otherwise not run: a server that gave it a fresh id there
+	// would have it run twice.
 	streamedCalls := len(order) > 0
-	var unnamed []string
-	for _, k := range order {
-		if calls[k].ID == "" {
-			unnamed = append(unnamed, k)
-		}
-	}
 	for i := range final.Output {
 		it := final.Output[i]
 		switch it.Type {
 		case "function_call":
 			if _, known := calls[it.CallID]; streamedCalls && !(it.CallID != "" && known) && find(it.ID, nil) == "" {
-				for len(unnamed) > 0 && calls[unnamed[0]].ID != "" {
-					unnamed = unnamed[1:] // named since by a matching item
-				}
-				if len(unnamed) == 0 {
+				k := soleUnnamed()
+				if it.CallID == "" || k == "" {
 					continue
 				}
-				cur := calls[unnamed[0]]
-				unnamed = unnamed[1:]
+				cur := calls[k]
 				cur.ID = it.CallID
+				calls[it.CallID] = cur // a later item with this call_id finds it
 				if cur.Name == "" {
 					cur.Name = it.Name
 				}
@@ -411,6 +419,14 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 	}
 	if dropped > 0 && len(order) > 0 {
 		return Message{}, fmt.Errorf("llm stream: %d unparseable event(s) in a turn with tool calls — not running arguments that may be incomplete", dropped)
+	}
+	for _, k := range order {
+		// A call the stream never named, or never tied to a call_id, can't be run
+		// safely: which arguments are its own was a guess, and its result could
+		// not be sent back.
+		if tc := calls[k]; tc.Name == "" || tc.ID == "" {
+			return Message{}, fmt.Errorf("llm stream: a tool call came without its name or call_id (%q, %q) — not running it", tc.Name, tc.ID)
+		}
 	}
 	c.commitUsage(final.Usage, *reqCompl, promptEstimate)
 	msg := Message{Role: "assistant", Content: stripChannelTokens(text.content.String()), Reasoning: text.reasoning.String(), FinishReason: final.finishReason(len(order) > 0)}

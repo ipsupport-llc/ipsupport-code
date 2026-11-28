@@ -517,15 +517,21 @@ func TestResponsesCallsSurviveChangingItemIDs(t *testing.T) {
 		{"a delta ahead of its call doesn't swallow it", []string{
 			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"e1","call_id":"call_A","name":"file","arguments":"{\"a\":1}"}}`,
 			`{"type":"response.function_call_arguments.delta","output_index":1,"item_id":"e7","delta":""}`,
-			`{"type":"response.function_call_arguments.done","output_index":1,"item_id":"e7","arguments":"{\"a\":1}"}`,
+			`{"type":"response.function_call_arguments.done","output_index":1,"item_id":"e7","arguments":"{\"b\":9}"}`,
 			`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"e8","call_id":"call_B","name":"calc","arguments":"{\"b\":2}"}}`,
 			`{"type":"response.completed","response":{"status":"completed"}}`,
 		}, `call_A file {"a":1}|call_B calc {"b":2}`},
-		{"no ids at all", []string{
+		{"no ids at all: not run", []string{
 			`{"type":"response.output_item.added","item":{"type":"function_call","name":"file","arguments":"{\"a\":1}"}}`,
 			`{"type":"response.output_item.added","item":{"type":"function_call","name":"calc","arguments":"{\"b\":2}"}}`,
 			`{"type":"response.completed","response":{"status":"completed"}}`,
-		}, ` file {"a":1}| calc {"b":2}`},
+		}, `error`},
+		{"two unnamed, one id shown late: not guessed", []string{
+			`{"type":"response.output_item.added","item":{"type":"function_call","id":"e1","name":"file","arguments":"{\"a\":1}"}}`,
+			`{"type":"response.output_item.added","item":{"type":"function_call","id":"e2","name":"calc","arguments":"{\"b\":2}"}}`,
+			`{"type":"response.output_item.done","item":{"type":"function_call","id":"e3","call_id":"call_A","name":"file","arguments":"{\"a\":1}"}}`,
+			`{"type":"response.completed","response":{"status":"completed"}}`,
+		}, `error`},
 		{"no index: the call streaming now", []string{
 			`{"type":"response.output_item.added","item":{"type":"function_call","id":"e1","call_id":"call_A","name":"file"}}`,
 			`{"type":"response.function_call_arguments.delta","item_id":"e2","delta":"{\"a\":1}"}`,
@@ -541,8 +547,14 @@ func TestResponsesCallsSurviveChangingItemIDs(t *testing.T) {
 				sse(w, tc.events...)
 			}))
 			defer srv.Close()
-			c := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "m", WireAPI: "responses"})
+			c := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "m", WireAPI: "responses", RetryAttempts: 1})
 			msg, err := c.Chat(context.Background(), []Message{User("hi")}, nil)
+			if tc.want == "error" {
+				if err == nil {
+					t.Fatalf("ran %+v, want the turn refused", msg.ToolCalls)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("Chat: %v", err)
 			}

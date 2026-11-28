@@ -161,7 +161,7 @@ env var (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`,
 
 `copilot` is GitHub Copilot through the GitHub CLI: with `gh` installed and
 signed in, `/ai copilot` (or `-m copilot:<model>`) needs no key — it runs
-`gh auth token` as its key command. Which models answer depends on your
+`gh auth token --hostname github.com` as its key command. Which models answer depends on your
 Copilot plan; `/model` lists them. For GitHub Enterprise on its own domain,
 set the provider's `base_url` and `api_key_cmd` (e.g.
 `["gh", "auth", "token", "--hostname", "<host>"]`) yourself. This uses
@@ -169,8 +169,9 @@ Copilot's API directly, which GitHub documents only through its own SDK.
 
 Some models are served only on `/responses` (OpenAI's Responses API), not
 `/chat/completions`. A provider's `wire_api` picks the format: `"chat"` (the
-default), `"responses"`, or `"auto"` — read the server's model list once and use
-`/responses` for a model listed as served only there (copilot's default).
+default), `"responses"`, or `"auto"` — read the server's model list before the
+first request and use `/responses` for a model listed as served only there
+(copilot's default). Any other value stops the config from loading.
 
 For an endpoint that only issues short-lived keys, give the provider a command
 that prints one instead of a key:

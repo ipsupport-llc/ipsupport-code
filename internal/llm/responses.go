@@ -123,7 +123,8 @@ type responsesEvent struct {
 	Type    string          `json:"type"`
 	Delta   string          `json:"delta"`
 	ItemID  string          `json:"item_id"`
-	Args    *string         `json:"arguments"`
+	Index   *int            `json:"output_index"`
+	Args    *argString      `json:"arguments"`
 	Item    *responsesItem  `json:"item"`
 	Resp    *responsesReply `json:"response"`
 	Code    any             `json:"code"`
@@ -203,15 +204,50 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 		tick()
 	}
 	text := &streamText{c: c, progress: progress}
-	calls := map[string]*ToolCall{} // by the server's item id
+	// A call is kept under its call_id: the one id servers hold steady (GitHub
+	// Copilot reportedly gives an item a new id on every event). An event that
+	// carries no call_id — argument deltas and their done — finds its call by
+	// item id, else by output_index, else it belongs to the call streaming now.
+	calls := map[string]*ToolCall{}
 	var order []string
-	call := func(it *responsesItem) *ToolCall {
-		cur, ok := calls[it.ID]
+	byItem, byIndex, last := map[string]string{}, map[int]string{}, ""
+	find := func(itemID string, idx *int) string {
+		if k, ok := byItem[itemID]; ok && itemID != "" {
+			return k
+		}
+		if idx != nil {
+			return byIndex[*idx]
+		}
+		return ""
+	}
+	at := func(key, itemID string, idx *int) *ToolCall {
+		cur, ok := calls[key]
 		if !ok {
 			cur = &ToolCall{}
-			calls[it.ID] = cur
-			order = append(order, it.ID)
+			calls[key] = cur
+			order = append(order, key)
 		}
+		if itemID != "" {
+			byItem[itemID] = key
+		}
+		if idx != nil {
+			byIndex[*idx] = key
+		}
+		last = key
+		return cur
+	}
+	// call is the call an item describes (output_item events, the finished
+	// response's output).
+	call := func(it *responsesItem, idx *int) *ToolCall {
+		key := it.CallID
+		if _, known := calls[key]; key == "" || !known {
+			if k := find(it.ID, idx); k != "" {
+				key = k // the same call, seen before under its item id or index
+			} else if key == "" {
+				key = "item:" + it.ID
+			}
+		}
+		cur := at(key, it.ID, idx)
 		if it.CallID != "" {
 			cur.ID = it.CallID // what the tool's output answers, not the item id
 		}
@@ -219,6 +255,17 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 			cur.Name = it.Name
 		}
 		return cur
+	}
+	// argsOf is the call an arguments event is about.
+	argsOf := func(itemID string, idx *int) *ToolCall {
+		key := find(itemID, idx)
+		if key == "" {
+			key = last
+		}
+		if key == "" {
+			key = "item:" + itemID
+		}
+		return at(key, itemID, idx)
 	}
 	events, dropped := 0, 0
 	var final *responsesReply
@@ -259,18 +306,17 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 			if ev.Item == nil || ev.Item.Type != "function_call" {
 				continue
 			}
-			cur := call(ev.Item)
-			if ev.Type == "response.output_item.done" || ev.Item.Arguments != "" {
+			if cur := call(ev.Item, ev.Index); ev.Item.Arguments != "" {
 				cur.Arguments = string(ev.Item.Arguments) // the finished item is the whole call
 			}
 		case "response.function_call_arguments.delta":
 			if ev.Delta != "" {
-				call(&responsesItem{ID: ev.ItemID}).Arguments += ev.Delta
+				argsOf(ev.ItemID, ev.Index).Arguments += ev.Delta
 				progress()
 			}
 		case "response.function_call_arguments.done":
-			if ev.Args != nil {
-				call(&responsesItem{ID: ev.ItemID}).Arguments = *ev.Args
+			if ev.Args != nil && *ev.Args != "" {
+				argsOf(ev.ItemID, ev.Index).Arguments = string(*ev.Args)
 			}
 		case "response.completed", "response.incomplete":
 			final = ev.Resp
@@ -301,6 +347,31 @@ func (c *OpenAIClient) parseResponsesStream(r io.Reader, tick, alive func(), max
 		}
 		return Message{}, fmt.Errorf("llm stream ended without completing (no response.completed): %d events, %d content bytes, %d reasoning bytes, %d tool-call arg bytes accumulated before it cut off",
 			events, text.content.Len(), text.reasoning.Len(), argsLen)
+	}
+	// The finished response lists its output again. With no calls streamed, its
+	// calls are the turn's; with some, it only fills in what they lack — a call
+	// it names that matches none of them is not run, since a server that gave
+	// it a fresh id there would have the same call run twice.
+	streamedCalls := len(order) > 0
+	for i := range final.Output {
+		it := final.Output[i]
+		switch it.Type {
+		case "function_call":
+			if _, known := calls[it.CallID]; streamedCalls && !known && find(it.ID, nil) == "" {
+				continue
+			}
+			if cur := call(&it, nil); cur.Arguments == "" {
+				cur.Arguments = string(it.Arguments)
+			}
+		case "message":
+			if text.content.Len() == 0 {
+				for _, part := range it.Content {
+					if part.Type == "output_text" {
+						text.content.WriteString(part.Text)
+					}
+				}
+			}
+		}
 	}
 	if dropped > 0 && len(order) > 0 {
 		return Message{}, fmt.Errorf("llm stream: %d unparseable event(s) in a turn with tool calls — not running arguments that may be incomplete", dropped)

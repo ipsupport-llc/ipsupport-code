@@ -68,7 +68,7 @@ type LLM struct {
 	// "responses" sends /responses (models served only there, e.g. newer GPTs
 	// behind some gateways), "auto" reads the server's model list once and uses
 	// /responses for a model listed as served only there.
-	WireAPI string `json:"wire_api,omitempty"`
+	WireAPI WireAPI `json:"wire_api,omitempty"`
 	// ContextWindow is the model's context size in tokens; auto-compact triggers
 	// as the prompt approaches it. 0 disables auto-compact.
 	// No omitempty: Default() sets this to a nonzero 8192, so an explicit 0
@@ -108,6 +108,24 @@ type LLM struct {
 	// params merged into the chat request — used for per-model reasoning controls
 	// (see Config.Reasoning), whose shape varies by provider.
 	Extra map[string]any `json:"-"`
+}
+
+// WireAPI is a connection's request format — see LLM.WireAPI. Any other value
+// is refused when the config is read: a typo would otherwise mean chat, and
+// show only as a model the server says it doesn't serve.
+type WireAPI string
+
+func (w *WireAPI) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	switch s {
+	case "", "chat", "responses", "auto":
+		*w = WireAPI(s)
+		return nil
+	}
+	return fmt.Errorf("wire_api %q: want chat, responses or auto", s)
 }
 
 // clone copies l without sharing its slices.
@@ -312,8 +330,10 @@ var ProviderTemplates = map[string]LLM{
 	"zai":        {BaseURL: "https://api.z.ai/api/paas/v4", Model: "glm-5.2"}, // Z.ai (Zhipu GLM), OpenAI-compat endpoint
 	// GitHub Copilot, signed in through the GitHub CLI. Some of its models are
 	// served only on /responses, hence auto. The key command is attached at
-	// resolve time and only for this address — see ResolveProvider.
-	"copilot": {BaseURL: "https://api.githubcopilot.com", Model: "gpt-4.1", WireAPI: "auto", APIKeyCmd: []string{"gh", "auth", "token"}},
+	// resolve time and only for this address — see ResolveProvider. It names
+	// github.com: gh's default host may be another (GH_HOST, an enterprise
+	// sign-in), whose token must not go to this server.
+	"copilot": {BaseURL: "https://api.githubcopilot.com", Model: "gpt-4.1", WireAPI: "auto", APIKeyCmd: []string{"gh", "auth", "token", "--hostname", "github.com"}},
 }
 
 // providerEnvKey maps a provider to the env var its API key falls back to.
@@ -376,7 +396,7 @@ func ResolveProvider(cfg Config, name string) (LLM, bool) {
 	// own server: a preset pointed elsewhere doesn't get it. Nor does a machine
 	// without the program — the provider would look ready and fail on use.
 	// Never saved: the preset keeps whatever the user wrote.
-	if hasTmpl && len(tmpl.APIKeyCmd) > 0 && p.APIKey == "" && len(p.APIKeyCmd) == 0 && p.BaseURL == tmpl.BaseURL && HasProgram(tmpl.APIKeyCmd[0]) {
+	if hasTmpl && len(tmpl.APIKeyCmd) > 0 && p.APIKey == "" && len(p.APIKeyCmd) == 0 && strings.TrimRight(p.BaseURL, "/") == tmpl.BaseURL && HasProgram(tmpl.APIKeyCmd[0]) {
 		p.APIKeyCmd = append([]string(nil), tmpl.APIKeyCmd...)
 	}
 	// Leave Temperature and MaxSteps at 0 unless the user set one: the client

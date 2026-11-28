@@ -238,26 +238,28 @@ type modelsServer struct {
 }
 
 func (s *modelsServer) start(t *testing.T) *httptest.Server {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		s.auth.Store(r.Header.Get("Authorization"))
-		switch r.URL.Path {
-		case "/models":
-			s.list.Add(1)
-			io.WriteString(w, s.models)
-		case "/chat/completions":
-			s.chat.Add(1)
-			io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"chat"}}]}`)
-		case "/responses":
-			s.rsp.Add(1)
-			w.Header().Set("Content-Type", "text/event-stream")
-			sse(w, `{"type":"response.output_text.delta","delta":"responses"}`,
-				`{"type":"response.completed","response":{"status":"completed"}}`)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
+	srv := httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func (s *modelsServer) serve(w http.ResponseWriter, r *http.Request) {
+	s.auth.Store(r.Header.Get("Authorization"))
+	switch r.URL.Path {
+	case "/models":
+		s.list.Add(1)
+		io.WriteString(w, s.models)
+	case "/chat/completions":
+		s.chat.Add(1)
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"chat"}}]}`)
+	case "/responses":
+		s.rsp.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		sse(w, `{"type":"response.output_text.delta","delta":"responses"}`,
+			`{"type":"response.completed","response":{"status":"completed"}}`)
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 // "auto" asks the model list once, and uses /responses only for a model listed
@@ -265,12 +267,13 @@ func (s *modelsServer) start(t *testing.T) *httptest.Server {
 func TestAutoWireFollowsTheModelList(t *testing.T) {
 	for _, tc := range []struct {
 		name, models, want string
+		reads              int32
 	}{
-		{"responses only", `{"data":[{"id":"m","supported_endpoints":["/responses","ws:/responses"]}]}`, "responses"},
-		{"both", `{"data":[{"id":"m","supported_endpoints":["/chat/completions","/responses"]}]}`, "chat"},
-		{"not said", `{"data":[{"id":"m"}]}`, "chat"},
-		{"other model", `{"data":[{"id":"x","supported_endpoints":["/responses"]}]}`, "chat"},
-		{"no list", `nope`, "chat"},
+		{"responses only", `{"data":[{"id":"m","supported_endpoints":["/responses","ws:/responses"]}]}`, "responses", 1},
+		{"both", `{"data":[{"id":"m","supported_endpoints":["/chat/completions","/responses"]}]}`, "chat", 1},
+		{"not said", `{"data":[{"id":"m"}]}`, "chat", 1},
+		{"other model", `{"data":[{"id":"x","supported_endpoints":["/responses"]}]}`, "chat", 1},
+		{"no list", `nope`, "chat", 2}, // unreadable: tried again on the next request
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &modelsServer{models: tc.models}
@@ -282,8 +285,8 @@ func TestAutoWireFollowsTheModelList(t *testing.T) {
 					t.Fatalf("answered %q (%v), want %s", msg.Content, err, tc.want)
 				}
 			}
-			if s.list.Load() != 1 {
-				t.Errorf("model list read %d times, want once", s.list.Load())
+			if s.list.Load() != tc.reads {
+				t.Errorf("model list read %d times, want %d", s.list.Load(), tc.reads)
 			}
 		})
 	}
@@ -352,5 +355,208 @@ func TestDetectModelContextReadsCopilotLimits(t *testing.T) {
 	}
 	if got := DetectModelContext(context.Background(), srv.URL, "", "b", nil); got != 128000 {
 		t.Errorf("b = %d, want the whole window when no prompt cap is listed", got)
+	}
+}
+
+// A finished call item without its arguments keeps the ones streamed before
+// it, and a finished-arguments event may carry them as an object.
+func TestResponsesKeepsStreamedArguments(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		sse(w,
+			`{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_A","name":"file"}}`,
+			`{"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"action\":\"read\"}"}`,
+			`{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_A","name":"file"}}`,
+			`{"type":"response.output_item.added","item":{"type":"function_call","id":"fc_2","call_id":"call_B","name":"calc"}}`,
+			`{"type":"response.function_call_arguments.done","item_id":"fc_2","arguments":{"expression":"1+1"}}`,
+			`{"type":"response.completed","response":{"status":"completed"}}`,
+		)
+	}))
+	defer srv.Close()
+	c := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "m", WireAPI: "responses"})
+	msg, err := c.Chat(context.Background(), []Message{User("hi")}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if len(msg.ToolCalls) != 2 || msg.ToolCalls[0].Arguments != `{"action":"read"}` || msg.ToolCalls[1].Arguments != `{"expression":"1+1"}` {
+		t.Errorf("tool calls = %+v", msg.ToolCalls)
+	}
+}
+
+// A server that lists the output only in the finished response still gives
+// its text and calls — once each, alongside the ones it did stream.
+func TestResponsesTakesOutputFromTheFinishedResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		events []string
+		calls  string
+	}{
+		{"only in the response", []string{
+			`{"type":"response.completed","response":{"status":"completed","output":[
+				{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reading"}]},
+				{"type":"function_call","id":"fc_1","call_id":"call_A","name":"file","arguments":"{\"action\":\"read\"}"},
+				{"type":"function_call","call_id":"call_B","name":"calc","arguments":"{}"}]}}`,
+		}, "call_A file,call_B calc"},
+		{"streamed too", []string{
+			`{"type":"response.output_text.delta","delta":"reading"}`,
+			`{"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_A","name":"file","arguments":"{\"action\":\"read\"}"}}`,
+			`{"type":"response.completed","response":{"status":"completed","output":[
+				{"type":"message","role":"assistant","content":[{"type":"output_text","text":"reading"}]},
+				{"type":"function_call","id":"fc_1","call_id":"call_A","name":"file","arguments":"{\"action\":\"read\"}"},
+				{"type":"function_call","call_id":"call_X","name":"calc","arguments":"{}"}]}}`,
+		}, "call_A file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				for _, e := range tc.events {
+					fmt.Fprintf(w, "data: %s\n\n", strings.Join(strings.Fields(e), " "))
+				}
+			}))
+			defer srv.Close()
+			c := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "m", WireAPI: "responses"})
+			msg, err := c.Chat(context.Background(), []Message{User("hi")}, nil)
+			if err != nil {
+				t.Fatalf("Chat: %v", err)
+			}
+			var got []string
+			for _, c := range msg.ToolCalls {
+				got = append(got, c.ID+" "+c.Name)
+			}
+			if msg.Content != "reading" || strings.Join(got, ",") != tc.calls {
+				t.Errorf("content %q, calls %v, want %s", msg.Content, got, tc.calls)
+			}
+		})
+	}
+}
+
+// A model list that fails to load is tried again on the next requests — a
+// server briefly down must not pin an auto client to the wrong format — but
+// not before every turn forever.
+func TestAutoWireRetriesAFailedList(t *testing.T) {
+	s := &modelsServer{models: `{"data":[{"id":"m","supported_endpoints":["/responses"]}]}`}
+	var down atomic.Int32
+	down.Store(1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/models" && down.Load() > 0 {
+			s.list.Add(1)
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		s.serve(w, r)
+	}))
+	defer srv.Close()
+	c := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "m", WireAPI: "auto"})
+	if msg, _ := c.Chat(context.Background(), []Message{User("hi")}, nil); msg.Content != "chat" {
+		t.Fatalf("first answer %q, want chat while the list is down", msg.Content)
+	}
+	down.Store(0)
+	if msg, _ := c.Chat(context.Background(), []Message{User("hi")}, nil); msg.Content != "responses" {
+		t.Fatalf("second answer %q, want responses once the list loads", msg.Content)
+	}
+
+	down.Store(1)
+	s.list.Store(0)
+	c = NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "m", WireAPI: "auto"})
+	for range 5 {
+		c.Chat(context.Background(), []Message{User("hi")}, nil)
+	}
+	if n := s.list.Load(); n != lookupTries {
+		t.Errorf("list tried %d times, want %d", n, lookupTries)
+	}
+}
+
+// The runaway cap follows a window found in the model list the way it follows
+// a configured one.
+func TestRunawayCapFollowsTheFoundWindow(t *testing.T) {
+	c := NewOpenAIClient(config.LLM{Model: "m"})
+	if c.respCap() != maxResponseTokens(0) {
+		t.Fatalf("cap %d with no window", c.respCap())
+	}
+	c.foundWindow.Store(200000)
+	if c.respCap() != maxResponseTokens(200000) {
+		t.Errorf("cap %d, want %d for a 200k window", c.respCap(), maxResponseTokens(200000))
+	}
+}
+
+// A server that gives an item a new id on every event (GitHub Copilot
+// reportedly does) still yields each call once: calls are kept by call_id, and
+// argument events find theirs by output_index, else the call streaming now.
+func TestResponsesCallsSurviveChangingItemIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		events []string
+		want   string
+	}{
+		{"one call, new id each event", []string{
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"e1","call_id":"call_A","name":"file","arguments":""}}`,
+			`{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"e2","delta":"{\"a\":"}`,
+			`{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"e3","delta":"1}"}`,
+			`{"type":"response.function_call_arguments.done","output_index":0,"item_id":"e4","arguments":"{\"a\":1}"}`,
+			`{"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"e5","call_id":"call_A","name":"file","arguments":"{\"a\":1}"}}`,
+			`{"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","id":"e6","call_id":"call_A","name":"file","arguments":"{\"a\":1}"}]}}`,
+		}, `call_A file {"a":1}`},
+		{"two calls interleaved by index", []string{
+			`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"e1","call_id":"call_A","name":"file"}}`,
+			`{"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"e2","call_id":"call_B","name":"calc"}}`,
+			`{"type":"response.function_call_arguments.delta","output_index":1,"item_id":"e3","delta":"{\"b\":2}"}`,
+			`{"type":"response.function_call_arguments.delta","output_index":0,"item_id":"e4","delta":"{\"a\":1}"}`,
+			`{"type":"response.completed","response":{"status":"completed"}}`,
+		}, `call_A file {"a":1}|call_B calc {"b":2}`},
+		{"no index: the call streaming now", []string{
+			`{"type":"response.output_item.added","item":{"type":"function_call","id":"e1","call_id":"call_A","name":"file"}}`,
+			`{"type":"response.function_call_arguments.delta","item_id":"e2","delta":"{\"a\":1}"}`,
+			`{"type":"response.output_item.added","item":{"type":"function_call","id":"e3","call_id":"call_B","name":"calc"}}`,
+			`{"type":"response.function_call_arguments.delta","item_id":"e4","delta":"{\"b\":2}"}`,
+			`{"type":"response.output_item.done","item":{"type":"function_call","id":"e5","call_id":"call_A","name":"file","arguments":"{\"a\":1}"}}`,
+			`{"type":"response.completed","response":{"status":"completed"}}`,
+		}, `call_A file {"a":1}|call_B calc {"b":2}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				sse(w, tc.events...)
+			}))
+			defer srv.Close()
+			c := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "m", WireAPI: "responses"})
+			msg, err := c.Chat(context.Background(), []Message{User("hi")}, nil)
+			if err != nil {
+				t.Fatalf("Chat: %v", err)
+			}
+			var got []string
+			for _, c := range msg.ToolCalls {
+				got = append(got, c.ID+" "+c.Name+" "+c.Arguments)
+			}
+			if strings.Join(got, "|") != tc.want {
+				t.Errorf("calls %q, want %q", strings.Join(got, "|"), tc.want)
+			}
+		})
+	}
+}
+
+// The path a request goes to is the format its body was built in — decided
+// once per call, not read again when it is sent.
+func TestSendUsesTheFormatTheBodyWasBuiltIn(t *testing.T) {
+	s := &modelsServer{}
+	srv := s.start(t)
+	c := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "m"}) // chat format
+	msg, err := c.roundTrip(context.Background(), []byte(`{}`), c.tuning.Load(), true)
+	if err != nil || msg.Content != "responses" {
+		t.Errorf("answered %q (%v), want the /responses path", msg.Content, err)
+	}
+}
+
+// Requests the user cancelled don't use up the model-list tries.
+func TestCancelledLookupsAreNotCounted(t *testing.T) {
+	s := &modelsServer{models: `{"data":[{"id":"m","supported_endpoints":["/responses"]}]}`}
+	srv := s.start(t)
+	c := NewOpenAIClient(config.LLM{BaseURL: srv.URL, Model: "m", WireAPI: "auto"})
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for range lookupTries + 1 {
+		c.Chat(cancelled, []Message{User("hi")}, nil)
+	}
+	if msg, _ := c.Chat(context.Background(), []Message{User("hi")}, nil); msg.Content != "responses" {
+		t.Errorf("answered %q after cancelled calls, want the list read and responses used", msg.Content)
 	}
 }

@@ -142,6 +142,7 @@ type OpenAIClient struct {
 	foundWindow atomic.Int64
 	lookupMu    sync.Mutex
 	looked      bool
+	lookupFails int
 }
 
 // tuning is the per-request part of a connection's settings.
@@ -255,7 +256,7 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 		},
 		idle:      idle,
 		maxRespTk: maxResponseTokens(c.ContextWindow),
-		wireAPI:   c.WireAPI,
+		wireAPI:   string(c.WireAPI),
 		window:    c.ContextWindow,
 	}
 	cl.responses.Store(c.WireAPI == "responses")
@@ -266,11 +267,16 @@ func NewOpenAIClient(c config.LLM) *OpenAIClient {
 // lookupTimeout bounds the one model-list read before the first request.
 const lookupTimeout = 5 * time.Second
 
+// lookupTries is how many requests in a row may try the model-list read
+// before it is given up — enough for a server that was briefly unavailable,
+// not a read before every turn from one that has no list.
+const lookupTries = 3
+
 // lookup reads this client's model from the server's model list once, before
 // the first request, when something depends on it: an "auto" wire format, or
 // a window nobody could detect because the key only exists once api_key_cmd
-// has run. Best-effort: a failed read leaves /chat/completions and the
-// configured window, and is not tried again.
+// has run. Best-effort: until a read succeeds (or lookupTries have failed),
+// requests go to /chat/completions with the configured window.
 func (c *OpenAIClient) lookup(ctx context.Context) {
 	if c.wireAPI != "auto" && (c.window > 0 || c.keys == nil) {
 		return
@@ -288,10 +294,19 @@ func (c *OpenAIClient) lookup(ctx context.Context) {
 		}
 		key = k
 	}
-	c.looked = true
 	lctx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	defer cancel()
-	info := lookupModel(lctx, c.baseURL, key, c.model, c.hc)
+	info, ok := lookupModel(lctx, c.baseURL, key, c.model, c.hc)
+	if !ok {
+		if ctx.Err() != nil {
+			return // the caller gave up; that says nothing about the server
+		}
+		if c.lookupFails++; c.lookupFails >= lookupTries {
+			c.looked = true
+		}
+		return
+	}
+	c.looked = true
 	if c.window == 0 && info.window > 0 {
 		c.foundWindow.Store(int64(info.window))
 	}
@@ -299,6 +314,16 @@ func (c *OpenAIClient) lookup(ctx context.Context) {
 		c.responses.Store(true)
 	}
 	slog.Debug("model lookup", "model", c.model, "window", info.window, "endpoints", info.endpoints, "responses", c.responses.Load())
+}
+
+// respCap is the per-turn runaway cap: from the configured window, or from the
+// one the model list gave when none was configured — as it would have been had
+// that window been in the config.
+func (c *OpenAIClient) respCap() int {
+	if f := c.FoundWindow(); f > 0 {
+		return max(c.maxRespTk, maxResponseTokens(f))
+	}
+	return c.maxRespTk
 }
 
 // FoundWindow is the context window the server's model list gave for this
@@ -410,9 +435,12 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	if t == nil { // a client not made by NewOpenAIClient
 		t = &tuning{retryAttempts: retryAttempts(0)}
 	}
+	// Read once: the body and the path it goes to must agree, even if a
+	// concurrent call's lookup settles the format meanwhile.
+	responses := c.responses.Load()
 	var buf []byte
 	var err error
-	if c.responses.Load() {
+	if responses {
 		buf, err = c.responsesBody(msgs, tools, t)
 	} else {
 		buf, err = c.chatBody(msgs, tools, t)
@@ -420,7 +448,7 @@ func (c *OpenAIClient) Chat(ctx context.Context, msgs []Message, tools []map[str
 	if err != nil {
 		return Message{}, err
 	}
-	return c.roundTrip(ctx, buf, t)
+	return c.roundTrip(ctx, buf, t, responses)
 }
 
 // chatBody builds a /chat/completions request.
@@ -465,7 +493,7 @@ func (c *OpenAIClient) chatBody(msgs []Message, tools []map[string]any, t *tunin
 }
 
 // roundTrip sends a built request, retrying what is worth retrying.
-func (c *OpenAIClient) roundTrip(ctx context.Context, buf []byte, t *tuning) (Message, error) {
+func (c *OpenAIClient) roundTrip(ctx context.Context, buf []byte, t *tuning, responses bool) (Message, error) {
 	// Local servers (LM Studio) hiccup with transient 5xx and need time to
 	// reload a model unloaded by the idle timeout. Retry those (and network
 	// errors) with exponential backoff instead of failing the whole task.
@@ -481,13 +509,13 @@ func (c *OpenAIClient) roundTrip(ctx context.Context, buf []byte, t *tuning) (Me
 		// counter (which would also wipe out a DIFFERENT concurrent Chat()
 		// call's legitimate progress made while this attempt was in flight).
 		var reqCompl int
-		msg, err, retriable := c.send(ctx, buf, &reqCompl)
+		msg, err, retriable := c.send(ctx, buf, &reqCompl, responses)
 		var ae *authError
 		if c.keys != nil && errors.As(err, &ae) {
 			// The key from api_key_cmd was refused — most likely it expired.
 			// Get a fresh one and try once more; a second 401 is reported.
 			c.keys.expire(ae.key)
-			msg, err, retriable = c.send(ctx, buf, &reqCompl)
+			msg, err, retriable = c.send(ctx, buf, &reqCompl, responses)
 		}
 		if err == nil {
 			return msg, nil
@@ -663,7 +691,7 @@ func isSingleRune(s string) bool {
 }
 
 // send makes one attempt; the bool reports whether the failure is worth a retry.
-func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Message, error, bool) {
+func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int, responses bool) (Message, error, bool) {
 	// Before the idle watchdog starts: an api_key_cmd may wait minutes on a
 	// sign-in, and that is not the server going quiet.
 	key := c.apiKey
@@ -688,7 +716,6 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 	// the caller knows to retry rather than abort.
 	stalled := func() bool { return reqCtx.Err() != nil && ctx.Err() == nil }
 
-	responses := c.responses.Load()
 	path := "/chat/completions"
 	if responses {
 		path = "/responses"
@@ -751,7 +778,7 @@ func (c *OpenAIClient) send(ctx context.Context, buf []byte, reqCompl *int) (Mes
 		if responses {
 			parse = c.parseResponsesStream
 		}
-		m, err := parse(resp.Body, tick, alive, c.maxRespTk, reqCompl, promptEstimate)
+		m, err := parse(resp.Body, tick, alive, c.respCap(), reqCompl, promptEstimate)
 		if err != nil {
 			var re *runawayError
 			var de *degenerateOutputError

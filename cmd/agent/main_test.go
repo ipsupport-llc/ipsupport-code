@@ -11129,7 +11129,7 @@ func TestModelFlagCopilotStaysOffDisk(t *testing.T) {
 	}
 	defer cleanup()
 	act := a.activeLLM()
-	if a.providerName() != "copilot" || act.Model != "gpt-6-sol" || act.WireAPI != "auto" || strings.Join(act.APIKeyCmd, " ") != "gh auth token" {
+	if a.providerName() != "copilot" || act.Model != "gpt-6-sol" || act.WireAPI != "auto" || strings.Join(act.APIKeyCmd, " ") != "gh auth token --hostname github.com" {
 		t.Fatalf("active = %s %+v", a.providerName(), act)
 	}
 	if err := config.SaveProviders(a.cfg.Provider, a.cfg.Providers); err != nil { // what a key edit does

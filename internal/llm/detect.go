@@ -68,7 +68,8 @@ func ListModels(ctx context.Context, baseURL, apiKey string, hc *http.Client) ([
 // under top_provider), GitHub Copilot capabilities.limits; most others omit it
 // → 0. Best-effort: 0 on any failure, so the caller keeps its current window.
 func DetectModelContext(ctx context.Context, baseURL, apiKey, model string, hc *http.Client) int {
-	return lookupModel(ctx, baseURL, apiKey, model, hc).window
+	info, _ := lookupModel(ctx, baseURL, apiKey, model, hc)
+	return info.window
 }
 
 // modelInfo is what a /models list says about one model.
@@ -80,15 +81,16 @@ type modelInfo struct {
 	endpoints []string
 }
 
-// lookupModel reads model's entry from the server's /models list. Best-effort:
-// the zero value on any failure.
-func lookupModel(ctx context.Context, baseURL, apiKey, model string, hc *http.Client) modelInfo {
+// lookupModel reads model's entry from the server's /models list. ok is false
+// when the list couldn't be read; a list without the model is ok, with the
+// zero value.
+func lookupModel(ctx context.Context, baseURL, apiKey, model string, hc *http.Client) (info modelInfo, ok bool) {
 	if hc == nil {
 		hc = http.DefaultClient
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/models", nil)
 	if err != nil {
-		return modelInfo{}
+		return modelInfo{}, false
 	}
 	setUserAgent(req)
 	if apiKey != "" {
@@ -96,11 +98,11 @@ func lookupModel(ctx context.Context, baseURL, apiKey, model string, hc *http.Cl
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return modelInfo{}
+		return modelInfo{}, false
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return modelInfo{}
+		return modelInfo{}, false
 	}
 	var out struct {
 		Data []struct {
@@ -121,13 +123,13 @@ func lookupModel(ctx context.Context, baseURL, apiKey, model string, hc *http.Cl
 		} `json:"data"`
 	}
 	if json.NewDecoder(resp.Body).Decode(&out) != nil {
-		return modelInfo{}
+		return modelInfo{}, false
 	}
 	for _, m := range out.Data {
 		if m.ID != model {
 			continue
 		}
-		info := modelInfo{endpoints: m.SupportedEndpoints}
+		info = modelInfo{endpoints: m.SupportedEndpoints}
 		lim := m.Capabilities.Limits
 		for _, n := range []int{m.ContextLength, m.TopProvider.ContextLength, lim.MaxPromptTokens, lim.MaxContextWindowTokens} {
 			if n > 0 {
@@ -135,9 +137,9 @@ func lookupModel(ctx context.Context, baseURL, apiKey, model string, hc *http.Cl
 				break
 			}
 		}
-		return info
+		return info, true
 	}
-	return modelInfo{}
+	return modelInfo{}, true
 }
 
 // LMModel is one entry from LM Studio's native /api/v0/models.

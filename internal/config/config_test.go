@@ -612,7 +612,7 @@ func TestResolveCopilotKeyCommand(t *testing.T) {
 	installed := true
 	defer func(f func(string) bool) { HasProgram = f }(HasProgram)
 	HasProgram = func(name string) bool { return installed && name == "gh" }
-	gh := []string{"gh", "auth", "token"}
+	gh := []string{"gh", "auth", "token", "--hostname", "github.com"}
 	for _, tc := range []struct {
 		name   string
 		preset LLM
@@ -624,6 +624,7 @@ func TestResolveCopilotKeyCommand(t *testing.T) {
 		{"env key", LLM{}, "from-env", nil},
 		{"own command", LLM{APIKeyCmd: []string{"my-cmd"}}, "", []string{"my-cmd"}},
 		{"other address", LLM{BaseURL: "https://gateway.example/v1"}, "", nil},
+		{"its address with a slash", LLM{BaseURL: "https://api.githubcopilot.com/"}, "", gh},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("COPILOT_GITHUB_TOKEN", tc.env)
@@ -658,5 +659,30 @@ func TestResolveCopilotKeyCommand(t *testing.T) {
 	// A preset of another provider never gets it.
 	if got, _ := ResolveProvider(Config{}, "openai"); len(got.APIKeyCmd) != 0 || got.WireAPI != "" {
 		t.Errorf("openai resolved with %v / %q", got.APIKeyCmd, got.WireAPI)
+	}
+}
+
+// A wire_api the client doesn't know stops the config from loading, rather
+// than meaning chat and surfacing as a model the server doesn't serve.
+func TestWireAPITypoIsAnError(t *testing.T) {
+	setHome(t, t.TempDir())
+	for _, tc := range []struct {
+		value string
+		ok    bool
+	}{{"responses", true}, {"auto", true}, {"chat", true}, {"responces", false}} {
+		if err := os.MkdirAll(filepath.Dir(GlobalPath()), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		data := `{"providers":{"gw":{"base_url":"https://gw.example/v1","wire_api":"` + tc.value + `"}}}`
+		if err := os.WriteFile(GlobalPath(), []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		c, err := Load(t.TempDir())
+		if tc.ok && (err != nil || string(c.Providers["gw"].WireAPI) != tc.value) {
+			t.Errorf("%s: %v, wire_api %q", tc.value, err, c.Providers["gw"].WireAPI)
+		}
+		if !tc.ok && (err == nil || !strings.Contains(err.Error(), "wire_api")) {
+			t.Errorf("%s: err %v, want one naming wire_api", tc.value, err)
+		}
 	}
 }
